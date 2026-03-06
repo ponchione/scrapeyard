@@ -2,36 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
-
+from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.database import get_db
-
-_COLUMNS = (
-    "job_id",
-    "project",
-    "name",
-    "status",
-    "config_yaml",
-    "created_at",
-    "updated_at",
-    "schedule_cron",
-    "last_run_at",
-    "run_count",
-)
-
-
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if value is None:
-        return None
-    return datetime.fromisoformat(value)
-
-
-def _fmt_dt(value: Optional[datetime]) -> Optional[str]:
-    if value is None:
-        return None
-    return value.isoformat()
 
 
 def _row_to_job(row: tuple) -> Job:
@@ -41,10 +14,10 @@ def _row_to_job(row: tuple) -> Job:
         name=row[2],
         status=JobStatus(row[3]),
         config_yaml=row[4],
-        created_at=_parse_dt(row[5]),  # type: ignore[arg-type]
-        updated_at=_parse_dt(row[6]),
+        created_at=parse_dt(row[5]),  # type: ignore[arg-type]
+        updated_at=parse_dt(row[6]),
         schedule_cron=row[7],
-        last_run_at=_parse_dt(row[8]),
+        last_run_at=parse_dt(row[8]),
         run_count=row[9],
     )
 
@@ -64,10 +37,10 @@ class SQLiteJobStore:
                     job.name,
                     job.status.value,
                     job.config_yaml,
-                    _fmt_dt(job.created_at),
-                    _fmt_dt(job.updated_at),
+                    fmt_dt(job.created_at),
+                    fmt_dt(job.updated_at),
                     job.schedule_cron,
-                    _fmt_dt(job.last_run_at),
+                    fmt_dt(job.last_run_at),
                     job.run_count,
                 ),
             )
@@ -85,10 +58,10 @@ class SQLiteJobStore:
                     job.name,
                     job.status.value,
                     job.config_yaml,
-                    _fmt_dt(job.created_at),
-                    _fmt_dt(job.updated_at),
+                    fmt_dt(job.created_at),
+                    fmt_dt(job.updated_at),
                     job.schedule_cron,
-                    _fmt_dt(job.last_run_at),
+                    fmt_dt(job.last_run_at),
                     job.run_count,
                     job.job_id,
                 ),
@@ -99,15 +72,32 @@ class SQLiteJobStore:
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
-            cursor = await db.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+            cursor = await db.execute(
+                "SELECT job_id, project, name, status, config_yaml, "
+                "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                "FROM jobs WHERE job_id=?",
+                (job_id,),
+            )
             row = await cursor.fetchone()
         if row is None:
             raise KeyError(f"Job not found: {job_id!r}")
         return _row_to_job(row)
 
-    async def list_jobs(self, project: str) -> list[Job]:
+    async def list_jobs(self, project: str | None = None) -> list[Job]:
         async with get_db("jobs.db") as db:
-            cursor = await db.execute("SELECT * FROM jobs WHERE project=?", (project,))
+            if project is not None:
+                cursor = await db.execute(
+                    "SELECT job_id, project, name, status, config_yaml, "
+                    "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                    "FROM jobs WHERE project=?",
+                    (project,),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT job_id, project, name, status, config_yaml, "
+                    "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                    "FROM jobs"
+                )
             rows = await cursor.fetchall()
         return [_row_to_job(r) for r in rows]
 

@@ -13,15 +13,13 @@ from scrapeyard.formatters.markdown_fmt import format_markdown
 Formatter = Callable[[dict[str, Any], list[dict[str, Any]], GroupBy], Any]
 
 
-def get_formatter(format: OutputFormat, group_by: GroupBy) -> Formatter:
+def get_formatter(format: OutputFormat) -> Formatter:
     """Return a formatter function for the given output format.
 
     Parameters
     ----------
     format:
         The desired output format.
-    group_by:
-        The grouping strategy (passed through to the returned formatter).
 
     Returns
     -------

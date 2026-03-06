@@ -40,7 +40,12 @@ def extract_selectors(page: Any, selectors: dict[str, SelectorValue]) -> dict[st
             transforms = [parse_transform(t.strip()) for t in transform_str.split("|")]
             texts = [apply_transforms(t, transforms) for t in texts]
 
-        result[name] = texts[0] if len(texts) == 1 else texts
+        if len(texts) == 0:
+            result[name] = None
+        elif len(texts) == 1:
+            result[name] = texts[0]
+        else:
+            result[name] = texts
 
     return result
 

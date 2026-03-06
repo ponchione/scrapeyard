@@ -3,19 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Optional
 
+from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
 from scrapeyard.storage.database import get_db
-
-
-def _parse_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value)
-
-
-def _fmt_dt(value: datetime) -> str:
-    return value.isoformat()
 
 
 def _row_to_error(row: tuple) -> ErrorRecord:
@@ -28,7 +19,7 @@ def _row_to_error(row: tuple) -> ErrorRecord:
         project=row[2],
         target_url=row[3],
         attempt=row[4],
-        timestamp=_parse_dt(row[5]),
+        timestamp=parse_dt(row[5]),
         error_type=ErrorType(row[6]),
         http_status=row[7],
         fetcher_used=row[8],
@@ -53,7 +44,7 @@ class SQLiteErrorStore:
                     error.project,
                     error.target_url,
                     error.attempt,
-                    _fmt_dt(error.timestamp),
+                    fmt_dt(error.timestamp),
                     error.error_type.value,
                     error.http_status,
                     error.fetcher_used,
@@ -76,12 +67,16 @@ class SQLiteErrorStore:
             params.append(filters.job_id)
         if filters.since is not None:
             clauses.append("timestamp >= ?")
-            params.append(_fmt_dt(filters.since))
+            params.append(fmt_dt(filters.since))
         if filters.error_type is not None:
             clauses.append("error_type = ?")
             params.append(filters.error_type.value)
 
-        sql = "SELECT * FROM errors"
+        sql = (
+            "SELECT id, job_id, project, target_url, attempt, timestamp, "
+            "error_type, http_status, fetcher_used, selectors_matched, "
+            "action_taken, resolved FROM errors"
+        )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY timestamp"

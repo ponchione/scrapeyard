@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class JobStatus(str, Enum):
@@ -47,7 +51,7 @@ class Job(BaseModel):
     name: str = Field(..., description="Job name within the project")
     status: JobStatus = Field(default=JobStatus.queued, description="Current job status")
     config_yaml: str = Field(..., description="Raw YAML config for this job")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
     updated_at: Optional[datetime] = None
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
     last_run_at: Optional[datetime] = None
@@ -61,7 +65,7 @@ class ErrorRecord(BaseModel):
     project: str
     target_url: str
     attempt: int
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     error_type: ErrorType
     http_status: Optional[int] = None
     fetcher_used: str

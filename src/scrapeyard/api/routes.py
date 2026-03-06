@@ -1,0 +1,296 @@
+"""API routes for scrape, jobs, results, and errors (spec section 4.1)."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, Query, Request, Response
+
+from scrapeyard.api.dependencies import (
+    get_circuit_breaker,
+    get_error_store,
+    get_job_store,
+    get_result_store,
+    get_scheduler,
+    get_worker_pool,
+)
+from scrapeyard.config.loader import load_config
+from scrapeyard.config.schema import ExecutionMode, FetcherType
+from scrapeyard.engine.resilience import CircuitBreaker
+from scrapeyard.models.job import ErrorFilters, ErrorType, Job, JobStatus
+from scrapeyard.queue.pool import WorkerPool
+from scrapeyard.queue.worker import scrape_task
+from scrapeyard.scheduler.cron import SchedulerService
+from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+
+router = APIRouter()
+
+
+def _should_run_sync(config: Any) -> bool:
+    """Determine if a scrape should run synchronously.
+
+    Heuristic: sync if single target AND no pagination AND fetcher is basic.
+    Overridable via execution.mode.
+    """
+    if config.execution.mode == ExecutionMode.sync:
+        return True
+    if config.execution.mode == ExecutionMode.async_:
+        return False
+    # auto mode
+    targets = config.resolved_targets()
+    if len(targets) != 1:
+        return False
+    target = targets[0]
+    if target.pagination is not None:
+        return False
+    if target.fetcher != FetcherType.basic:
+        return False
+    return True
+
+
+@router.post("/scrape")
+async def scrape(
+    request: Request,
+    job_store: JobStore = Depends(get_job_store),
+    result_store: ResultStore = Depends(get_result_store),
+    error_store: ErrorStore = Depends(get_error_store),
+    circuit_breaker: CircuitBreaker = Depends(get_circuit_breaker),
+    worker_pool: WorkerPool = Depends(get_worker_pool),
+) -> Response:
+    """Submit an ad-hoc scrape request."""
+    body = await request.body()
+    config_yaml = body.decode("utf-8")
+    config = load_config(config_yaml)
+
+    job = Job(
+        job_id=str(uuid.uuid4()),
+        project=config.project,
+        name=config.name,
+        config_yaml=config_yaml,
+    )
+    await job_store.save_job(job)
+
+    if _should_run_sync(config):
+        # Check pool limits before running inline.
+        if not worker_pool.can_accept():
+            return Response(
+                content=_json_encode({"error": "Server at capacity — try again later"}),
+                status_code=503,
+                media_type="application/json",
+            )
+        # Run inline and return results.
+        await scrape_task(
+            job.job_id,
+            config_yaml,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+        )
+        try:
+            result = await result_store.get_result(job.job_id)
+        except KeyError:
+            result = None
+        updated_job = await job_store.get_job(job.job_id)
+        return Response(
+            content=_json_encode({
+                "job_id": job.job_id,
+                "status": updated_job.status.value,
+                "results": result,
+            }),
+            status_code=200,
+            media_type="application/json",
+        )
+
+    # Async mode — enqueue and return 202.
+    await worker_pool.enqueue(
+        job.job_id, config_yaml, config.execution.priority.value
+    )
+    return Response(
+        content=_json_encode({
+            "job_id": job.job_id,
+            "status": "queued",
+            "poll_url": f"/results/{job.job_id}",
+        }),
+        status_code=202,
+        media_type="application/json",
+    )
+
+
+@router.post("/jobs", status_code=201, response_model=None)
+async def create_job(
+    request: Request,
+    job_store: JobStore = Depends(get_job_store),
+    scheduler: SchedulerService = Depends(get_scheduler),
+):
+    """Create a scheduled job. Requires a schedule block in the config."""
+    body = await request.body()
+    config_yaml = body.decode("utf-8")
+    config = load_config(config_yaml)
+
+    if config.schedule is None:
+        return Response(
+            content=_json_encode({"error": "A 'schedule' block is required for POST /jobs"}),
+            status_code=400,
+            media_type="application/json",
+        )
+
+    job = Job(
+        job_id=str(uuid.uuid4()),
+        project=config.project,
+        name=config.name,
+        config_yaml=config_yaml,
+        schedule_cron=config.schedule.cron,
+    )
+    await job_store.save_job(job)
+    scheduler.register_job(job.job_id, config.schedule.cron, enabled=config.schedule.enabled)
+    return {
+        "job_id": job.job_id,
+        "project": config.project,
+        "name": config.name,
+        "schedule": config.schedule.cron,
+    }
+
+
+@router.get("/jobs")
+async def list_jobs(
+    project: Optional[str] = Query(None),
+    job_store: JobStore = Depends(get_job_store),
+) -> list[dict[str, Any]]:
+    """List jobs, optionally filtered by project."""
+    jobs = await job_store.list_jobs(project)
+    return [_job_to_dict(j) for j in jobs]
+
+
+@router.get("/jobs/{job_id}", response_model=None)
+async def get_job(
+    job_id: str,
+    job_store: JobStore = Depends(get_job_store),
+):
+    """Get a single job by ID."""
+    try:
+        job = await job_store.get_job(job_id)
+    except KeyError:
+        return Response(
+            content=_json_encode({"error": f"Job {job_id!r} not found"}),
+            status_code=404,
+            media_type="application/json",
+        )
+    return _job_to_dict(job)
+
+
+@router.delete("/jobs/{job_id}", status_code=204)
+async def delete_job(
+    job_id: str,
+    delete_results: bool = Query(False),
+    job_store: JobStore = Depends(get_job_store),
+    result_store: ResultStore = Depends(get_result_store),
+    scheduler: SchedulerService = Depends(get_scheduler),
+) -> Response:
+    """Delete a job by ID."""
+    scheduler.remove_job(job_id)
+    if delete_results:
+        await result_store.delete_results(job_id)
+    await job_store.delete_job(job_id)
+    return Response(status_code=204)
+
+
+@router.get("/results/{job_id}", response_model=None)
+async def get_results(
+    job_id: str,
+    latest: bool = Query(True),
+    run_id: Optional[str] = Query(None),
+    job_store: JobStore = Depends(get_job_store),
+    result_store: ResultStore = Depends(get_result_store),
+):
+    """Get results for a job."""
+    # Check job exists.
+    try:
+        job = await job_store.get_job(job_id)
+    except KeyError:
+        return Response(
+            content=_json_encode({"error": f"Job {job_id!r} not found"}),
+            status_code=404,
+            media_type="application/json",
+        )
+
+    # If job is still running, return 202.
+    if job.status in (JobStatus.queued, JobStatus.running):
+        return Response(
+            content=_json_encode({
+                "job_id": job_id,
+                "status": job.status.value,
+                "poll_url": f"/jobs/{job_id}",
+            }),
+            status_code=202,
+            media_type="application/json",
+        )
+
+    try:
+        result = await result_store.get_result(job_id, run_id=run_id)
+    except KeyError:
+        return Response(
+            content=_json_encode({"error": f"No results found for job {job_id!r}"}),
+            status_code=404,
+            media_type="application/json",
+        )
+
+    return {"job_id": job_id, "status": job.status.value, "results": result}
+
+
+@router.get("/errors")
+async def get_errors(
+    project: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    since: Optional[str] = Query(None),
+    error_type: Optional[str] = Query(None),
+    error_store: ErrorStore = Depends(get_error_store),
+) -> list[dict[str, Any]]:
+    """Query error records with optional filters."""
+    since_dt = datetime.fromisoformat(since) if since else None
+    error_type_enum = ErrorType(error_type) if error_type else None
+
+    filters = ErrorFilters(
+        project=project,
+        job_id=job_id,
+        since=since_dt,
+        error_type=error_type_enum,
+    )
+    errors = await error_store.query_errors(filters)
+    return [
+        {
+            "job_id": e.job_id,
+            "project": e.project,
+            "target_url": e.target_url,
+            "attempt": e.attempt,
+            "timestamp": e.timestamp.isoformat(),
+            "error_type": e.error_type.value,
+            "http_status": e.http_status,
+            "fetcher_used": e.fetcher_used,
+            "selectors_matched": e.selectors_matched,
+            "action_taken": e.action_taken.value,
+            "resolved": e.resolved,
+        }
+        for e in errors
+    ]
+
+
+def _job_to_dict(job: Job) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "project": job.project,
+        "name": job.name,
+        "status": job.status.value,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "schedule_cron": job.schedule_cron,
+        "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+        "run_count": job.run_count,
+    }
+
+
+def _json_encode(data: Any) -> bytes:
+    return json.dumps(data).encode("utf-8")

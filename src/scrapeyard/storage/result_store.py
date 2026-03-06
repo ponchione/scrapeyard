@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from scrapeyard.storage.database import get_db
 
@@ -109,3 +110,17 @@ class LocalResultStore:
                 return json.loads(path.read_text())
         # Fallback to first file as string.
         return (run_dir / filenames[0]).read_text()
+
+    async def delete_results(self, job_id: str) -> None:
+        """Delete all results for a job from disk and metadata DB."""
+        async with get_db("results_meta.db") as db:
+            cursor = await db.execute(
+                "SELECT file_path FROM results_meta WHERE job_id=?", (job_id,)
+            )
+            rows = await cursor.fetchall()
+            for (file_path,) in rows:
+                run_dir = Path(file_path)
+                if run_dir.exists():
+                    shutil.rmtree(run_dir)
+            await db.execute("DELETE FROM results_meta WHERE job_id=?", (job_id,))
+            await db.commit()

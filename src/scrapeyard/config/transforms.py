@@ -5,14 +5,36 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+# Pattern matching spec-style func("arg1", "arg2") syntax.
+_FUNC_RE = re.compile(r'^(\w+)\((.+)\)$')
+
+
+def _parse_args(raw_args: str) -> list[str]:
+    """Parse comma-separated, optionally quoted arguments."""
+    args: list[str] = []
+    for part in raw_args.split(","):
+        part = part.strip().strip('"').strip("'")
+        args.append(part)
+    return args
+
 
 def parse_transform(raw: str) -> Callable[[str], str]:
     """Parse a single transform string into a callable.
 
+    Supports both colon syntax (``prepend:value``) and spec function-call
+    syntax (``prepend("value")``).
+
     Raises ValueError for unknown transforms or bad syntax.
     """
-    parts = raw.split(":", 2)
-    name = parts[0]
+    # Try spec func("arg") syntax first.
+    m = _FUNC_RE.match(raw)
+    if m:
+        name = m.group(1)
+        args = _parse_args(m.group(2))
+    else:
+        parts = raw.split(":", 2)
+        name = parts[0]
+        args = parts[1:] if len(parts) > 1 else []
 
     if name == "trim":
         return str.strip
@@ -21,34 +43,31 @@ def parse_transform(raw: str) -> Callable[[str], str]:
     elif name == "uppercase":
         return str.upper
     elif name == "prepend":
-        if len(parts) < 2:
-            raise ValueError(f"prepend requires a value: 'prepend:<value>', got '{raw}'")
-        prefix = parts[1]
+        if not args:
+            raise ValueError(f"prepend requires a value, got '{raw}'")
+        prefix = args[0]
         return lambda s, p=prefix: p + s
     elif name == "append":
-        if len(parts) < 2:
-            raise ValueError(f"append requires a value: 'append:<value>', got '{raw}'")
-        suffix = parts[1]
+        if not args:
+            raise ValueError(f"append requires a value, got '{raw}'")
+        suffix = args[0]
         return lambda s, sf=suffix: s + sf
     elif name == "replace":
-        if len(parts) < 3:
-            raise ValueError(
-                f"replace requires old and new: 'replace:<old>:<new>', got '{raw}'"
-            )
-        old, new = parts[1], parts[2]
+        if len(args) < 2:
+            raise ValueError(f"replace requires old and new, got '{raw}'")
+        old, new = args[0], args[1]
         return lambda s, o=old, n=new: s.replace(o, n)
     elif name == "regex":
-        if len(parts) < 3:
-            raise ValueError(
-                f"regex requires pattern and replacement: 'regex:<pattern>:<replacement>', got '{raw}'"
-            )
-        pattern, replacement = parts[1], parts[2]
+        if len(args) < 2:
+            raise ValueError(f"regex requires pattern and replacement, got '{raw}'")
+        pattern, replacement = args[0], args[1]
         compiled = re.compile(pattern)
         return lambda s, c=compiled, r=replacement: c.sub(r, s)
     elif name == "join":
-        if len(parts) < 2:
-            raise ValueError(f"join requires a separator: 'join:<separator>', got '{raw}'")
-        return lambda s: s
+        if not args:
+            raise ValueError(f"join requires a separator, got '{raw}'")
+        sep = args[0]
+        return lambda s, sp=sep: s  # no-op on single strings; list-level join is separate
     else:
         raise ValueError(f"Unknown transform: '{name}'")
 
