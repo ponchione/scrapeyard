@@ -1,0 +1,16 @@
+services:
+  scrapeyard:
+    build: .
+    ports:
+      - "8420:8420"
+    volumes:
+      - scrapeyard-data:/data
+    environment:
+      - SCRAPEYARD_WORKERS_MAX_CONCURRENT=4
+      - SCRAPEYARD_WORKERS_MAX_BROWSERS=2
+      - SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=4096
+      - SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS=120
+      - SCRAPEYARD_STORAGE_RETENTION_DAYS=30
+
+volumes:
+  scrapeyard-data:

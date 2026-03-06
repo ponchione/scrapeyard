@@ -1,2 +1,12 @@
-.idea
+__pycache__/
+.venv/
+*.pyc
+dist/
+data/
+*.db
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.idea/
 /work-orders
