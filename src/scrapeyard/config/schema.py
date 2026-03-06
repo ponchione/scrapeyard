@@ -1,14 +1,11 @@
-"""Pydantic models for the YAML configuration schema (spec section 3.5).
-
-Validators and transform parsing are deferred to a later work order.
-"""
+"""Pydantic models for the YAML configuration schema (spec section 3.5)."""
 
 from __future__ import annotations
 
 from enum import Enum
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # --- Enums ---
@@ -189,3 +186,19 @@ class ScrapeConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     schedule: Optional[ScheduleConfig] = None
     output: OutputConfig = Field(default_factory=OutputConfig)
+
+    @model_validator(mode="after")
+    def _check_target_mutual_exclusivity(self) -> ScrapeConfig:
+        has_target = self.target is not None
+        has_targets = self.targets is not None
+        if has_target and has_targets:
+            raise ValueError("Specify either 'target' or 'targets', not both")
+        if not has_target and not has_targets:
+            raise ValueError("One of 'target' or 'targets' must be provided")
+        return self
+
+    def resolved_targets(self) -> list[TargetConfig]:
+        """Return the list of targets regardless of Tier 1 or Tier 2 config."""
+        if self.target is not None:
+            return [self.target]
+        return self.targets  # type: ignore[return-value]
