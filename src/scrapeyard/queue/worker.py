@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import OutputFormat
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
@@ -92,7 +93,8 @@ async def scrape_task(
                 "Scraping %s with fetcher=%s adaptive=%s",
                 target_cfg.url, target_cfg.fetcher.value, adaptive,
             )
-            result = await scrape_target(target_cfg, adaptive, config.retry)
+            settings = get_settings()
+            result = await scrape_target(target_cfg, adaptive, config.retry, adaptive_dir=settings.adaptive_dir)
 
             if result.status == "success":
                 circuit_breaker.record_success(domain)
