@@ -26,10 +26,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source.
 COPY src/ src/
-COPY pyproject.toml .
+COPY sql/ sql/
+COPY pyproject.toml README.md ./
 
 # Install the project itself (editable not needed in container).
 RUN pip install --no-cache-dir --no-deps .
+
+# Place SQL migrations where database.py expects them (../../sql relative to the package).
+RUN cp -r sql/ "$(python -c 'import scrapeyard, pathlib; print(pathlib.Path(scrapeyard.__file__).resolve().parent / "../../sql")')"
 
 # Create the /data directory for the volume mount.
 RUN mkdir -p /data/db /data/results /data/adaptive /data/logs
