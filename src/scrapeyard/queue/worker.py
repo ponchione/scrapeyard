@@ -48,6 +48,7 @@ async def scrape_task(
     job = job.model_copy(update={"status": JobStatus.running})
     await job_store.update_job(job)
 
+    settings = get_settings()
     targets = config.resolved_targets()
     concurrency = config.execution.concurrency
     delay_between = config.execution.delay_between
@@ -93,7 +94,6 @@ async def scrape_task(
                 "Scraping %s with fetcher=%s adaptive=%s",
                 target_cfg.url, target_cfg.fetcher.value, adaptive,
             )
-            settings = get_settings()
             result = await scrape_target(target_cfg, adaptive, config.retry, adaptive_dir=settings.adaptive_dir)
 
             if result.status == "success":
