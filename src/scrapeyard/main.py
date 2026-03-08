@@ -1,28 +1,72 @@
 """FastAPI application entry point."""
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from scrapeyard.api.dependencies import get_scheduler, get_worker_pool
+from scrapeyard.api.dependencies import (
+    get_error_store,
+    get_job_store,
+    get_result_store,
+    get_scheduler,
+    get_worker_pool,
+)
 from scrapeyard.api.routes import router
+from scrapeyard.common.logging import setup_logging
+from scrapeyard.common.settings import get_settings
+from scrapeyard.storage.cleanup import start_cleanup_loop
+from scrapeyard.storage.database import init_db, reset_db
 
 _start_time: float = 0.0
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start scheduler and worker pool on startup; shut down on exit."""
+    """Orchestrate startup and shutdown in dependency order."""
     global _start_time  # noqa: PLW0603
     _start_time = time.monotonic()
-    scheduler = get_scheduler()
+
+    # 1. Settings & logging
+    settings = get_settings()
+    setup_logging(settings.log_dir)
+
+    # 2. Database
+    await init_db(settings.db_dir)
+
+    # 3. Storage instances
+    app.state.job_store = get_job_store()
+    app.state.error_store = get_error_store()
+    app.state.result_store = get_result_store()
+
+    # 4. Worker pool
     pool = get_worker_pool()
-    await scheduler.start()
+    app.state.worker_pool = pool
     await pool.start()
+
+    # 5. Scheduler (re-registers persisted jobs on start)
+    scheduler = get_scheduler()
+    app.state.scheduler = scheduler
+    await scheduler.start()
+
+    # 6. Cleanup loop
+    app.state.cleanup_task = start_cleanup_loop(
+        app.state.result_store,
+        retention_days=settings.storage_retention_days,
+    )
+
     yield
+
+    # Shutdown (reverse order)
+    app.state.cleanup_task.cancel()
+    try:
+        await app.state.cleanup_task
+    except asyncio.CancelledError:
+        pass
     scheduler.shutdown()
     await pool.stop()
+    reset_db()
 
 
 app = FastAPI(
