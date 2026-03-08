@@ -20,6 +20,12 @@ _DB_MIGRATIONS: dict[str, str] = {
 _db_dir: Path | None = None
 
 
+def reset_db() -> None:
+    """Clear the module-level database directory, signalling teardown."""
+    global _db_dir  # noqa: PLW0603
+    _db_dir = None
+
+
 async def init_db(db_dir: str) -> None:
     """Create *db_dir* (if needed), open each database, and apply migrations.
 
