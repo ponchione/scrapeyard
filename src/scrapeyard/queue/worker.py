@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,8 @@ from scrapeyard.engine.scraper import TargetResult, scrape_target
 from scrapeyard.formatters.factory import get_formatter
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+
+logger = logging.getLogger(__name__)
 
 
 async def scrape_task(
@@ -63,6 +66,7 @@ async def scrape_task(
             try:
                 circuit_breaker.check(domain)
             except CircuitOpenError as exc:
+                logger.info("Circuit breaker open for %s", domain)
                 tr = TargetResult(url=target_cfg.url, status="failed", errors=[str(exc)])
                 await _log_error(
                     job_id, config.project, target_cfg.url, 0,
@@ -84,11 +88,16 @@ async def scrape_task(
                 adaptive = config.adaptive
             else:
                 adaptive = config.schedule is not None
+            logger.info(
+                "Scraping %s with fetcher=%s adaptive=%s",
+                target_cfg.url, target_cfg.fetcher.value, adaptive,
+            )
             result = await scrape_target(target_cfg, adaptive, config.retry)
 
             if result.status == "success":
                 circuit_breaker.record_success(domain)
             else:
+                logger.info("Recording failure for domain %s", domain)
                 circuit_breaker.record_failure(domain)
                 for err_msg in result.errors:
                     await _log_error(
