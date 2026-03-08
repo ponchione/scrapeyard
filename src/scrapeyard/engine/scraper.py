@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,7 +20,7 @@ class TargetResult:
     """Result of scraping a single target URL."""
 
     url: str
-    status: str  # "success" or "failed"
+    status: str = "failed"  # "success" or "failed"
     data: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     pages_scraped: int = 0
@@ -49,13 +50,20 @@ async def _fetch_page(
     fetcher_type: FetcherType,
     adaptive: bool,
     retryable_status: set[int],
+    adaptive_dir: str,
 ) -> Any:
     """Fetch a single page using the appropriate Scrapling method.
 
     Raises :class:`RetryableError` for retryable HTTP status codes,
     :class:`FetchError` for other error statuses.
     """
-    custom_config = {"auto_match": adaptive}
+    custom_config: dict[str, Any] = {
+        "auto_match": adaptive,
+        "storage_args": {
+            "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
+            "url": url,
+        },
+    }
 
     if fetcher_type == FetcherType.basic:
         # Fetcher.get is synchronous — run in thread pool.
@@ -80,6 +88,7 @@ async def scrape_target(
     target: TargetConfig,
     adaptive: bool,
     retry: RetryConfig,
+    adaptive_dir: str = "/data/adaptive",
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination.
 
@@ -93,13 +102,17 @@ async def scrape_target(
         Retry configuration passed to :class:`RetryHandler`.
     """
     result = TargetResult(url=target.url)
+
+    # Ensure adaptive directory exists.
+    Path(adaptive_dir).mkdir(parents=True, exist_ok=True)
+
     fetcher_cls = _get_fetcher(target.fetcher)
     retry_handler = RetryHandler(retry)
     retryable_status = set(retry.retryable_status)
 
     try:
         page = await retry_handler.execute(
-            _fetch_page, fetcher_cls, target.url, target.fetcher, adaptive, retryable_status
+            _fetch_page, fetcher_cls, target.url, target.fetcher, adaptive, retryable_status, adaptive_dir
         )
         data = extract_selectors(page, target.selectors)
         result.data.append(data)
@@ -119,7 +132,7 @@ async def scrape_target(
                     break
 
                 page = await retry_handler.execute(
-                    _fetch_page, fetcher_cls, next_url, target.fetcher, adaptive, retryable_status
+                    _fetch_page, fetcher_cls, next_url, target.fetcher, adaptive, retryable_status, adaptive_dir
                 )
                 data = extract_selectors(page, target.selectors)
                 result.data.append(data)
