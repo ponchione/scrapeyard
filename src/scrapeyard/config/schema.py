@@ -75,6 +75,14 @@ class GroupBy(str, Enum):
     merge = "merge"
 
 
+class FailStrategy(str, Enum):
+    """How to handle target failures within a job."""
+
+    partial = "partial"
+    all_or_nothing = "all_or_nothing"
+    continue_ = "continue"
+
+
 # --- Selector Models ---
 
 
@@ -145,6 +153,9 @@ class ExecutionConfig(BaseModel):
     )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")
     priority: Priority = Field(default=Priority.normal, description="Queue priority")
+    fail_strategy: FailStrategy = Field(
+        default=FailStrategy.partial, description="How to handle target failures"
+    )
 
 
 class ScheduleConfig(BaseModel):
