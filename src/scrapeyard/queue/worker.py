@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import OutputFormat
+from scrapeyard.config.schema import FailStrategy, OutputFormat
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, scrape_target
 from scrapeyard.formatters.factory import get_formatter
@@ -129,14 +129,29 @@ async def scrape_task(
         flat_data.extend(tr.data)
     validation = validator.validate(flat_data)
 
-    # Determine final status.
+    # Determine final status based on fail_strategy.
     failed_count = sum(1 for r in all_results if r.status == "failed")
-    if failed_count == len(all_results):
-        final_status = JobStatus.failed
-    elif failed_count > 0 or not validation.passed:
-        final_status = JobStatus.partial
+    fail_strategy = config.execution.fail_strategy
+
+    if fail_strategy == FailStrategy.all_or_nothing:
+        if failed_count > 0:
+            final_status = JobStatus.failed
+            flat_data.clear()  # Discard all results.
+        else:
+            final_status = JobStatus.complete
+    elif fail_strategy == FailStrategy.continue_:
+        if flat_data:
+            final_status = JobStatus.complete
+        else:
+            final_status = JobStatus.failed
     else:
-        final_status = JobStatus.complete
+        # FailStrategy.partial (default / current behavior).
+        if failed_count == len(all_results):
+            final_status = JobStatus.failed
+        elif failed_count > 0 or not validation.passed:
+            final_status = JobStatus.partial
+        else:
+            final_status = JobStatus.complete
 
     # Format and save results if we have data.
     if flat_data:
