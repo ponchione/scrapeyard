@@ -10,5 +10,6 @@ CREATE TABLE IF NOT EXISTS results_meta (
     created_at   TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_results_meta_job_id  ON results_meta (job_id);
-CREATE INDEX IF NOT EXISTS idx_results_meta_project ON results_meta (project);
+CREATE INDEX IF NOT EXISTS idx_results_meta_job_id     ON results_meta (job_id);
+CREATE INDEX IF NOT EXISTS idx_results_meta_project    ON results_meta (project);
+CREATE INDEX IF NOT EXISTS idx_results_meta_created_at ON results_meta (created_at);
