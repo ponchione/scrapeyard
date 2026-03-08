@@ -10,19 +10,22 @@ RUN poetry export -f requirements.txt --without-hashes -o requirements.txt
 # --- Final stage: lean runtime image ---
 FROM python:3.12-slim
 
-# System deps for Scrapling (lxml, etc.)
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install build deps, Python deps, then purge build deps in one layer.
+COPY --from=builder /build/requirements.txt .
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         libxml2-dev \
         libxslt1-dev \
+    && pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y build-essential libxml2-dev libxslt1-dev \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Install Python deps from exported requirements.
-COPY --from=builder /build/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source.
 COPY src/ src/
