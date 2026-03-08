@@ -1,7 +1,6 @@
 """Test result retention auto-cleanup."""
 
 import json
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
