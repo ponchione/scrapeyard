@@ -2,7 +2,7 @@
 
 import pytest
 
-from scrapeyard.storage.database import _db_dir, init_db, reset_db
+from scrapeyard.storage.database import init_db, reset_db
 
 
 @pytest.mark.asyncio
