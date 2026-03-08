@@ -71,3 +71,9 @@ async def get_db(db_name: str) -> AsyncIterator[aiosqlite.Connection]:
         raise ValueError(f"Unknown database: {db_name!r}")
     async with aiosqlite.connect(_db_dir / db_name) as db:
         yield db
+
+
+def reset_db() -> None:
+    """Reset the module-level database directory (useful for test isolation)."""
+    global _db_dir  # noqa: PLW0603
+    _db_dir = None

@@ -30,6 +30,8 @@ class ResultStore(Protocol):
 
     async def delete_results(self, job_id: str) -> None: ...
 
+    async def delete_expired(self, retention_days: int) -> int: ...
+
 
 class ErrorStore(Protocol):
     """Async interface for structured error record persistence."""

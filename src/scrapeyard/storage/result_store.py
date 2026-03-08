@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -124,3 +124,28 @@ class LocalResultStore:
                     shutil.rmtree(run_dir)
             await db.execute("DELETE FROM results_meta WHERE job_id=?", (job_id,))
             await db.commit()
+
+    async def delete_expired(self, retention_days: int) -> int:
+        """Delete results older than *retention_days*. Returns count deleted."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat()
+        async with get_db("results_meta.db") as db:
+            cursor = await db.execute(
+                "SELECT id, file_path FROM results_meta WHERE created_at < ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            for row_id, file_path in rows:
+                run_dir = Path(file_path)
+                if run_dir.exists():
+                    shutil.rmtree(run_dir)
+            if rows:
+                ids = [r[0] for r in rows]
+                placeholders = ",".join("?" for _ in ids)
+                await db.execute(
+                    f"DELETE FROM results_meta WHERE id IN ({placeholders})",
+                    ids,
+                )
+                await db.commit()
+        return len(rows)
