@@ -11,6 +11,18 @@ from scrapeyard.common.settings import ServiceSettings, get_settings
 class TestServiceSettingsDefaults:
     """Verify all default values when no environment variables are set."""
 
+    @staticmethod
+    def _make_clean_settings(monkeypatch):
+        """Create a ServiceSettings with directory env vars removed."""
+        for key in (
+            "SCRAPEYARD_DB_DIR",
+            "SCRAPEYARD_LOG_DIR",
+            "SCRAPEYARD_STORAGE_RESULTS_DIR",
+            "SCRAPEYARD_ADAPTIVE_DIR",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        return ServiceSettings()
+
     def test_workers_max_concurrent_default(self):
         settings = ServiceSettings()
         assert settings.workers_max_concurrent == 4
@@ -31,24 +43,24 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.storage_retention_days == 30
 
-    def test_storage_results_dir_default(self):
-        settings = ServiceSettings()
+    def test_storage_results_dir_default(self, monkeypatch):
+        settings = self._make_clean_settings(monkeypatch)
         assert settings.storage_results_dir == "/data/results"
 
     def test_storage_max_results_per_job_default(self):
         settings = ServiceSettings()
         assert settings.storage_max_results_per_job == 100
 
-    def test_db_dir_default(self):
-        settings = ServiceSettings()
+    def test_db_dir_default(self, monkeypatch):
+        settings = self._make_clean_settings(monkeypatch)
         assert settings.db_dir == "/data/db"
 
-    def test_adaptive_dir_default(self):
-        settings = ServiceSettings()
+    def test_adaptive_dir_default(self, monkeypatch):
+        settings = self._make_clean_settings(monkeypatch)
         assert settings.adaptive_dir == "/data/adaptive"
 
-    def test_log_dir_default(self):
-        settings = ServiceSettings()
+    def test_log_dir_default(self, monkeypatch):
+        settings = self._make_clean_settings(monkeypatch)
         assert settings.log_dir == "/data/logs"
 
     def test_circuit_breaker_max_failures_default(self):
