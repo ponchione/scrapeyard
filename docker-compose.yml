@@ -6,11 +6,24 @@ services:
     volumes:
       - scrapeyard-data:/data
     environment:
-      - SCRAPEYARD_WORKERS_MAX_CONCURRENT=4
-      - SCRAPEYARD_WORKERS_MAX_BROWSERS=2
-      - SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=4096
-      - SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS=120
-      - SCRAPEYARD_STORAGE_RETENTION_DAYS=30
+      # Workers
+      SCRAPEYARD_WORKERS_MAX_CONCURRENT: "4"
+      SCRAPEYARD_WORKERS_MAX_BROWSERS: "2"
+      SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB: "4096"
+      # Scheduler
+      SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS: "120"
+      # Storage
+      SCRAPEYARD_STORAGE_RETENTION_DAYS: "30"
+      SCRAPEYARD_STORAGE_RESULTS_DIR: "/data/results"
+      SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB: "100"
+      # Data directories
+      SCRAPEYARD_DB_DIR: "/data/db"
+      SCRAPEYARD_ADAPTIVE_DIR: "/data/adaptive"
+      SCRAPEYARD_LOG_DIR: "/data/logs"
+      # Circuit breaker
+      SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES: "3"
+      SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS: "300"
+    restart: unless-stopped
 
 volumes:
   scrapeyard-data:
