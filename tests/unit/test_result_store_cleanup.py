@@ -1,6 +1,4 @@
 """Test result retention cleanup."""
-
-import json
 from datetime import datetime, timedelta, timezone
 
 import pytest

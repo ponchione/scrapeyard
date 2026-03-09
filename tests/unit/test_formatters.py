@@ -19,9 +19,11 @@ _RESULTS = [
 class TestJsonGroupedByTarget:
     def test_groups_by_url(self):
         out = format_json(_META, _RESULTS, GroupBy.target)
-        assert "https://a.com" in out["results"]
-        assert "https://b.com" in out["results"]
-        assert out["results"]["https://a.com"] == _RESULTS[0]["data"]
+        assert "a.com" in out["results"]
+        assert "b.com" in out["results"]
+        assert out["results"]["a.com"]["data"] == _RESULTS[0]["data"]
+        assert out["results"]["a.com"]["status"] == "success"
+        assert out["results"]["a.com"]["count"] == 2
 
     def test_includes_metadata(self):
         out = format_json(_META, _RESULTS, GroupBy.target)
@@ -39,7 +41,7 @@ class TestJsonMerged:
     def test_source_field_values(self):
         out = format_json(_META, _RESULTS, GroupBy.merge)
         sources = [r["_source"] for r in out["results"]]
-        assert sources == ["https://a.com", "https://a.com", "https://b.com"]
+        assert sources == ["a.com", "a.com", "b.com"]
 
     def test_preserves_original_fields(self):
         out = format_json(_META, _RESULTS, GroupBy.merge)
@@ -51,7 +53,7 @@ class TestJsonMerged:
         results = [{"url": "https://c.com", "data": {"title": "C1"}}]
         out = format_json(_META, results, GroupBy.merge)
         assert len(out["results"]) == 1
-        assert out["results"][0]["_source"] == "https://c.com"
+        assert out["results"][0]["_source"] == "c.com"
 
 
 class TestMarkdown:
@@ -85,17 +87,17 @@ class TestHtml:
 
 class TestFactory:
     def test_json_returns_json_formatter(self):
-        f = get_formatter(OutputFormat.json)
+        f = get_formatter(OutputFormat.json, GroupBy.target)
         assert f is format_json
 
     def test_markdown_returns_markdown_formatter(self):
-        f = get_formatter(OutputFormat.markdown)
+        f = get_formatter(OutputFormat.markdown, GroupBy.target)
         assert f is format_markdown
 
     def test_html_returns_html_formatter(self):
-        f = get_formatter(OutputFormat.html)
+        f = get_formatter(OutputFormat.html, GroupBy.target)
         assert f is format_html
 
     def test_json_markdown_returns_json_formatter(self):
-        f = get_formatter(OutputFormat.json_markdown)
+        f = get_formatter(OutputFormat.json_markdown, GroupBy.target)
         assert f is format_json

@@ -29,6 +29,12 @@ from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 router = APIRouter()
 
 
+def _is_yaml_request(request: Request) -> bool:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/x-yaml"
+
+
 def _should_run_sync(config: Any) -> bool:
     """Determine if a scrape should run synchronously.
 
@@ -61,6 +67,13 @@ async def scrape(
     worker_pool: WorkerPool = Depends(get_worker_pool),
 ) -> Response:
     """Submit an ad-hoc scrape request."""
+    if not _is_yaml_request(request):
+        return Response(
+            content=_json_encode({"error": "Content-Type must be application/x-yaml"}),
+            status_code=415,
+            media_type="application/json",
+        )
+
     body = await request.body()
     config_yaml = body.decode("utf-8")
     config = load_config(config_yaml)
@@ -106,8 +119,14 @@ async def scrape(
         )
 
     # Async mode — enqueue and return 202.
+    has_browser_target = any(
+        t.fetcher != FetcherType.basic for t in config.resolved_targets()
+    )
     await worker_pool.enqueue(
-        job.job_id, config_yaml, config.execution.priority.value
+        job.job_id,
+        config_yaml,
+        config.execution.priority.value,
+        needs_browser=has_browser_target,
     )
     return Response(
         content=_json_encode({
@@ -226,6 +245,13 @@ async def get_results(
                 "poll_url": f"/jobs/{job_id}",
             }),
             status_code=202,
+            media_type="application/json",
+        )
+
+    if run_id is None and not latest:
+        return Response(
+            content=_json_encode({"error": "Provide run_id when latest=false"}),
+            status_code=400,
             media_type="application/json",
         )
 

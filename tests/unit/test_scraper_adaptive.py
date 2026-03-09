@@ -1,6 +1,5 @@
 """Test that Scrapling adaptive DB path is configured correctly."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,6 +30,8 @@ async def test_adaptive_db_path_passed_to_fetcher(tmp_path):
 
         call_kwargs = mock_fetcher.get.call_args
         custom_config = call_kwargs.kwargs.get("custom_config") or call_kwargs[1].get("custom_config")
+        assert call_kwargs.kwargs["auto_save"] is True
+        assert call_kwargs.kwargs["adaptor"] is True
         assert custom_config["auto_match"] is True
         assert custom_config["storage_args"]["storage_file"] == str(adaptive_dir / "scrapling.db")
 
@@ -83,5 +84,7 @@ async def test_adaptive_false_still_passes_storage_args(tmp_path):
 
         call_kwargs = mock_fetcher.get.call_args
         custom_config = call_kwargs.kwargs.get("custom_config") or call_kwargs[1].get("custom_config")
+        assert call_kwargs.kwargs["auto_save"] is False
+        assert call_kwargs.kwargs["adaptor"] is False
         assert custom_config["auto_match"] is False
         assert "storage_args" in custom_config

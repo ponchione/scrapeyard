@@ -60,6 +60,7 @@ class WorkerPool:
         self._running = False
         self._consumer_task: asyncio.Task | None = None
         self._active_tasks = 0
+        self._active_browsers = 0
 
     def _check_memory(self) -> bool:
         """Return True if current RSS is within limits."""
@@ -135,12 +136,28 @@ class WorkerPool:
     def active_tasks(self) -> int:
         return self._active_tasks
 
+    @property
+    def active_browsers(self) -> int:
+        return self._active_browsers
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
+
+    @property
+    def max_browsers(self) -> int:
+        return self._max_browsers
+
     async def _run(self, item: _QueueItem) -> None:
         """Execute a single task under concurrency limits."""
         async with self._semaphore:
             if item.needs_browser:
                 async with self._browser_semaphore:
-                    await self._execute(item)
+                    self._active_browsers += 1
+                    try:
+                        await self._execute(item)
+                    finally:
+                        self._active_browsers -= 1
             else:
                 await self._execute(item)
 

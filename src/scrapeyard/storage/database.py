@@ -26,6 +26,15 @@ def reset_db() -> None:
     _db_dir = None
 
 
+async def close_db() -> None:
+    """Close database subsystem state.
+
+    Connections are opened per-operation via :func:`get_db`; this function
+    exists to provide an explicit shutdown hook for app lifespan teardown.
+    """
+    reset_db()
+
+
 async def init_db(db_dir: str) -> None:
     """Create *db_dir* (if needed), open each database, and apply migrations.
 
