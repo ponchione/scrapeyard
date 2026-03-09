@@ -31,3 +31,5 @@ async def test_health_response_shape():
     assert "active_tasks" in workers
     assert "max_browsers" in workers
     assert "active_browsers" in workers
+    assert "projects" in data
+    assert isinstance(data["projects"], dict)

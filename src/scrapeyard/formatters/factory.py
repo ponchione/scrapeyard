@@ -13,7 +13,7 @@ from scrapeyard.formatters.markdown_fmt import format_markdown
 Formatter = Callable[[dict[str, Any], list[dict[str, Any]], GroupBy], Any]
 
 
-def get_formatter(format: OutputFormat) -> Formatter:
+def get_formatter(format: OutputFormat, group_by: GroupBy) -> Formatter:
     """Return a formatter function for the given output format.
 
     Parameters
@@ -26,6 +26,7 @@ def get_formatter(format: OutputFormat) -> Formatter:
     Formatter
         A callable ``(job_meta, results, group_by) -> formatted_output``.
     """
+    _ = group_by
     formatters: dict[OutputFormat, Formatter] = {
         OutputFormat.json: format_json,
         OutputFormat.markdown: format_markdown,

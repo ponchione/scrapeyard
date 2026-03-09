@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,12 @@ from urllib.parse import urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
+from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
 from scrapeyard.engine.selectors import extract_selectors
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,16 +69,32 @@ async def _fetch_page(
         },
     }
 
+    call_kwargs: dict[str, Any] = {
+        "custom_config": custom_config,
+        "auto_save": adaptive,
+        "adaptor": adaptive,
+    }
+    fallback_kwargs: dict[str, Any] = {"custom_config": custom_config}
+
     if fetcher_type == FetcherType.basic:
         # Fetcher.get is synchronous — run in thread pool.
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: fetcher_cls.get(url, custom_config=custom_config),
-        )
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: fetcher_cls.get(url, **call_kwargs),
+            )
+        except TypeError:
+            response = await loop.run_in_executor(
+                None,
+                lambda: fetcher_cls.get(url, **fallback_kwargs),
+            )
     else:
         # StealthyFetcher / PlayWrightFetcher have async_fetch.
-        response = await fetcher_cls.async_fetch(url, custom_config=custom_config)
+        try:
+            response = await fetcher_cls.async_fetch(url, **call_kwargs)
+        except TypeError:
+            response = await fetcher_cls.async_fetch(url, **fallback_kwargs)
 
     if response.status and response.status >= 400:
         if response.status in retryable_status:
@@ -88,7 +108,7 @@ async def scrape_target(
     target: TargetConfig,
     adaptive: bool,
     retry: RetryConfig,
-    adaptive_dir: str = "/data/adaptive",
+    adaptive_dir: str | None = None,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination.
 
@@ -103,6 +123,9 @@ async def scrape_target(
     """
     result = TargetResult(url=target.url)
 
+    if adaptive_dir is None:
+        adaptive_dir = get_settings().adaptive_dir
+
     # Ensure adaptive directory exists.
     Path(adaptive_dir).mkdir(parents=True, exist_ok=True)
 
@@ -115,6 +138,14 @@ async def scrape_target(
             _fetch_page, fetcher_cls, target.url, target.fetcher, adaptive, retryable_status, adaptive_dir
         )
         data = extract_selectors(page, target.selectors)
+        if adaptive:
+            missing = [k for k, v in data.items() if v is None or v == "" or v == []]
+            if missing:
+                logger.info(
+                    "Adaptive relocation check: url=%s missing_selectors=%s",
+                    target.url,
+                    ",".join(missing),
+                )
         result.data.append(data)
         result.pages_scraped = 1
 

@@ -17,9 +17,12 @@ from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
 from scrapeyard.storage.cleanup import start_cleanup_loop
-from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.database import close_db, get_db, init_db
 
 _start_time: float = 0.0
+_projects_cache: dict[str, dict] = {}
+_projects_cache_refreshed_at: float = 0.0
+_PROJECTS_CACHE_TTL_SECONDS = 5.0
 
 
 @asynccontextmanager
@@ -63,7 +66,7 @@ async def lifespan(app: FastAPI):
         pass
     scheduler.shutdown()
     await pool.stop()
-    reset_db()
+    await close_db()
 
 
 app = FastAPI(
@@ -76,25 +79,78 @@ app = FastAPI(
 app.include_router(router)
 
 
+async def _project_health_summary() -> dict[str, dict]:
+    global _projects_cache_refreshed_at  # noqa: PLW0603
+    global _projects_cache  # noqa: PLW0603
+    now = time.monotonic()
+    if now - _projects_cache_refreshed_at < _PROJECTS_CACHE_TTL_SECONDS:
+        return _projects_cache
+
+    rows: list[tuple[str, str, int]] = []
+    try:
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
+            )
+            rows = await cursor.fetchall()
+    except RuntimeError:
+        rows = []
+
+    summary: dict[str, dict] = {}
+    for project, status, count in rows:
+        project_entry = summary.setdefault(
+            project,
+            {
+                "job_count": 0,
+                "status": "healthy",
+                "status_counts": {
+                    "queued": 0,
+                    "running": 0,
+                    "complete": 0,
+                    "partial": 0,
+                    "failed": 0,
+                },
+            },
+        )
+        project_entry["job_count"] += count
+        if status in project_entry["status_counts"]:
+            project_entry["status_counts"][status] += count
+
+    for project_entry in summary.values():
+        counts = project_entry["status_counts"]
+        if counts["failed"] > 0:
+            project_entry["status"] = "failing"
+        elif counts["partial"] > 0 or counts["running"] > 0:
+            project_entry["status"] = "degraded"
+        else:
+            project_entry["status"] = "healthy"
+
+    _projects_cache = summary
+    _projects_cache_refreshed_at = now
+    return summary
+
+
 @app.get("/health")
 async def health() -> dict:
     """Service health check endpoint with detailed status."""
     pool = get_worker_pool()
 
     uptime = time.monotonic() - _start_time if _start_time else 0.0
+    projects = await _project_health_summary()
 
     # Determine overall status based on active task load.
     status = "ok"
-    if pool.active_tasks >= pool._max_concurrent:
+    if pool.active_tasks >= pool.max_concurrent:
         status = "degraded"
 
     return {
         "status": status,
         "uptime_seconds": round(uptime, 1),
         "workers": {
-            "max_concurrent": pool._max_concurrent,
+            "max_concurrent": pool.max_concurrent,
             "active_tasks": pool.active_tasks,
-            "max_browsers": pool._max_browsers,
-            "active_browsers": 0,
+            "max_browsers": pool.max_browsers,
+            "active_browsers": pool.active_browsers,
         },
+        "projects": projects,
     }

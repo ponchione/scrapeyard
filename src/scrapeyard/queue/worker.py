@@ -157,10 +157,21 @@ async def scrape_task(
     if flat_data:
         fmt = config.output.format
         group_by = config.output.group_by
-        formatter = get_formatter(fmt)
-        job_meta = {"project": config.project, "name": config.name, "job_id": job_id}
+        formatter = get_formatter(fmt, group_by)
+        job_meta = {
+            "project": config.project,
+            "name": config.name,
+            "job_id": job_id,
+            "status": final_status.value,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "errors": all_errors,
+        }
         formatted_results = [
-            {"url": tr.url, "data": tr.data[0] if len(tr.data) == 1 else tr.data}
+            {
+                "url": tr.url,
+                "status": tr.status,
+                "data": tr.data[0] if len(tr.data) == 1 else tr.data,
+            }
             for tr in all_results if tr.data
         ]
         formatted = formatter(job_meta, formatted_results, group_by)

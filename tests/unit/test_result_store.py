@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from scrapeyard.storage.database import init_db
@@ -65,7 +63,7 @@ async def test_get_latest_without_run_id(store):
     data1 = [{"v": 1}]
     data2 = [{"v": 2}]
     await store.save_result("j-1", data1, "json")
-    run_id2 = await store.save_result("j-1", data2, "json")
+    await store.save_result("j-1", data2, "json")
 
     result = await store.get_result("j-1")
     # Latest should be data2
