@@ -1,5 +1,588 @@
 # Scrapeyard
 
-Config-driven web scraping microservice built on Scrapling.
+Scrapeyard is a config-driven web scraping service built with FastAPI and Scrapling. You submit YAML, the service decides whether to run the scrape inline or queue it, stores job metadata in SQLite, writes result artifacts to disk, and exposes jobs, results, errors, and health over HTTP.
 
+It is designed for small-to-medium scraping workflows where you want:
 
+- a stable HTTP API instead of one-off scripts
+- YAML-defined scraping jobs instead of hard-coded crawlers
+- persisted results and error records
+- cron-based recurring scrapes
+- local operation with no Redis or external queue dependency
+
+## Features
+
+- `POST /scrape` for ad hoc scrape jobs
+- `POST /jobs` for cron-scheduled jobs
+- sync, async, or auto execution mode
+- multi-target jobs with per-job concurrency and rate limits
+- `basic`, `stealthy`, and `dynamic` fetcher support via Scrapling
+- selector transforms such as `trim`, `uppercase`, `prepend(...)`, and `regex(...)`
+- pagination support
+- result formatting as JSON, Markdown, HTML, or JSON+Markdown
+- SQLite-backed job, error, and result metadata stores
+- filesystem-backed result artifacts
+- per-domain circuit breaker and retry handling
+- background cleanup for retention and per-job result pruning
+
+## Architecture
+
+At runtime the service is composed of:
+
+- FastAPI application and HTTP routes
+- an in-memory priority worker pool for async jobs
+- APScheduler for cron-based scheduled execution
+- SQLite databases for jobs, errors, and result metadata
+- a local results directory for run artifacts
+
+Request flow:
+
+1. A YAML config is submitted to `POST /scrape` or `POST /jobs`.
+2. The config is validated with Pydantic models.
+3. A job record is written to `jobs.db`.
+4. Ad hoc jobs either run inline or are queued based on `execution.mode` and a simple heuristic.
+5. The worker executes targets, applies retries, rate limiting, validation, and formatting.
+6. Results are written to disk and indexed in `results_meta.db`.
+7. Errors are written to `errors.db`.
+
+## Repository Layout
+
+- `src/scrapeyard/main.py`: FastAPI app and lifespan wiring
+- `src/scrapeyard/api/routes.py`: HTTP API
+- `src/scrapeyard/config/schema.py`: YAML schema
+- `src/scrapeyard/engine/`: scraping, selectors, retries, validation, circuit breaker
+- `src/scrapeyard/queue/`: in-memory worker pool and scrape task
+- `src/scrapeyard/scheduler/cron.py`: APScheduler integration
+- `src/scrapeyard/storage/`: SQLite and filesystem persistence
+- `sql/`: SQLite schema creation scripts
+- `tests/`: unit and integration tests
+- `tests/manual/`: example YAML configs for manual runs
+
+## Requirements
+
+- Python `3.10+`
+- Poetry
+- Docker and Docker Compose optional, but supported
+
+## Run Locally
+
+Install dependencies:
+
+```bash
+poetry install
+```
+
+Start the API:
+
+```bash
+poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
+```
+
+Health check:
+
+```bash
+curl -s http://127.0.0.1:8420/health
+```
+
+## Run with Docker
+
+Build and start:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Check health:
+
+```bash
+curl -s http://127.0.0.1:8420/health
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+The default compose setup mounts a named volume at `/data` for databases, results, adaptive matching state, and logs.
+
+## Environment Variables
+
+All service settings use the `SCRAPEYARD_` prefix.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs in the worker pool |
+| `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser-based jobs |
+| `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` | `4096` | Reject new jobs when RSS exceeds this limit |
+| `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS` | `120` | Random jitter applied to scheduled jobs |
+| `SCRAPEYARD_STORAGE_RETENTION_DAYS` | `30` | Age-based result retention |
+| `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Root directory for result artifacts |
+| `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB` | `100` | Per-job run history cap |
+| `SCRAPEYARD_DB_DIR` | `/data/db` | Directory containing SQLite databases |
+| `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive storage directory |
+| `SCRAPEYARD_LOG_DIR` | `/data/logs` | Service log directory |
+| `SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES` | `3` | Failures before a domain breaker opens |
+| `SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Breaker cooldown before retrying a domain |
+
+Example:
+
+```bash
+SCRAPEYARD_DB_DIR=/tmp/scrapeyard/db \
+SCRAPEYARD_STORAGE_RESULTS_DIR=/tmp/scrapeyard/results \
+poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
+```
+
+## YAML Configuration
+
+Exactly one of `target` or `targets` is required.
+
+### Minimal ad hoc config
+
+```yaml
+project: demo
+name: example-job
+
+target:
+  url: https://example.com
+  fetcher: basic
+  selectors:
+    title: h1
+```
+
+### Multi-target job
+
+```yaml
+project: demo
+name: product-recon
+
+targets:
+  - url: https://example.com/products
+    fetcher: basic
+    selectors:
+      name: .product-card h2::text
+      price: .price::text
+
+  - url: https://example.com/blog
+    fetcher: basic
+    selectors:
+      title: article h2 a::text
+      href: article h2 a::attr(href)
+```
+
+### Scheduled job
+
+```yaml
+project: demo
+name: scheduled-products
+
+schedule:
+  cron: "*/15 * * * *"
+  enabled: true
+
+target:
+  url: https://example.com/products
+  fetcher: basic
+  selectors:
+    name: .product-card h2::text
+    price: .price::text
+```
+
+### Pagination and transforms
+
+```yaml
+project: demo
+name: paged-quotes
+
+target:
+  url: http://quotes.toscrape.com/
+  fetcher: basic
+  selectors:
+    quote:
+      query: ".quote .text::text"
+      transform: trim
+    author:
+      query: ".quote .author::text"
+      transform: uppercase
+    about_url:
+      query: ".quote span a::attr(href)"
+      transform: prepend("http://quotes.toscrape.com")
+  pagination:
+    next: li.next a
+    max_pages: 3
+```
+
+### Top-level fields
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `project` | string | Project namespace used in job records and result paths |
+| `name` | string | Job name within the project |
+| `target` | object | Single-target config |
+| `targets` | list | Multi-target config |
+| `adaptive` | bool | Overrides adaptive mode; otherwise defaults by job type |
+| `retry` | object | Retry policy |
+| `validation` | object | Result validation behavior |
+| `execution` | object | Concurrency, rate limit, priority, and mode |
+| `schedule` | object | Required for `POST /jobs` |
+| `output` | object | Format and grouping |
+
+### Target fields
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `url` | string | Target URL |
+| `fetcher` | enum | `basic`, `stealthy`, `dynamic` |
+| `selectors` | map | Field name to selector |
+| `pagination` | object | Optional pagination config |
+
+Selectors can be short-form strings:
+
+```yaml
+selectors:
+  title: h1
+```
+
+Or long-form objects:
+
+```yaml
+selectors:
+  title:
+    query: h1
+    type: css
+    transform: trim
+```
+
+`type` supports `css` and `xpath`.
+
+### Retry settings
+
+```yaml
+retry:
+  max_attempts: 3
+  backoff: exponential
+  backoff_max: 30
+  retryable_status: [429, 500, 502, 503, 504]
+```
+
+`backoff` supports `exponential`, `linear`, and `fixed`.
+
+### Validation settings
+
+```yaml
+validation:
+  required_fields: [title, price]
+  min_results: 10
+  on_empty: warn
+```
+
+`on_empty` supports `retry`, `warn`, `fail`, and `skip`.
+
+### Execution settings
+
+```yaml
+execution:
+  concurrency: 2
+  delay_between: 2
+  domain_rate_limit: 3
+  mode: auto
+  priority: normal
+  fail_strategy: partial
+```
+
+Values:
+
+- `mode`: `auto`, `sync`, `async`
+- `priority`: `high`, `normal`, `low`
+- `fail_strategy`: `partial`, `all_or_nothing`, `continue`
+
+### Output settings
+
+```yaml
+output:
+  format: json
+  group_by: target
+```
+
+Values:
+
+- `format`: `json`, `markdown`, `html`, `json+markdown`
+- `group_by`: `target`, `merge`
+
+## API
+
+For `POST /scrape` and `POST /jobs`, send `Content-Type: application/x-yaml`.
+
+### `POST /scrape`
+
+Submit an ad hoc scrape job.
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/scrape \
+  -H 'Content-Type: application/x-yaml' \
+  --data-binary @config.yaml
+```
+
+Possible responses:
+
+- `200`: job ran synchronously and includes results inline
+- `202`: job was queued and returns `job_id` plus `poll_url`
+- `415`: missing or incorrect content type
+- `503`: sync execution rejected because the pool is at capacity
+
+Example sync response:
+
+```json
+{
+  "job_id": "9a2d4a13-5a0d-4e4e-9eb2-6fa66f5db24a",
+  "status": "complete",
+  "results": {
+    "job_id": "9a2d4a13-5a0d-4e4e-9eb2-6fa66f5db24a",
+    "project": "demo",
+    "status": "complete",
+    "completed_at": "2026-03-12T12:00:00+00:00",
+    "errors": [],
+    "results": {
+      "example.com": {
+        "status": "success",
+        "count": 1,
+        "data": {
+          "title": "Example Domain"
+        }
+      }
+    }
+  }
+}
+```
+
+Example async response:
+
+```json
+{
+  "job_id": "3ab2b237-5f3e-4500-8b8f-b44d9eb63511",
+  "status": "queued",
+  "poll_url": "/results/3ab2b237-5f3e-4500-8b8f-b44d9eb63511"
+}
+```
+
+### `GET /results/{job_id}`
+
+Fetch the latest result for a job, or a specific run when `run_id` is provided.
+
+```bash
+curl -s "http://127.0.0.1:8420/results/<job_id>"
+curl -s "http://127.0.0.1:8420/results/<job_id>?run_id=<run_id>"
+```
+
+Behavior:
+
+- `202` while the job is `queued` or `running`
+- `200` when results are available
+- `400` if `latest=false` is used without `run_id`
+- `404` if the job or result does not exist
+
+### `POST /jobs`
+
+Create a scheduled scrape job. The submitted YAML must include a `schedule` block.
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/jobs \
+  -H 'Content-Type: application/x-yaml' \
+  --data-binary @scheduled.yaml
+```
+
+Returns `201` with `job_id`, `project`, `name`, and `schedule`.
+
+### `GET /jobs`
+
+List all jobs, or filter by project.
+
+```bash
+curl -s "http://127.0.0.1:8420/jobs"
+curl -s "http://127.0.0.1:8420/jobs?project=demo"
+```
+
+### `GET /jobs/{job_id}`
+
+Fetch a single job record.
+
+```bash
+curl -s "http://127.0.0.1:8420/jobs/<job_id>"
+```
+
+Returned fields include:
+
+- `job_id`
+- `project`
+- `name`
+- `status`
+- `created_at`
+- `updated_at`
+- `schedule_cron`
+- `last_run_at`
+- `run_count`
+
+### `DELETE /jobs/{job_id}`
+
+Delete a job and remove its schedule. Optionally delete persisted results too.
+
+```bash
+curl -s -X DELETE "http://127.0.0.1:8420/jobs/<job_id>"
+curl -s -X DELETE "http://127.0.0.1:8420/jobs/<job_id>?delete_results=true"
+```
+
+Returns `204`.
+
+### `GET /errors`
+
+Query structured error records.
+
+```bash
+curl -s "http://127.0.0.1:8420/errors"
+curl -s "http://127.0.0.1:8420/errors?project=demo"
+curl -s "http://127.0.0.1:8420/errors?job_id=<job_id>"
+curl -s "http://127.0.0.1:8420/errors?error_type=http_error"
+curl -s "http://127.0.0.1:8420/errors?since=2026-03-12T00:00:00"
+```
+
+Supported `error_type` values:
+
+- `content_empty`
+- `http_error`
+- `network_error`
+- `browser_error`
+- `timeout`
+
+### `GET /health`
+
+Returns overall status, uptime, worker pool usage, and a per-project summary derived from stored job states.
+
+```bash
+curl -s http://127.0.0.1:8420/health
+```
+
+## Execution Behavior
+
+### Sync vs async
+
+When `execution.mode: auto`, `POST /scrape` runs synchronously only when all of these are true:
+
+- exactly one target
+- no pagination
+- `fetcher: basic`
+
+Everything else is queued and returns `202`.
+
+You can override this with:
+
+- `execution.mode: sync`
+- `execution.mode: async`
+
+### Adaptive mode
+
+Adaptive matching defaults to:
+
+- `false` for ad hoc scrapes
+- `true` for scheduled jobs
+
+You can override it explicitly with top-level `adaptive: true` or `adaptive: false`.
+
+### Failure handling
+
+`execution.fail_strategy` controls the final job status:
+
+- `partial`: mixed success produces `partial`
+- `all_or_nothing`: any failed target marks the job `failed` and discards data
+- `continue`: keep whatever succeeded; only fully empty jobs become `failed`
+
+### Circuit breaker and retries
+
+- Retry behavior is applied to retryable HTTP statuses from the config
+- The circuit breaker is tracked per domain
+- Once a domain exceeds the configured failure threshold, that domain is skipped until cooldown expires
+
+## Result Storage
+
+Results are stored on disk beneath:
+
+```text
+{SCRAPEYARD_STORAGE_RESULTS_DIR}/{project}/{job_name}/{run_id}/
+```
+
+Run IDs look like:
+
+```text
+YYYYMMDD-HHMMSS-xxxxxxxx
+```
+
+Artifacts written by format:
+
+- `json` -> `results.json`
+- `markdown` -> `results.md`
+- `html` -> `raw.html`
+- `json+markdown` -> `results.json` and `results.md`
+
+Metadata for each run is stored in `results_meta.db`.
+When retrieving `json+markdown` results through the API, the service returns the JSON representation and keeps the extra Markdown artifact on disk.
+
+## Scheduled Jobs
+
+Scheduled jobs are persisted in `jobs.db` and re-registered with APScheduler on startup. Cron expressions use standard 5-field crontab syntax, for example:
+
+```yaml
+schedule:
+  cron: "0 * * * *"
+  enabled: true
+```
+
+The scheduler applies random jitter up to `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS`.
+
+## Cleanup and Retention
+
+A background cleanup loop runs every 6 hours and:
+
+- deletes result runs older than `SCRAPEYARD_STORAGE_RETENTION_DAYS`
+- prunes old runs beyond `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB`
+
+Cleanup affects result artifacts and `results_meta.db`. Job records remain in `jobs.db` unless explicitly deleted.
+
+## Development
+
+Run the test suite:
+
+```bash
+poetry run pytest
+```
+
+Run unit tests only:
+
+```bash
+poetry run pytest tests/unit
+```
+
+Run integration tests:
+
+```bash
+poetry run pytest tests/integration
+```
+
+Lint:
+
+```bash
+poetry run ruff check src tests
+```
+
+Manual test configs are available under `tests/manual/`.
+
+## Known Constraints
+
+- The async queue is in-memory, so queued work is not durable across process restarts
+- The worker pool is local to a single process
+- `POST /jobs` does not currently enforce YAML content type
+- No authentication or authorization layer is present
+- Result retrieval returns the latest run unless you already know a historical `run_id`
+
+## License
+
+No license file is present in this repository.
