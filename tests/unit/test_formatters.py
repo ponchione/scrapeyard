@@ -30,6 +30,19 @@ class TestJsonGroupedByTarget:
         assert out["project"] == "acme"
         assert out["job_id"] == "j-1"
 
+    def test_distinguishes_same_domain_by_path_and_query(self):
+        results = [
+            {"url": "https://web.archive.org/web/1/https://example.com/page", "data": [{"title": "first"}]},
+            {"url": "https://web.archive.org/web/1/https://example.com/page?view=full", "data": [{"title": "second"}]},
+        ]
+
+        out = format_json(_META, results, GroupBy.target)
+
+        assert "web.archive.org/web/1/https://example.com/page" in out["results"]
+        assert "web.archive.org/web/1/https://example.com/page?view=full" in out["results"]
+        assert out["results"]["web.archive.org/web/1/https://example.com/page"]["data"] == [{"title": "first"}]
+        assert out["results"]["web.archive.org/web/1/https://example.com/page?view=full"]["data"] == [{"title": "second"}]
+
 
 class TestJsonMerged:
     def test_flattens_with_source(self):
@@ -54,6 +67,19 @@ class TestJsonMerged:
         out = format_json(_META, results, GroupBy.merge)
         assert len(out["results"]) == 1
         assert out["results"][0]["_source"] == "c.com"
+
+    def test_source_field_distinguishes_same_domain_by_path_and_query(self):
+        results = [
+            {"url": "https://web.archive.org/web/1/https://example.com/page", "data": {"title": "first"}},
+            {"url": "https://web.archive.org/web/1/https://example.com/page?view=full", "data": {"title": "second"}},
+        ]
+
+        out = format_json(_META, results, GroupBy.merge)
+
+        assert [record["_source"] for record in out["results"]] == [
+            "web.archive.org/web/1/https://example.com/page",
+            "web.archive.org/web/1/https://example.com/page?view=full",
+        ]
 
 
 class TestMarkdown:

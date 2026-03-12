@@ -61,40 +61,33 @@ async def _fetch_page(
     Raises :class:`RetryableError` for retryable HTTP status codes,
     :class:`FetchError` for other error statuses.
     """
-    custom_config: dict[str, Any] = {
-        "auto_match": adaptive,
-        "storage_args": {
-            "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
-            "url": url,
-        },
-    }
-
-    call_kwargs: dict[str, Any] = {
-        "custom_config": custom_config,
-        "auto_save": adaptive,
-        "adaptor": adaptive,
-    }
-    fallback_kwargs: dict[str, Any] = {"custom_config": custom_config}
+    # Only pass adaptive kwargs when adaptive tracking is enabled.
+    # Scrapling's basic Fetcher cannot handle custom_config (unhashable dict).
+    if adaptive:
+        call_kwargs: dict[str, Any] = {
+            "custom_config": {
+                "auto_match": True,
+                "storage_args": {
+                    "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
+                    "url": url,
+                },
+            },
+            "auto_save": True,
+            "adaptor": True,
+        }
+    else:
+        call_kwargs = {}
 
     if fetcher_type == FetcherType.basic:
         # Fetcher.get is synchronous — run in thread pool.
         loop = asyncio.get_running_loop()
-        try:
-            response = await loop.run_in_executor(
-                None,
-                lambda: fetcher_cls.get(url, **call_kwargs),
-            )
-        except TypeError:
-            response = await loop.run_in_executor(
-                None,
-                lambda: fetcher_cls.get(url, **fallback_kwargs),
-            )
+        response = await loop.run_in_executor(
+            None,
+            lambda: fetcher_cls.get(url, **call_kwargs),
+        )
     else:
         # StealthyFetcher / PlayWrightFetcher have async_fetch.
-        try:
-            response = await fetcher_cls.async_fetch(url, **call_kwargs)
-        except TypeError:
-            response = await fetcher_cls.async_fetch(url, **fallback_kwargs)
+        response = await fetcher_cls.async_fetch(url, **call_kwargs)
 
     if response.status and response.status >= 400:
         if response.status in retryable_status:
@@ -149,22 +142,25 @@ async def scrape_target(
         result.data.append(data)
         result.pages_scraped = 1
 
-        # Pagination
+        # Pagination — resolve each "next" href against the *current* page URL,
+        # not the original target URL, so relative links work across pages.
         if target.pagination:
             max_pages = target.pagination.max_pages
             next_selector = target.pagination.next
+            current_url = target.url
             for _ in range(max_pages - 1):
                 next_links = page.css(next_selector)
                 if not next_links:
                     break
                 next_el = next_links[0]
-                next_url = _resolve_href(next_el, target.url)
+                next_url = _resolve_href(next_el, current_url)
                 if not next_url:
                     break
 
                 page = await retry_handler.execute(
                     _fetch_page, fetcher_cls, next_url, target.fetcher, adaptive, retryable_status, adaptive_dir
                 )
+                current_url = next_url
                 data = extract_selectors(page, target.selectors)
                 result.data.append(data)
                 result.pages_scraped += 1

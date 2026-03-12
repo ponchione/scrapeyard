@@ -9,6 +9,28 @@ from urllib.parse import urlparse
 from scrapeyard.config.schema import GroupBy
 
 
+def _format_source_key(url: str) -> str:
+    """Return a readable, per-target identifier derived from the URL."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+
+    if parsed.netloc:
+        key = parsed.netloc
+        if path:
+            key += path
+        if parsed.query:
+            key += f"?{parsed.query}"
+        return key
+
+    if path:
+        key = path
+        if parsed.query:
+            key += f"?{parsed.query}"
+        return key
+
+    return url
+
+
 def format_json(
     job_meta: dict[str, Any],
     results: list[dict[str, Any]],
@@ -37,7 +59,7 @@ def format_json(
         grouped: dict[str, Any] = {}
         for entry in results:
             url = entry["url"]
-            key = urlparse(url).netloc or url
+            key = _format_source_key(url)
             data = entry["data"]
             count = len(data) if isinstance(data, list) else 1
             grouped[key] = {
@@ -51,7 +73,7 @@ def format_json(
     merged: list[dict[str, Any]] = []
     for entry in results:
         url = entry["url"]
-        source = urlparse(url).netloc or url
+        source = _format_source_key(url)
         data = entry["data"]
         if isinstance(data, list):
             for record in data:
