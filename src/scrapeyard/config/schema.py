@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 # --- Enums ---
@@ -81,6 +81,14 @@ class FailStrategy(str, Enum):
     partial = "partial"
     all_or_nothing = "all_or_nothing"
     continue_ = "continue"
+
+
+class WebhookStatus(str, Enum):
+    """Job statuses that can trigger a webhook."""
+
+    complete = "complete"
+    partial = "partial"
+    failed = "failed"
 
 
 # --- Selector Models ---
@@ -172,6 +180,20 @@ class OutputConfig(BaseModel):
     group_by: GroupBy = Field(default=GroupBy.target, description="Result grouping strategy")
 
 
+class WebhookConfig(BaseModel):
+    """Webhook notification configuration."""
+
+    url: HttpUrl = Field(..., description="URL to POST webhook payload to")
+    on: list[WebhookStatus] = Field(
+        default=[WebhookStatus.complete, WebhookStatus.partial],
+        description="Job statuses that trigger the webhook",
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict, description="Custom HTTP headers"
+    )
+    timeout: int = Field(default=10, description="Timeout in seconds")
+
+
 # --- Top-Level Config ---
 
 
@@ -196,6 +218,7 @@ class ScrapeConfig(BaseModel):
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     schedule: Optional[ScheduleConfig] = None
+    webhook: Optional[WebhookConfig] = None
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="after")
