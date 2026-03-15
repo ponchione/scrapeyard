@@ -33,14 +33,16 @@ The `on` field validates that all values are valid `WebhookStatus` members; inva
 | File | Change |
 |------|--------|
 | `src/scrapeyard/config/schema.py` | Add `WebhookStatus` enum and `WebhookConfig` model. Add `webhook: Optional[WebhookConfig] = None` to `ScrapeConfig`. |
+| `src/scrapeyard/config/__init__.py` | Add `WebhookConfig` and `WebhookStatus` to exports |
 | `pyproject.toml` | Move `httpx = "^0.28"` from dev dependencies to production dependencies |
 | `tests/unit/test_config.py` | Add `TestWebhookConfig` test class |
 
 ## Files NOT Changed
 
 - `src/scrapeyard/config/loader.py` — Pydantic handles the new optional field automatically
-- `src/scrapeyard/config/__init__.py` — no re-export needed for internal schema types
 - Any existing models or enum values
+
+**Note on `__init__.py`:** `WebhookConfig` and `WebhookStatus` will be added to `src/scrapeyard/config/__init__.py` exports so tests can import them via `scrapeyard.config`, matching the existing test import convention.
 
 ## New Tests
 
@@ -54,7 +56,7 @@ The `on` field validates that all values are valid `WebhookStatus` members; inva
 ## Design Decisions
 
 - **Same file (`schema.py`):** Follows the existing convention that all config schema models and enums live in one file. At ~236 lines post-change, still well within reason.
-- **`HttpUrl` for validation:** Pydantic v2 provides `HttpUrl` which validates URL format. Prevents misconfigured URLs from reaching the dispatcher.
+- **`HttpUrl` for validation:** Pydantic v2 provides `HttpUrl` which validates URL format. Prevents misconfigured URLs from reaching the dispatcher. Note: `TargetConfig.url` uses plain `str` because target URLs may need templating or non-standard forms in the future. Webhook URLs are configured once and dispatched automatically, so stricter validation is appropriate.
 - **`httpx` promoted now:** The webhook dispatcher (WO-003) will need it as a production dependency. Moving it now per WO-001 keeps the dependency change atomic and avoids WO-003 mixing schema and dependency concerns.
 
 ## Acceptance Criteria (from work order)
