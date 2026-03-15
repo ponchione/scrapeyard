@@ -81,7 +81,7 @@ async def scrape(
     job = Job(
         job_id=str(uuid.uuid4()),
         project=config.project,
-        name=config.name,
+        name=f"{config.name}-{uuid.uuid4().hex[:8]}",
         config_yaml=config_yaml,
     )
     await job_store.save_job(job)
