@@ -95,3 +95,53 @@ async def test_errors_are_recorded_on_failed_scrape(client, monkeypatch):
     errors = errors_response.json()
     assert len(errors) >= 1
     assert all(e["job_id"] == job_id for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_adhoc_scrape_does_not_collide(client, monkeypatch):
+    """Submitting the same ad-hoc config twice must not hit UNIQUE constraint."""
+    import re
+
+    async def _fake_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Hello"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+
+    yaml_config = _async_scrape_yaml()
+
+    resp1 = await client.post(
+        "/scrape",
+        content=yaml_config,
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert resp1.status_code in (200, 202), f"First submission failed: {resp1.status_code}"
+
+    resp2 = await client.post(
+        "/scrape",
+        content=yaml_config,
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert resp2.status_code in (200, 202), f"Second submission failed: {resp2.status_code}"
+
+    job_id_1 = resp1.json()["job_id"]
+    job_id_2 = resp2.json()["job_id"]
+    assert job_id_1 != job_id_2, "Two submissions should produce different job IDs"
+
+    # Verify each job has a suffixed name
+    job1_resp = await client.get(f"/jobs/{job_id_1}")
+    job2_resp = await client.get(f"/jobs/{job_id_2}")
+    assert job1_resp.status_code == 200
+    assert job2_resp.status_code == 200
+
+    name1 = job1_resp.json()["name"]
+    name2 = job2_resp.json()["name"]
+    assert name1 != name2, "Two ad-hoc jobs from same config must have different names"
+
+    suffix_pattern = re.compile(r"^async-scrape-[0-9a-f]{8}$")
+    assert suffix_pattern.match(name1), f"Name {name1!r} doesn't match expected suffix pattern"
+    assert suffix_pattern.match(name2), f"Name {name2!r} doesn't match expected suffix pattern"
