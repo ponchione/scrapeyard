@@ -27,7 +27,7 @@ This produces names like `my-scrape-a3b7c9d2` — human-readable with negligible
 
 | File | Change |
 |------|--------|
-| `src/scrapeyard/api/routes.py` | Modify line 84 in `scrape()`: append `-{short_uuid}` to `config.name` for ad-hoc jobs |
+| `src/scrapeyard/api/routes.py` | Modify `name=config.name` in the `Job(...)` constructor in `scrape()`: append `-{short_uuid}` to `config.name` for ad-hoc jobs |
 | `tests/integration/test_scrape_lifecycle.py` | Add `test_duplicate_adhoc_scrape_does_not_collide` |
 
 ## Files NOT Changed
@@ -43,6 +43,8 @@ This produces names like `my-scrape-a3b7c9d2` — human-readable with negligible
 1. Submit the same ad-hoc YAML config twice via `POST /scrape`
 2. Assert both requests return 200 or 202 (no 500)
 3. Assert the two responses have different `job_id` values
+4. Retrieve both jobs via `GET /jobs/{job_id}` and assert their `name` fields differ
+5. Assert each name matches the regex `^async-scrape-[0-9a-f]{8}$`
 
 ## Design Decisions
 
