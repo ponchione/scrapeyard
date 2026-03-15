@@ -10,3 +10,7 @@ data/
 *.egg-info/
 .idea/
 /work-orders
+
+.claude
+CLAUDE.md
+/docs/plans/**
