@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from scrapeyard.config import (
     ScrapeConfig,
     TargetConfig,
+    WebhookConfig,
+    WebhookStatus,
     apply_transforms,
     load_config,
     parse_transform,
@@ -195,3 +197,41 @@ targets:
 """
         with pytest.raises(ValidationError, match="not both"):
             load_config(yaml_str)
+
+
+# --- Webhook Config ---
+
+
+class TestWebhookConfig:
+    """WebhookConfig schema parsing and validation."""
+
+    def test_config_without_webhook_defaults_to_none(self):
+        config = ScrapeConfig(**_tier1_config())
+        assert config.webhook is None
+
+    def test_valid_webhook_parses(self):
+        webhook_data = {
+            "url": "https://example.com/hook",
+            "on": ["complete", "failed"],
+            "headers": {"Authorization": "Bearer token"},
+            "timeout": 5,
+        }
+        config = ScrapeConfig(**_tier1_config(webhook=webhook_data))
+        assert config.webhook is not None
+        assert str(config.webhook.url) == "https://example.com/hook"
+        assert config.webhook.on == [WebhookStatus.complete, WebhookStatus.failed]
+        assert config.webhook.headers == {"Authorization": "Bearer token"}
+        assert config.webhook.timeout == 5
+
+    def test_webhook_defaults(self):
+        webhook_data = {"url": "https://example.com/hook"}
+        config = ScrapeConfig(**_tier1_config(webhook=webhook_data))
+        assert config.webhook is not None
+        assert config.webhook.on == [WebhookStatus.complete, WebhookStatus.partial]
+        assert config.webhook.headers == {}
+        assert config.webhook.timeout == 10
+
+    def test_invalid_webhook_on_value_raises(self):
+        webhook_data = {"url": "https://example.com/hook", "on": ["complet"]}
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**_tier1_config(webhook=webhook_data))
