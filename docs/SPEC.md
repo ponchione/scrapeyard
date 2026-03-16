@@ -24,7 +24,7 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 | Project | Description | Scraping Profile |
 |---|---|---|
 | job-scout | Scrapes job boards and career pages, feeds results into an LLM for ranking | Moderate volume, multiple targets, stealthy fetching |
-| firearms-optics-db | Global firearms optics product database | High volume, hundreds of pages, regular scheduled refreshes |
+| eyebox | Optics price comparison pipeline | High volume, hundreds of pages, regular scheduled refreshes, webhook-driven |
 | (future projects) | TBD | Varying |
 
 ---
@@ -710,7 +710,7 @@ The following features are explicitly deferred and not part of v1 implementation
 | Feature | Description | Trigger for inclusion |
 |---|---|---|
 | **Follow / chained scrapes** | Scrape a listing page, then follow each link to detail pages. `follow` block in config. | Needed when job-scout requires scraping individual job detail pages. |
-| **Webhooks** | Optional callback URL notified on job completion. | Needed when another local service needs to react to scrape results without polling. |
+| ~~**Webhooks**~~ | ~~Optional callback URL notified on job completion.~~ | **Implemented** — `WebhookConfig` on `ScrapeConfig`, fire-and-forget dispatch via `src/scrapeyard/webhook/`. |
 | **Cloud deployment** | Postgres, S3, managed queues, auth, secrets management. | Needed when the service must run 24/7 or serve remote clients. |
 | **Global cross-project rate limiting** | Shared per-domain rate limits across all projects. | Needed when many projects frequently hit the same domains simultaneously. |
 | **Fetcher escalation** | Auto-escalate fetcher tier (basic → stealthy → dynamic) on 403/block detection. | Useful but adds complexity; evaluate after v1 usage patterns emerge. |
