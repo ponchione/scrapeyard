@@ -62,35 +62,31 @@ async def run_cleanup(
 
     # 2. Per-job pruning: keep only max_results_per_job most recent runs per job.
     cursor = await db.execute(
-        "SELECT DISTINCT job_id FROM results_meta",
+        """
+        SELECT id, file_path FROM (
+            SELECT id, file_path,
+                   ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC) AS rn
+            FROM results_meta
+        ) WHERE rn > ?
+        """,
+        (max_results_per_job,),
     )
-    job_ids = [r[0] for r in await cursor.fetchall()]
+    excess_rows = await cursor.fetchall()
 
-    pruned_total = 0
-    for job_id in job_ids:
-        cursor = await db.execute(
-            "SELECT id, file_path FROM results_meta WHERE job_id = ? ORDER BY created_at DESC",
-            (job_id,),
-        )
-        rows = await cursor.fetchall()
-        if len(rows) <= max_results_per_job:
-            continue
-        excess = rows[max_results_per_job:]
-        for row_id, file_path in excess:
-            run_dir = Path(file_path)
-            if run_dir.exists():
-                shutil.rmtree(run_dir)
-        excess_ids = [r[0] for r in excess]
-        placeholders = ",".join("?" for _ in excess_ids)
+    for row_id, file_path in excess_rows:
+        run_dir = Path(file_path)
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+    if excess_rows:
+        ids = [r[0] for r in excess_rows]
+        placeholders = ",".join("?" for _ in ids)
         await db.execute(
             f"DELETE FROM results_meta WHERE id IN ({placeholders})",
-            excess_ids,
+            ids,
         )
-        pruned_total += len(excess)
-
-    if pruned_total:
         await db.commit()
-        logger.info("Cleanup pruned %d excess result(s) across jobs", pruned_total)
+        logger.info("Cleanup pruned %d excess result(s) across jobs", len(excess_rows))
 
 
 def start_cleanup_loop(interval_hours: float = _DEFAULT_INTERVAL_HOURS) -> asyncio.Task:
