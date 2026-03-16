@@ -20,6 +20,7 @@ It is designed for small-to-medium scraping workflows where you want:
 - selector transforms such as `trim`, `uppercase`, `prepend(...)`, and `regex(...)`
 - pagination support
 - result formatting as JSON, Markdown, HTML, or JSON+Markdown
+- webhook notifications on job completion (fire-and-forget)
 - SQLite-backed job, error, and result metadata stores
 - filesystem-backed result artifacts
 - per-domain circuit breaker and retry handling
@@ -44,6 +45,7 @@ Request flow:
 5. The worker executes targets, applies retries, rate limiting, validation, and formatting.
 6. Results are written to disk and indexed in `results_meta.db`.
 7. Errors are written to `errors.db`.
+8. If a `webhook` is configured, a JSON payload is POSTed to the webhook URL (fire-and-forget).
 
 ## Repository Layout
 
@@ -54,6 +56,7 @@ Request flow:
 - `src/scrapeyard/queue/`: in-memory worker pool and scrape task
 - `src/scrapeyard/scheduler/cron.py`: APScheduler integration
 - `src/scrapeyard/storage/`: SQLite and filesystem persistence
+- `src/scrapeyard/webhook/`: webhook dispatcher (Protocol + httpx), payload builder
 - `sql/`: SQLite schema creation scripts
 - `tests/`: unit and integration tests
 - `tests/manual/`: example YAML configs for manual runs
@@ -309,6 +312,45 @@ Values:
 
 - `format`: `json`, `markdown`, `html`, `json+markdown`
 - `group_by`: `target`, `merge`
+
+### Webhook settings
+
+```yaml
+webhook:
+  url: https://myservice.com/ingest
+  on: [complete, partial]
+  headers:
+    Authorization: "Bearer token123"
+  timeout: 10
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `url` | string | required | Endpoint to POST results to |
+| `on` | list | `[complete, partial]` | Which job statuses trigger the webhook (`complete`, `partial`, `failed`) |
+| `headers` | map | `{}` | Custom headers sent with the POST |
+| `timeout` | int | `10` | Request timeout in seconds |
+
+Webhooks only fire on async jobs (worker pool path). The sync `POST /scrape` path does not trigger webhooks. Dispatch is fire-and-forget — failures are logged at WARNING but do not affect job status.
+
+The webhook POST body looks like:
+
+```json
+{
+  "event": "job.complete",
+  "job_id": "abc-123",
+  "project": "myproject",
+  "name": "my-scrape",
+  "status": "complete",
+  "run_id": "20260316-080130-a1b2c3d4",
+  "result_path": "/data/results/myproject/my-scrape/20260316-080130-a1b2c3d4",
+  "results_url": "/results/abc-123?run_id=20260316-080130-a1b2c3d4",
+  "result_count": 47,
+  "error_count": 0,
+  "started_at": "2026-03-16T08:00:00Z",
+  "completed_at": "2026-03-16T08:01:30Z"
+}
+```
 
 ## API
 
