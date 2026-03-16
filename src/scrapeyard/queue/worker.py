@@ -22,6 +22,13 @@ from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
 logger = logging.getLogger(__name__)
 
+_OUTPUT_FORMAT_TO_SAVE: dict[OutputFormat, str] = {
+    OutputFormat.json: "json",
+    OutputFormat.markdown: "markdown",
+    OutputFormat.html: "html",
+    OutputFormat.json_markdown: "json+markdown",
+}
+
 
 async def scrape_task(
     job_id: str,
@@ -182,13 +189,7 @@ async def scrape_task(
             ]
             formatted = formatter(job_meta, formatted_results, group_by)
 
-            save_fmt = "json"
-            if fmt == OutputFormat.markdown:
-                save_fmt = "markdown"
-            elif fmt == OutputFormat.html:
-                save_fmt = "html"
-            elif fmt == OutputFormat.json_markdown:
-                save_fmt = "json+markdown"
+            save_fmt = _OUTPUT_FORMAT_TO_SAVE[fmt]
 
             save_meta = await result_store.save_result(
                 job_id, formatted, save_fmt, record_count=len(flat_data)
