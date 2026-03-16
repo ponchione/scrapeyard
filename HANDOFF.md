@@ -1,54 +1,54 @@
-# Scrapeyard — Session Handoff
+# Scrapeyard — Handoff
 
-**Date:** 2026-03-15
-**Branch:** main
+**Last updated:** 2026-03-16
+**Branch:** main (all work merged)
 
-## What happened this session
+## Project overview
 
-Assessed all 6 work orders in `work-orders/` against the codebase, then implemented the first two.
+Scrapeyard is a config-driven web scraping microservice (FastAPI + Scrapling). Users submit YAML configs defining targets, selectors, and execution rules. Jobs run async via a worker pool or sync for simple single-target requests. Results persist to the local filesystem with metadata in SQLite. Optional webhooks notify consumers on job completion.
 
-### WO-000: Fix POST /scrape UNIQUE constraint collision — DONE
+## Current state
 
-**Problem:** Submitting the same YAML config to `POST /scrape` twice caused a 500 IntegrityError due to `UNIQUE(project, name)` on the jobs table.
+The core service is functional with webhook support wired end-to-end. Consumer projects (e.g. EyeBox) own their own configs and submit them via the API.
 
-**Fix:** `src/scrapeyard/api/routes.py` — ad-hoc jobs now get `name=f"{config.name}-{uuid.uuid4().hex[:8]}"`. Scheduled jobs (`POST /jobs`) are unchanged.
+| WO | Title | Summary |
+|----|-------|---------|
+| 000 | Fix ad-hoc job UNIQUE constraint | Ad-hoc jobs get UUID-suffixed names to avoid collision |
+| 001 | WebhookConfig schema | `WebhookConfig` model + `WebhookStatus` enum on `ScrapeConfig` |
+| 002 | SaveResultMeta return type | `save_result` returns frozen `SaveResultMeta(run_id, file_path, record_count)` instead of bare string |
+| 003 | Webhook dispatcher module | `src/scrapeyard/webhook/` — Protocol, httpx dispatcher (fire-and-forget), payload builder, `should_fire` filter |
+| 004 | Wire webhook into worker | `scrape_task` accepts `webhook_dispatcher`, fires via `asyncio.create_task` after save; sync path skips; integration tested |
 
-**Commits:**
-- `5b2e724` test: add failing test for duplicate ad-hoc scrape collision
-- `9b5b71f` fix: append short UUID suffix to ad-hoc job names
+## Key architecture decisions
 
-### WO-001: Add WebhookConfig to YAML config schema — DONE
+- **Webhook dispatch is fire-and-forget.** Exceptions are caught and logged at WARNING inside `HttpWebhookDispatcher.dispatch`. The `asyncio.create_task` in the worker ensures dispatch never blocks status updates.
+- **Sync path (`POST /scrape`) does not fire webhooks.** The sync route doesn't pass `webhook_dispatcher` to `scrape_task`, so the kwarg defaults to `None` and the webhook block is skipped. This is by design — sync results are returned inline.
+- **`record_count` is caller-supplied.** The worker passes `len(flat_data)` (raw scraped records) rather than having `save_result` compute it from the formatted envelope. This gives accurate counts regardless of output format.
+- **`SaveResultMeta` is a frozen dataclass**, not Pydantic. Kept lightweight since it's an internal return type.
 
-**What was added:**
-- `WebhookStatus` enum (`complete`, `partial`, `failed`) and `WebhookConfig` model (`url`, `on`, `headers`, `timeout`) in `src/scrapeyard/config/schema.py`
-- Optional `webhook` field on `ScrapeConfig`
-- Exports added to `src/scrapeyard/config/__init__.py`
-- `httpx` promoted from dev to production dependency in `pyproject.toml`
+## Package structure
 
-**Commits:**
-- `c086b11` test: add failing tests for WebhookConfig schema
-- `951d797` feat: add WebhookStatus enum and WebhookConfig model
-- `3cc506c` build: promote httpx to production dependency
+```
+src/scrapeyard/
+├── api/            # FastAPI routes + dependency injection
+├── common/         # Settings, shared utilities
+├── config/         # YAML schema (Pydantic), loader
+├── engine/         # Scraper, resilience (circuit breaker, validation)
+├── formatters/     # Output formatting (JSON, markdown, HTML)
+├── models/         # Domain models (Job, ErrorRecord)
+├── queue/          # Worker pool, scrape_task orchestration
+├── scheduler/      # Cron scheduling (APScheduler)
+├── storage/        # Result store, job store, error store (SQLite + filesystem)
+└── webhook/        # Dispatcher (Protocol + httpx), payload builder, should_fire
+```
 
-## What's next
+## Known issues
 
-The remaining work orders should be done in order. Each one builds on the previous.
-
-| WO | Title | Status | Notes |
-|----|-------|--------|-------|
-| 002 | Enhance save_result to return SaveResultMeta | **Next up** | `record_count` already computed in DB layer; needs `SaveResultMeta` dataclass, updated return type, protocol update, worker wiring |
-| 003 | Create webhook dispatcher module | Not started | New `src/scrapeyard/webhook/` package with Protocol, httpx dispatcher, payload builder, `should_fire` |
-| 004 | Wire webhook into worker completion path | Not started | Connects 001+002+003: `asyncio.create_task` dispatch in worker, integration tests with mock HTTP server |
-| 005 | OpticsSeek retailer config skeletons | Not started | 5 YAML configs in `configs/opticsseek/` with TODO selectors. No Python code. |
-
-## Pre-existing test failures
-
-2 tests fail and are unrelated to this work:
-- `test_scheduled_job_create_list_delete` — `CronTrigger.from_crontab()` got unexpected kwarg `jitter` (APScheduler version mismatch)
-- `test_adaptive_false_still_passes_storage_args` — `KeyError: 'auto_save'` (scraper API changed)
+- 2 pre-existing test failures (APScheduler `jitter` kwarg mismatch, Scrapling `auto_save` key change) — unrelated to any work order
+- Queue backend uses `asyncio.PriorityQueue` instead of arq (see `docs/TECH-DEBT.md`)
 
 ## Test suite
 
-Run: `.venv/bin/python -m pytest tests/ -v`
-
-Current: 130 passed, 2 failed (pre-existing)
+```
+.venv/bin/python -m pytest tests/ -v
+```
