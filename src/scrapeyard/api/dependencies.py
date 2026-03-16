@@ -12,6 +12,7 @@ from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.result_store import LocalResultStore
+from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
 @lru_cache(maxsize=1)
@@ -46,12 +47,19 @@ def get_circuit_breaker() -> CircuitBreaker:
 
 
 @lru_cache(maxsize=1)
+def get_webhook_dispatcher() -> HttpWebhookDispatcher:
+    return HttpWebhookDispatcher()
+
+
+@lru_cache(maxsize=1)
 def get_worker_pool() -> WorkerPool:
     settings = get_settings()
     job_store = get_job_store()
     result_store = get_result_store()
     error_store = get_error_store()
     circuit_breaker = get_circuit_breaker()
+
+    webhook_dispatcher = get_webhook_dispatcher()
 
     async def _task_handler(job_id: str, config_yaml: str) -> None:
         await scrape_task(
@@ -61,6 +69,7 @@ def get_worker_pool() -> WorkerPool:
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            webhook_dispatcher=webhook_dispatcher,
         )
 
     return WorkerPool(
