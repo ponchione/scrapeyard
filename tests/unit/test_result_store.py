@@ -23,7 +23,8 @@ async def store(tmp_path):
 
 async def test_save_and_get_json(store):
     data = [{"price": 9.99}, {"price": 19.99}]
-    run_id = await store.save_result("j-1", data, "json")
+    meta = await store.save_result("j-1", data, "json")
+    run_id = meta.run_id
 
     result = await store.get_result("j-1", run_id)
     assert result == data
@@ -31,7 +32,8 @@ async def test_save_and_get_json(store):
 
 async def test_save_markdown(store, tmp_path):
     md = "# Prices\n- $9.99\n- $19.99"
-    run_id = await store.save_result("j-1", md, "markdown")
+    meta = await store.save_result("j-1", md, "markdown")
+    run_id = meta.run_id
 
     result = await store.get_result("j-1", run_id)
     assert result == md
@@ -39,7 +41,8 @@ async def test_save_markdown(store, tmp_path):
 
 async def test_save_html(store):
     html = "<html><body>hello</body></html>"
-    run_id = await store.save_result("j-1", html, "html")
+    meta = await store.save_result("j-1", html, "html")
+    run_id = meta.run_id
 
     result = await store.get_result("j-1", run_id)
     assert result == html
@@ -47,7 +50,8 @@ async def test_save_html(store):
 
 async def test_save_json_markdown(store, tmp_path):
     data = [{"price": 9.99}]
-    run_id = await store.save_result("j-1", data, "json+markdown")
+    meta = await store.save_result("j-1", data, "json+markdown")
+    run_id = meta.run_id
 
     # get_result prefers JSON
     result = await store.get_result("j-1", run_id)
@@ -103,7 +107,8 @@ async def test_save_result_with_record_count(store):
 
 
 async def test_run_id_format(store):
-    run_id = await store.save_result("j-1", [{"a": 1}], "json")
+    meta = await store.save_result("j-1", [{"a": 1}], "json")
+    run_id = meta.run_id
     # Format: YYYYMMDD-HHMMSS-{8 hex chars}
     parts = run_id.split("-")
     assert len(parts) == 3
