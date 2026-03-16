@@ -41,6 +41,7 @@ conventions:
     - "src/scrapeyard/models"
     - "src/scrapeyard/formatters"
     - "src/scrapeyard/common"
+    - "src/scrapeyard/webhook"
     - "tests"
     - "tests/unit"
     - "tests/integration"
