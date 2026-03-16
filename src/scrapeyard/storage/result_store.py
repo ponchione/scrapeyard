@@ -5,11 +5,22 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from scrapeyard.storage.database import get_db
+
+
+@dataclass(frozen=True, slots=True)
+class SaveResultMeta:
+    """Metadata returned from a save_result call."""
+
+    run_id: str
+    file_path: str
+    record_count: int | None
+
 
 # Supported format → filename mapping.
 _FORMAT_FILES: dict[str, list[str]] = {
@@ -45,7 +56,9 @@ class LocalResultStore:
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
 
-    async def save_result(self, job_id: str, data: Any, format: str) -> str:
+    async def save_result(
+        self, job_id: str, data: Any, format: str, *, record_count: int | None = None
+    ) -> SaveResultMeta:
         if format not in _FORMAT_FILES:
             raise ValueError(f"Unsupported format: {format!r}")
 
@@ -61,8 +74,6 @@ class LocalResultStore:
                 path.write_text(json.dumps(data, default=str, indent=2))
             else:
                 path.write_text(str(data))
-
-        record_count = len(data) if isinstance(data, list) else None
 
         async with get_db("results_meta.db") as db:
             await db.execute(
@@ -82,7 +93,11 @@ class LocalResultStore:
             )
             await db.commit()
 
-        return run_id
+        return SaveResultMeta(
+            run_id=run_id,
+            file_path=str(run_dir),
+            record_count=record_count,
+        )
 
     async def get_result(self, job_id: str, run_id: str | None = None) -> Any:
         if run_id is not None:
