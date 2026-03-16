@@ -1,3 +1,3 @@
-from scrapeyard.webhook.payload import should_fire
+from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
-__all__ = ["should_fire"]
+__all__ = ["build_webhook_payload", "should_fire"]

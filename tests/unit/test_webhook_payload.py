@@ -6,7 +6,7 @@ import pytest
 
 from scrapeyard.config.schema import WebhookConfig, WebhookStatus
 from scrapeyard.models.job import JobStatus
-from scrapeyard.webhook.payload import should_fire
+from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
 
 class TestShouldFire:
@@ -37,3 +37,41 @@ class TestShouldFire:
         )
         assert should_fire(config, JobStatus.queued) is False
         assert should_fire(config, JobStatus.running) is False
+
+
+class TestBuildWebhookPayload:
+    def test_all_fields_present(self):
+        payload = build_webhook_payload(
+            job_id="job-123",
+            project="acme",
+            name="scrape-prices",
+            status=JobStatus.complete,
+            run_id="20260316-120000-abcd1234",
+            result_path="/results/acme/scrape-prices/20260316-120000-abcd1234",
+            result_count=42,
+            error_count=0,
+            started_at="2026-03-16T12:00:00+00:00",
+            completed_at="2026-03-16T12:01:00+00:00",
+        )
+
+        assert payload["event"] == "job.complete"
+        assert payload["job_id"] == "job-123"
+        assert payload["project"] == "acme"
+        assert payload["name"] == "scrape-prices"
+        assert payload["status"] == "complete"
+        assert payload["run_id"] == "20260316-120000-abcd1234"
+        assert payload["result_path"] == "/results/acme/scrape-prices/20260316-120000-abcd1234"
+        assert payload["results_url"] == "/results/job-123?run_id=20260316-120000-abcd1234"
+        assert payload["result_count"] == 42
+        assert payload["error_count"] == 0
+        assert payload["started_at"] == "2026-03-16T12:00:00+00:00"
+        assert payload["completed_at"] == "2026-03-16T12:01:00+00:00"
+
+    def test_event_format_for_each_status(self):
+        for status in (JobStatus.complete, JobStatus.partial, JobStatus.failed):
+            payload = build_webhook_payload(
+                job_id="j", project="p", name="n", status=status,
+                run_id="r", result_path="/r", result_count=0,
+                error_count=0, started_at="t", completed_at="t",
+            )
+            assert payload["event"] == f"job.{status.value}"
