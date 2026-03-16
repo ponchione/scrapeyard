@@ -18,6 +18,7 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_job_store,
         get_result_store,
         get_scheduler,
+        get_webhook_dispatcher,
         get_worker_pool,
     )
 
@@ -28,6 +29,7 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_error_store,
         get_result_store,
         get_circuit_breaker,
+        get_webhook_dispatcher,
         get_worker_pool,
         get_scheduler,
     ]:
@@ -41,6 +43,7 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_error_store,
         get_result_store,
         get_circuit_breaker,
+        get_webhook_dispatcher,
         get_worker_pool,
         get_scheduler,
     ]:
