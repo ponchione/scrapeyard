@@ -76,7 +76,14 @@ async def scrape(
 
     body = await request.body()
     config_yaml = body.decode("utf-8")
-    config = load_config(config_yaml)
+    try:
+        config = load_config(config_yaml)
+    except Exception as exc:
+        return Response(
+            content=_json_encode({"error": f"Invalid config: {exc}"}),
+            status_code=422,
+            media_type="application/json",
+        )
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -148,7 +155,14 @@ async def create_job(
     """Create a scheduled job. Requires a schedule block in the config."""
     body = await request.body()
     config_yaml = body.decode("utf-8")
-    config = load_config(config_yaml)
+    try:
+        config = load_config(config_yaml)
+    except Exception as exc:
+        return Response(
+            content=_json_encode({"error": f"Invalid config: {exc}"}),
+            status_code=422,
+            media_type="application/json",
+        )
 
     if config.schedule is None:
         return Response(
@@ -274,10 +288,24 @@ async def get_errors(
     since: Optional[str] = Query(None),
     error_type: Optional[str] = Query(None),
     error_store: ErrorStore = Depends(get_error_store),
-) -> list[dict[str, Any]]:
+):
     """Query error records with optional filters."""
-    since_dt = datetime.fromisoformat(since) if since else None
-    error_type_enum = ErrorType(error_type) if error_type else None
+    try:
+        since_dt = datetime.fromisoformat(since) if since else None
+    except ValueError:
+        return Response(
+            content=_json_encode({"error": f"Invalid 'since' format: {since!r}"}),
+            status_code=400,
+            media_type="application/json",
+        )
+    try:
+        error_type_enum = ErrorType(error_type) if error_type else None
+    except ValueError:
+        return Response(
+            content=_json_encode({"error": f"Invalid 'error_type': {error_type!r}"}),
+            status_code=400,
+            media_type="application/json",
+        )
 
     filters = ErrorFilters(
         project=project,
