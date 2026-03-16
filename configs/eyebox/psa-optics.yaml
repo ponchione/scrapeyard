@@ -1,0 +1,69 @@
+# Palmetto State Armory (PSA) — Optics Config Skeleton
+# Retailer: Palmetto State Armory (palmettostatearmory.com)
+# Known URL patterns: /optics/red-dots/, /optics/scopes/, /optics/holographic-sights/
+# Notes: High-traffic site with frequent sales. Known for aggressive bot detection.
+
+project: eyebox
+name: psa-optics
+
+schedule:
+  cron: "0 */6 * * *"
+  enabled: true
+
+webhook:
+  url: http://localhost:9000/ingest
+  on: [complete, partial]
+
+execution:
+  concurrency: 1
+  delay_between: 3
+  domain_rate_limit: 2
+  mode: async
+  priority: normal
+  fail_strategy: partial
+
+retry:
+  max_attempts: 3
+  backoff: exponential
+  backoff_max: 30
+  retryable_status: [429, 500, 502, 503, 504]
+
+validation:
+  required_fields: [name, price, url]
+  min_results: 5
+  on_empty: warn
+
+output:
+  format: json
+  group_by: merge
+
+targets:
+  - url: https://palmettostatearmory.com/optics/red-dots.html
+    fetcher: stealthy  # dynamic may be needed if JS rendering is required
+    selectors:
+      name: "TODO: inspect site markup"     # product title
+      price: "TODO: inspect site markup"    # current/sale price
+      url: "TODO: inspect site markup"      # product detail link
+    pagination:
+      next: "TODO: inspect site markup"     # next page link/button
+      max_pages: 15
+
+  - url: https://palmettostatearmory.com/optics/scopes.html
+    fetcher: stealthy  # dynamic may be needed if JS rendering is required
+    selectors:
+      name: "TODO: inspect site markup"
+      price: "TODO: inspect site markup"
+      url: "TODO: inspect site markup"
+    pagination:
+      next: "TODO: inspect site markup"
+      max_pages: 15
+
+  - url: https://palmettostatearmory.com/optics/holographic-sights.html
+    fetcher: stealthy  # dynamic may be needed if JS rendering is required
+    selectors:
+      name: "TODO: inspect site markup"
+      price: "TODO: inspect site markup"
+      url: "TODO: inspect site markup"
+    pagination:
+      next: "TODO: inspect site markup"
+      max_pages: 15
