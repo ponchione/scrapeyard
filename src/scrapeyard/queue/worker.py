@@ -184,7 +184,9 @@ async def scrape_task(
         elif fmt == OutputFormat.json_markdown:
             save_fmt = "json+markdown"
 
-        await result_store.save_result(job_id, formatted, save_fmt)
+        save_meta = await result_store.save_result(
+            job_id, formatted, save_fmt, record_count=len(flat_data)
+        )
 
     # Update job status.
     job = await job_store.get_job(job_id)
