@@ -45,7 +45,8 @@ class SchedulerService:
         enabled:
             If False, the job is added in a paused state.
         """
-        trigger = CronTrigger.from_crontab(cron_expr, jitter=self._jitter_max)
+        trigger = CronTrigger.from_crontab(cron_expr)
+        trigger.jitter = self._jitter_max
 
         # Remove existing job with same id if present.
         try:

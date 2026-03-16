@@ -44,7 +44,6 @@ src/scrapeyard/
 
 ## Known issues
 
-- 2 pre-existing test failures (APScheduler `jitter` kwarg mismatch, Scrapling `auto_save` key change) — unrelated to any work order
 - Queue backend uses `asyncio.PriorityQueue` instead of arq (see `docs/TECH-DEBT.md`)
 
 ## Test suite
