@@ -95,6 +95,13 @@ async def test_save_result_returns_meta(store):
     assert meta.record_count is None  # no record_count passed
 
 
+async def test_save_result_with_record_count(store):
+    data = [{"price": 9.99}, {"price": 19.99}]
+    meta = await store.save_result("j-1", data, "json", record_count=2)
+
+    assert meta.record_count == 2
+
+
 async def test_run_id_format(store):
     run_id = await store.save_result("j-1", [{"a": 1}], "json")
     # Format: YYYYMMDD-HHMMSS-{8 hex chars}
