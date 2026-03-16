@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job
+from scrapeyard.storage.result_store import SaveResultMeta
 
 
 class JobStore(Protocol):
@@ -24,7 +25,9 @@ class JobStore(Protocol):
 class ResultStore(Protocol):
     """Async interface for scrape result persistence."""
 
-    async def save_result(self, job_id: str, data: Any, format: str) -> str: ...
+    async def save_result(
+        self, job_id: str, data: Any, format: str, *, record_count: int | None = None
+    ) -> SaveResultMeta: ...
 
     async def get_result(self, job_id: str, run_id: str | None = None) -> Any: ...
 
