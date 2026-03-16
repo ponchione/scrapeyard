@@ -113,17 +113,17 @@ class TestHtml:
 
 class TestFactory:
     def test_json_returns_json_formatter(self):
-        f = get_formatter(OutputFormat.json, GroupBy.target)
+        f = get_formatter(OutputFormat.json)
         assert f is format_json
 
     def test_markdown_returns_markdown_formatter(self):
-        f = get_formatter(OutputFormat.markdown, GroupBy.target)
+        f = get_formatter(OutputFormat.markdown)
         assert f is format_markdown
 
     def test_html_returns_html_formatter(self):
-        f = get_formatter(OutputFormat.html, GroupBy.target)
+        f = get_formatter(OutputFormat.html)
         assert f is format_html
 
     def test_json_markdown_returns_json_formatter(self):
-        f = get_formatter(OutputFormat.json_markdown, GroupBy.target)
+        f = get_formatter(OutputFormat.json_markdown)
         assert f is format_json

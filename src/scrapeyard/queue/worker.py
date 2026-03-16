@@ -163,7 +163,7 @@ async def scrape_task(
         if flat_data:
             fmt = config.output.format
             group_by = config.output.group_by
-            formatter = get_formatter(fmt, group_by)
+            formatter = get_formatter(fmt)
             job_meta = {
                 "project": config.project,
                 "name": config.name,
