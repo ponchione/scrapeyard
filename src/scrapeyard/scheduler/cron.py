@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -51,7 +52,7 @@ class SchedulerService:
         # Remove existing job with same id if present.
         try:
             self._scheduler.remove_job(job_id)
-        except Exception:
+        except JobLookupError:
             pass
 
         self._scheduler.add_job(
@@ -69,7 +70,7 @@ class SchedulerService:
         """Remove a scheduled job. Silent if the job doesn't exist."""
         try:
             self._scheduler.remove_job(job_id)
-        except Exception:
+        except JobLookupError:
             pass
 
     async def start(self) -> None:
