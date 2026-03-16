@@ -63,8 +63,8 @@ async def test_adaptive_dir_created_if_missing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_adaptive_false_still_passes_storage_args(tmp_path):
-    """Even when adaptive=False, storage_args should be set for consistency."""
+async def test_adaptive_false_passes_no_adaptive_kwargs(tmp_path):
+    """When adaptive=False, no adaptive kwargs are sent to the fetcher."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -83,8 +83,6 @@ async def test_adaptive_false_still_passes_storage_args(tmp_path):
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
         call_kwargs = mock_fetcher.get.call_args
-        custom_config = call_kwargs.kwargs.get("custom_config") or call_kwargs[1].get("custom_config")
-        assert call_kwargs.kwargs["auto_save"] is False
-        assert call_kwargs.kwargs["adaptor"] is False
-        assert custom_config["auto_match"] is False
-        assert "storage_args" in custom_config
+        assert "auto_save" not in call_kwargs.kwargs
+        assert "adaptor" not in call_kwargs.kwargs
+        assert "custom_config" not in call_kwargs.kwargs
