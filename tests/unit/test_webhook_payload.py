@@ -75,3 +75,23 @@ class TestBuildWebhookPayload:
                 error_count=0, started_at="t", completed_at="t",
             )
             assert payload["event"] == f"job.{status.value}"
+
+    def test_none_run_id_gives_none_results_url(self):
+        payload = build_webhook_payload(
+            job_id="job-123",
+            project="acme",
+            name="scrape-prices",
+            status=JobStatus.failed,
+            run_id=None,
+            result_path=None,
+            result_count=0,
+            error_count=3,
+            started_at="2026-03-16T12:00:00+00:00",
+            completed_at="2026-03-16T12:01:00+00:00",
+        )
+
+        assert payload["run_id"] is None
+        assert payload["result_path"] is None
+        assert payload["results_url"] is None
+        assert payload["result_count"] == 0
+        assert payload["event"] == "job.failed"
