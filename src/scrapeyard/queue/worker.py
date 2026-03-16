@@ -17,6 +17,8 @@ from scrapeyard.engine.scraper import TargetResult, scrape_target
 from scrapeyard.formatters.factory import get_formatter
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+from scrapeyard.webhook.dispatcher import WebhookDispatcher
+from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ async def scrape_task(
     result_store: ResultStore,
     error_store: ErrorStore,
     circuit_breaker: CircuitBreaker,
+    webhook_dispatcher: WebhookDispatcher | None = None,
 ) -> None:
     """Execute a complete scrape job.
 
@@ -43,6 +46,7 @@ async def scrape_task(
     7. Logs errors via *error_store*.
     8. Updates final job status.
     """
+    started_at = datetime.now(timezone.utc)
     config = load_config(config_yaml)
     job = await job_store.get_job(job_id)
     job = job.model_copy(update={"status": JobStatus.running})
@@ -154,6 +158,7 @@ async def scrape_task(
             final_status = JobStatus.complete
 
     # Format and save results if we have data.
+    save_meta = None
     if flat_data:
         fmt = config.output.format
         group_by = config.output.group_by
@@ -187,6 +192,23 @@ async def scrape_task(
         save_meta = await result_store.save_result(
             job_id, formatted, save_fmt, record_count=len(flat_data)
         )
+
+    # Webhook dispatch (fire-and-forget).
+    completed_at = datetime.now(timezone.utc)
+    if webhook_dispatcher is not None and config.webhook is not None and should_fire(config.webhook, final_status):
+        payload = build_webhook_payload(
+            job_id=job_id,
+            project=config.project,
+            name=config.name,
+            status=final_status,
+            run_id=save_meta.run_id if save_meta else None,
+            result_path=save_meta.file_path if save_meta else None,
+            result_count=save_meta.record_count if save_meta else 0,
+            error_count=len(all_errors),
+            started_at=started_at.isoformat(),
+            completed_at=completed_at.isoformat(),
+        )
+        asyncio.create_task(webhook_dispatcher.dispatch(config.webhook, payload))
 
     # Update job status.
     job = await job_store.get_job(job_id)
