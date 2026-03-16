@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from scrapeyard.storage.database import init_db
-from scrapeyard.storage.result_store import LocalResultStore
+from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
 
 
 async def _lookup(job_id: str) -> tuple[str, str]:
@@ -83,6 +83,16 @@ async def test_get_result_specific_run_not_found(store):
 async def test_unsupported_format(store):
     with pytest.raises(ValueError, match="Unsupported format"):
         await store.save_result("j-1", {}, "xml")
+
+
+async def test_save_result_returns_meta(store):
+    data = [{"price": 9.99}, {"price": 19.99}]
+    meta = await store.save_result("j-1", data, "json")
+
+    assert isinstance(meta, SaveResultMeta)
+    assert isinstance(meta.run_id, str)
+    assert meta.file_path.endswith(meta.run_id)
+    assert meta.record_count is None  # no record_count passed
 
 
 async def test_run_id_format(store):
