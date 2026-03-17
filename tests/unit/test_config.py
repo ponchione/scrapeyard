@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from scrapeyard.config import (
     ScrapeConfig,
     TargetConfig,
-    WebhookConfig,
     WebhookStatus,
     apply_transforms,
     load_config,

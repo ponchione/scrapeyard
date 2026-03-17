@@ -1,0 +1,44 @@
+# Reusable Agent Conductor work order template.
+# Save a copy as something like:
+#   001-add-health-endpoint.yaml
+#
+# Valid types:
+# - new_feature
+# - bug_fix
+# - refactor
+# - schema_change
+# - docs
+# - bootstrap
+#
+# Required fields:
+# - title
+# - type
+# - target_module
+#
+# Notes:
+# - Use the canonical field order below.
+# - Keep work orders narrow. Prefer 1-3 files changed.
+# - acceptance_criteria should be specific and verifiable.
+# - Criteria mentioning `go build`, `go test`, or `go vet` are used by verify pre-checks.
+# - For bootstrap work orders, `known_files` should usually be empty because the project skeleton does not exist yet.
+# - `audit_source` is optional and normally only set by the planner audit pass.
+
+title: "Add health check endpoint"
+type: new_feature
+target_module: internal/health
+reference_module: internal/status
+known_files:
+  - cmd/server/main.go
+  - internal/routes/router.go
+  - internal/status/handler.go
+acceptance_criteria:
+  - "GET /health returns 200 with a JSON response"
+  - "Response includes service version from build info"
+  - "Route is registered without changing unrelated routing behavior"
+  - "go build ./... passes"
+  - "go test ./... passes"
+constraints:
+  - "Do not change unrelated routes or middleware behavior"
+  - "Do not add new external dependencies"
+  - "Follow existing handler and response patterns from internal/status"
+# audit_source: modified

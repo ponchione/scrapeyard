@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from scrapeyard.config.schema import WebhookConfig, WebhookStatus
 from scrapeyard.models.job import JobStatus
 from scrapeyard.webhook.payload import build_webhook_payload, should_fire

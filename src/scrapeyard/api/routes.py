@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -27,6 +28,7 @@ from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _is_yaml_request(request: Request) -> bool:
@@ -129,12 +131,21 @@ async def scrape(
     has_browser_target = any(
         t.fetcher != FetcherType.basic for t in config.resolved_targets()
     )
-    await worker_pool.enqueue(
-        job.job_id,
-        config_yaml,
-        config.execution.priority.value,
-        needs_browser=has_browser_target,
-    )
+    try:
+        await worker_pool.enqueue(
+            job.job_id,
+            config_yaml,
+            config.execution.priority.value,
+            needs_browser=has_browser_target,
+        )
+    except MemoryError:
+        logger.warning("Rejecting async scrape job %s due to pool memory pressure", job.job_id)
+        await job_store.delete_job(job.job_id)
+        return Response(
+            content=_json_encode({"error": "Server at capacity — try again later"}),
+            status_code=503,
+            media_type="application/json",
+        )
     return Response(
         content=_json_encode({
             "job_id": job.job_id,

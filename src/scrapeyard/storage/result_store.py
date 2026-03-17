@@ -57,7 +57,13 @@ class LocalResultStore:
         self._job_lookup = job_lookup
 
     async def save_result(
-        self, job_id: str, data: Any, format: str, *, record_count: int | None = None
+        self,
+        job_id: str,
+        data: Any,
+        format: str,
+        *,
+        record_count: int | None = None,
+        file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta:
         if format not in _FORMAT_FILES:
             raise ValueError(f"Unsupported format: {format!r}")
@@ -70,10 +76,13 @@ class LocalResultStore:
         filenames = _FORMAT_FILES[format]
         for filename in filenames:
             path = run_dir / filename
+            value = data
+            if file_contents and filename in file_contents:
+                value = file_contents[filename]
             if filename.endswith(".json"):
-                path.write_text(json.dumps(data, default=str, indent=2))
+                path.write_text(json.dumps(value, default=str, indent=2))
             else:
-                path.write_text(str(data))
+                path.write_text(str(value))
 
         async with get_db("results_meta.db") as db:
             await db.execute(

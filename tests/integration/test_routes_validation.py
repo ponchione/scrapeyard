@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from scrapeyard.api.dependencies import get_worker_pool
+
 
 @pytest.mark.asyncio
 async def test_scrape_invalid_yaml_returns_422(client):
@@ -50,3 +52,34 @@ async def test_errors_invalid_error_type_returns_400(client):
     """Invalid error_type enum value should return 400."""
     response = await client.get("/errors?error_type=bogus")
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_async_scrape_enqueue_memory_error_returns_503_and_removes_job(client, monkeypatch):
+    """Async enqueue rejection should return 503 without leaving a stranded job."""
+    pool = get_worker_pool()
+
+    async def _reject(*_args, **_kwargs):
+        raise MemoryError("over memory limit")
+
+    monkeypatch.setattr(pool, "enqueue", _reject)
+
+    response = await client.post(
+        "/scrape",
+        content="""
+project: integ
+name: rejected-job
+execution:
+  mode: async
+target:
+  url: https://example.com
+  fetcher: basic
+  selectors:
+    title: h1
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 503
+    jobs = (await client.get("/jobs?project=integ")).json()
+    assert jobs == []
