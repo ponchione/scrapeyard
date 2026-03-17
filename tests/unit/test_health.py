@@ -1,9 +1,23 @@
 """Test the /health endpoint."""
 
+import logging
+from unittest.mock import patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from scrapeyard.common.logging import setup_logging
 from scrapeyard.main import app
+
+
+def test_setup_logging_is_idempotent(tmp_path) -> None:
+    log_dir = tmp_path / "logs"
+    logger = logging.Logger("scrapeyard-test")
+    with patch("logging.getLogger", return_value=logger):
+        setup_logging(str(log_dir))
+        first_count = len(logger.handlers)
+        setup_logging(str(log_dir))
+        assert len(logger.handlers) == first_count
 
 
 @pytest.mark.asyncio

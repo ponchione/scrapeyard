@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
@@ -175,20 +175,13 @@ async def scrape_target(
 
 
 def _resolve_href(element: Any, base_url: str) -> str | None:
-    """Extract an href from an element, returning an absolute URL or None."""
+    """Return an absolute URL for a next-page element or None."""
     href = element.attrib.get("href") if hasattr(element, "attrib") else None
     if href is None:
-        # Try common attribute access patterns.
         try:
             href = element.attributes.get("href")
         except AttributeError:
             return None
     if not href:
         return None
-    if href.startswith(("http://", "https://")):
-        return href
-    # Relative URL — resolve against base.
-    parsed = urlparse(base_url)
-    if href.startswith("/"):
-        return f"{parsed.scheme}://{parsed.netloc}{href}"
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rsplit('/', 1)[0]}/{href}"
+    return urljoin(base_url, href)

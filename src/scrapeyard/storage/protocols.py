@@ -26,7 +26,13 @@ class ResultStore(Protocol):
     """Async interface for scrape result persistence."""
 
     async def save_result(
-        self, job_id: str, data: Any, format: str, *, record_count: int | None = None
+        self,
+        job_id: str,
+        data: Any,
+        format: str,
+        *,
+        record_count: int | None = None,
+        file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta: ...
 
     async def get_result(self, job_id: str, run_id: str | None = None) -> Any: ...

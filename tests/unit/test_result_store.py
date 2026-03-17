@@ -50,7 +50,13 @@ async def test_save_html(store):
 
 async def test_save_json_markdown(store, tmp_path):
     data = [{"price": 9.99}]
-    meta = await store.save_result("j-1", data, "json+markdown")
+    markdown = "# Prices\n- $9.99"
+    meta = await store.save_result(
+        "j-1",
+        data,
+        "json+markdown",
+        file_contents={"results.md": markdown},
+    )
     run_id = meta.run_id
 
     # get_result prefers JSON
@@ -59,8 +65,11 @@ async def test_save_json_markdown(store, tmp_path):
 
     # Verify markdown file also exists on disk
     results_dir = tmp_path / "results" / "acme" / "scrape-prices" / run_id
-    assert (results_dir / "results.md").exists()
-    assert (results_dir / "results.json").exists()
+    md_path = results_dir / "results.md"
+    json_path = results_dir / "results.json"
+    assert md_path.exists()
+    assert json_path.exists()
+    assert md_path.read_text() == markdown
 
 
 async def test_get_latest_without_run_id(store):

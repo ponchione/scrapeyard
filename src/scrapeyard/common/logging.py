@@ -6,7 +6,11 @@ from logging.handlers import RotatingFileHandler
 
 
 def setup_logging(log_dir: str) -> None:
-    """Configure root logger with structured JSON format, stdout, and rotating file."""
+    """Configure structured JSON logging once per process."""
+    root = logging.getLogger()
+    if getattr(root, "_scrapeyard_logging_initialized", False):
+        return
+
     os.makedirs(log_dir, exist_ok=True)
 
     fmt = logging.Formatter(
@@ -15,7 +19,6 @@ def setup_logging(log_dir: str) -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    root = logging.getLogger()
     root.setLevel(logging.INFO)
 
     stream_handler = logging.StreamHandler()
@@ -29,3 +32,5 @@ def setup_logging(log_dir: str) -> None:
     )
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
+
+    setattr(root, "_scrapeyard_logging_initialized", True)

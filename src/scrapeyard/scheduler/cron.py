@@ -5,6 +5,8 @@ from __future__ import annotations
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from scrapeyard.config.loader import load_config
+from scrapeyard.config.schema import FetcherType
 
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.storage.job_store import SQLiteJobStore
@@ -81,11 +83,11 @@ class SchedulerService:
 
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT job_id, schedule_cron, config_yaml FROM jobs WHERE schedule_cron IS NOT NULL"
+                "SELECT job_id, schedule_cron FROM jobs WHERE schedule_cron IS NOT NULL"
             )
             rows = await cursor.fetchall()
 
-        for job_id, cron_expr, config_yaml in rows:
+        for job_id, cron_expr in rows:
             self.register_job(job_id, cron_expr, enabled=True)
 
         self._scheduler.start()
@@ -106,4 +108,7 @@ class SchedulerService:
             self.remove_job(job_id)
             return
 
-        await self._pool.enqueue(job.job_id, job.config_yaml, "normal")
+        config = load_config(job.config_yaml)
+        priority = config.execution.priority.value
+        needs_browser = any(t.fetcher != FetcherType.basic for t in config.resolved_targets())
+        await self._pool.enqueue(job.job_id, job.config_yaml, priority, needs_browser)

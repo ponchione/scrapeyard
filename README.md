@@ -59,7 +59,6 @@ Request flow:
 - `src/scrapeyard/webhook/`: webhook dispatcher (Protocol + httpx), payload builder
 - `sql/`: SQLite schema creation scripts
 - `tests/`: unit and integration tests
-- `tests/manual/`: example YAML configs for manual runs
 
 ## Requirements
 
@@ -229,6 +228,7 @@ target:
 | `validation` | object | Result validation behavior |
 | `execution` | object | Concurrency, rate limit, priority, and mode |
 | `schedule` | object | Required for `POST /jobs` |
+| `webhook` | object | Optional async completion notifications |
 | `output` | object | Format and grouping |
 
 ### Target fields
@@ -371,7 +371,7 @@ Possible responses:
 - `200`: job ran synchronously and includes results inline
 - `202`: job was queued and returns `job_id` plus `poll_url`
 - `415`: missing or incorrect content type
-- `503`: sync execution rejected because the pool is at capacity
+- `503`: the server rejected execution or enqueueing because the pool is at capacity
 
 Example sync response:
 
@@ -614,8 +614,6 @@ Lint:
 ```bash
 poetry run ruff check src tests
 ```
-
-Manual test configs are available under `tests/manual/`.
 
 ## Known Constraints
 

@@ -178,7 +178,7 @@ selectors:
 | `prepend(str)` | Prepend string | `prepend("https://example.com")` |
 | `append(str)` | Append string | `append("/details")` |
 | `replace(old, new)` | String replacement | `replace("$", "")` |
-| `regex(pattern, group)` | Regex extraction | `regex("\\d+", 0)` |
+| `regex(pattern, replacement)` | Regex substitution | `regex("\\d+", "NUM")` |
 | `lowercase` | To lowercase | `lowercase` |
 | `uppercase` | To uppercase | `uppercase` |
 | `join(sep)` | Join multiple results | `join(", ")` |

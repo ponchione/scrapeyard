@@ -11,10 +11,12 @@ from urllib.parse import urlparse
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FailStrategy, OutputFormat
+from scrapeyard.config.schema import FailStrategy, OnEmptyAction, OutputFormat
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, scrape_target
 from scrapeyard.formatters.factory import get_formatter
+from scrapeyard.formatters.json_fmt import format_json
+from scrapeyard.formatters.markdown_fmt import format_markdown
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.webhook.dispatcher import WebhookDispatcher
@@ -71,6 +73,108 @@ async def scrape_task(
         all_results: list[TargetResult] = []
         all_errors: list[str] = []
         sem = asyncio.Semaphore(concurrency)
+        validator = ResultValidator(config.validation)
+
+        async def _apply_validation(
+            target_cfg: Any,
+            domain: str,
+            adaptive: bool,
+            result: TargetResult,
+            *,
+            attempt: int = 1,
+        ) -> TargetResult:
+            if result.status != "success":
+                return result
+
+            validation = validator.validate(result.data)
+            if validation.passed:
+                return result
+
+            action = ActionTaken(validation.action.value)
+            await _log_error(
+                job_id,
+                config.project,
+                target_cfg.url,
+                attempt,
+                ErrorType.content_empty,
+                None,
+                target_cfg.fetcher.value,
+                action,
+                error_store,
+            )
+
+            if validation.action == OnEmptyAction.warn:
+                logger.warning("Validation warning for %s: %s", target_cfg.url, validation.message)
+                result.errors.append(validation.message)
+                return result
+
+            if validation.action == OnEmptyAction.skip:
+                logger.info("Skipping invalid result for %s: %s", target_cfg.url, validation.message)
+                return TargetResult(
+                    url=target_cfg.url,
+                    status="success",
+                    data=[],
+                    errors=[validation.message],
+                    pages_scraped=result.pages_scraped,
+                )
+
+            if validation.action == OnEmptyAction.fail:
+                logger.info("Failing target %s due to validation: %s", target_cfg.url, validation.message)
+                return TargetResult(
+                    url=target_cfg.url,
+                    status="failed",
+                    data=[],
+                    errors=[validation.message],
+                    pages_scraped=result.pages_scraped,
+                )
+
+            logger.info("Retrying target %s after validation failure: %s", target_cfg.url, validation.message)
+            retry_result = await scrape_target(
+                target_cfg,
+                adaptive,
+                config.retry,
+                adaptive_dir=settings.adaptive_dir,
+            )
+            if retry_result.status != "success":
+                logger.info("Recording failure for domain %s after validation retry", domain)
+                circuit_breaker.record_failure(domain)
+                for _ in retry_result.errors:
+                    await _log_error(
+                        job_id,
+                        config.project,
+                        target_cfg.url,
+                        attempt + 1,
+                        ErrorType.http_error,
+                        None,
+                        target_cfg.fetcher.value,
+                        ActionTaken.fail,
+                        error_store,
+                    )
+                return retry_result
+
+            circuit_breaker.record_success(domain)
+            retry_validation = validator.validate(retry_result.data)
+            if retry_validation.passed:
+                return retry_result
+
+            await _log_error(
+                job_id,
+                config.project,
+                target_cfg.url,
+                attempt + 1,
+                ErrorType.content_empty,
+                None,
+                target_cfg.fetcher.value,
+                ActionTaken.fail,
+                error_store,
+            )
+            return TargetResult(
+                url=target_cfg.url,
+                status="failed",
+                data=[],
+                errors=[retry_validation.message],
+                pages_scraped=retry_result.pages_scraped,
+            )
 
         async def _process_target(target_cfg: Any) -> TargetResult:
             async with sem:
@@ -110,6 +214,7 @@ async def scrape_task(
 
                 if result.status == "success":
                     circuit_breaker.record_success(domain)
+                    result = await _apply_validation(target_cfg, domain, adaptive, result)
                 else:
                     logger.info("Recording failure for domain %s", domain)
                     circuit_breaker.record_failure(domain)
@@ -134,12 +239,9 @@ async def scrape_task(
             all_results.append(tr)
             all_errors.extend(tr.errors)
 
-        # Validate results.
-        validator = ResultValidator(config.validation)
         flat_data: list[dict[str, Any]] = []
         for tr in all_results:
             flat_data.extend(tr.data)
-        validation = validator.validate(flat_data)
 
         # Determine final status based on fail_strategy.
         failed_count = sum(1 for r in all_results if r.status == "failed")
@@ -158,9 +260,9 @@ async def scrape_task(
                 final_status = JobStatus.failed
         else:
             # FailStrategy.partial (default / current behavior).
-            if failed_count == len(all_results):
+            if failed_count == len(all_results) or not flat_data:
                 final_status = JobStatus.failed
-            elif failed_count > 0 or not validation.passed:
+            elif failed_count > 0:
                 final_status = JobStatus.partial
             else:
                 final_status = JobStatus.complete
@@ -170,7 +272,6 @@ async def scrape_task(
         if flat_data:
             fmt = config.output.format
             group_by = config.output.group_by
-            formatter = get_formatter(fmt)
             job_meta = {
                 "project": config.project,
                 "name": config.name,
@@ -187,13 +288,28 @@ async def scrape_task(
                 }
                 for tr in all_results if tr.data
             ]
-            formatted = formatter(job_meta, formatted_results, group_by)
 
             save_fmt = _OUTPUT_FORMAT_TO_SAVE[fmt]
 
-            save_meta = await result_store.save_result(
-                job_id, formatted, save_fmt, record_count=len(flat_data)
-            )
+            if fmt == OutputFormat.json_markdown:
+                json_output = format_json(job_meta, formatted_results, group_by)
+                markdown_output = format_markdown(job_meta, formatted_results, group_by)
+                save_meta = await result_store.save_result(
+                    job_id,
+                    json_output,
+                    save_fmt,
+                    record_count=len(flat_data),
+                    file_contents={"results.md": markdown_output},
+                )
+            else:
+                formatter = get_formatter(fmt)
+                formatted = formatter(job_meta, formatted_results, group_by)
+                save_meta = await result_store.save_result(
+                    job_id,
+                    formatted,
+                    save_fmt,
+                    record_count=len(flat_data),
+                )
 
         # Webhook dispatch (fire-and-forget).
         completed_at = datetime.now(timezone.utc)
