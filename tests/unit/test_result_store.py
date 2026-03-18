@@ -115,6 +115,17 @@ async def test_save_result_with_record_count(store):
     assert meta.record_count == 2
 
 
+async def test_save_result_reuses_explicit_run_id(store):
+    first = await store.save_result("j-1", [{"price": 9.99}], "json", run_id="run-1")
+    second = await store.save_result("j-1", [{"price": 19.99}], "json", run_id="run-1")
+
+    result = await store.get_result("j-1", "run-1")
+
+    assert first.run_id == "run-1"
+    assert second.run_id == "run-1"
+    assert result == [{"price": 19.99}]
+
+
 async def test_run_id_format(store):
     meta = await store.save_result("j-1", [{"a": 1}], "json")
     run_id = meta.run_id

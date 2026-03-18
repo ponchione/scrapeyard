@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
@@ -27,6 +27,19 @@ def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
     if target.item_selector is not None:
         return extract_item_selectors(page, target.item_selector, target.selectors)
     return [extract_selectors(page, target.selectors)]
+
+
+def _normalized_adaptive_domain(target: TargetConfig) -> str:
+    if target.adaptive_domain:
+        return target.adaptive_domain.strip().lower()
+    return urlparse(target.url).hostname or "unknown-host"
+
+
+def _adaptive_storage_url(target: TargetConfig) -> str:
+    parsed = urlparse(target.url)
+    scheme = parsed.scheme or "https"
+    adaptive_domain = _normalized_adaptive_domain(target)
+    return f"{scheme}://{adaptive_domain}/"
 
 
 @dataclass
@@ -106,6 +119,7 @@ def _classify_fetch_exception(exc: Exception, fetcher_type: FetcherType) -> tupl
 async def _fetch_page(
     fetcher_cls: Any,
     url: str,
+    target: TargetConfig,
     fetcher_type: FetcherType,
     adaptive: bool,
     retryable_status: set[int],
@@ -124,7 +138,7 @@ async def _fetch_page(
                 "auto_match": True,
                 "storage_args": {
                     "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
-                    "url": url,
+                    "url": _adaptive_storage_url(target),
                 },
             },
             "auto_save": True,
@@ -144,9 +158,19 @@ async def _fetch_page(
         # Browser-backed fetchers need more headroom than simple HTTP fetches,
         # and dropping non-essential resources reduces load-event stalls on
         # heavy retail pages.
-        call_kwargs.setdefault("timeout", _BROWSER_TIMEOUT_MS)
-        call_kwargs.setdefault("disable_resources", True)
-        call_kwargs.setdefault("network_idle", False)
+        browser = target.browser
+        call_kwargs.setdefault(
+            "timeout",
+            browser.timeout_ms if browser is not None else _BROWSER_TIMEOUT_MS,
+        )
+        call_kwargs.setdefault(
+            "disable_resources",
+            True if browser is None else browser.disable_resources,
+        )
+        call_kwargs.setdefault(
+            "network_idle",
+            False if browser is None else browser.network_idle,
+        )
         # StealthyFetcher / PlayWrightFetcher have async_fetch.
         response = await fetcher_cls.async_fetch(url, **call_kwargs)
 
@@ -189,7 +213,7 @@ async def scrape_target(
 
     try:
         page = await retry_handler.execute(
-            _fetch_page, fetcher_cls, target.url, target.fetcher, adaptive, retryable_status, adaptive_dir
+            _fetch_page, fetcher_cls, target.url, target, target.fetcher, adaptive, retryable_status, adaptive_dir
         )
         data = _extract_page_data(page, target)
         if adaptive:
@@ -226,7 +250,7 @@ async def scrape_target(
                     break
 
                 page = await retry_handler.execute(
-                    _fetch_page, fetcher_cls, next_url, target.fetcher, adaptive, retryable_status, adaptive_dir
+                    _fetch_page, fetcher_cls, next_url, target, target.fetcher, adaptive, retryable_status, adaptive_dir
                 )
                 current_url = next_url
                 data = _extract_page_data(page, target)

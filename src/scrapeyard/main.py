@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     await scheduler.start()
 
     # 6. Cleanup loop
-    app.state.cleanup_task = start_cleanup_loop()
+    app.state.cleanup_task = start_cleanup_loop(app.state.result_store)
 
     yield
 

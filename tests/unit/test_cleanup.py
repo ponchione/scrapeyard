@@ -3,6 +3,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,45 +49,22 @@ async def _insert_meta(
 
 
 @pytest.mark.asyncio
-async def test_run_cleanup_removes_expired_results(db_and_dirs):
-    results_dir = db_and_dirs
-    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
-    run_dir = _create_result_on_disk(results_dir, "proj", "job1", "run-old")
-
-    await _insert_meta("job-1", "proj", "run-old", str(run_dir), old_date)
+async def test_run_cleanup_delegates_age_based_deletion(db_and_dirs):
+    result_store = AsyncMock()
+    result_store.delete_expired = AsyncMock(return_value=1)
 
     async with get_db("results_meta.db") as db:
-        await run_cleanup(str(results_dir), retention_days=30, max_results_per_job=100, db=db)
+        await run_cleanup(result_store, retention_days=30, max_results_per_job=100, db=db)
 
-        cursor = await db.execute("SELECT COUNT(*) FROM results_meta WHERE run_id = ?", ("run-old",))
-        row = await cursor.fetchone()
-
-    assert row[0] == 0
-    assert not run_dir.exists()
-
-
-@pytest.mark.asyncio
-async def test_run_cleanup_keeps_fresh_results(db_and_dirs):
-    results_dir = db_and_dirs
-    now = datetime.now(timezone.utc).isoformat()
-    run_dir = _create_result_on_disk(results_dir, "proj", "job1", "run-fresh")
-
-    await _insert_meta("job-1", "proj", "run-fresh", str(run_dir), now)
-
-    async with get_db("results_meta.db") as db:
-        await run_cleanup(str(results_dir), retention_days=30, max_results_per_job=100, db=db)
-
-        cursor = await db.execute("SELECT COUNT(*) FROM results_meta WHERE run_id = ?", ("run-fresh",))
-        row = await cursor.fetchone()
-
-    assert row[0] == 1
-    assert run_dir.exists()
+    result_store.delete_expired.assert_awaited_once_with(30)
 
 
 @pytest.mark.asyncio
 async def test_run_cleanup_prunes_excess_results_per_job(db_and_dirs):
     results_dir = db_and_dirs
     now = datetime.now(timezone.utc)
+    result_store = AsyncMock()
+    result_store.delete_expired = AsyncMock(return_value=0)
 
     # Create 3 runs for the same job, all fresh.
     run_dirs = []
@@ -99,7 +77,7 @@ async def test_run_cleanup_prunes_excess_results_per_job(db_and_dirs):
 
     # max_results_per_job=2 should delete the oldest (run-0).
     async with get_db("results_meta.db") as db:
-        await run_cleanup(str(results_dir), retention_days=30, max_results_per_job=2, db=db)
+        await run_cleanup(result_store, retention_days=30, max_results_per_job=2, db=db)
 
         cursor = await db.execute(
             "SELECT run_id FROM results_meta WHERE job_id = ? ORDER BY created_at",
@@ -117,6 +95,8 @@ async def test_run_cleanup_prunes_excess_results_per_job(db_and_dirs):
 async def test_run_cleanup_prunes_per_job_independently(db_and_dirs):
     results_dir = db_and_dirs
     now = datetime.now(timezone.utc)
+    result_store = AsyncMock()
+    result_store.delete_expired = AsyncMock(return_value=0)
 
     # Job A: 3 runs, Job B: 1 run. max=2 should only prune Job A.
     for i in range(3):
@@ -128,7 +108,7 @@ async def test_run_cleanup_prunes_per_job_independently(db_and_dirs):
     await _insert_meta("job-B", "proj", "runB-0", str(run_dir_b), now.isoformat())
 
     async with get_db("results_meta.db") as db:
-        await run_cleanup(str(results_dir), retention_days=30, max_results_per_job=2, db=db)
+        await run_cleanup(result_store, retention_days=30, max_results_per_job=2, db=db)
 
         cursor = await db.execute("SELECT COUNT(*) FROM results_meta WHERE job_id = ?", ("job-A",))
         count_a = (await cursor.fetchone())[0]

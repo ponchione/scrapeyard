@@ -116,11 +116,33 @@ class PaginationConfig(BaseModel):
     max_pages: int = Field(default=10, description="Maximum pages to scrape")
 
 
+class BrowserConfig(BaseModel):
+    """Browser-backed fetcher tuning."""
+
+    timeout_ms: int = Field(default=60000, description="Browser fetch timeout in milliseconds")
+    disable_resources: bool = Field(
+        default=True,
+        description="Whether to block non-essential resources during browser fetches",
+    )
+    network_idle: bool = Field(
+        default=False,
+        description="Whether browser fetches should wait for network idle",
+    )
+
+
 class TargetConfig(BaseModel):
     """Single scrape target definition."""
 
     url: str = Field(..., description="Target URL to scrape")
     fetcher: FetcherType = Field(default=FetcherType.basic, description="Fetcher type")
+    adaptive_domain: Optional[str] = Field(
+        default=None,
+        description="Optional adaptive fingerprint namespace override for this target",
+    )
+    browser: Optional[BrowserConfig] = Field(
+        default=None,
+        description="Optional browser-backed fetch tuning for stealthy and dynamic fetchers",
+    )
     item_selector: Optional[SelectorValue] = Field(
         default=None,
         description="Optional selector for repeated item containers; when set, field selectors are applied relative to each matched item",

@@ -1,0 +1,65 @@
+# Copy this file into a project and replace the example values.
+
+project: example-project
+name: example-scrape
+
+target:
+  url: "https://example.com/catalog"
+  fetcher: dynamic
+  # Optional override for adaptive fingerprint sharing.
+  # adaptive_domain: example.com
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+  item_selector: ".catalog-item"
+  selectors:
+    title:
+      query: ".item-title::text"
+      transform: trim
+    price:
+      query: ".item-price::text"
+      transform: trim
+    link:
+      query: "a::attr(href)"
+      transform: prepend("https://example.com")
+  pagination:
+    next: ".pagination-next"
+    max_pages: 5
+
+# Optional override. If omitted, adaptive defaults to false for on-demand jobs
+# and true for scheduled jobs.
+adaptive: true
+
+retry:
+  max_attempts: 3
+  backoff: exponential
+  backoff_max: 30
+
+validation:
+  required_fields: [title, link]
+  min_results: 1
+  on_empty: retry
+
+execution:
+  concurrency: 2
+  delay_between: 2
+  domain_rate_limit: 3
+  mode: auto
+  priority: normal
+
+# Uncomment for recurring jobs.
+# schedule:
+#   cron: "0 * * * *"
+
+output:
+  format: json+markdown
+  group_by: target
+
+# Uncomment to notify another system when this job finishes.
+# webhook:
+#   url: "https://example.com/webhooks/scrapeyard"
+#   on: [complete, partial, failed]
+#   headers:
+#     Authorization: "Bearer change-me"
+#   timeout: 10

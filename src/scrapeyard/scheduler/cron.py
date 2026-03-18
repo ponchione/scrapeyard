@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+from scrapeyard.common.ids import generate_run_id
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FetcherType
+from scrapeyard.models.job import JobStatus
 
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.storage.job_store import SQLiteJobStore
@@ -108,7 +113,23 @@ class SchedulerService:
             self.remove_job(job_id)
             return
 
+        if job.status == JobStatus.running:
+            return
+
         config = load_config(job.config_yaml)
         priority = config.execution.priority.value
         needs_browser = any(t.fetcher != FetcherType.basic for t in config.resolved_targets())
-        await self._pool.enqueue(job.job_id, job.config_yaml, priority, needs_browser)
+        run_id = generate_run_id()
+        queued_job = job.model_copy(update={
+            "status": JobStatus.queued,
+            "updated_at": datetime.now(timezone.utc),
+            "current_run_id": run_id,
+        })
+        await self._job_store.update_job(queued_job)
+        await self._pool.enqueue(
+            job.job_id,
+            job.config_yaml,
+            priority,
+            needs_browser,
+            run_id=run_id,
+        )

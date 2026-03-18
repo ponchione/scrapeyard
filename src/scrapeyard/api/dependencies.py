@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from arq.connections import RedisSettings
+
 from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.queue.pool import WorkerPool
@@ -61,10 +63,11 @@ def get_worker_pool() -> WorkerPool:
 
     webhook_dispatcher = get_webhook_dispatcher()
 
-    async def _task_handler(job_id: str, config_yaml: str) -> None:
+    async def _task_handler(job_id: str, config_yaml: str, *, run_id: str | None = None) -> None:
         await scrape_task(
             job_id,
             config_yaml,
+            run_id=run_id,
             job_store=job_store,
             result_store=result_store,
             error_store=error_store,
@@ -76,6 +79,8 @@ def get_worker_pool() -> WorkerPool:
         max_concurrent=settings.workers_max_concurrent,
         max_browsers=settings.workers_max_browsers,
         memory_limit_mb=settings.workers_memory_limit_mb,
+        redis_settings=RedisSettings.from_dsn(settings.redis_dsn),
+        queue_name=settings.queue_name,
         task_handler=_task_handler,
     )
 

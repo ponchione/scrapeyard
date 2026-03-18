@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from scrapeyard.api.dependencies import (
-    get_circuit_breaker,
     get_error_store,
     get_job_store,
     get_result_store,
@@ -20,10 +20,10 @@ from scrapeyard.api.dependencies import (
 )
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import ExecutionMode, FetcherType
-from scrapeyard.engine.resilience import CircuitBreaker
+from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.settings import get_settings
 from scrapeyard.models.job import ErrorFilters, ErrorType, Job, JobStatus
-from scrapeyard.queue.pool import WorkerPool
-from scrapeyard.queue.worker import scrape_task
+from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 
@@ -37,8 +37,8 @@ def _is_yaml_request(request: Request) -> bool:
     return media_type == "application/x-yaml"
 
 
-def _should_run_sync(config: Any) -> bool:
-    """Determine if a scrape should run synchronously.
+def _should_wait_for_completion(config: Any) -> bool:
+    """Determine if a scrape should wait on queued completion.
 
     Heuristic: sync if single target AND no pagination AND fetcher is basic.
     Overridable via execution.mode.
@@ -59,13 +59,35 @@ def _should_run_sync(config: Any) -> bool:
     return True
 
 
+def _queued_response(job_id: str) -> Response:
+    return Response(
+        content=_json_encode({
+            "job_id": job_id,
+            "status": "queued",
+            "poll_url": f"/results/{job_id}",
+        }),
+        status_code=202,
+        media_type="application/json",
+    )
+
+
+async def _wait_for_queued_job(
+    queued_job: QueueJobHandle,
+    *,
+    timeout_seconds: int,
+) -> bool:
+    try:
+        await queued_job.result(timeout=timeout_seconds, poll_delay=0.05)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
 @router.post("/scrape")
 async def scrape(
     request: Request,
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
-    error_store: ErrorStore = Depends(get_error_store),
-    circuit_breaker: CircuitBreaker = Depends(get_circuit_breaker),
     worker_pool: WorkerPool = Depends(get_worker_pool),
 ) -> Response:
     """Submit an ad-hoc scrape request."""
@@ -92,51 +114,21 @@ async def scrape(
         project=config.project,
         name=f"{config.name}-{uuid.uuid4().hex[:8]}",
         config_yaml=config_yaml,
+        updated_at=datetime.now(timezone.utc),
+        current_run_id=generate_run_id(),
     )
     await job_store.save_job(job)
 
-    if _should_run_sync(config):
-        # Check pool limits before running inline.
-        if not worker_pool.can_accept():
-            return Response(
-                content=_json_encode({"error": "Server at capacity — try again later"}),
-                status_code=503,
-                media_type="application/json",
-            )
-        # Run inline and return results.
-        await scrape_task(
-            job.job_id,
-            config_yaml,
-            job_store=job_store,
-            result_store=result_store,
-            error_store=error_store,
-            circuit_breaker=circuit_breaker,
-        )
-        try:
-            result = await result_store.get_result(job.job_id)
-        except KeyError:
-            result = None
-        updated_job = await job_store.get_job(job.job_id)
-        return Response(
-            content=_json_encode({
-                "job_id": job.job_id,
-                "status": updated_job.status.value,
-                "results": result,
-            }),
-            status_code=200,
-            media_type="application/json",
-        )
-
-    # Async mode — enqueue and return 202.
     has_browser_target = any(
         t.fetcher != FetcherType.basic for t in config.resolved_targets()
     )
     try:
-        await worker_pool.enqueue(
+        queued_job = await worker_pool.enqueue(
             job.job_id,
             config_yaml,
             config.execution.priority.value,
             needs_browser=has_browser_target,
+            run_id=job.current_run_id,
         )
     except MemoryError:
         logger.warning("Rejecting async scrape job %s due to pool memory pressure", job.job_id)
@@ -146,13 +138,30 @@ async def scrape(
             status_code=503,
             media_type="application/json",
         )
+
+    if not _should_wait_for_completion(config):
+        return _queued_response(job.job_id)
+
+    settings = get_settings()
+    completed = await _wait_for_queued_job(
+        queued_job,
+        timeout_seconds=settings.sync_timeout_seconds,
+    )
+    if not completed:
+        return _queued_response(job.job_id)
+
+    try:
+        result = await result_store.get_result(job.job_id)
+    except KeyError:
+        result = None
+    updated_job = await job_store.get_job(job.job_id)
     return Response(
         content=_json_encode({
             "job_id": job.job_id,
-            "status": "queued",
-            "poll_url": f"/results/{job.job_id}",
+            "status": updated_job.status.value,
+            "results": result,
         }),
-        status_code=202,
+        status_code=200,
         media_type="application/json",
     )
 

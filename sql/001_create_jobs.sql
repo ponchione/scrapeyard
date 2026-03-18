@@ -9,5 +9,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     schedule_cron TEXT,
     last_run_at  TEXT,
     run_count    INTEGER NOT NULL DEFAULT 0,
+    current_run_id TEXT,
     UNIQUE (project, name)
 );

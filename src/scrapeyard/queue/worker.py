@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -36,6 +37,7 @@ async def scrape_task(
     job_id: str,
     config_yaml: str,
     *,
+    run_id: str | None = None,
     job_store: JobStore,
     result_store: ResultStore,
     error_store: ErrorStore,
@@ -59,10 +61,19 @@ async def scrape_task(
         started_at = datetime.now(timezone.utc)
         config = load_config(config_yaml)
         job = await job_store.get_job(job_id)
-        job = job.model_copy(update={"status": JobStatus.running})
-        await job_store.update_job(job)
 
         settings = get_settings()
+        adaptive_dir = str(Path(settings.adaptive_dir) / config.project)
+        if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
+            logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+            return
+
+        job = job.model_copy(update={
+            "status": JobStatus.running,
+            "updated_at": started_at,
+        })
+        await job_store.update_job(job)
+
         targets = config.resolved_targets()
         concurrency = config.execution.concurrency
         delay_between = config.execution.delay_between
@@ -133,7 +144,7 @@ async def scrape_task(
                 target_cfg,
                 adaptive,
                 config.retry,
-                adaptive_dir=settings.adaptive_dir,
+                adaptive_dir=adaptive_dir,
             )
             if retry_result.status != "success":
                 logger.info("Recording failure for domain %s after validation retry", domain)
@@ -210,7 +221,7 @@ async def scrape_task(
                     "Scraping %s with fetcher=%s adaptive=%s",
                     target_cfg.url, target_cfg.fetcher.value, adaptive,
                 )
-                result = await scrape_target(target_cfg, adaptive, config.retry, adaptive_dir=settings.adaptive_dir)
+                result = await scrape_target(target_cfg, adaptive, config.retry, adaptive_dir=adaptive_dir)
 
                 if result.status == "success":
                     circuit_breaker.record_success(domain)
@@ -280,6 +291,10 @@ async def scrape_task(
         # Format and save results if we have data.
         save_meta = None
         if flat_data:
+            latest_job = await job_store.get_job(job_id)
+            if _run_superseded(latest_job, run_id):
+                logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
+                return
             fmt = config.output.format
             group_by = config.output.group_by
             job_meta = {
@@ -308,6 +323,7 @@ async def scrape_task(
                     job_id,
                     json_output,
                     save_fmt,
+                    run_id=run_id,
                     record_count=len(flat_data),
                     file_contents={"results.md": markdown_output},
                 )
@@ -318,11 +334,17 @@ async def scrape_task(
                     job_id,
                     formatted,
                     save_fmt,
+                    run_id=run_id,
                     record_count=len(flat_data),
                 )
 
         # Webhook dispatch (fire-and-forget).
         completed_at = datetime.now(timezone.utc)
+        latest_job = await job_store.get_job(job_id)
+        if _run_superseded(latest_job, run_id):
+            logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+            return
+
         if webhook_dispatcher is not None and config.webhook is not None and should_fire(config.webhook, final_status):
             payload = build_webhook_payload(
                 job_id=job_id,
@@ -342,9 +364,10 @@ async def scrape_task(
         job = await job_store.get_job(job_id)
         job = job.model_copy(update={
             "status": final_status,
-            "updated_at": datetime.now(timezone.utc),
-            "last_run_at": datetime.now(timezone.utc),
+            "updated_at": completed_at,
+            "last_run_at": completed_at,
             "run_count": job.run_count + 1,
+            "current_run_id": run_id,
         })
         await job_store.update_job(job)
     except Exception:
@@ -358,6 +381,32 @@ async def scrape_task(
             await job_store.update_job(job)
         except Exception:
             logger.exception("Failed to mark job %s as failed", job_id)
+
+
+def _run_superseded(job: Any, run_id: str | None) -> bool:
+    return run_id is not None and job.current_run_id != run_id
+
+
+def _should_skip_delivery(
+    job: Any,
+    run_id: str | None,
+    running_lease_seconds: int,
+    now: datetime,
+) -> bool:
+    if _run_superseded(job, run_id):
+        return True
+
+    if job.status in {JobStatus.complete, JobStatus.partial, JobStatus.failed}:
+        return run_id is None or job.current_run_id == run_id
+
+    if job.status != JobStatus.running:
+        return False
+
+    if job.updated_at is None:
+        return False
+
+    lease_age = (now - job.updated_at).total_seconds()
+    return lease_age < running_lease_seconds
 
 
 async def _log_error(
