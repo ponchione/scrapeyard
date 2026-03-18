@@ -11,9 +11,9 @@ from scrapeyard.storage.database import get_db
 
 def _row_to_error(row: tuple) -> ErrorRecord:
     # Columns: id, job_id, project, target_url, attempt, timestamp,
-    #          error_type, http_status, fetcher_used, selectors_matched,
-    #          action_taken, resolved
-    selectors = row[9]
+    #          error_type, http_status, fetcher_used, error_message,
+    #          selectors_matched, action_taken, resolved
+    selectors = row[10]
     return ErrorRecord(
         job_id=row[1],
         project=row[2],
@@ -23,9 +23,10 @@ def _row_to_error(row: tuple) -> ErrorRecord:
         error_type=ErrorType(row[6]),
         http_status=row[7],
         fetcher_used=row[8],
+        error_message=row[9],
         selectors_matched=json.loads(selectors) if selectors is not None else None,
-        action_taken=ActionTaken(row[10]),
-        resolved=bool(row[11]),
+        action_taken=ActionTaken(row[11]),
+        resolved=bool(row[12]),
     )
 
 
@@ -36,9 +37,9 @@ class SQLiteErrorStore:
         async with get_db("errors.db") as db:
             await db.execute(
                 """INSERT INTO errors (job_id, project, target_url, attempt, timestamp,
-                   error_type, http_status, fetcher_used, selectors_matched,
-                   action_taken, resolved)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   error_type, http_status, fetcher_used, error_message,
+                   selectors_matched, action_taken, resolved)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     error.job_id,
                     error.project,
@@ -48,6 +49,7 @@ class SQLiteErrorStore:
                     error.error_type.value,
                     error.http_status,
                     error.fetcher_used,
+                    error.error_message,
                     json.dumps(error.selectors_matched) if error.selectors_matched is not None else None,
                     error.action_taken.value,
                     int(error.resolved),
@@ -74,7 +76,7 @@ class SQLiteErrorStore:
 
         sql = (
             "SELECT id, job_id, project, target_url, attempt, timestamp, "
-            "error_type, http_status, fetcher_used, selectors_matched, "
+            "error_type, http_status, fetcher_used, error_message, selectors_matched, "
             "action_taken, resolved FROM errors"
         )
         if clauses:

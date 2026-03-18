@@ -121,6 +121,10 @@ class TargetConfig(BaseModel):
 
     url: str = Field(..., description="Target URL to scrape")
     fetcher: FetcherType = Field(default=FetcherType.basic, description="Fetcher type")
+    item_selector: Optional[SelectorValue] = Field(
+        default=None,
+        description="Optional selector for repeated item containers; when set, field selectors are applied relative to each matched item",
+    )
     selectors: dict[str, SelectorValue] = Field(..., description="Named selector definitions")
     pagination: Optional[PaginationConfig] = None
 

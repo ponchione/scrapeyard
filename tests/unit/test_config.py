@@ -81,6 +81,11 @@ class TestResolvedTargets:
         assert len(result) == 2
         assert result is config.targets
 
+    def test_target_with_item_selector_parses(self):
+        config = ScrapeConfig(**_tier1_config(target=_target_dict(item_selector=".product-card")))
+        assert config.target is not None
+        assert config.target.item_selector == ".product-card"
+
 
 # --- Transform Parser ---
 

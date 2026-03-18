@@ -8,6 +8,17 @@ from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
 from scrapeyard.config.transforms import apply_transforms, parse_transform
 
 
+def extract_item_selectors(
+    page: Any,
+    item_selector: SelectorValue,
+    selectors: dict[str, SelectorValue],
+) -> list[dict[str, Any]]:
+    """Apply field selectors relative to each matched item container."""
+    query, sel_type, _ = _unpack_selector(item_selector)
+    items = _select_elements(page, query, sel_type)
+    return [extract_selectors(item, selectors) for item in items]
+
+
 def extract_selectors(page: Any, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
     """Apply named selectors to a Scrapling page response.
 
@@ -28,11 +39,7 @@ def extract_selectors(page: Any, selectors: dict[str, SelectorValue]) -> dict[st
     result: dict[str, Any] = {}
     for name, selector in selectors.items():
         query, sel_type, transform_str = _unpack_selector(selector)
-
-        if sel_type == SelectorType.xpath:
-            elements = page.xpath(query)
-        else:
-            elements = page.css(query)
+        elements = _select_elements(page, query, sel_type)
 
         texts = [_element_text(el) for el in elements]
 
@@ -58,6 +65,13 @@ def _unpack_selector(selector: SelectorValue) -> tuple[str, SelectorType, str | 
         return selector.query, selector.type, selector.transform
     # dict form (from YAML parsing before Pydantic validation)
     return selector.query, selector.type, selector.transform  # type: ignore[union-attr]
+
+
+def _select_elements(scope: Any, query: str, selector_type: SelectorType) -> list[Any]:
+    """Select elements from a page or item scope using CSS or XPath."""
+    if selector_type == SelectorType.xpath:
+        return scope.xpath(query)
+    return scope.css(query)
 
 
 def _element_text(element: Any) -> str:

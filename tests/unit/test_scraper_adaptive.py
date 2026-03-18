@@ -86,3 +86,55 @@ async def test_adaptive_false_passes_no_adaptive_kwargs(tmp_path):
         assert "auto_save" not in call_kwargs.kwargs
         assert "adaptor" not in call_kwargs.kwargs
         assert "custom_config" not in call_kwargs.kwargs
+
+
+@pytest.mark.asyncio
+async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
+    """Dynamic fetcher should get a longer timeout and resource suppression."""
+    adaptive_dir = tmp_path / "adaptive"
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.css.return_value = []
+
+    target = TargetConfig(
+        url="http://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    retry = RetryConfig()
+
+    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+        mock_fetcher.async_fetch.return_value = mock_response
+        await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
+
+        call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
+        assert call_kwargs["timeout"] == 60000
+        assert call_kwargs["disable_resources"] is True
+        assert call_kwargs["network_idle"] is False
+
+
+@pytest.mark.asyncio
+async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
+    """Stealthy fetcher should get a longer timeout and resource suppression."""
+    adaptive_dir = tmp_path / "adaptive"
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.css.return_value = []
+
+    target = TargetConfig(
+        url="http://example.com",
+        fetcher=FetcherType.stealthy,
+        selectors={"title": "h1"},
+    )
+    retry = RetryConfig()
+
+    with patch("scrapeyard.engine.scraper.StealthyFetcher") as mock_fetcher:
+        mock_fetcher.async_fetch.return_value = mock_response
+        await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
+
+        call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
+        assert call_kwargs["timeout"] == 60000
+        assert call_kwargs["disable_resources"] is True
+        assert call_kwargs["network_idle"] is False

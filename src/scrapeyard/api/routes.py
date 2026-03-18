@@ -335,6 +335,7 @@ async def get_errors(
             "error_type": e.error_type.value,
             "http_status": e.http_status,
             "fetcher_used": e.fetcher_used,
+            "error_message": e.error_message,
             "selectors_matched": e.selectors_matched,
             "action_taken": e.action_taken.value,
             "resolved": e.resolved,

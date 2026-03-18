@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-# Mapping of database filename to its migration script.
+# Mapping of database filename to its initial migration script.
 _DB_MIGRATIONS: dict[str, str] = {
     "jobs.db": "001_create_jobs.sql",
     "errors.db": "002_create_errors.sql",
@@ -56,6 +56,18 @@ async def init_db(db_dir: str) -> None:
         migration_sql = (sql_dir / migration_file).read_text()
         async with aiosqlite.connect(db_path / db_name) as db:
             await db.executescript(migration_sql)
+            if db_name == "errors.db":
+                await _ensure_error_columns(db)
+            await db.commit()
+
+
+async def _ensure_error_columns(db: aiosqlite.Connection) -> None:
+    """Backfill newer error-table columns for existing databases."""
+    cursor = await db.execute("PRAGMA table_info(errors)")
+    rows = await cursor.fetchall()
+    columns = {row[1] for row in rows}
+    if "error_message" not in columns:
+        await db.execute("ALTER TABLE errors ADD COLUMN error_message TEXT")
 
 
 @asynccontextmanager

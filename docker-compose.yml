@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "8420:8420"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - scrapeyard-data:/data
     environment:

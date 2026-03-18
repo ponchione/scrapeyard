@@ -14,9 +14,19 @@ from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.selectors import extract_selectors
+from scrapeyard.engine.selectors import extract_item_selectors, extract_selectors
+from scrapeyard.models.job import ErrorType
 
 logger = logging.getLogger(__name__)
+
+_BROWSER_TIMEOUT_MS = 60000
+
+
+def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
+    """Extract either a single page-wide record or multiple item-scoped records."""
+    if target.item_selector is not None:
+        return extract_item_selectors(page, target.item_selector, target.selectors)
+    return [extract_selectors(page, target.selectors)]
 
 
 @dataclass
@@ -28,6 +38,9 @@ class TargetResult:
     data: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     pages_scraped: int = 0
+    error_type: ErrorType | None = None
+    http_status: int | None = None
+    error_detail: str | None = None
 
 
 def _get_fetcher(fetcher_type: FetcherType) -> Any:
@@ -46,6 +59,48 @@ class FetchError(Exception):
     def __init__(self, status: int) -> None:
         self.status = status
         super().__init__(f"HTTP {status}")
+
+
+def _classify_fetch_exception(exc: Exception, fetcher_type: FetcherType) -> tuple[ErrorType, int | None]:
+    """Map low-level fetch exceptions to structured Scrapeyard error types."""
+    if isinstance(exc, RetryableError):
+        return ErrorType.http_error, exc.status
+    if isinstance(exc, FetchError):
+        return ErrorType.http_error, exc.status
+    if isinstance(exc, asyncio.TimeoutError):
+        return ErrorType.timeout, None
+
+    detail = f"{type(exc).__name__}: {exc}".lower()
+    if fetcher_type != FetcherType.basic and any(
+        token in detail
+        for token in (
+            "playwright",
+            "browser",
+            "page.goto",
+            "target page",
+            "executable",
+            "chromium",
+            "webkit",
+            "firefox",
+        )
+    ):
+        return ErrorType.browser_error, None
+
+    if isinstance(exc, (ConnectionError, OSError)) or any(
+        token in detail
+        for token in (
+            "connection",
+            "dns",
+            "tls",
+            "ssl",
+            "certificate",
+            "network",
+            "socket",
+        )
+    ):
+        return ErrorType.network_error, None
+
+    return ErrorType.http_error, None
 
 
 async def _fetch_page(
@@ -86,6 +141,12 @@ async def _fetch_page(
             lambda: fetcher_cls.get(url, **call_kwargs),
         )
     else:
+        # Browser-backed fetchers need more headroom than simple HTTP fetches,
+        # and dropping non-essential resources reduces load-event stalls on
+        # heavy retail pages.
+        call_kwargs.setdefault("timeout", _BROWSER_TIMEOUT_MS)
+        call_kwargs.setdefault("disable_resources", True)
+        call_kwargs.setdefault("network_idle", False)
         # StealthyFetcher / PlayWrightFetcher have async_fetch.
         response = await fetcher_cls.async_fetch(url, **call_kwargs)
 
@@ -130,16 +191,23 @@ async def scrape_target(
         page = await retry_handler.execute(
             _fetch_page, fetcher_cls, target.url, target.fetcher, adaptive, retryable_status, adaptive_dir
         )
-        data = extract_selectors(page, target.selectors)
+        data = _extract_page_data(page, target)
         if adaptive:
-            missing = [k for k, v in data.items() if v is None or v == "" or v == []]
+            missing = []
+            if not data:
+                missing = list(target.selectors.keys())
+            else:
+                for key in target.selectors:
+                    values = [record.get(key) for record in data]
+                    if all(value is None or value == "" or value == [] for value in values):
+                        missing.append(key)
             if missing:
                 logger.info(
                     "Adaptive relocation check: url=%s missing_selectors=%s",
                     target.url,
                     ",".join(missing),
                 )
-        result.data.append(data)
+        result.data.extend(data)
         result.pages_scraped = 1
 
         # Pagination — resolve each "next" href against the *current* page URL,
@@ -161,15 +229,27 @@ async def scrape_target(
                     _fetch_page, fetcher_cls, next_url, target.fetcher, adaptive, retryable_status, adaptive_dir
                 )
                 current_url = next_url
-                data = extract_selectors(page, target.selectors)
-                result.data.append(data)
+                data = _extract_page_data(page, target)
+                result.data.extend(data)
                 result.pages_scraped += 1
 
         result.status = "success"
 
     except Exception as exc:
+        error_type, http_status = _classify_fetch_exception(exc, target.fetcher)
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        logger.exception(
+            "Scrape target failed: url=%s fetcher=%s classified_as=%s detail=%s",
+            target.url,
+            target.fetcher.value,
+            error_type.value,
+            detail,
+        )
         result.status = "failed"
-        result.errors.append(str(exc))
+        result.error_type = error_type
+        result.http_status = http_status
+        result.error_detail = detail
+        result.errors.append(detail)
 
     return result
 

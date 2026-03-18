@@ -69,6 +69,7 @@ class ErrorRecord(BaseModel):
     error_type: ErrorType
     http_status: Optional[int] = None
     fetcher_used: str
+    error_message: Optional[str] = None
     selectors_matched: Optional[dict[str, int]] = None
     action_taken: ActionTaken
     resolved: bool = False
