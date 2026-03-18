@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import shutil
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from scrapeyard.common.ids import generate_run_id
 from scrapeyard.storage.database import get_db
 
 
@@ -29,13 +29,6 @@ _FORMAT_FILES: dict[str, list[str]] = {
     "html": ["raw.html"],
     "json+markdown": ["results.json", "results.md"],
 }
-
-
-def _generate_run_id() -> str:
-    now = datetime.now(timezone.utc)
-    short_uuid = uuid.uuid4().hex[:8]
-    return f"{now.strftime('%Y%m%d-%H%M%S')}-{short_uuid}"
-
 
 class LocalResultStore:
     """Stores scrape results on the local filesystem with metadata in SQLite.
@@ -62,6 +55,7 @@ class LocalResultStore:
         data: Any,
         format: str,
         *,
+        run_id: str | None = None,
         record_count: int | None = None,
         file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta:
@@ -69,8 +63,10 @@ class LocalResultStore:
             raise ValueError(f"Unsupported format: {format!r}")
 
         project, job_name = await self._job_lookup(job_id)
-        run_id = _generate_run_id()
+        run_id = run_id or generate_run_id()
         run_dir = self._results_dir / project / job_name / run_id
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
 
         filenames = _FORMAT_FILES[format]
@@ -85,6 +81,10 @@ class LocalResultStore:
                 path.write_text(str(value))
 
         async with get_db("results_meta.db") as db:
+            await db.execute(
+                "DELETE FROM results_meta WHERE job_id=? AND run_id=?",
+                (job_id, run_id),
+            )
             await db.execute(
                 """INSERT INTO results_meta
                    (job_id, project, run_id, status, record_count, file_path, format, created_at)

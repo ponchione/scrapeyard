@@ -189,3 +189,33 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     result_store.save_result.assert_called_once()
     error = error_store.log_error.call_args[0][0]
     assert error.action_taken == ActionTaken.retry
+
+
+@pytest.mark.asyncio
+async def test_worker_scopes_adaptive_state_by_project(mock_stores):
+    job_store, result_store, error_store, circuit_breaker = mock_stores
+    job_store.get_job = AsyncMock(return_value=_make_job())
+    job_store.update_job = AsyncMock()
+
+    result = TargetResult(url="http://a.com", status="success", data=[{"title": "ok"}])
+
+    with patch("scrapeyard.queue.worker.load_config") as mock_load, \
+         patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            workers_running_lease_seconds=300,
+        )
+        mock_load.return_value = _make_config(_make_target("http://a.com"), on_empty=OnEmptyAction.warn)
+        mock_scrape.return_value = result
+
+        await scrape_task(
+            "job-1",
+            "yaml",
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+        )
+
+    assert mock_scrape.call_args.kwargs["adaptive_dir"] == "/tmp/adaptive/test"

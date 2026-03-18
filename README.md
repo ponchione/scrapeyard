@@ -1,6 +1,6 @@
 # Scrapeyard
 
-Scrapeyard is a config-driven web scraping service built with FastAPI and Scrapling. You submit YAML, the service decides whether to run the scrape inline or queue it, stores job metadata in SQLite, writes result artifacts to disk, and exposes jobs, results, errors, and health over HTTP.
+Scrapeyard is a config-driven web scraping service built with FastAPI and Scrapling. You submit YAML, the service validates it, creates a job, enqueues execution through a Redis-backed durable queue, stores job metadata in SQLite, writes result artifacts to disk, and exposes jobs, results, errors, and health over HTTP.
 
 It is designed for small-to-medium scraping workflows where you want:
 
@@ -8,7 +8,7 @@ It is designed for small-to-medium scraping workflows where you want:
 - YAML-defined scraping jobs instead of hard-coded crawlers
 - persisted results and error records
 - cron-based recurring scrapes
-- local operation with no Redis or external queue dependency
+- durable queued execution with Redis and `arq`
 
 ## Features
 
@@ -17,6 +17,7 @@ It is designed for small-to-medium scraping workflows where you want:
 - sync, async, or auto execution mode
 - multi-target jobs with per-job concurrency and rate limits
 - `basic`, `stealthy`, and `dynamic` fetcher support via Scrapling
+- per-target browser tuning and `adaptive_domain` overrides
 - selector transforms such as `trim`, `uppercase`, `prepend(...)`, and `regex(...)`
 - pagination support
 - result formatting as JSON, Markdown, HTML, or JSON+Markdown
@@ -31,7 +32,8 @@ It is designed for small-to-medium scraping workflows where you want:
 At runtime the service is composed of:
 
 - FastAPI application and HTTP routes
-- an in-memory priority worker pool for async jobs
+- a Redis-backed `arq` queue with one queued execution path for all jobs
+- a local worker pool that executes queued jobs with bounded shutdown drain
 - APScheduler for cron-based scheduled execution
 - SQLite databases for jobs, errors, and result metadata
 - a local results directory for run artifacts
@@ -41,11 +43,12 @@ Request flow:
 1. A YAML config is submitted to `POST /scrape` or `POST /jobs`.
 2. The config is validated with Pydantic models.
 3. A job record is written to `jobs.db`.
-4. Ad hoc jobs either run inline or are queued based on `execution.mode` and a simple heuristic.
-5. The worker executes targets, applies retries, rate limiting, validation, and formatting.
-6. Results are written to disk and indexed in `results_meta.db`.
-7. Errors are written to `errors.db`.
-8. If a `webhook` is configured, a JSON payload is POSTed to the webhook URL (fire-and-forget).
+4. The job is enqueued on Redis with a per-run delivery ID.
+5. `POST /scrape` may wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`.
+6. The worker executes targets, applies retries, rate limiting, validation, and formatting.
+7. Results are written to disk and indexed in `results_meta.db`.
+8. Errors are written to `errors.db`.
+9. If a `webhook` is configured, a JSON payload is POSTed to the webhook URL (fire-and-forget).
 
 ## Repository Layout
 
@@ -53,7 +56,7 @@ Request flow:
 - `src/scrapeyard/api/routes.py`: HTTP API
 - `src/scrapeyard/config/schema.py`: YAML schema
 - `src/scrapeyard/engine/`: scraping, selectors, retries, validation, circuit breaker
-- `src/scrapeyard/queue/`: in-memory worker pool and scrape task
+- `src/scrapeyard/queue/`: Redis queue integration, worker pool, and scrape task
 - `src/scrapeyard/scheduler/cron.py`: APScheduler integration
 - `src/scrapeyard/storage/`: SQLite and filesystem persistence
 - `src/scrapeyard/webhook/`: webhook dispatcher (Protocol + httpx), payload builder
@@ -73,6 +76,9 @@ Install dependencies:
 ```bash
 poetry install
 ```
+
+Make sure Redis is running locally, or point `SCRAPEYARD_REDIS_DSN` at an
+existing Redis instance before starting the API.
 
 Start the API:
 
@@ -110,9 +116,11 @@ Stop:
 docker compose down
 ```
 
-The default compose setup mounts a named volume at `/data` for databases,
-results, adaptive matching state, and logs. The Docker image also installs
-Playwright Chromium so `fetcher: dynamic` works inside the container.
+The default compose setup starts both Redis and Scrapeyard. It mounts a named
+volume at `/data` for databases, results, adaptive matching state, and logs,
+and a second named volume for Redis append-only durability. The Docker image
+also installs Playwright Chromium so `fetcher: dynamic` works inside the
+container.
 
 ## Environment Variables
 
@@ -120,9 +128,14 @@ All service settings use the `SCRAPEYARD_` prefix.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection used by `arq` |
+| `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Redis queue name |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs in the worker pool |
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser-based jobs |
 | `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` | `4096` | Reject new jobs when RSS exceeds this limit |
+| `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | How long sync mode waits on queued completion |
+| `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` | `30` | Grace period for worker drain on shutdown |
+| `SCRAPEYARD_WORKERS_RUNNING_LEASE_SECONDS` | `300` | Lease used to recover stale running jobs |
 | `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS` | `120` | Random jitter applied to scheduled jobs |
 | `SCRAPEYARD_STORAGE_RETENTION_DAYS` | `30` | Age-based result retention |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Root directory for result artifacts |
@@ -146,6 +159,8 @@ poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
 ## YAML Configuration
 
 Exactly one of `target` or `targets` is required.
+
+A reusable starter config is available at [`template.yaml`](/home/gernsback/source/scrapeyard/template.yaml).
 
 ### Minimal ad hoc config
 
@@ -258,7 +273,7 @@ target:
 | `validation` | object | Result validation behavior |
 | `execution` | object | Concurrency, rate limit, priority, and mode |
 | `schedule` | object | Required for `POST /jobs` |
-| `webhook` | object | Optional async completion notifications |
+| `webhook` | object | Optional completion notifications |
 | `output` | object | Format and grouping |
 
 ### Target fields
@@ -267,6 +282,8 @@ target:
 | --- | --- | --- |
 | `url` | string | Target URL |
 | `fetcher` | enum | `basic`, `stealthy`, `dynamic` |
+| `adaptive_domain` | string | Optional adaptive fingerprint namespace override |
+| `browser` | object | Optional timeout/resource/wait tuning for browser-backed fetchers |
 | `item_selector` | selector | Optional repeated-item container selector; field selectors run relative to each matched item |
 | `selectors` | map | Field name to selector |
 | `pagination` | object | Optional pagination config |
@@ -362,7 +379,10 @@ webhook:
 | `headers` | map | `{}` | Custom headers sent with the POST |
 | `timeout` | int | `10` | Request timeout in seconds |
 
-Webhooks only fire on async jobs (worker pool path). The sync `POST /scrape` path does not trigger webhooks. Dispatch is fire-and-forget — failures are logged at WARNING but do not affect job status.
+Webhooks fire from the worker path for any job that reaches a configured
+terminal state, including ad hoc scrapes submitted in sync-wait mode.
+Dispatch is fire-and-forget: failures are logged at WARNING but do not affect
+job status.
 
 If Scrapeyard is running in Docker and your consumer is running on the host,
 use `http://host.docker.internal:<port>/...` rather than `localhost` in the
@@ -408,8 +428,8 @@ curl -s -X POST http://127.0.0.1:8420/scrape \
 
 Possible responses:
 
-- `200`: job ran synchronously and includes results inline
-- `202`: job was queued and returns `job_id` plus `poll_url`
+- `200`: the queued job completed within the sync-wait timeout and includes results inline
+- `202`: the job was accepted and queued, or sync-wait timed out before completion
 - `415`: missing or incorrect content type
 - `503`: the server rejected execution or enqueueing because the pool is at capacity
 
@@ -551,18 +571,21 @@ curl -s http://127.0.0.1:8420/health
 
 ### Sync vs async
 
-When `execution.mode: auto`, `POST /scrape` runs synchronously only when all of these are true:
+All ad hoc scrapes are enqueued first. `execution.mode` controls whether the
+API waits on queued completion.
+
+When `execution.mode: auto`, `POST /scrape` waits for completion only when all of these are true:
 
 - exactly one target
 - no pagination
 - `fetcher: basic`
 
-Everything else is queued and returns `202`.
+Everything else returns `202` immediately after enqueueing.
 
 You can override this with:
 
-- `execution.mode: sync`
-- `execution.mode: async`
+- `execution.mode: sync`: always wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`, then fall back to `202`
+- `execution.mode: async`: always return `202` after enqueueing
 
 ### Adaptive mode
 
@@ -572,6 +595,21 @@ Adaptive matching defaults to:
 - `true` for scheduled jobs
 
 You can override it explicitly with top-level `adaptive: true` or `adaptive: false`.
+Adaptive fingerprints are scoped by `project + adaptive_domain`, where
+`adaptive_domain` defaults to the normalized target hostname and can be
+overridden per target when multiple hostnames should share adaptive state.
+
+### Browser tuning
+
+Browser-backed fetchers keep the current defaults unless a target opts in with:
+
+```yaml
+target:
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+```
 
 ### Failure handling
 
@@ -630,7 +668,9 @@ A background cleanup loop runs every 6 hours and:
 - deletes result runs older than `SCRAPEYARD_STORAGE_RETENTION_DAYS`
 - prunes old runs beyond `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB`
 
-Cleanup affects result artifacts and `results_meta.db`. Job records remain in `jobs.db` unless explicitly deleted.
+Age-based deletion is applied through the configured result store, and per-job
+pruning still removes excess historical runs from both disk and `results_meta.db`.
+Job records remain in `jobs.db` unless explicitly deleted.
 
 ## Common Errors
 
@@ -667,8 +707,8 @@ poetry run ruff check src tests
 
 ## Known Constraints
 
-- The async queue is in-memory, so queued work is not durable across process restarts
-- The worker pool is local to a single process
+- Delivery semantics are at-least-once, so idempotent downstream handling is still the right assumption
+- The worker pool is local to a single service process, even though queue state is durable in Redis
 - `POST /jobs` does not currently enforce YAML content type
 - No authentication or authorization layer is present
 - Result retrieval returns the latest run unless you already know a historical `run_id`

@@ -39,6 +39,7 @@ async def test_save_and_get(store):
     assert fetched.name == "scrape-prices"
     assert fetched.status == JobStatus.queued
     assert fetched.run_count == 0
+    assert fetched.current_run_id is None
 
 
 async def test_get_not_found(store):
@@ -84,6 +85,7 @@ async def test_update_job(store):
         "status": JobStatus.running,
         "updated_at": datetime(2026, 1, 1, 12, 0, 0),
         "run_count": 1,
+        "current_run_id": "20260318-120000-abcd1234",
     })
     await store.update_job(updated)
 
@@ -91,6 +93,7 @@ async def test_update_job(store):
     assert fetched.status == JobStatus.running
     assert fetched.run_count == 1
     assert fetched.updated_at == datetime(2026, 1, 1, 12, 0, 0)
+    assert fetched.current_run_id == "20260318-120000-abcd1234"
 
 
 async def test_update_nonexistent_raises(store):

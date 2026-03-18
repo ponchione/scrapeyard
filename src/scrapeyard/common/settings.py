@@ -17,6 +17,13 @@ class ServiceSettings(BaseSettings):
     workers_max_concurrent: int = 4
     workers_max_browsers: int = 2
     workers_memory_limit_mb: int = 4096
+    sync_timeout_seconds: int = 15
+    workers_shutdown_grace_seconds: int = 30
+    workers_running_lease_seconds: int = 300
+
+    # Queue
+    redis_dsn: str = "redis://redis:6379/0"
+    queue_name: str = "scrapeyard"
 
     # Scheduler
     scheduler_jitter_max_seconds: int = 120

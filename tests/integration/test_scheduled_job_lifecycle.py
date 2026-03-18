@@ -55,10 +55,17 @@ async def test_scheduler_respects_priority_and_browser(client, monkeypatch):
 
     scheduler = get_scheduler()
     pool = get_worker_pool()
-    enqueued: list[tuple[str, str, bool]] = []
+    enqueued: list[tuple[str, str, bool, str | None]] = []
 
-    async def capture_enqueue(job_id: str, config_yaml: str, priority: str = "normal", needs_browser: bool = False):
-        enqueued.append((job_id, priority, needs_browser))
+    async def capture_enqueue(
+        job_id: str,
+        config_yaml: str,
+        priority: str = "normal",
+        needs_browser: bool = False,
+        *,
+        run_id: str | None = None,
+    ):
+        enqueued.append((job_id, priority, needs_browser, run_id))
 
     monkeypatch.setattr(pool, "enqueue", capture_enqueue)
 
@@ -86,4 +93,47 @@ target:
 
     await scheduler._trigger_job(job_id)
 
-    assert enqueued == [(job_id, "high", True)]
+    assert len(enqueued) == 1
+    enqueued_job_id, priority, needs_browser, run_id = enqueued[0]
+    assert enqueued_job_id == job_id
+    assert priority == "high"
+    assert needs_browser is True
+    assert run_id is not None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_assigns_distinct_run_ids_per_trigger(client, monkeypatch):
+    from scrapeyard.api.dependencies import get_scheduler, get_worker_pool
+
+    scheduler = get_scheduler()
+    pool = get_worker_pool()
+    run_ids: list[str | None] = []
+
+    async def capture_enqueue(
+        job_id: str,
+        config_yaml: str,
+        priority: str = "normal",
+        needs_browser: bool = False,
+        *,
+        run_id: str | None = None,
+    ):
+        del job_id, config_yaml, priority, needs_browser
+        run_ids.append(run_id)
+
+    monkeypatch.setattr(pool, "enqueue", capture_enqueue)
+
+    response = await client.post(
+        "/jobs",
+        content=_scheduled_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 201
+    job_id = response.json()["job_id"]
+
+    await scheduler._trigger_job(job_id)
+    await scheduler._trigger_job(job_id)
+
+    assert len(run_ids) == 2
+    assert run_ids[0] is not None
+    assert run_ids[1] is not None
+    assert run_ids[0] != run_ids[1]

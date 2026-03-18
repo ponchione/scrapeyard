@@ -56,9 +56,20 @@ async def init_db(db_dir: str) -> None:
         migration_sql = (sql_dir / migration_file).read_text()
         async with aiosqlite.connect(db_path / db_name) as db:
             await db.executescript(migration_sql)
+            if db_name == "jobs.db":
+                await _ensure_job_columns(db)
             if db_name == "errors.db":
                 await _ensure_error_columns(db)
             await db.commit()
+
+
+async def _ensure_job_columns(db: aiosqlite.Connection) -> None:
+    """Backfill newer job-table columns for existing databases."""
+    cursor = await db.execute("PRAGMA table_info(jobs)")
+    rows = await cursor.fetchall()
+    columns = {row[1] for row in rows}
+    if "current_run_id" not in columns:
+        await db.execute("ALTER TABLE jobs ADD COLUMN current_run_id TEXT")
 
 
 async def _ensure_error_columns(db: aiosqlite.Connection) -> None:

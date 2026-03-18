@@ -1,8 +1,8 @@
 # Scrapeyard — SPEC.md
 
-> **Version:** 1.0-draft
-> **Date:** 2026-03-05
-> **Status:** Design Complete — Pre-Implementation
+> **Version:** 1.1-draft
+> **Date:** 2026-03-18
+> **Status:** Design Locked — Implementation Guide
 
 ---
 
@@ -23,7 +23,6 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 
 | Project | Description | Scraping Profile |
 |---|---|---|
-| job-scout | Scrapes job boards and career pages, feeds results into an LLM for ranking | Moderate volume, multiple targets, stealthy fetching |
 | eyebox | Optics price comparison pipeline | High volume, hundreds of pages, regular scheduled refreshes, webhook-driven |
 | (future projects) | TBD | Varying |
 
@@ -48,8 +47,8 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 │    └── GET  /errors         (error log query)                │
 │            │                                                 │
 │            ▼                                                 │
-│       Job Queue (arq)                                        │
-│       (priority-sorted, in-process)                          │
+│       Job Queue (arq + Redis broker)                         │
+│       (durable, priority-sorted)                             │
 │            │                                                 │
 │            ▼                                                 │
 │       Worker Pool                                            │
@@ -94,37 +93,49 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 
 1. Client sends `POST /scrape` with YAML config (inline or file reference).
 2. FastAPI validates the config against the schema.
-3. Job is enqueued to the arq job queue with assigned priority.
-4. If estimated fast (single target, no pagination, basic fetcher): the API waits and returns `200` with results inline.
-5. If estimated slow (multi-target, pagination, stealthy/dynamic fetcher): the API returns `202 Accepted` with a `job_id` for polling.
-6. Worker picks up the job, executes via Scrapling, formats results, writes to storage.
-7. Client retrieves results via `GET /results/{job_id}`.
+3. Job is persisted and enqueued to the arq queue via Redis with assigned priority.
+4. Worker picks up the job, executes via Scrapling, formats results, and writes to storage.
+5. If the request is in sync-wait mode, the API waits for queued job completion up to `sync_timeout_seconds`.
+6. If the job completes within the wait window, the API returns `200` with results inline.
+7. Otherwise, the API returns `202 Accepted` with a `job_id` for polling.
+8. Client retrieves results via `GET /results/{job_id}`.
 
 **Scheduled scrape:**
 
 1. Client sends `POST /jobs` with YAML config including a `schedule` block.
 2. Config is validated and stored in the job store (SQLite).
 3. APScheduler registers a cron trigger for the job.
-4. At each trigger time (with jitter applied), the scheduler enqueues the job to the same arq queue.
+4. At each trigger time (with jitter applied), the scheduler enqueues the job to the same Redis-backed arq queue.
 5. Worker executes identically to an on-demand scrape.
 6. Results accumulate in storage under the job's namespace.
 
 ### 2.3 Sync/Async Response Strategy
 
-The API auto-detects whether to respond synchronously or asynchronously based on scrape complexity:
+All scrape requests are enqueued first. The API then decides whether to wait for queued completion or return immediately based on response mode and scrape complexity.
+
+In `auto` mode, the API waits for completion only for simple jobs:
 
 | Condition | Response |
 |---|---|
-| Single target, no pagination, basic fetcher | `200` — results inline |
-| Multi-target, pagination, or stealthy/dynamic fetcher | `202 Accepted` — poll `GET /results/{job_id}` |
+| Single target, no pagination, basic fetcher | Wait up to `sync_timeout_seconds`; return `200` if complete, else `202` |
+| Multi-target, pagination, or stealthy/dynamic fetcher | `202 Accepted` immediately; poll `GET /results/{job_id}` |
 
 The caller can override this behavior explicitly:
 
 ```yaml
 execution:
-  mode: async   # always return 202
+  mode: async   # enqueue and return 202 immediately
   # or
-  mode: sync    # block until done (subject to timeout)
+  mode: sync    # enqueue, then wait up to sync_timeout_seconds
+```
+
+`sync` never bypasses the worker path. It means "wait on the queued job up to timeout," not "execute inline in the API process."
+
+Recommended service-level setting:
+
+```yaml
+api:
+  sync_timeout_seconds: 15
 ```
 
 ---
@@ -172,6 +183,7 @@ name: python-jobs-multi
 targets:
   - url: "https://indeed.com/jobs?q=python"
     fetcher: stealthy
+    adaptive_domain: indeed.com
     selectors:
       title:      ".jobTitle::text"
       company:    ".companyName::text"
@@ -238,6 +250,7 @@ output:
 |---|---|---|---|
 | `url` | string | **Yes** | Target URL to scrape. |
 | `fetcher` | string | No | `basic` (default), `stealthy`, or `dynamic`. |
+| `adaptive_domain` | string | No | Override the adaptive fingerprint namespace for this target. Defaults to the normalized hostname. |
 | `selectors` | object | **Yes** | Named selector definitions (see below). |
 | `pagination` | object | No | Pagination rules (see below). |
 
@@ -311,7 +324,7 @@ Transforms are a fixed set of safe, predictable string operations. No arbitrary 
 | `concurrency` | integer | 2 | Max targets scraped simultaneously within this job. |
 | `delay_between` | integer | 2 | Seconds between starting concurrent targets. |
 | `domain_rate_limit` | integer | 3 | Minimum seconds between requests to the same domain. |
-| `mode` | string | `auto` | Response mode: `auto`, `sync`, `async`. |
+| `mode` | string | `auto` | Response mode: `auto`, `sync`, `async`. `sync` means wait on queued completion up to timeout. |
 | `priority` | string | `normal` | Queue priority: `high`, `normal`, `low`. |
 
 #### Schedule Fields
@@ -328,6 +341,15 @@ Transforms are a fixed set of safe, predictable string operations. No arbitrary 
 | `format` | string | `json` | Output format: `json`, `markdown`, `html`, `json+markdown`. |
 | `group_by` | string | `target` | Result grouping: `target` (grouped) or `merge` (flat with source field). |
 
+### 3.6 Submission Validation Policy
+
+Config validation at submit time is static only.
+
+- `POST /scrape` and `POST /jobs` validate YAML structure, required fields, enum values, and cheap semantic constraints.
+- Submit-time validation does **not** fetch target URLs or test selectors against live pages.
+- Selector effectiveness is evaluated at runtime through the existing `validation` block and normal scrape execution.
+- If deeper preflight analysis is ever added, it should live in a separate dry-run or lint endpoint, not in the main submission path.
+
 ---
 
 ## 4. API Specification
@@ -339,8 +361,10 @@ Transforms are a fixed set of safe, predictable string operations. No arbitrary 
 Submit an on-demand scrape job.
 
 - **Request body:** YAML config (Content-Type: `application/x-yaml`)
-- **Response (fast):** `200 OK` with results
-- **Response (slow):** `202 Accepted` with `{ "job_id": "...", "status": "queued", "poll_url": "/results/{job_id}" }`
+- **Behavior:** Create a job, enqueue it, then either wait for queued completion or return immediately depending on `execution.mode`
+- **Response (completed within wait window):** `200 OK` with results
+- **Response (still running or async mode):** `202 Accepted` with `{ "job_id": "...", "status": "queued", "poll_url": "/results/{job_id}" }`
+- **Response (invalid config):** `422 Unprocessable Entity`
 
 #### `POST /jobs`
 
@@ -348,6 +372,7 @@ Register a scheduled or reusable job.
 
 - **Request body:** YAML config with `schedule` block
 - **Response:** `201 Created` with `{ "job_id": "...", "project": "...", "name": "...", "schedule": "..." }`
+- **Response (invalid config):** `422 Unprocessable Entity`
 
 #### `GET /jobs`
 
@@ -492,7 +517,7 @@ When adaptive is enabled:
 
 ### 6.3 Storage
 
-Adaptive fingerprints are stored in Scrapling's internal SQLite database, persisted via Docker volume at `/data/adaptive/`. Each project's fingerprints are namespaced by the `project` + `adaptive_domain` (automatically derived from target URL).
+Adaptive fingerprints are stored in Scrapling's internal SQLite database, persisted via Docker volume at `/data/adaptive/`. Each project's fingerprints are namespaced by the `project` + `adaptive_domain`, where `adaptive_domain` defaults to the normalized hostname and can be overridden explicitly per target.
 
 ---
 
@@ -500,9 +525,9 @@ Adaptive fingerprints are stored in Scrapling's internal SQLite database, persis
 
 ### 7.1 Job Queue + Worker Pool
 
-The service does **not** execute scrapes directly from the API layer. All scrape requests — both on-demand and scheduled — are enqueued to an arq job queue and executed by a worker pool.
+The service does **not** execute scrapes directly from the API layer. All scrape requests — both on-demand and scheduled — are enqueued to an arq queue backed by Redis and executed by a worker pool.
 
-**Queue:** arq (lightweight, async-native, in-process). Jobs are priority-sorted so on-demand requests aren't blocked by large background crawls.
+**Queue:** arq with Redis persistence. Jobs are priority-sorted so on-demand requests aren't blocked by large background crawls, and queued work survives Scrapeyard process restarts as long as Redis persistence is intact.
 
 **Worker pool configuration (service-level):**
 
@@ -639,7 +664,9 @@ class ErrorStore(Protocol):
 
 ### 9.2 Stateless Workers
 
-Workers hold no in-memory state between jobs. All state (job configs, results, adaptive fingerprints, error logs) lives in the storage layer. A worker that crashes mid-scrape produces a recoverable state: the job is either retried from the queue or marked as failed in the DB.
+Workers hold no durable in-memory state between jobs. All durable state (job configs, queue state, results, adaptive fingerprints, error logs) lives in Redis or the storage layer.
+
+Job delivery is **at-least-once**. A worker that crashes mid-scrape may result in the job being retried after recovery. Job handlers therefore must be idempotent with respect to `job_id` and `run_id`, or otherwise tolerate duplicate execution safely.
 
 This means the service can scale horizontally in the future — multiple identical worker containers pulling from a shared queue — without architectural changes.
 
@@ -653,7 +680,7 @@ This means the service can scale horizontally in the future — multiple identic
 |---|---|
 | API framework | FastAPI + Uvicorn |
 | Scraping engine | Scrapling (with fetchers) |
-| Job queue | arq |
+| Job queue | arq + Redis |
 | Scheduler | APScheduler |
 | Database | SQLite |
 | Dependency management | Poetry |
@@ -664,20 +691,31 @@ This means the service can scale horizontally in the future — multiple identic
 
 ```yaml
 services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
   scrapeyard:
     build: .
     ports:
       - "8420:8420"
+    depends_on:
+      - redis
     volumes:
       - scrapeyard-data:/data
     environment:
+      - ARQ_REDIS_SETTINGS=redis://redis:6379/0
       - SCRAPEYARD_WORKERS_MAX_CONCURRENT=4
       - SCRAPEYARD_WORKERS_MAX_BROWSERS=2
       - SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=4096
+      - SCRAPEYARD_SYNC_TIMEOUT_SECONDS=15
       - SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS=120
       - SCRAPEYARD_STORAGE_RETENTION_DAYS=30
 
 volumes:
+  redis-data:
   scrapeyard-data:
 ```
 
@@ -720,11 +758,13 @@ The following features are explicitly deferred and not part of v1 implementation
 
 ---
 
-## 12. Open Questions
+## 12. Resolved Design Decisions
 
-Items to resolve during implementation:
+The following decisions were locked on 2026-03-18 to guide implementation:
 
-1. **arq persistence.** arq uses Redis as its default broker. For a local-first service, evaluate whether to run Redis in Docker Compose alongside the worker, or use arq's in-memory mode (with the tradeoff that queued jobs are lost on restart). Scheduled jobs are re-enqueued by APScheduler on startup regardless, so the impact may be limited to in-flight on-demand requests.
-2. **Sync response threshold.** The auto-detect logic for sync vs. async responses needs a concrete heuristic. Proposed: sync if single target AND no pagination AND fetcher is `basic`; async otherwise.
-3. **Config validation depth.** How strictly should the service validate YAML configs? Options range from basic schema validation (field types and required fields) to deep validation (test selectors against a sample fetch, warn on likely-broken XPath).
-4. **Adaptive domain handling.** When a target URL changes but the site is the same (e.g., indeed.com redesigns and changes URL patterns), how should the `adaptive_domain` mapping be managed? Manual override in config vs. automatic detection.
+1. **Queue persistence:** v1 uses Redis-backed `arq`, not an in-memory queue. Queue durability is part of the core architecture.
+2. **Execution path:** all jobs are enqueued first. The API never runs scrape jobs inline.
+3. **Sync semantics:** `execution.mode: sync` means "wait on queued completion up to `sync_timeout_seconds`," then fall back to `202 Accepted` if unfinished.
+4. **Auto response heuristic:** in `auto` mode, wait only for single-target, non-paginated, `basic` fetcher jobs. All other jobs return `202` immediately after enqueue.
+5. **Config validation depth:** submission-time validation is static only; no live fetches or selector probing during `POST /scrape` or `POST /jobs`.
+6. **Adaptive domain handling:** adaptive fingerprints are scoped by `project + adaptive_domain`, where `adaptive_domain` defaults to the normalized hostname and can be overridden explicitly per target.

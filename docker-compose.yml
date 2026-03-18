@@ -1,13 +1,26 @@
 services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
   scrapeyard:
     build: .
     ports:
       - "8420:8420"
+    depends_on:
+      - redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - scrapeyard-data:/data
     environment:
+      # Queue
+      SCRAPEYARD_REDIS_DSN: "redis://redis:6379/0"
+      SCRAPEYARD_QUEUE_NAME: "scrapeyard"
+      SCRAPEYARD_SYNC_TIMEOUT_SECONDS: "15"
       # Workers
       SCRAPEYARD_WORKERS_MAX_CONCURRENT: "4"
       SCRAPEYARD_WORKERS_MAX_BROWSERS: "2"
@@ -28,4 +41,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  redis-data:
   scrapeyard-data:

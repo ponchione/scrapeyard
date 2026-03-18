@@ -19,6 +19,7 @@ def _row_to_job(row: tuple) -> Job:
         schedule_cron=row[7],
         last_run_at=parse_dt(row[8]),
         run_count=row[9],
+        current_run_id=row[10],
     )
 
 
@@ -29,8 +30,8 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db:
             await db.execute(
                 """INSERT INTO jobs (job_id, project, name, status, config_yaml,
-                   created_at, updated_at, schedule_cron, last_run_at, run_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   created_at, updated_at, schedule_cron, last_run_at, run_count, current_run_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.job_id,
                     job.project,
@@ -42,6 +43,7 @@ class SQLiteJobStore:
                     job.schedule_cron,
                     fmt_dt(job.last_run_at),
                     job.run_count,
+                    job.current_run_id,
                 ),
             )
             await db.commit()
@@ -51,7 +53,7 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
                 """UPDATE jobs SET project=?, name=?, status=?, config_yaml=?,
-                   created_at=?, updated_at=?, schedule_cron=?, last_run_at=?, run_count=?
+                   created_at=?, updated_at=?, schedule_cron=?, last_run_at=?, run_count=?, current_run_id=?
                    WHERE job_id=?""",
                 (
                     job.project,
@@ -63,6 +65,7 @@ class SQLiteJobStore:
                     job.schedule_cron,
                     fmt_dt(job.last_run_at),
                     job.run_count,
+                    job.current_run_id,
                     job.job_id,
                 ),
             )
@@ -74,7 +77,7 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
                 "SELECT job_id, project, name, status, config_yaml, "
-                "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                "created_at, updated_at, schedule_cron, last_run_at, run_count, current_run_id "
                 "FROM jobs WHERE job_id=?",
                 (job_id,),
             )
@@ -88,14 +91,14 @@ class SQLiteJobStore:
             if project is not None:
                 cursor = await db.execute(
                     "SELECT job_id, project, name, status, config_yaml, "
-                    "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                    "created_at, updated_at, schedule_cron, last_run_at, run_count, current_run_id "
                     "FROM jobs WHERE project=?",
                     (project,),
                 )
             else:
                 cursor = await db.execute(
                     "SELECT job_id, project, name, status, config_yaml, "
-                    "created_at, updated_at, schedule_cron, last_run_at, run_count "
+                    "created_at, updated_at, schedule_cron, last_run_at, run_count, current_run_id "
                     "FROM jobs"
                 )
             rows = await cursor.fetchall()

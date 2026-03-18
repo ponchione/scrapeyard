@@ -56,6 +56,7 @@ class Job(BaseModel):
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
     last_run_at: Optional[datetime] = None
     run_count: int = Field(default=0, description="Total number of runs")
+    current_run_id: Optional[str] = Field(default=None, description="Current queued or active run identifier")
 
 
 class ErrorRecord(BaseModel):

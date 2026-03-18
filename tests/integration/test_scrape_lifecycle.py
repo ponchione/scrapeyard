@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
+from scrapeyard.common.settings import get_settings
+from scrapeyard.api.dependencies import get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
 
 
@@ -15,6 +18,23 @@ project: integ
 name: async-scrape
 execution:
   mode: async
+  concurrency: 1
+  delay_between: 0
+  domain_rate_limit: 0
+target:
+  url: https://example.com
+  fetcher: basic
+  selectors:
+    title: h1
+"""
+
+
+def _sync_scrape_yaml() -> str:
+    return """
+project: integ
+name: sync-scrape
+execution:
+  mode: sync
   concurrency: 1
   delay_between: 0
   domain_rate_limit: 0
@@ -43,7 +63,7 @@ async def test_scrape_lifecycle_eventually_returns_results(client, monkeypatch):
         content=_async_scrape_yaml(),
         headers={"content-type": "application/x-yaml"},
     )
-    assert response.status_code in (200, 202)
+    assert response.status_code == 202
 
     payload = response.json()
     job_id = payload["job_id"]
@@ -79,7 +99,7 @@ async def test_errors_are_recorded_on_failed_scrape(client, monkeypatch):
         content=_async_scrape_yaml(),
         headers={"content-type": "application/x-yaml"},
     )
-    assert response.status_code in (200, 202)
+    assert response.status_code == 202
     job_id = response.json()["job_id"]
 
     for _ in range(40):
@@ -120,14 +140,14 @@ async def test_duplicate_adhoc_scrape_does_not_collide(client, monkeypatch):
         content=yaml_config,
         headers={"content-type": "application/x-yaml"},
     )
-    assert resp1.status_code in (200, 202), f"First submission failed: {resp1.status_code}"
+    assert resp1.status_code == 202, f"First submission failed: {resp1.status_code}"
 
     resp2 = await client.post(
         "/scrape",
         content=yaml_config,
         headers={"content-type": "application/x-yaml"},
     )
-    assert resp2.status_code in (200, 202), f"Second submission failed: {resp2.status_code}"
+    assert resp2.status_code == 202, f"Second submission failed: {resp2.status_code}"
 
     job_id_1 = resp1.json()["job_id"]
     job_id_2 = resp2.json()["job_id"]
@@ -146,3 +166,60 @@ async def test_duplicate_adhoc_scrape_does_not_collide(client, monkeypatch):
     suffix_pattern = re.compile(r"^async-scrape-[0-9a-f]{8}$")
     assert suffix_pattern.match(name1), f"Name {name1!r} doesn't match expected suffix pattern"
     assert suffix_pattern.match(name2), f"Name {name2!r} doesn't match expected suffix pattern"
+
+
+@pytest.mark.asyncio
+async def test_sync_scrape_waits_for_queued_completion(client, monkeypatch):
+    async def _fake_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Hello"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+
+    response = await client.post(
+        "/scrape",
+        content=_sync_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "complete"
+    assert "Hello" in json.dumps(payload["results"])
+
+
+@pytest.mark.asyncio
+async def test_sync_scrape_returns_202_when_timeout_expires(client, monkeypatch):
+    pool = get_worker_pool()
+    settings = get_settings()
+    original_timeout = settings.sync_timeout_seconds
+    settings.sync_timeout_seconds = 0
+
+    class _SlowQueuedJob:
+        async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
+            del poll_delay
+            if timeout == 0:
+                raise asyncio.TimeoutError
+            await asyncio.sleep(0.01)
+
+    async def _enqueue(*_args, **_kwargs):
+        return _SlowQueuedJob()
+
+    monkeypatch.setattr(pool, "enqueue", _enqueue)
+
+    response = await client.post(
+        "/scrape",
+        content=_sync_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    settings.sync_timeout_seconds = original_timeout
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert payload["poll_url"].startswith("/results/")

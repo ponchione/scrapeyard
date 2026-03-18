@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -85,6 +87,26 @@ class TestResolvedTargets:
         config = ScrapeConfig(**_tier1_config(target=_target_dict(item_selector=".product-card")))
         assert config.target is not None
         assert config.target.item_selector == ".product-card"
+
+    def test_target_with_browser_and_adaptive_domain_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    adaptive_domain="example.com",
+                    browser={
+                        "timeout_ms": 90000,
+                        "disable_resources": False,
+                        "network_idle": True,
+                    },
+                )
+            )
+        )
+        assert config.target is not None
+        assert config.target.adaptive_domain == "example.com"
+        assert config.target.browser is not None
+        assert config.target.browser.timeout_ms == 90000
+        assert config.target.browser.disable_resources is False
+        assert config.target.browser.network_idle is True
 
 
 # --- Transform Parser ---
@@ -201,6 +223,14 @@ targets:
 """
         with pytest.raises(ValidationError, match="not both"):
             load_config(yaml_str)
+
+    def test_root_template_yaml_loads(self):
+        template_path = Path(__file__).resolve().parents[2] / "template.yaml"
+        config = load_config(template_path.read_text())
+        assert config.project == "example-project"
+        assert config.target is not None
+        assert config.target.browser is not None
+        assert config.target.adaptive_domain is None
 
 
 # --- Webhook Config ---
