@@ -27,6 +27,7 @@ def _make_error(**overrides) -> ErrorRecord:
         "error_type": ErrorType.http_error,
         "http_status": 503,
         "fetcher_used": "httpx",
+        "error_message": "HTTP 503",
         "selectors_matched": {"h1": 1},
         "action_taken": ActionTaken.retry,
     }
@@ -45,18 +46,20 @@ async def test_log_and_query_all(store):
     assert r.project == "acme"
     assert r.error_type == ErrorType.http_error
     assert r.http_status == 503
+    assert r.error_message == "HTTP 503"
     assert r.selectors_matched == {"h1": 1}
     assert r.action_taken == ActionTaken.retry
     assert r.resolved is False
 
 
 async def test_log_error_null_optionals(store):
-    err = _make_error(http_status=None, selectors_matched=None)
+    err = _make_error(http_status=None, error_message=None, selectors_matched=None)
     await store.log_error(err)
 
     results = await store.query_errors(ErrorFilters())
     assert len(results) == 1
     assert results[0].http_status is None
+    assert results[0].error_message is None
     assert results[0].selectors_matched is None
 
 

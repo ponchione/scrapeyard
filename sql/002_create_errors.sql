@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS errors (
     error_type       TEXT NOT NULL,
     http_status      INTEGER,
     fetcher_used     TEXT NOT NULL,
+    error_message    TEXT,
     selectors_matched TEXT,
     action_taken     TEXT NOT NULL,
     resolved         INTEGER NOT NULL DEFAULT 0

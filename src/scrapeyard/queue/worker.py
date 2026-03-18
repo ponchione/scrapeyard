@@ -216,13 +216,23 @@ async def scrape_task(
                     circuit_breaker.record_success(domain)
                     result = await _apply_validation(target_cfg, domain, adaptive, result)
                 else:
-                    logger.info("Recording failure for domain %s", domain)
+                    logger.warning(
+                        "Recording failure for domain %s type=%s status=%s detail=%s",
+                        domain,
+                        result.error_type.value if result.error_type else ErrorType.http_error.value,
+                        result.http_status,
+                        result.error_detail or "; ".join(result.errors) or "unknown error",
+                    )
                     circuit_breaker.record_failure(domain)
-                    for err_msg in result.errors:
+                    for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
                         await _log_error(
                             job_id, config.project, target_cfg.url, 1,
-                            ErrorType.http_error, None, target_cfg.fetcher.value,
-                            ActionTaken.fail, error_store,
+                            result.error_type or ErrorType.http_error,
+                            result.http_status,
+                            target_cfg.fetcher.value,
+                            ActionTaken.fail,
+                            error_store,
+                            error_message=err_msg,
                         )
 
                 return result
@@ -360,6 +370,7 @@ async def _log_error(
     fetcher_used: str,
     action: ActionTaken,
     error_store: ErrorStore,
+    error_message: str | None = None,
 ) -> None:
     """Helper to log a structured error record."""
     record = ErrorRecord(
@@ -370,6 +381,7 @@ async def _log_error(
         error_type=error_type,
         http_status=http_status,
         fetcher_used=fetcher_used,
+        error_message=error_message,
         action_taken=action,
     )
     await error_store.log_error(record)

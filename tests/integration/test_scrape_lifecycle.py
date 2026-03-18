@@ -95,6 +95,7 @@ async def test_errors_are_recorded_on_failed_scrape(client, monkeypatch):
     errors = errors_response.json()
     assert len(errors) >= 1
     assert all(e["job_id"] == job_id for e in errors)
+    assert any(e["error_message"] == "boom" for e in errors)
 
 
 @pytest.mark.asyncio

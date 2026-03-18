@@ -80,6 +80,9 @@ Start the API:
 poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
 ```
 
+When running outside Docker, override the default `/data/...` paths to writable
+local directories before starting the service.
+
 Health check:
 
 ```bash
@@ -107,7 +110,9 @@ Stop:
 docker compose down
 ```
 
-The default compose setup mounts a named volume at `/data` for databases, results, adaptive matching state, and logs.
+The default compose setup mounts a named volume at `/data` for databases,
+results, adaptive matching state, and logs. The Docker image also installs
+Playwright Chromium so `fetcher: dynamic` works inside the container.
 
 ## Environment Variables
 
@@ -133,6 +138,8 @@ Example:
 ```bash
 SCRAPEYARD_DB_DIR=/tmp/scrapeyard/db \
 SCRAPEYARD_STORAGE_RESULTS_DIR=/tmp/scrapeyard/results \
+SCRAPEYARD_ADAPTIVE_DIR=/tmp/scrapeyard/adaptive \
+SCRAPEYARD_LOG_DIR=/tmp/scrapeyard/logs \
 poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
 ```
 
@@ -172,6 +179,29 @@ targets:
       title: article h2 a::text
       href: article h2 a::attr(href)
 ```
+
+### Item-scoped extraction
+
+```yaml
+project: demo
+name: product-cards
+
+target:
+  url: https://example.com/products
+  fetcher: basic
+  item_selector: .product-card
+  selectors:
+    name: .title::text
+    price: .price::text
+    url:
+      query: a::attr(href)
+      transform: prepend("https://example.com")
+```
+
+When `item_selector` is set, Scrapeyard matches each repeated item container and
+applies the field selectors relative to that item, returning one record per
+match instead of page-wide parallel arrays.
+This is the preferred mode for product grids and other repeated card layouts.
 
 ### Scheduled job
 
@@ -237,6 +267,7 @@ target:
 | --- | --- | --- |
 | `url` | string | Target URL |
 | `fetcher` | enum | `basic`, `stealthy`, `dynamic` |
+| `item_selector` | selector | Optional repeated-item container selector; field selectors run relative to each matched item |
 | `selectors` | map | Field name to selector |
 | `pagination` | object | Optional pagination config |
 
@@ -333,6 +364,10 @@ webhook:
 
 Webhooks only fire on async jobs (worker pool path). The sync `POST /scrape` path does not trigger webhooks. Dispatch is fire-and-forget — failures are logged at WARNING but do not affect job status.
 
+If Scrapeyard is running in Docker and your consumer is running on the host,
+use `http://host.docker.internal:<port>/...` rather than `localhost` in the
+webhook URL.
+
 The webhook POST body looks like:
 
 ```json
@@ -351,6 +386,11 @@ The webhook POST body looks like:
   "completed_at": "2026-03-16T08:01:30Z"
 }
 ```
+
+For ad hoc `POST /scrape` jobs, the stored job directory name includes a random
+suffix to avoid collisions. The webhook payload `name` remains the config name,
+while `result_path` reflects the suffixed stored directory. Consumers should
+key off `payload.name`, not infer identity from `result_path`.
 
 ## API
 
@@ -496,6 +536,9 @@ Supported `error_type` values:
 - `browser_error`
 - `timeout`
 
+Error records may also include `error_message`, which is useful for diagnosing
+browser startup failures, timeouts, and other fetch exceptions.
+
 ### `GET /health`
 
 Returns overall status, uptime, worker pool usage, and a per-project summary derived from stored job states.
@@ -588,6 +631,13 @@ A background cleanup loop runs every 6 hours and:
 - prunes old runs beyond `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB`
 
 Cleanup affects result artifacts and `results_meta.db`. Job records remain in `jobs.db` unless explicitly deleted.
+
+## Common Errors
+
+- `415 Content-Type must be application/x-yaml`: add `-H 'Content-Type: application/x-yaml'`
+- `404 No results found`: the job may still be running or may have failed before saving artifacts; check `GET /jobs/{job_id}` and `GET /errors`
+- `503 Service unavailable`: the worker pool rejected the job because the service is at capacity or above its memory limit
+- `browser_error` with missing Playwright executable: rebuild the Docker image so the bundled browser runtime is installed
 
 ## Development
 
