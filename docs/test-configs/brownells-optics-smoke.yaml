@@ -1,0 +1,64 @@
+# Brownells optics smoke test
+#
+# Purpose:
+# - Verify async queue submission from an external client
+# - Verify dynamic/browser execution still works
+# - Verify selectors extract at least a few product cards
+# - Verify webhook delivery back to Eyeboxapp
+#
+# Notes:
+# - Keeps pagination to one page to reduce runtime and flake surface
+# - Keeps adaptive disabled so the first pass isolates base scraping behavior
+
+project: eyebox
+name: brownells-optics-smoke
+adaptive: false
+
+webhook:
+  url: http://host.docker.internal:19057/ingest
+  on: [complete, partial, failed]
+
+execution:
+  concurrency: 1
+  delay_between: 1
+  domain_rate_limit: 1
+  mode: async
+  priority: normal
+  fail_strategy: partial
+
+retry:
+  max_attempts: 2
+  backoff: exponential
+  backoff_max: 15
+  retryable_status: [429, 500, 502, 503, 504]
+
+validation:
+  required_fields: [name, price, url]
+  min_results: 3
+  on_empty: warn
+
+output:
+  format: json
+  group_by: merge
+
+target:
+  url: https://www.brownells.com/optics/reflex-red-dot-sights/red-dot-sights/
+  fetcher: dynamic
+  adaptive_domain: brownells.com
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+  item_selector: "div.category-slider__item.pl-item"
+  selectors:
+    name: "a.category-slider__item__title::text"
+    price: "div.category-slider__item__price--inline > p.category-slider__item__price::text"
+    original_price: "p.category-slider__item__price__old::text"
+    url:
+      query: "a.category-slider__item__title::attr(href)"
+      transform: 'prepend("https://www.brownells.com")'
+    stock_status: "div.product-item-inventory span::text"
+    image_url: "a.category-slider__item__img img::attr(src)"
+  pagination:
+    next: "li.plp-pagination-next a"
+    max_pages: 1
