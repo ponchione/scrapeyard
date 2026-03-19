@@ -28,6 +28,9 @@ respx = "^0.22.0"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live_redis: exercises the real Redis-backed queue path",
+]
 
 [tool.ruff]
 target-version = "py310"

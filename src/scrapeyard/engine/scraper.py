@@ -42,6 +42,32 @@ def _adaptive_storage_url(target: TargetConfig) -> str:
     return f"{scheme}://{adaptive_domain}/"
 
 
+def _adaptive_fetch_kwargs(
+    target: TargetConfig,
+    *,
+    adaptive: bool,
+    adaptive_dir: str,
+) -> dict[str, Any]:
+    """Return parser kwargs for Scrapling adaptive matching.
+
+    Scrapling 0.2.x exposes adaptive parser configuration via ``custom_config``
+    across both basic and browser-backed fetchers. Browser fetchers do not
+    accept legacy kwargs such as ``auto_save``.
+    """
+    if not adaptive:
+        return {}
+
+    return {
+        "custom_config": {
+            "auto_match": True,
+            "storage_args": {
+                "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
+                "url": _adaptive_storage_url(target),
+            },
+        },
+    }
+
+
 @dataclass
 class TargetResult:
     """Result of scraping a single target URL."""
@@ -130,22 +156,11 @@ async def _fetch_page(
     Raises :class:`RetryableError` for retryable HTTP status codes,
     :class:`FetchError` for other error statuses.
     """
-    # Only pass adaptive kwargs when adaptive tracking is enabled.
-    # Scrapling's basic Fetcher cannot handle custom_config (unhashable dict).
-    if adaptive:
-        call_kwargs: dict[str, Any] = {
-            "custom_config": {
-                "auto_match": True,
-                "storage_args": {
-                    "storage_file": str(Path(adaptive_dir) / "scrapling.db"),
-                    "url": _adaptive_storage_url(target),
-                },
-            },
-            "auto_save": True,
-            "adaptor": True,
-        }
-    else:
-        call_kwargs = {}
+    call_kwargs = _adaptive_fetch_kwargs(
+        target,
+        adaptive=adaptive,
+        adaptive_dir=adaptive_dir,
+    )
 
     if fetcher_type == FetcherType.basic:
         # Fetcher.get is synchronous — run in thread pool.

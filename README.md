@@ -63,6 +63,32 @@ Request flow:
 - `sql/`: SQLite schema creation scripts
 - `tests/`: unit and integration tests
 
+## Testing
+
+Fast local checks:
+
+```bash
+poetry run ruff check src tests
+poetry run pytest -q
+```
+
+Live Redis queue-path automation:
+
+```bash
+./scripts/run_live_redis_tests.sh
+```
+
+This runner starts an isolated Redis container on host port `56379`, runs the
+`live_redis` pytest marker, then tears the container down. During a normal
+`poetry run pytest`, these tests skip cleanly if that Redis instance is not
+available.
+
+Testing references:
+
+- Strategy: [docs/TESTING-STRATEGY.md](/home/gernsback/source/scrapeyard/docs/TESTING-STRATEGY.md)
+- Remaining automation backlog: [docs/TESTING-BACKLOG.md](/home/gernsback/source/scrapeyard/docs/TESTING-BACKLOG.md)
+- Brownells manual fixtures: [docs/test-configs/brownells-optics-smoke.yaml](/home/gernsback/source/scrapeyard/docs/test-configs/brownells-optics-smoke.yaml) and [docs/test-configs/brownells-optics-validation.yaml](/home/gernsback/source/scrapeyard/docs/test-configs/brownells-optics-validation.yaml)
+
 ## Requirements
 
 - Python `3.10+`

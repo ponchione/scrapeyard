@@ -30,8 +30,6 @@ async def test_adaptive_db_path_passed_to_fetcher(tmp_path):
 
         call_kwargs = mock_fetcher.get.call_args
         custom_config = call_kwargs.kwargs.get("custom_config") or call_kwargs[1].get("custom_config")
-        assert call_kwargs.kwargs["auto_save"] is True
-        assert call_kwargs.kwargs["adaptor"] is True
         assert custom_config["auto_match"] is True
         assert custom_config["storage_args"]["storage_file"] == str(adaptive_dir / "scrapling.db")
         assert custom_config["storage_args"]["url"] == "http://example.com/"
@@ -84,9 +82,36 @@ async def test_adaptive_false_passes_no_adaptive_kwargs(tmp_path):
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
         call_kwargs = mock_fetcher.get.call_args
-        assert "auto_save" not in call_kwargs.kwargs
-        assert "adaptor" not in call_kwargs.kwargs
         assert "custom_config" not in call_kwargs.kwargs
+
+
+@pytest.mark.asyncio
+async def test_dynamic_fetcher_adaptive_uses_custom_config_only(tmp_path):
+    """Browser-backed adaptive fetches should only pass supported kwargs."""
+    adaptive_dir = tmp_path / "adaptive"
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.css.return_value = []
+
+    target = TargetConfig(
+        url="https://www.example.com/products",
+        fetcher=FetcherType.dynamic,
+        adaptive_domain="example.com",
+        selectors={"title": "h1"},
+    )
+    retry = RetryConfig()
+
+    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+        mock_fetcher.async_fetch.return_value = mock_response
+        await scrape_target(target, adaptive=True, retry=retry, adaptive_dir=str(adaptive_dir))
+
+        call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
+        assert "auto_save" not in call_kwargs
+        assert "adaptor" not in call_kwargs
+        assert call_kwargs["custom_config"]["auto_match"] is True
+        assert call_kwargs["custom_config"]["storage_args"]["storage_file"] == str(adaptive_dir / "scrapling.db")
+        assert call_kwargs["custom_config"]["storage_args"]["url"] == "https://example.com/"
 
 
 @pytest.mark.asyncio
