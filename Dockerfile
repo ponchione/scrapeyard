@@ -20,12 +20,15 @@ COPY --from=builder /build/requirements.txt .
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        libdbus-glib-1-2 \
+        libgtk-3-0t64 \
         libxml2-dev \
         libxslt1-dev \
     && pip install --no-cache-dir -r requirements.txt \
     && apt-get purge -y build-essential libxml2-dev libxslt1-dev \
     && apt-get autoremove -y \
     && python -m playwright install --with-deps chromium \
+    && python -m camoufox fetch \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy application source.
