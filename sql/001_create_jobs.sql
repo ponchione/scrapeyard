@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at   TEXT NOT NULL,
     updated_at   TEXT,
     schedule_cron TEXT,
+    schedule_enabled INTEGER NOT NULL DEFAULT 1,
     last_run_at  TEXT,
     run_count    INTEGER NOT NULL DEFAULT 0,
     current_run_id TEXT,

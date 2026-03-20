@@ -56,6 +56,7 @@ class LocalResultStore:
         format: str,
         *,
         run_id: str | None = None,
+        status: str = "complete",
         record_count: int | None = None,
         file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta:
@@ -93,7 +94,7 @@ class LocalResultStore:
                     job_id,
                     project,
                     run_id,
-                    "complete",
+                    status,
                     record_count,
                     str(run_dir),
                     format,

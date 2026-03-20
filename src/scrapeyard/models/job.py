@@ -54,6 +54,7 @@ class Job(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: Optional[datetime] = None
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
+    schedule_enabled: bool = Field(default=True, description="Whether the schedule is enabled")
     last_run_at: Optional[datetime] = None
     run_count: int = Field(default=0, description="Total number of runs")
     current_run_id: Optional[str] = Field(default=None, description="Current queued or active run identifier")

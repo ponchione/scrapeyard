@@ -25,6 +25,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.models.job import ErrorFilters, ErrorType, Job, JobStatus
 from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
 from scrapeyard.scheduler.cron import SchedulerService
+from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 
 router = APIRouter()
@@ -197,8 +198,20 @@ async def create_job(
         name=config.name,
         config_yaml=config_yaml,
         schedule_cron=config.schedule.cron,
+        schedule_enabled=config.schedule.enabled,
     )
-    await job_store.save_job(job)
+    try:
+        await job_store.save_job(job)
+    except DuplicateJobError as exc:
+        return Response(
+            content=_json_encode({
+                "error": (
+                    f"Job name {exc.name!r} already exists in project {exc.project!r}"
+                )
+            }),
+            status_code=409,
+            media_type="application/json",
+        )
     scheduler.register_job(job.job_id, config.schedule.cron, enabled=config.schedule.enabled)
     return {
         "job_id": job.job_id,
@@ -362,6 +375,7 @@ def _job_to_dict(job: Job) -> dict[str, Any]:
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
         "schedule_cron": job.schedule_cron,
+        "schedule_enabled": job.schedule_enabled,
         "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
         "run_count": job.run_count,
     }

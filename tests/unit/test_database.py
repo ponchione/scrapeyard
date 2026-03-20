@@ -28,6 +28,9 @@ async def test_init_db_creates_tables(tmp_path):
         )
         row = await cursor.fetchone()
         assert row is not None
+        cursor = await db.execute("PRAGMA table_info(jobs)")
+        columns = {column[1] for column in await cursor.fetchall()}
+        assert "schedule_enabled" in columns
 
     async with get_db("errors.db") as db:
         cursor = await db.execute(
