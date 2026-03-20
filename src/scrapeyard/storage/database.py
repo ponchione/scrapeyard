@@ -9,11 +9,11 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-# Mapping of database filename to its initial migration script.
-_DB_MIGRATIONS: dict[str, str] = {
-    "jobs.db": "001_create_jobs.sql",
-    "errors.db": "002_create_errors.sql",
-    "results_meta.db": "003_create_results_meta.sql",
+# Mapping of database filename to its migration scripts (executed in order).
+_DB_MIGRATIONS: dict[str, list[str]] = {
+    "jobs.db": ["001_create_jobs.sql", "004_create_job_runs.sql"],
+    "errors.db": ["002_create_errors.sql"],
+    "results_meta.db": ["003_create_results_meta.sql"],
 }
 
 # Module-level cache of database directory after init.
@@ -52,37 +52,12 @@ async def init_db(db_dir: str) -> None:
     # Resolve to an actual filesystem path so we can read the files.
     sql_dir = Path(str(sql_dir)).resolve()
 
-    for db_name, migration_file in _DB_MIGRATIONS.items():
-        migration_sql = (sql_dir / migration_file).read_text()
+    for db_name, migration_files in _DB_MIGRATIONS.items():
         async with aiosqlite.connect(db_path / db_name) as db:
-            await db.executescript(migration_sql)
-            if db_name == "jobs.db":
-                await _ensure_job_columns(db)
-            if db_name == "errors.db":
-                await _ensure_error_columns(db)
+            for migration_file in migration_files:
+                migration_sql = (sql_dir / migration_file).read_text()
+                await db.executescript(migration_sql)
             await db.commit()
-
-
-async def _ensure_job_columns(db: aiosqlite.Connection) -> None:
-    """Backfill newer job-table columns for existing databases."""
-    cursor = await db.execute("PRAGMA table_info(jobs)")
-    rows = await cursor.fetchall()
-    columns = {row[1] for row in rows}
-    if "current_run_id" not in columns:
-        await db.execute("ALTER TABLE jobs ADD COLUMN current_run_id TEXT")
-    if "schedule_enabled" not in columns:
-        await db.execute(
-            "ALTER TABLE jobs ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 1"
-        )
-
-
-async def _ensure_error_columns(db: aiosqlite.Connection) -> None:
-    """Backfill newer error-table columns for existing databases."""
-    cursor = await db.execute("PRAGMA table_info(errors)")
-    rows = await cursor.fetchall()
-    columns = {row[1] for row in rows}
-    if "error_message" not in columns:
-        await db.execute("ALTER TABLE errors ADD COLUMN error_message TEXT")
 
 
 @asynccontextmanager

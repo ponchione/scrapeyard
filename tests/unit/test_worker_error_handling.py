@@ -68,7 +68,6 @@ async def test_scrape_task_skips_completed_duplicate_run():
     job = _make_job(status=JobStatus.complete).model_copy(
         update={
             "current_run_id": "run-1",
-            "last_run_at": datetime.now(timezone.utc),
         }
     )
     job_store = AsyncMock()

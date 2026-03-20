@@ -38,7 +38,6 @@ validation:
   on_empty: warn
 
 output:
-  format: json
   group_by: merge
 
 target:

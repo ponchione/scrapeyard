@@ -149,6 +149,7 @@ class WorkerPool:
         needs_browser: bool = False,
         *,
         run_id: str | None = None,
+        trigger: str = "adhoc",
     ) -> QueueJobHandle:
         """Enqueue a scrape job and return a handle for awaiting completion."""
         if not self._check_memory():
@@ -167,6 +168,7 @@ class WorkerPool:
             config_yaml,
             run_id,
             needs_browser=needs_browser,
+            trigger=trigger,
             _job_id=run_id,
             _queue_name=self._queue_name,
             _defer_until=defer_until,
@@ -200,6 +202,7 @@ class WorkerPool:
         run_id: str | None = None,
         *,
         needs_browser: bool = False,
+        trigger: str = "adhoc",
     ) -> dict[str, str]:
         """Execute one queued scrape job under browser-concurrency limits."""
         self._active_tasks += 1
@@ -208,15 +211,29 @@ class WorkerPool:
                 async with self._browser_semaphore:
                     self._active_browsers += 1
                     try:
-                        await self._execute(job_id, config_yaml, run_id=run_id)
+                        await self._execute(
+                            job_id, config_yaml,
+                            run_id=run_id, trigger=trigger,
+                        )
                     finally:
                         self._active_browsers -= 1
             else:
-                await self._execute(job_id, config_yaml, run_id=run_id)
+                await self._execute(
+                    job_id, config_yaml, run_id=run_id, trigger=trigger,
+                )
         finally:
             self._active_tasks -= 1
         return {"job_id": job_id}
 
-    async def _execute(self, job_id: str, config_yaml: str, *, run_id: str | None = None) -> None:
+    async def _execute(
+        self,
+        job_id: str,
+        config_yaml: str,
+        *,
+        run_id: str | None = None,
+        trigger: str = "adhoc",
+    ) -> None:
         if self._task_handler is not None:
-            await self._task_handler(job_id, config_yaml, run_id=run_id)
+            await self._task_handler(
+                job_id, config_yaml, run_id=run_id, trigger=trigger,
+            )

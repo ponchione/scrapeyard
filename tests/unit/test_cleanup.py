@@ -41,8 +41,8 @@ async def _insert_meta(
     async with get_db("results_meta.db") as db:
         await db.execute(
             """INSERT INTO results_meta
-               (job_id, project, run_id, status, record_count, file_path, format, created_at)
-               VALUES (?, ?, ?, 'complete', 1, ?, 'json', ?)""",
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, 'complete', 1, ?, ?)""",
             (job_id, project, run_id, file_path, created_at),
         )
         await db.commit()

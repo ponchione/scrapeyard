@@ -10,23 +10,26 @@ from scrapeyard.storage.database import get_db
 
 
 def _row_to_error(row: tuple) -> ErrorRecord:
-    # Columns: id, job_id, project, target_url, attempt, timestamp,
+    # Columns: id, job_id, run_id, project, target_url, attempt, timestamp,
     #          error_type, http_status, fetcher_used, error_message,
     #          selectors_matched, action_taken, resolved
-    selectors = row[10]
+    selectors = row[11]
     return ErrorRecord(
         job_id=row[1],
-        project=row[2],
-        target_url=row[3],
-        attempt=row[4],
-        timestamp=parse_dt(row[5]),
-        error_type=ErrorType(row[6]),
-        http_status=row[7],
-        fetcher_used=row[8],
-        error_message=row[9],
-        selectors_matched=json.loads(selectors) if selectors is not None else None,
-        action_taken=ActionTaken(row[11]),
-        resolved=bool(row[12]),
+        run_id=row[2],
+        project=row[3],
+        target_url=row[4],
+        attempt=row[5],
+        timestamp=parse_dt(row[6]),
+        error_type=ErrorType(row[7]),
+        http_status=row[8],
+        fetcher_used=row[9],
+        error_message=row[10],
+        selectors_matched=(
+            json.loads(selectors) if selectors is not None else None
+        ),
+        action_taken=ActionTaken(row[12]),
+        resolved=bool(row[13]),
     )
 
 
@@ -36,12 +39,15 @@ class SQLiteErrorStore:
     async def log_error(self, error: ErrorRecord) -> None:
         async with get_db("errors.db") as db:
             await db.execute(
-                """INSERT INTO errors (job_id, project, target_url, attempt, timestamp,
-                   error_type, http_status, fetcher_used, error_message,
-                   selectors_matched, action_taken, resolved)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO errors
+                   (job_id, run_id, project, target_url, attempt,
+                    timestamp, error_type, http_status, fetcher_used,
+                    error_message, selectors_matched, action_taken,
+                    resolved)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     error.job_id,
+                    error.run_id,
                     error.project,
                     error.target_url,
                     error.attempt,
@@ -75,9 +81,10 @@ class SQLiteErrorStore:
             params.append(filters.error_type.value)
 
         sql = (
-            "SELECT id, job_id, project, target_url, attempt, timestamp, "
-            "error_type, http_status, fetcher_used, error_message, selectors_matched, "
-            "action_taken, resolved FROM errors"
+            "SELECT id, job_id, run_id, project, target_url, attempt, "
+            "timestamp, error_type, http_status, fetcher_used, "
+            "error_message, selectors_matched, action_taken, resolved "
+            "FROM errors"
         )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)

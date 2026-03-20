@@ -59,15 +59,6 @@ class Priority(str, Enum):
     low = "low"
 
 
-class OutputFormat(str, Enum):
-    """Supported output formats."""
-
-    json = "json"
-    markdown = "markdown"
-    html = "html"
-    json_markdown = "json+markdown"
-
-
 class GroupBy(str, Enum):
     """Result grouping strategies."""
 
@@ -200,9 +191,8 @@ class ScheduleConfig(BaseModel):
 
 
 class OutputConfig(BaseModel):
-    """Output format and grouping settings."""
+    """Output grouping settings."""
 
-    format: OutputFormat = Field(default=OutputFormat.json, description="Output format")
     group_by: GroupBy = Field(default=GroupBy.target, description="Result grouping strategy")
 
 

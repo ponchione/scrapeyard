@@ -39,7 +39,6 @@ def _make_config_mock(*, webhook: WebhookConfig | None = None):
     cfg.schedule = None
     cfg.retry = MagicMock()
     cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-    cfg.output.format = "json"
     cfg.output.group_by = "target"
     cfg.webhook = webhook
     return cfg

@@ -1,8 +1,9 @@
-"""Stateless scrape task: orchestrates fetch → validate → format → store."""
+"""Stateless scrape task: orchestrates fetch → validate → store."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from datetime import datetime, timezone
@@ -12,25 +13,16 @@ from urllib.parse import urlparse
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FailStrategy, OnEmptyAction, OutputFormat
+from scrapeyard.config.schema import FailStrategy, GroupBy, OnEmptyAction
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, scrape_target
-from scrapeyard.formatters.factory import get_formatter
-from scrapeyard.formatters.json_fmt import format_json
-from scrapeyard.formatters.markdown_fmt import format_markdown
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.webhook.dispatcher import WebhookDispatcher
 from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
 logger = logging.getLogger(__name__)
-
-_OUTPUT_FORMAT_TO_SAVE: dict[OutputFormat, str] = {
-    OutputFormat.json: "json",
-    OutputFormat.markdown: "markdown",
-    OutputFormat.html: "html",
-    OutputFormat.json_markdown: "json+markdown",
-}
 
 
 async def scrape_task(
@@ -38,6 +30,7 @@ async def scrape_task(
     config_yaml: str,
     *,
     run_id: str | None = None,
+    trigger: str = "adhoc",
     job_store: JobStore,
     result_store: ResultStore,
     error_store: ErrorStore,
@@ -53,7 +46,7 @@ async def scrape_task(
     3. Iterates resolved targets, respecting concurrency / delay / rate limits.
     4. Applies circuit breaker per domain.
     5. Validates results.
-    6. Formats output and saves via *result_store*.
+    6. Saves output via *result_store*.
     7. Logs errors via *error_store*.
     8. Updates final job status.
     """
@@ -73,6 +66,24 @@ async def scrape_task(
             "updated_at": started_at,
         })
         await job_store.update_job(job)
+
+        if run_id is not None:
+            config_hash = hashlib.sha256(
+                config_yaml.encode()
+            ).hexdigest()
+            async with get_db("jobs.db") as db:
+                await db.execute(
+                    """INSERT INTO job_runs
+                       (run_id, job_id, status, trigger,
+                        config_hash, started_at)
+                       VALUES (?, ?, 'running', ?, ?, ?)""",
+                    (
+                        run_id, job_id, trigger,
+                        config_hash,
+                        started_at.isoformat(),
+                    ),
+                )
+                await db.commit()
 
         targets = config.resolved_targets()
         concurrency = config.execution.concurrency
@@ -104,6 +115,7 @@ async def scrape_task(
             action = ActionTaken(validation.action.value)
             await _log_error(
                 job_id,
+                run_id or "",
                 config.project,
                 target_cfg.url,
                 attempt,
@@ -152,6 +164,7 @@ async def scrape_task(
                 for _ in retry_result.errors:
                     await _log_error(
                         job_id,
+                        run_id or "",
                         config.project,
                         target_cfg.url,
                         attempt + 1,
@@ -170,6 +183,7 @@ async def scrape_task(
 
             await _log_error(
                 job_id,
+                run_id or "",
                 config.project,
                 target_cfg.url,
                 attempt + 1,
@@ -198,7 +212,8 @@ async def scrape_task(
                     logger.info("Circuit breaker open for %s", domain)
                     tr = TargetResult(url=target_cfg.url, status="failed", errors=[str(exc)])
                     await _log_error(
-                        job_id, config.project, target_cfg.url, 0,
+                        job_id, run_id or "", config.project,
+                        target_cfg.url, 0,
                         ErrorType.network_error, None, "circuit_breaker",
                         ActionTaken.circuit_break, error_store,
                     )
@@ -237,7 +252,8 @@ async def scrape_task(
                     circuit_breaker.record_failure(domain)
                     for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
                         await _log_error(
-                            job_id, config.project, target_cfg.url, 1,
+                            job_id, run_id or "", config.project,
+                            target_cfg.url, 1,
                             result.error_type or ErrorType.http_error,
                             result.http_status,
                             target_cfg.fetcher.value,
@@ -293,52 +309,80 @@ async def scrape_task(
         if flat_data:
             latest_job = await job_store.get_job(job_id)
             if _run_superseded(latest_job, run_id):
-                logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
+                logger.info(
+                    "Skipping result save for superseded job_id=%s run_id=%s",
+                    job_id, run_id,
+                )
                 return
-            fmt = config.output.format
-            group_by = config.output.group_by
             job_meta = {
                 "project": config.project,
                 "name": config.name,
                 "job_id": job_id,
                 "status": final_status.value,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
                 "errors": all_errors,
             }
-            formatted_results = [
-                {
-                    "url": tr.url,
-                    "status": tr.status,
-                    "data": tr.data[0] if len(tr.data) == 1 else tr.data,
-                }
-                for tr in all_results if tr.data
-            ]
+            group_by = config.output.group_by
 
-            save_fmt = _OUTPUT_FORMAT_TO_SAVE[fmt]
-
-            if fmt == OutputFormat.json_markdown:
-                json_output = format_json(job_meta, formatted_results, group_by)
-                markdown_output = format_markdown(job_meta, formatted_results, group_by)
-                save_meta = await result_store.save_result(
-                    job_id,
-                    json_output,
-                    save_fmt,
-                    run_id=run_id,
-                    status=final_status.value,
-                    record_count=len(flat_data),
-                    file_contents={"results.md": markdown_output},
-                )
+            if group_by == GroupBy.merge:
+                merged: list[Any] = []
+                for tr in all_results:
+                    for item in tr.data:
+                        if isinstance(item, dict):
+                            item["_source"] = urlparse(
+                                tr.url
+                            ).netloc
+                        merged.append(item)
+                output_data = {**job_meta, "results": merged}
             else:
-                formatter = get_formatter(fmt)
-                formatted = formatter(job_meta, formatted_results, group_by)
-                save_meta = await result_store.save_result(
-                    job_id,
-                    formatted,
-                    save_fmt,
-                    run_id=run_id,
-                    status=final_status.value,
-                    record_count=len(flat_data),
+                grouped: dict[str, Any] = {}
+                for tr in all_results:
+                    if not tr.data:
+                        continue
+                    domain = urlparse(tr.url).netloc
+                    grouped[domain] = {
+                        "status": tr.status,
+                        "count": len(tr.data),
+                        "data": tr.data,
+                    }
+                output_data = {
+                    **job_meta, "results": grouped,
+                }
+            save_meta = await result_store.save_result(
+                job_id,
+                output_data,
+                run_id=run_id,
+                status=final_status.value,
+                record_count=len(flat_data),
+            )
+
+        # Finalize run row.
+        if run_id is not None:
+            async with get_db("errors.db") as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM errors "
+                    "WHERE run_id = ?",
+                    (run_id,),
                 )
+                error_count = (await cursor.fetchone())[0]
+
+            async with get_db("jobs.db") as db:
+                await db.execute(
+                    """UPDATE job_runs
+                       SET status = ?, completed_at = ?,
+                           record_count = ?, error_count = ?
+                       WHERE run_id = ?""",
+                    (
+                        final_status.value,
+                        datetime.now(timezone.utc).isoformat(),
+                        len(flat_data),
+                        error_count,
+                        run_id,
+                    ),
+                )
+                await db.commit()
 
         # Webhook dispatch (fire-and-forget).
         completed_at = datetime.now(timezone.utc)
@@ -367,8 +411,6 @@ async def scrape_task(
         job = job.model_copy(update={
             "status": final_status,
             "updated_at": completed_at,
-            "last_run_at": completed_at,
-            "run_count": job.run_count + 1,
             "current_run_id": run_id,
         })
         await job_store.update_job(job)
@@ -383,6 +425,27 @@ async def scrape_task(
             await job_store.update_job(job)
         except Exception:
             logger.exception("Failed to mark job %s as failed", job_id)
+        if run_id is not None:
+            try:
+                async with get_db("jobs.db") as db:
+                    await db.execute(
+                        """UPDATE job_runs
+                           SET status = 'failed',
+                               completed_at = ?
+                           WHERE run_id = ?
+                             AND status = 'running'""",
+                        (
+                            datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            run_id,
+                        ),
+                    )
+                    await db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to finalize run %s", run_id,
+                )
 
 
 def _run_superseded(job: Any, run_id: str | None) -> bool:
@@ -413,6 +476,7 @@ def _should_skip_delivery(
 
 async def _log_error(
     job_id: str,
+    run_id: str,
     project: str,
     url: str,
     attempt: int,
@@ -426,6 +490,7 @@ async def _log_error(
     """Helper to log a structured error record."""
     record = ErrorRecord(
         job_id=job_id,
+        run_id=run_id,
         project=project,
         target_url=url,
         attempt=attempt,

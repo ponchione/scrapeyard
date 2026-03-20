@@ -63,11 +63,18 @@ def get_worker_pool() -> WorkerPool:
 
     webhook_dispatcher = get_webhook_dispatcher()
 
-    async def _task_handler(job_id: str, config_yaml: str, *, run_id: str | None = None) -> None:
+    async def _task_handler(
+        job_id: str,
+        config_yaml: str,
+        *,
+        run_id: str | None = None,
+        trigger: str = "adhoc",
+    ) -> None:
         await scrape_task(
             job_id,
             config_yaml,
             run_id=run_id,
+            trigger=trigger,
             job_store=job_store,
             result_store=result_store,
             error_store=error_store,
