@@ -133,4 +133,10 @@ class SchedulerService:
             priority,
             needs_browser,
             run_id=run_id,
+            trigger="scheduled",
         )
+
+    def get_next_run_time(self, job_id: str) -> datetime | None:
+        """Return the next scheduled fire time, or None if not scheduled."""
+        aps_job = self._scheduler.get_job(job_id)
+        return aps_job.next_run_time if aps_job else None

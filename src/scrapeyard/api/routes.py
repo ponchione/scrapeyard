@@ -130,6 +130,7 @@ async def scrape(
             config.execution.priority.value,
             needs_browser=has_browser_target,
             run_id=job.current_run_id,
+            trigger="adhoc",
         )
     except MemoryError:
         logger.warning("Rejecting async scrape job %s due to pool memory pressure", job.job_id)
@@ -152,15 +153,15 @@ async def scrape(
         return _queued_response(job.job_id)
 
     try:
-        result = await result_store.get_result(job.job_id)
+        payload = await result_store.get_result(job.job_id)
     except KeyError:
-        result = None
+        payload = None
     updated_job = await job_store.get_job(job.job_id)
     return Response(
         content=_json_encode({
             "job_id": job.job_id,
             "status": updated_job.status.value,
-            "results": result,
+            "results": payload.data if payload else None,
         }),
         status_code=200,
         media_type="application/json",
@@ -227,14 +228,29 @@ async def list_jobs(
     job_store: JobStore = Depends(get_job_store),
 ) -> list[dict[str, Any]]:
     """List jobs, optionally filtered by project."""
-    jobs = await job_store.list_jobs(project)
-    return [_job_to_dict(j) for j in jobs]
+    rows = await job_store.list_jobs_with_stats(project)
+    return [
+        {
+            "job_id": job.job_id,
+            "project": job.project,
+            "name": job.name,
+            "status": job.status.value,
+            "created_at": job.created_at.isoformat(),
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "schedule_cron": job.schedule_cron,
+            "schedule_enabled": job.schedule_enabled,
+            "run_count": run_count,
+            "last_run_at": last_run_at.isoformat() if last_run_at else None,
+        }
+        for job, run_count, last_run_at in rows
+    ]
 
 
 @router.get("/jobs/{job_id}", response_model=None)
 async def get_job(
     job_id: str,
     job_store: JobStore = Depends(get_job_store),
+    scheduler: SchedulerService = Depends(get_scheduler),
 ):
     """Get a single job by ID."""
     try:
@@ -245,7 +261,41 @@ async def get_job(
             status_code=404,
             media_type="application/json",
         )
-    return _job_to_dict(job)
+
+    runs = await job_store.get_job_runs(job_id, limit=10)
+    run_count, last_run_at = await job_store.get_job_run_stats(job_id)
+    next_run_at = scheduler.get_next_run_time(job_id)
+
+    return {
+        "job_id": job.job_id,
+        "project": job.project,
+        "name": job.name,
+        "status": job.status.value,
+        "config_yaml": job.config_yaml,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "schedule_cron": job.schedule_cron,
+        "schedule_enabled": job.schedule_enabled,
+        "next_run_at": next_run_at.isoformat() if next_run_at else None,
+        "run_count": run_count,
+        "last_run_at": last_run_at.isoformat() if last_run_at else None,
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "status": r.status.value if hasattr(r.status, "value") else r.status,
+                "trigger": r.trigger,
+                "config_hash": r.config_hash,
+                "started_at": r.started_at.isoformat()
+                    if hasattr(r.started_at, "isoformat") else r.started_at,
+                "completed_at": r.completed_at.isoformat()
+                    if r.completed_at and hasattr(r.completed_at, "isoformat")
+                    else r.completed_at,
+                "record_count": r.record_count,
+                "error_count": r.error_count,
+            }
+            for r in runs
+        ],
+    }
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
@@ -303,7 +353,7 @@ async def get_results(
         )
 
     try:
-        result = await result_store.get_result(job_id, run_id=run_id)
+        payload = await result_store.get_result(job_id, run_id=run_id)
     except KeyError:
         return Response(
             content=_json_encode({"error": f"No results found for job {job_id!r}"}),
@@ -311,7 +361,12 @@ async def get_results(
             media_type="application/json",
         )
 
-    return {"job_id": job_id, "status": job.status.value, "results": result}
+    return {
+        "job_id": job_id,
+        "run_id": payload.run_id,
+        "status": job.status.value,
+        "results": payload.data,
+    }
 
 
 @router.get("/errors")
@@ -350,6 +405,7 @@ async def get_errors(
     return [
         {
             "job_id": e.job_id,
+            "run_id": e.run_id,
             "project": e.project,
             "target_url": e.target_url,
             "attempt": e.attempt,
@@ -364,21 +420,6 @@ async def get_errors(
         }
         for e in errors
     ]
-
-
-def _job_to_dict(job: Job) -> dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "project": job.project,
-        "name": job.name,
-        "status": job.status.value,
-        "created_at": job.created_at.isoformat(),
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
-        "schedule_cron": job.schedule_cron,
-        "schedule_enabled": job.schedule_enabled,
-        "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
-        "run_count": job.run_count,
-    }
 
 
 def _json_encode(data: Any) -> bytes:

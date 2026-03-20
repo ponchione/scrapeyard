@@ -65,6 +65,7 @@ async def test_scheduler_respects_priority_and_browser(client, monkeypatch):
         needs_browser: bool = False,
         *,
         run_id: str | None = None,
+        trigger: str = "adhoc",
     ):
         enqueued.append((job_id, priority, needs_browser, run_id))
 
@@ -115,8 +116,9 @@ async def test_scheduler_assigns_distinct_run_ids_per_trigger(client, monkeypatc
         needs_browser: bool = False,
         *,
         run_id: str | None = None,
+        trigger: str = "adhoc",
     ):
-        del job_id, config_yaml, priority, needs_browser
+        del job_id, config_yaml, priority, needs_browser, trigger
         run_ids.append(run_id)
 
     monkeypatch.setattr(pool, "enqueue", capture_enqueue)

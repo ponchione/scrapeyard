@@ -41,7 +41,6 @@ def _make_config(*targets: MagicMock, on_empty: OnEmptyAction):
     cfg.schedule = None
     cfg.retry = MagicMock()
     cfg.validation = MagicMock(required_fields=["title"], min_results=1, on_empty=on_empty)
-    cfg.output.format = "json"
     cfg.output.group_by = "target"
     cfg.webhook = None
     return cfg

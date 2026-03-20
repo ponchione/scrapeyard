@@ -65,7 +65,6 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
         cfg.schedule = None
         cfg.retry = MagicMock()
         cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-        cfg.output.format = "json"
         cfg.output.group_by = "target"
 
         mock_scrape.side_effect = [success_result, fail_result]
@@ -107,7 +106,6 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
         cfg.schedule = None
         cfg.retry = MagicMock()
         cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-        cfg.output.format = "json"
         cfg.output.group_by = "target"
 
         mock_scrape.side_effect = [success_result, fail_result]
@@ -150,7 +148,6 @@ async def test_continue_completes_even_with_failures(mock_stores):
         cfg.schedule = None
         cfg.retry = MagicMock()
         cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-        cfg.output.format = "json"
         cfg.output.group_by = "target"
 
         mock_scrape.side_effect = [success_result, fail_result]
@@ -194,7 +191,6 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
         cfg.schedule = None
         cfg.retry = MagicMock()
         cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-        cfg.output.format = "json"
         cfg.output.group_by = "target"
 
         mock_scrape.return_value = success_result
@@ -237,7 +233,6 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
         cfg.schedule = None
         cfg.retry = MagicMock()
         cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-        cfg.output.format = "json"
         cfg.output.group_by = "target"
 
         mock_scrape.side_effect = [success_result, fail_result]

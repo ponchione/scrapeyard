@@ -64,6 +64,7 @@ async def test_app(monkeypatch):
         needs_browser: bool = False,
         *,
         run_id: str | None = None,
+        trigger: str = "adhoc",
     ) -> _FakeQueuedJob:
         del priority, needs_browser
         task = asyncio.create_task(
@@ -71,6 +72,7 @@ async def test_app(monkeypatch):
                 job_id,
                 config_yaml,
                 run_id=run_id,
+                trigger=trigger,
                 job_store=job_store,
                 result_store=result_store,
                 error_store=error_store,

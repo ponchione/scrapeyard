@@ -24,7 +24,7 @@ async def store(tmp_path):
 @pytest.mark.asyncio
 async def test_delete_expired_removes_old_results(store, tmp_path):
     # Save a result.
-    meta = await store.save_result("job-1", [{"url": "http://example.com"}], "json")
+    meta = await store.save_result("job-1", [{"url": "http://example.com"}])
     run_id = meta.run_id
 
     # Manually backdate the created_at to 31 days ago.
@@ -52,7 +52,7 @@ async def test_delete_expired_removes_old_results(store, tmp_path):
 
 @pytest.mark.asyncio
 async def test_delete_expired_keeps_fresh_results(store):
-    meta = await store.save_result("job-2", [{"url": "http://example.com"}], "json")
+    meta = await store.save_result("job-2", [{"url": "http://example.com"}])
     run_id = meta.run_id
     deleted = await store.delete_expired(30)
     assert deleted == 0

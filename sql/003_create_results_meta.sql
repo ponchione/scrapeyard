@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS results_meta (
     status       TEXT NOT NULL,
     record_count INTEGER,
     file_path    TEXT NOT NULL,
-    format       TEXT NOT NULL,
     created_at   TEXT NOT NULL
 );
 

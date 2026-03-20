@@ -55,15 +55,36 @@ class Job(BaseModel):
     updated_at: Optional[datetime] = None
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
     schedule_enabled: bool = Field(default=True, description="Whether the schedule is enabled")
-    last_run_at: Optional[datetime] = None
-    run_count: int = Field(default=0, description="Total number of runs")
-    current_run_id: Optional[str] = Field(default=None, description="Current queued or active run identifier")
+    current_run_id: Optional[str] = Field(
+        default=None, description="Current queued or active run identifier"
+    )
+
+
+class JobRun(BaseModel):
+    """Represents a single execution of a scrape job."""
+
+    run_id: str = Field(..., description="Unique run identifier")
+    job_id: str = Field(..., description="Parent job identifier")
+    status: JobStatus = Field(
+        default=JobStatus.running, description="Run outcome"
+    )
+    trigger: str = Field(
+        ..., description="What initiated this run: adhoc, scheduled, manual"
+    )
+    config_hash: str = Field(
+        ..., description="SHA-256 of the config YAML used for this run"
+    )
+    started_at: datetime = Field(default_factory=_utcnow)
+    completed_at: Optional[datetime] = None
+    record_count: Optional[int] = None
+    error_count: int = Field(default=0)
 
 
 class ErrorRecord(BaseModel):
     """Structured error record per spec section 5.2."""
 
     job_id: str
+    run_id: str = Field(..., description="Run that produced this error")
     project: str
     target_url: str
     attempt: int

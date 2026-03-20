@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol
 
-from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job
-from scrapeyard.storage.result_store import SaveResultMeta
+from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun
+from scrapeyard.storage.result_store import ResultPayload, SaveResultMeta
 
 
 class JobStore(Protocol):
@@ -21,6 +22,18 @@ class JobStore(Protocol):
 
     async def delete_job(self, job_id: str) -> None: ...
 
+    async def get_job_runs(
+        self, job_id: str, limit: int = 10,
+    ) -> list[JobRun]: ...
+
+    async def get_job_run_stats(
+        self, job_id: str,
+    ) -> tuple[int, datetime | None]: ...
+
+    async def list_jobs_with_stats(
+        self, project: str | None = None,
+    ) -> list[tuple[Job, int, datetime | None]]: ...
+
 
 class ResultStore(Protocol):
     """Async interface for scrape result persistence."""
@@ -29,15 +42,15 @@ class ResultStore(Protocol):
         self,
         job_id: str,
         data: Any,
-        format: str,
         *,
         run_id: str | None = None,
         status: str = "complete",
         record_count: int | None = None,
-        file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta: ...
 
-    async def get_result(self, job_id: str, run_id: str | None = None) -> Any: ...
+    async def get_result(
+        self, job_id: str, run_id: str | None = None,
+    ) -> ResultPayload: ...
 
     async def delete_results(self, job_id: str) -> None: ...
 
@@ -49,4 +62,6 @@ class ErrorStore(Protocol):
 
     async def log_error(self, error: ErrorRecord) -> None: ...
 
-    async def query_errors(self, filters: ErrorFilters) -> list[ErrorRecord]: ...
+    async def query_errors(
+        self, filters: ErrorFilters,
+    ) -> list[ErrorRecord]: ...

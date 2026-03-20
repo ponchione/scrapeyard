@@ -20,6 +20,7 @@ async def store(tmp_path):
 def _make_error(**overrides) -> ErrorRecord:
     defaults = {
         "job_id": "j-1",
+        "run_id": "run-1",
         "project": "acme",
         "target_url": "https://example.com",
         "attempt": 1,

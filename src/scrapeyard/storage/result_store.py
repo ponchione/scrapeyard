@@ -14,6 +14,14 @@ from scrapeyard.storage.database import get_db
 
 
 @dataclass(frozen=True, slots=True)
+class ResultPayload:
+    """Wrapper returned by get_result with run context."""
+
+    run_id: str
+    data: Any
+
+
+@dataclass(frozen=True, slots=True)
 class SaveResultMeta:
     """Metadata returned from a save_result call."""
 
@@ -21,14 +29,6 @@ class SaveResultMeta:
     file_path: str
     record_count: int | None
 
-
-# Supported format → filename mapping.
-_FORMAT_FILES: dict[str, list[str]] = {
-    "json": ["results.json"],
-    "markdown": ["results.md"],
-    "html": ["raw.html"],
-    "json+markdown": ["results.json", "results.md"],
-}
 
 class LocalResultStore:
     """Stores scrape results on the local filesystem with metadata in SQLite.
@@ -53,16 +53,11 @@ class LocalResultStore:
         self,
         job_id: str,
         data: Any,
-        format: str,
         *,
         run_id: str | None = None,
         status: str = "complete",
         record_count: int | None = None,
-        file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta:
-        if format not in _FORMAT_FILES:
-            raise ValueError(f"Unsupported format: {format!r}")
-
         project, job_name = await self._job_lookup(job_id)
         run_id = run_id or generate_run_id()
         run_dir = self._results_dir / project / job_name / run_id
@@ -70,16 +65,8 @@ class LocalResultStore:
             shutil.rmtree(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        filenames = _FORMAT_FILES[format]
-        for filename in filenames:
-            path = run_dir / filename
-            value = data
-            if file_contents and filename in file_contents:
-                value = file_contents[filename]
-            if filename.endswith(".json"):
-                path.write_text(json.dumps(value, default=str, indent=2))
-            else:
-                path.write_text(str(value))
+        path = run_dir / "results.json"
+        path.write_text(json.dumps(data, default=str, indent=2))
 
         async with get_db("results_meta.db") as db:
             await db.execute(
@@ -88,8 +75,9 @@ class LocalResultStore:
             )
             await db.execute(
                 """INSERT INTO results_meta
-                   (job_id, project, run_id, status, record_count, file_path, format, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (job_id, project, run_id, status, record_count,
+                    file_path, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     project,
@@ -97,7 +85,6 @@ class LocalResultStore:
                     status,
                     record_count,
                     str(run_dir),
-                    format,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -109,12 +96,20 @@ class LocalResultStore:
             record_count=record_count,
         )
 
-    async def get_result(self, job_id: str, run_id: str | None = None) -> Any:
+    async def get_result(
+        self, job_id: str, run_id: str | None = None,
+    ) -> ResultPayload:
         if run_id is not None:
-            sql = "SELECT run_id, file_path, format FROM results_meta WHERE job_id=? AND run_id=?"
+            sql = (
+                "SELECT run_id, file_path FROM results_meta"
+                " WHERE job_id=? AND run_id=?"
+            )
             params: tuple = (job_id, run_id)
         else:
-            sql = "SELECT run_id, file_path, format FROM results_meta WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+            sql = (
+                "SELECT run_id, file_path FROM results_meta"
+                " WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+            )
             params = (job_id,)
 
         async with get_db("results_meta.db") as db:
@@ -122,19 +117,15 @@ class LocalResultStore:
             row = await cursor.fetchone()
 
         if row is None:
-            raise KeyError(f"No results found for job {job_id!r}" + (f" run {run_id!r}" if run_id else ""))
+            raise KeyError(
+                f"No results found for job {job_id!r}"
+                + (f" run {run_id!r}" if run_id else "")
+            )
 
-        _, file_path, fmt = row
-        run_dir = Path(file_path)
-        filenames = _FORMAT_FILES[fmt]
-
-        # Return the primary file content; prefer JSON if available.
-        for filename in filenames:
-            path = run_dir / filename
-            if filename.endswith(".json"):
-                return json.loads(path.read_text())
-        # Fallback to first file as string.
-        return (run_dir / filenames[0]).read_text()
+        result_run_id, file_path = row
+        path = Path(file_path) / "results.json"
+        data = json.loads(path.read_text())
+        return ResultPayload(run_id=result_run_id, data=data)
 
     async def delete_results(self, job_id: str) -> None:
         """Delete all results for a job from disk and metadata DB."""
