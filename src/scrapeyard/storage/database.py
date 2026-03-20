@@ -70,6 +70,10 @@ async def _ensure_job_columns(db: aiosqlite.Connection) -> None:
     columns = {row[1] for row in rows}
     if "current_run_id" not in columns:
         await db.execute("ALTER TABLE jobs ADD COLUMN current_run_id TEXT")
+    if "schedule_enabled" not in columns:
+        await db.execute(
+            "ALTER TABLE jobs ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 1"
+        )
 
 
 async def _ensure_error_columns(db: aiosqlite.Connection) -> None:

@@ -32,6 +32,7 @@ class ResultStore(Protocol):
         format: str,
         *,
         run_id: str | None = None,
+        status: str = "complete",
         record_count: int | None = None,
         file_contents: dict[str, Any] | None = None,
     ) -> SaveResultMeta: ...

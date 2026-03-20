@@ -88,12 +88,13 @@ class SchedulerService:
 
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT job_id, schedule_cron FROM jobs WHERE schedule_cron IS NOT NULL"
+                "SELECT job_id, schedule_cron, schedule_enabled "
+                "FROM jobs WHERE schedule_cron IS NOT NULL"
             )
             rows = await cursor.fetchall()
 
-        for job_id, cron_expr in rows:
-            self.register_job(job_id, cron_expr, enabled=True)
+        for job_id, cron_expr, schedule_enabled in rows:
+            self.register_job(job_id, cron_expr, enabled=bool(schedule_enabled))
 
         self._scheduler.start()
 

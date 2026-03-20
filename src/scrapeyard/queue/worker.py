@@ -324,6 +324,7 @@ async def scrape_task(
                     json_output,
                     save_fmt,
                     run_id=run_id,
+                    status=final_status.value,
                     record_count=len(flat_data),
                     file_contents={"results.md": markdown_output},
                 )
@@ -335,6 +336,7 @@ async def scrape_task(
                     formatted,
                     save_fmt,
                     run_id=run_id,
+                    status=final_status.value,
                     record_count=len(flat_data),
                 )
 

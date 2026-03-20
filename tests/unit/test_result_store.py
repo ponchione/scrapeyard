@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
 
@@ -113,6 +114,19 @@ async def test_save_result_with_record_count(store):
     meta = await store.save_result("j-1", data, "json", record_count=2)
 
     assert meta.record_count == 2
+
+
+async def test_save_result_persists_explicit_status(store):
+    meta = await store.save_result("j-1", [{"price": 9.99}], "json", status="partial")
+
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            "SELECT status FROM results_meta WHERE job_id=? AND run_id=?",
+            ("j-1", meta.run_id),
+        )
+        row = await cursor.fetchone()
+
+    assert row == ("partial",)
 
 
 async def test_save_result_reuses_explicit_run_id(store):

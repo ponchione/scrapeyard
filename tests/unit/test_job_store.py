@@ -38,6 +38,7 @@ async def test_save_and_get(store):
     assert fetched.project == "acme"
     assert fetched.name == "scrape-prices"
     assert fetched.status == JobStatus.queued
+    assert fetched.schedule_enabled is True
     assert fetched.run_count == 0
     assert fetched.current_run_id is None
 
@@ -83,6 +84,7 @@ async def test_update_job(store):
 
     updated = job.model_copy(update={
         "status": JobStatus.running,
+        "schedule_enabled": False,
         "updated_at": datetime(2026, 1, 1, 12, 0, 0),
         "run_count": 1,
         "current_run_id": "20260318-120000-abcd1234",
@@ -91,9 +93,19 @@ async def test_update_job(store):
 
     fetched = await store.get_job("j-1")
     assert fetched.status == JobStatus.running
+    assert fetched.schedule_enabled is False
     assert fetched.run_count == 1
     assert fetched.updated_at == datetime(2026, 1, 1, 12, 0, 0)
     assert fetched.current_run_id == "20260318-120000-abcd1234"
+
+
+async def test_save_and_get_preserves_disabled_schedule(store):
+    job = _make_job(schedule_cron="*/5 * * * *", schedule_enabled=False)
+    await store.save_job(job)
+
+    fetched = await store.get_job("j-1")
+    assert fetched.schedule_cron == "*/5 * * * *"
+    assert fetched.schedule_enabled is False
 
 
 async def test_update_nonexistent_raises(store):
