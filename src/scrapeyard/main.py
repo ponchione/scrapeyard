@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from scrapeyard import __version__
 from scrapeyard.api.dependencies import (
     get_error_store,
     get_job_store,
@@ -72,7 +73,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Scrapeyard",
     description="Config-driven web scraping microservice",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
