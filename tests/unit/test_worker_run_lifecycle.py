@@ -40,7 +40,7 @@ def _make_job(
 
 
 def _make_target(url: str = "http://example.com") -> MagicMock:
-    target = MagicMock(url=url)
+    target = MagicMock(url=url, proxy=None)
     target.fetcher.value = "basic"
     return target
 
@@ -63,6 +63,7 @@ def _patch_config(cfg: MagicMock) -> MagicMock:
     cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
     cfg.output.group_by = "target"
     cfg.webhook = None
+    cfg.proxy = None
     return cfg
 
 
@@ -117,6 +118,7 @@ class TestRunCreation:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -175,6 +177,7 @@ class TestRunCreation:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -221,6 +224,7 @@ class TestRunCreation:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -271,6 +275,7 @@ class TestRunFinalization:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -340,6 +345,7 @@ class TestRunFinalization:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -388,6 +394,7 @@ class TestRunFinalization:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -439,6 +446,7 @@ class TestRunFinalization:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -496,6 +504,7 @@ class TestRunCrashHandling:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
 
             await scrape_task(
@@ -551,6 +560,7 @@ class TestRunCrashHandling:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
 
             await scrape_task(
@@ -593,6 +603,7 @@ class TestRunCrashHandling:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
 
             await scrape_task(
@@ -634,6 +645,7 @@ class TestRunCrashHandling:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
 
             # Should not raise.
@@ -685,6 +697,7 @@ class TestErrorLoggingWithRunId:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 
@@ -736,6 +749,7 @@ class TestErrorLoggingWithRunId:
             mock_settings.return_value = MagicMock(
                 adaptive_dir=str(tmp_path / "adaptive"),
                 workers_running_lease_seconds=300,
+                proxy_url="",
             )
             _patch_config(mock_load.return_value)
 

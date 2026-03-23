@@ -24,7 +24,7 @@ def _make_job(job_id: str = "job-1") -> Job:
 
 
 def _make_target(url: str) -> MagicMock:
-    target = MagicMock(url=url)
+    target = MagicMock(url=url, proxy=None)
     target.fetcher.value = "basic"
     return target
 
@@ -44,6 +44,7 @@ def _make_config(*targets: MagicMock, on_empty: OnEmptyAction):
     cfg.validation = MagicMock(required_fields=["title"], min_results=1, on_empty=on_empty)
     cfg.output.group_by = "target"
     cfg.webhook = None
+    cfg.proxy = None
     return cfg
 
 
@@ -70,7 +71,7 @@ async def test_validation_warn_keeps_data_and_completes(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config(_make_target("http://a.com"), on_empty=OnEmptyAction.warn)
         mock_scrape.return_value = result
 
@@ -103,7 +104,7 @@ async def test_validation_skip_discards_invalid_target_but_keeps_job_complete(mo
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config(
             _make_target("http://a.com"),
             _make_target("http://b.com"),
@@ -140,7 +141,7 @@ async def test_validation_fail_marks_target_failed(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config(_make_target("http://a.com"), on_empty=OnEmptyAction.fail)
         mock_scrape.return_value = invalid
 
@@ -173,7 +174,7 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config(_make_target("http://a.com"), on_empty=OnEmptyAction.retry)
         mock_scrape.side_effect = [invalid, valid]
 
@@ -209,6 +210,7 @@ async def test_worker_scopes_adaptive_state_by_project(mock_stores):
         mock_settings.return_value = MagicMock(
             adaptive_dir="/tmp/adaptive",
             workers_running_lease_seconds=300,
+            proxy_url="",
         )
         mock_load.return_value = _make_config(_make_target("http://a.com"), on_empty=OnEmptyAction.warn)
         mock_scrape.return_value = result
