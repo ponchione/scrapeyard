@@ -20,6 +20,7 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_scheduler,
         get_webhook_dispatcher,
         get_worker_pool,
+        reset_rate_limiter,
     )
 
     # Clear all cached singletons.
@@ -34,6 +35,7 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_scheduler,
     ]:
         cached_fn.cache_clear()
+    reset_rate_limiter()
 
     yield
 
@@ -48,3 +50,4 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
         get_scheduler,
     ]:
         cached_fn.cache_clear()
+    reset_rate_limiter()

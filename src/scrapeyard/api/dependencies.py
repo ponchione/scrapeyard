@@ -7,6 +7,11 @@ from functools import lru_cache
 from arq.connections import RedisSettings
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.engine.rate_limiter import (
+    DomainRateLimiter,
+    LocalDomainRateLimiter,
+    RedisDomainRateLimiter,
+)
 from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.queue.worker import scrape_task
@@ -51,6 +56,41 @@ def get_circuit_breaker() -> CircuitBreaker:
 @lru_cache(maxsize=1)
 def get_webhook_dispatcher() -> HttpWebhookDispatcher:
     return HttpWebhookDispatcher()
+
+
+# Rate limiter — set during lifespan startup, not @lru_cache, because
+# RedisDomainRateLimiter needs an async Redis connection that isn't
+# available at import time.
+_rate_limiter: DomainRateLimiter | None = None
+
+
+def init_rate_limiter(redis: object | None = None) -> DomainRateLimiter:
+    """Create and store the rate limiter singleton.
+
+    Called from lifespan after Redis is available. When
+    domain_rate_limit_shared is True and a redis handle is provided,
+    returns RedisDomainRateLimiter; otherwise LocalDomainRateLimiter.
+    """
+    global _rate_limiter
+    settings = get_settings()
+    if settings.domain_rate_limit_shared and redis is not None:
+        _rate_limiter = RedisDomainRateLimiter(redis)
+    else:
+        _rate_limiter = LocalDomainRateLimiter()
+    return _rate_limiter
+
+
+def get_rate_limiter() -> DomainRateLimiter:
+    """Return the rate limiter singleton. Must call init_rate_limiter() first."""
+    if _rate_limiter is None:
+        return init_rate_limiter()
+    return _rate_limiter
+
+
+def reset_rate_limiter() -> None:
+    """Reset the rate limiter singleton (for test teardown)."""
+    global _rate_limiter
+    _rate_limiter = None
 
 
 @lru_cache(maxsize=1)
