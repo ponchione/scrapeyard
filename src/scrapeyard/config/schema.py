@@ -100,6 +100,18 @@ SelectorValue = Union[str, SelectorLong]
 # --- Sub-config Models ---
 
 
+class ProxyConfig(BaseModel):
+    """Proxy configuration for a target, job, or service default."""
+
+    url: str = Field(
+        ...,
+        description=(
+            'Proxy gateway URL (e.g., "http://user:pass@gate.provider.com:7777") '
+            'or "direct" to bypass proxying even when a default is set'
+        ),
+    )
+
+
 class PaginationConfig(BaseModel):
     """Pagination rules for a target."""
 
@@ -140,6 +152,10 @@ class TargetConfig(BaseModel):
     )
     selectors: dict[str, SelectorValue] = Field(..., description="Named selector definitions")
     pagination: Optional[PaginationConfig] = None
+    proxy: Optional[ProxyConfig] = Field(
+        default=None,
+        description="Target-level proxy override. Takes precedence over job and service defaults.",
+    )
 
 
 class RetryConfig(BaseModel):
@@ -228,6 +244,10 @@ class ScrapeConfig(BaseModel):
 
     adaptive: Optional[bool] = Field(
         default=None, description="Override adaptive tracking (default: auto)"
+    )
+    proxy: Optional[ProxyConfig] = Field(
+        default=None,
+        description="Job-level proxy. Applies to all targets unless overridden at target level.",
     )
 
     retry: RetryConfig = Field(default_factory=RetryConfig)
