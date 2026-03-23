@@ -13,6 +13,7 @@ from scrapeyard.api.dependencies import (
     get_result_store,
     get_scheduler,
     get_worker_pool,
+    init_rate_limiter,
 )
 from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
     pool = get_worker_pool()
     app.state.worker_pool = pool
     await pool.start()
+
+    # Initialize rate limiter with the pool's Redis connection for cross-job
+    # domain rate limiting. Falls back to local when Redis is unavailable.
+    init_rate_limiter(redis=getattr(pool, "_redis", None))
 
     # 5. Scheduler (re-registers persisted jobs on start)
     scheduler = get_scheduler()
