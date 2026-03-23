@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,8 @@ from urllib.parse import urlparse
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, GroupBy, OnEmptyAction
+from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
+from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, scrape_target
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
@@ -35,6 +36,7 @@ async def scrape_task(
     result_store: ResultStore,
     error_store: ErrorStore,
     circuit_breaker: CircuitBreaker,
+    rate_limiter: DomainRateLimiter,
     webhook_dispatcher: WebhookDispatcher | None = None,
 ) -> None:
     """Execute a complete scrape job.
@@ -90,8 +92,6 @@ async def scrape_task(
         delay_between = config.execution.delay_between
         domain_rate_limit = config.execution.domain_rate_limit
 
-        # Track last request time per domain for rate limiting.
-        domain_last_request: dict[str, float] = {}
         all_results: list[TargetResult] = []
         all_errors: list[str] = []
         sem = asyncio.Semaphore(concurrency)
@@ -104,6 +104,7 @@ async def scrape_task(
             result: TargetResult,
             *,
             attempt: int = 1,
+            proxy_url: str | None = None,
         ) -> TargetResult:
             if result.status != "success":
                 return result
@@ -157,6 +158,7 @@ async def scrape_task(
                 adaptive,
                 config.retry,
                 adaptive_dir=adaptive_dir,
+                proxy_url=proxy_url,
             )
             if retry_result.status != "success":
                 logger.info("Recording failure for domain %s after validation retry", domain)
@@ -219,28 +221,39 @@ async def scrape_task(
                     )
                     return tr
 
-                # Domain rate limiting.
-                now = time.monotonic()
-                last = domain_last_request.get(domain, 0.0)
-                wait = domain_rate_limit - (now - last)
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                domain_last_request[domain] = time.monotonic()
+                # Domain rate limiting (shared across jobs when Redis-backed).
+                await rate_limiter.acquire(domain, domain_rate_limit)
 
                 # Spec 6.1: adaptive defaults to True for scheduled jobs, False for on-demand.
                 if config.adaptive is not None:
                     adaptive = config.adaptive
                 else:
                     adaptive = config.schedule is not None
-                logger.info(
-                    "Scraping %s with fetcher=%s adaptive=%s",
-                    target_cfg.url, target_cfg.fetcher.value, adaptive,
+
+                # Resolve proxy for this target.
+                proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
+
+                if proxy_url:
+                    logger.info(
+                        "Scraping %s with fetcher=%s adaptive=%s proxy=%s",
+                        target_cfg.url, target_cfg.fetcher.value, adaptive,
+                        redact_proxy_url(proxy_url),
+                    )
+                else:
+                    logger.info(
+                        "Scraping %s with fetcher=%s adaptive=%s",
+                        target_cfg.url, target_cfg.fetcher.value, adaptive,
+                    )
+                result = await scrape_target(
+                    target_cfg, adaptive, config.retry,
+                    adaptive_dir=adaptive_dir, proxy_url=proxy_url,
                 )
-                result = await scrape_target(target_cfg, adaptive, config.retry, adaptive_dir=adaptive_dir)
 
                 if result.status == "success":
                     circuit_breaker.record_success(domain)
-                    result = await _apply_validation(target_cfg, domain, adaptive, result)
+                    result = await _apply_validation(
+                        target_cfg, domain, adaptive, result, proxy_url=proxy_url,
+                    )
                 else:
                     logger.warning(
                         "Recording failure for domain %s type=%s status=%s detail=%s",
