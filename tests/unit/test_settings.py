@@ -121,3 +121,32 @@ class TestGetSettings:
         get_settings.cache_clear()
         second = get_settings()
         assert first is not second
+
+
+def test_proxy_url_defaults_to_empty(monkeypatch):
+    """proxy_url defaults to empty string (no proxy)."""
+    monkeypatch.delenv("SCRAPEYARD_PROXY_URL", raising=False)
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.proxy_url == ""
+
+
+def test_proxy_url_from_env(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_PROXY_URL", "http://gate.example.com:7777")
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.proxy_url == "http://gate.example.com:7777"
+
+
+def test_domain_rate_limit_shared_defaults_true(monkeypatch):
+    monkeypatch.delenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", raising=False)
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.domain_rate_limit_shared is True
+
+
+def test_domain_rate_limit_shared_from_env(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", "false")
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.domain_rate_limit_shared is False

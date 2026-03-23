@@ -42,6 +42,12 @@ class ServiceSettings(BaseSettings):
     circuit_breaker_max_failures: int = 3
     circuit_breaker_cooldown_seconds: int = 300
 
+    # Proxy
+    proxy_url: str = ""
+
+    # Cross-job rate limiting
+    domain_rate_limit_shared: bool = True
+
     model_config = {"env_prefix": "SCRAPEYARD_"}
 
 
