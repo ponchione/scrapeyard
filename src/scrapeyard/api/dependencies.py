@@ -102,6 +102,7 @@ def get_worker_pool() -> WorkerPool:
     circuit_breaker = get_circuit_breaker()
 
     webhook_dispatcher = get_webhook_dispatcher()
+    rate_limiter = get_rate_limiter()
 
     async def _task_handler(
         job_id: str,
@@ -119,6 +120,7 @@ def get_worker_pool() -> WorkerPool:
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=rate_limiter,
             webhook_dispatcher=webhook_dispatcher,
         )
 
