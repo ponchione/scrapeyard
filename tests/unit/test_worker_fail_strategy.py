@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.config.schema import FailStrategy
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
@@ -73,6 +74,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -114,6 +116,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -156,6 +159,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -199,6 +203,7 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     result_store.save_result.assert_called_once()
@@ -241,6 +246,7 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     result_store.save_result.assert_called_once()

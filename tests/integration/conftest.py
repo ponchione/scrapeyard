@@ -18,6 +18,7 @@ from scrapeyard.api.dependencies import (
     get_worker_pool,
 )
 from scrapeyard.common.settings import get_settings
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.main import app
 from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.database import init_db, reset_db
@@ -77,6 +78,7 @@ async def test_app(monkeypatch):
                 result_store=result_store,
                 error_store=error_store,
                 circuit_breaker=circuit_breaker,
+                rate_limiter=LocalDomainRateLimiter(),
                 webhook_dispatcher=webhook_dispatcher,
             )
         )
