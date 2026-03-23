@@ -150,6 +150,7 @@ async def _fetch_page(
     adaptive: bool,
     retryable_status: set[int],
     adaptive_dir: str,
+    proxy_url: str | None = None,
 ) -> Any:
     """Fetch a single page using the appropriate Scrapling method.
 
@@ -161,6 +162,9 @@ async def _fetch_page(
         adaptive=adaptive,
         adaptive_dir=adaptive_dir,
     )
+
+    if proxy_url is not None:
+        call_kwargs["proxy"] = proxy_url
 
     if fetcher_type == FetcherType.basic:
         # Fetcher.get is synchronous — run in thread pool.
@@ -202,6 +206,7 @@ async def scrape_target(
     adaptive: bool,
     retry: RetryConfig,
     adaptive_dir: str | None = None,
+    proxy_url: str | None = None,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination.
 
@@ -228,7 +233,8 @@ async def scrape_target(
 
     try:
         page = await retry_handler.execute(
-            _fetch_page, fetcher_cls, target.url, target, target.fetcher, adaptive, retryable_status, adaptive_dir
+            _fetch_page, fetcher_cls, target.url, target, target.fetcher,
+            adaptive, retryable_status, adaptive_dir, proxy_url,
         )
         data = _extract_page_data(page, target)
         if adaptive:
@@ -265,7 +271,8 @@ async def scrape_target(
                     break
 
                 page = await retry_handler.execute(
-                    _fetch_page, fetcher_cls, next_url, target, target.fetcher, adaptive, retryable_status, adaptive_dir
+                    _fetch_page, fetcher_cls, next_url, target, target.fetcher,
+                    adaptive, retryable_status, adaptive_dir, proxy_url,
                 )
                 current_url = next_url
                 data = _extract_page_data(page, target)
