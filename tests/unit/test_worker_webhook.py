@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.config.schema import FailStrategy, WebhookConfig, WebhookStatus
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
@@ -82,6 +83,7 @@ async def test_webhook_dispatched_on_complete(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
         # Let any create_task webhooks run.
@@ -120,6 +122,7 @@ async def test_no_webhook_when_not_configured(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
         await asyncio.sleep(0)
@@ -153,6 +156,7 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
 
@@ -186,6 +190,7 @@ async def test_webhook_status_not_in_on_list(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
         await asyncio.sleep(0)
@@ -222,6 +227,7 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
             "job-1", "yaml",
             job_store=job_store, result_store=result_store,
             error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
         await asyncio.sleep(0)

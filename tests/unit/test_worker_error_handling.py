@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
 
@@ -40,6 +41,7 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
         result_store=AsyncMock(),
         error_store=AsyncMock(),
         circuit_breaker=MagicMock(),
+        rate_limiter=LocalDomainRateLimiter(),
     )
 
     assert len(updated_jobs) > 0
@@ -60,6 +62,7 @@ async def test_scrape_task_marks_job_failed_on_missing_job():
         result_store=AsyncMock(),
         error_store=AsyncMock(),
         circuit_breaker=MagicMock(),
+        rate_limiter=LocalDomainRateLimiter(),
     )
 
 
@@ -84,6 +87,7 @@ async def test_scrape_task_skips_completed_duplicate_run():
         result_store=result_store,
         error_store=error_store,
         circuit_breaker=MagicMock(),
+        rate_limiter=LocalDomainRateLimiter(),
     )
 
     job_store.update_job.assert_not_called()
@@ -110,6 +114,7 @@ async def test_scrape_task_skips_recent_running_duplicate():
         result_store=AsyncMock(),
         error_store=AsyncMock(),
         circuit_breaker=MagicMock(),
+        rate_limiter=LocalDomainRateLimiter(),
     )
 
     job_store.update_job.assert_not_called()
@@ -142,6 +147,7 @@ async def test_scrape_task_reclaims_stale_running_job():
             result_store=AsyncMock(),
             error_store=AsyncMock(),
             circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     assert updated_jobs

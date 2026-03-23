@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.config.schema import FailStrategy, OnEmptyAction
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ActionTaken, Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
@@ -80,6 +81,7 @@ async def test_validation_warn_keeps_data_and_completes(mock_stores):
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -116,6 +118,7 @@ async def test_validation_skip_discards_invalid_target_but_keeps_job_complete(mo
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -148,6 +151,7 @@ async def test_validation_fail_marks_target_failed(mock_stores):
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -180,6 +184,7 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     final_update = job_store.update_job.call_args_list[-1][0][0]
@@ -215,6 +220,7 @@ async def test_worker_scopes_adaptive_state_by_project(mock_stores):
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
         )
 
     assert mock_scrape.call_args.kwargs["adaptive_dir"] == "/tmp/adaptive/test"

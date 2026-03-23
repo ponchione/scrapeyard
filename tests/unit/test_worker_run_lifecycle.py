@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
+from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import (
     ErrorRecord,
@@ -127,6 +128,7 @@ class TestRunCreation:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         # Read back the row from the real DB.
@@ -183,6 +185,7 @@ class TestRunCreation:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -228,6 +231,7 @@ class TestRunCreation:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -277,6 +281,7 @@ class TestRunFinalization:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -345,6 +350,7 @@ class TestRunFinalization:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -392,6 +398,7 @@ class TestRunFinalization:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -442,6 +449,7 @@ class TestRunFinalization:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         # No rows should exist at all.
@@ -497,6 +505,7 @@ class TestRunCrashHandling:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -551,6 +560,7 @@ class TestRunCrashHandling:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
@@ -592,6 +602,7 @@ class TestRunCrashHandling:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         # No rows should exist in job_runs.
@@ -633,6 +644,7 @@ class TestRunCrashHandling:
                 result_store=AsyncMock(),
                 error_store=AsyncMock(),
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
 
@@ -683,6 +695,7 @@ class TestErrorLoggingWithRunId:
                 result_store=AsyncMock(),
                 error_store=error_store,
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         assert len(logged_errors) > 0
@@ -733,6 +746,7 @@ class TestErrorLoggingWithRunId:
                 result_store=AsyncMock(),
                 error_store=error_store,
                 circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
             )
 
         assert len(logged_errors) > 0
