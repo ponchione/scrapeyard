@@ -22,7 +22,7 @@ def _make_job(job_id: str = "job-1") -> Job:
 
 
 def _make_target(url: str) -> MagicMock:
-    target = MagicMock(url=url)
+    target = MagicMock(url=url, proxy=None)
     target.fetcher.value = "basic"
     return target
 
@@ -42,6 +42,7 @@ def _make_config_mock(*, webhook: WebhookConfig | None = None):
     cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
     cfg.output.group_by = "target"
     cfg.webhook = webhook
+    cfg.proxy = None
     return cfg
 
 
@@ -75,7 +76,7 @@ async def test_webhook_dispatched_on_complete(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
@@ -114,7 +115,7 @@ async def test_no_webhook_when_not_configured(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config_mock(webhook=None)
         mock_scrape.return_value = success_result
 
@@ -147,7 +148,7 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
@@ -182,7 +183,7 @@ async def test_webhook_status_not_in_on_list(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
@@ -219,7 +220,7 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive")
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
         mock_load.return_value = _make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = fail_result
 
