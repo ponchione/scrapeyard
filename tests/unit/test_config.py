@@ -269,3 +269,58 @@ class TestWebhookConfig:
         webhook_data = {"url": "https://example.com/hook", "on": ["complet"]}
         with pytest.raises(ValidationError):
             ScrapeConfig(**_tier1_config(webhook=webhook_data))
+
+
+class TestProxyConfig:
+    """ProxyConfig schema parsing and precedence in target/job configs."""
+
+    def test_target_with_proxy_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(proxy={"url": "http://user:pass@gate.example.com:7777"})
+            )
+        )
+        assert config.target is not None
+        assert config.target.proxy is not None
+        assert config.target.proxy.url == "http://user:pass@gate.example.com:7777"
+
+    def test_target_with_direct_proxy_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(proxy={"url": "direct"})
+            )
+        )
+        assert config.target.proxy.url == "direct"
+
+    def test_target_without_proxy_defaults_to_none(self):
+        config = ScrapeConfig(**_tier1_config())
+        assert config.target.proxy is None
+
+    def test_job_level_proxy_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(proxy={"url": "http://user:pass@gate.example.com:7777"})
+        )
+        assert config.proxy is not None
+        assert config.proxy.url == "http://user:pass@gate.example.com:7777"
+
+    def test_job_without_proxy_defaults_to_none(self):
+        config = ScrapeConfig(**_tier1_config())
+        assert config.proxy is None
+
+    def test_tier2_targets_with_mixed_proxy(self):
+        config = ScrapeConfig(
+            **_tier2_config(
+                proxy={"url": "http://job-proxy:8080"},
+                targets=[
+                    _target_dict(proxy={"url": "http://target-proxy:9090"}),
+                    _target_dict(url="https://example.org"),
+                ],
+            )
+        )
+        assert config.proxy.url == "http://job-proxy:8080"
+        assert config.targets[0].proxy.url == "http://target-proxy:9090"
+        assert config.targets[1].proxy is None
+
+    def test_proxy_config_requires_url(self):
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**_tier1_config(proxy={}))
