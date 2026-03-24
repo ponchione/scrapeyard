@@ -39,7 +39,7 @@ def get_result_store() -> LocalResultStore:
 
     async def _lookup(job_id: str) -> tuple[str, str]:
         job = await job_store.get_job(job_id)
-        return (job.project, job.name)
+        return job.project, job.name
 
     return LocalResultStore(settings.storage_results_dir, _lookup)
 
@@ -120,7 +120,7 @@ def get_worker_pool() -> WorkerPool:
             result_store=result_store,
             error_store=error_store,
             circuit_breaker=circuit_breaker,
-            rate_limiter=rate_limiter,
+            rate_limiter=get_rate_limiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
 
