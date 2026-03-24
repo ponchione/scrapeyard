@@ -282,14 +282,11 @@ async def get_job(
         "runs": [
             {
                 "run_id": r.run_id,
-                "status": r.status.value if hasattr(r.status, "value") else r.status,
+                "status": r.status.value,
                 "trigger": r.trigger,
                 "config_hash": r.config_hash,
-                "started_at": r.started_at.isoformat()
-                    if hasattr(r.started_at, "isoformat") else r.started_at,
-                "completed_at": r.completed_at.isoformat()
-                    if r.completed_at and hasattr(r.completed_at, "isoformat")
-                    else r.completed_at,
+                "started_at": r.started_at.isoformat(),
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
                 "record_count": r.record_count,
                 "error_count": r.error_count,
             }

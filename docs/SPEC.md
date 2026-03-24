@@ -62,14 +62,13 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 │       ├── Fetcher (basic HTTP + TLS impersonation)           │
 │       ├── StealthyFetcher (Camoufox, anti-bot bypass)        │
 │       ├── DynamicFetcher (Playwright, JS rendering)          │
-│       └── Adaptive tracking (auto_save / relocate)           │
+│       ├── Adaptive tracking (auto_save / relocate)           │
+│       └── Proxy routing (managed service integration)        │
 │            │                                                 │
 │            ▼                                                 │
-│       Result Formatter                                       │
-│       ├── JSON                                               │
-│       ├── Markdown                                           │
-│       ├── HTML (raw)                                         │
-│       └── JSON + Markdown (combo)                            │
+│       Result Grouping (JSON only, inline in worker)          │
+│       ├── group_by: target (grouped by domain)               │
+│       └── group_by: merge  (flat with _source field)         │
 │            │                                                 │
 │            ▼                                                 │
 │       Storage Layer (abstracted interface)                    │
@@ -223,7 +222,6 @@ schedule:
   cron: "0 8 * * MON-FRI"
 
 output:
-  format: json+markdown
   group_by: target        # "target" (default) or "merge"
 ```
 
@@ -238,11 +236,12 @@ output:
 | `target` | object | One of `target` or `targets` | Single scrape target definition. |
 | `targets` | array | One of `target` or `targets` | Multiple scrape target definitions. |
 | `adaptive` | boolean | No | Override adaptive tracking. Default: auto (see Section 6). |
+| `proxy` | object | No | Job-level proxy config. Applies to all targets unless overridden at target level. See proxy spec. |
 | `retry` | object | No | Retry policy. Defaults applied if omitted. |
 | `validation` | object | No | Result validation rules. |
 | `execution` | object | No | Concurrency and orchestration settings. |
 | `schedule` | object | No | Cron-style scheduling. Omit for on-demand only. |
-| `output` | object | No | Output format and grouping. Defaults to `json`, grouped by target. |
+| `output` | object | No | Result grouping. Defaults to grouped by target. |
 
 #### Target Fields
 
@@ -338,8 +337,7 @@ Transforms are a fixed set of safe, predictable string operations. No arbitrary 
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `format` | string | `json` | Output format: `json`, `markdown`, `html`, `json+markdown`. |
-| `group_by` | string | `target` | Result grouping: `target` (grouped) or `merge` (flat with source field). |
+| `group_by` | string | `target` | Result grouping: `target` (grouped by domain) or `merge` (flat with `_source` field). |
 
 ### 3.6 Submission Validation Policy
 
@@ -551,9 +549,9 @@ Every config requires a `project` field. This provides complete isolation:
 
 ### 7.3 Rate Limiting
 
-Rate limits are **per-project, per-domain**. Each project controls its own throttling via the `execution.domain_rate_limit` config field.
+Domain rate limits are enforced via `execution.domain_rate_limit` (minimum seconds between requests to the same domain). When `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED=true` (default), rate limiting is coordinated **cross-job via Redis** — all concurrent jobs targeting the same domain share a single rate limit window. This prevents burst patterns that are detectable by retailer anti-bot systems regardless of proxy rotation.
 
-**Accepted tradeoff:** If two projects scrape the same domain simultaneously, the service does not coordinate between them. This is managed operationally through schedule staggering, not infrastructure. This keeps the implementation simpler and gives each project full autonomy.
+When `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED=false`, falls back to per-invocation rate limiting (useful for testing without Redis or single-job scenarios).
 
 ### 7.4 Schedule Jitter
 
@@ -571,14 +569,9 @@ A job scheduled for "0 8 * * MON-FRI" will fire between 8:00:00 and 8:02:00.
 
 ## 8. Result Delivery
 
-### 8.1 Output Formats
+### 8.1 Output Format
 
-| Format | Content-Type | Description |
-|---|---|---|
-| `json` | `application/json` | Structured data, ideal for programmatic consumption and LLM pipelines. |
-| `markdown` | `text/markdown` | Human-readable tables/lists, also effective for LLM context windows. |
-| `html` | `text/html` | Raw page content for debugging or re-parsing with different selectors. |
-| `json+markdown` | Both files produced | JSON as canonical data store, Markdown as LLM-friendly rendition. |
+Results are always stored as JSON (`results.json`). The multi-format output system (`markdown`, `html`, `json+markdown`) was removed in favor of JSON-only output with inline grouping logic in the worker.
 
 ### 8.2 Result Grouping
 
@@ -650,8 +643,8 @@ class JobStore(Protocol):
     async def delete_job(self, job_id: str) -> None: ...
 
 class ResultStore(Protocol):
-    async def save_result(self, job_id: str, data: Any, format: str) -> str: ...
-    async def get_result(self, job_id: str, run_id: str | None) -> Any: ...
+    async def save_result(self, job_id: str, data: Any, *, run_id: str | None = None, status: str = "complete", record_count: int | None = None) -> SaveResultMeta: ...
+    async def get_result(self, job_id: str, run_id: str | None = None) -> ResultPayload: ...
 
 class ErrorStore(Protocol):
     async def log_error(self, error: ErrorRecord) -> None: ...
@@ -731,8 +724,7 @@ volumes:
 │   └── {project}/
 │       └── {job_name}/
 │           └── {run_id}/
-│               ├── results.json
-│               └── results.md    # if json+markdown
+│               └── results.json
 ├── adaptive/
 │   └── scrapling.db          # Scrapling's adaptive fingerprint store
 └── logs/
@@ -750,7 +742,7 @@ The following features are explicitly deferred and not part of v1 implementation
 | **Follow / chained scrapes** | Scrape a listing page, then follow each link to detail pages. `follow` block in config. | Needed when job-scout requires scraping individual job detail pages. |
 | ~~**Webhooks**~~ | ~~Optional callback URL notified on job completion.~~ | **Implemented** — `WebhookConfig` on `ScrapeConfig`, fire-and-forget dispatch via `src/scrapeyard/webhook/`. |
 | **Cloud deployment** | Postgres, S3, managed queues, auth, secrets management. | Needed when the service must run 24/7 or serve remote clients. |
-| **Global cross-project rate limiting** | Shared per-domain rate limits across all projects. | Needed when many projects frequently hit the same domains simultaneously. |
+| ~~**Global cross-project rate limiting**~~ | ~~Shared per-domain rate limits across all projects.~~ | **Implemented** — `RedisDomainRateLimiter` provides cross-job coordination via Redis. See `src/scrapeyard/engine/rate_limiter.py`. |
 | **Fetcher escalation** | Auto-escalate fetcher tier (basic → stealthy → dynamic) on 403/block detection. | Useful but adds complexity; evaluate after v1 usage patterns emerge. |
 | **Config templates** | Reusable partial configs (e.g., shared retry policy, common selector patterns). | Useful once 10+ configs exist with repeated boilerplate. |
 | **Result diffing** | Compare results between runs to detect meaningful changes. | Valuable for price tracking and product database freshness monitoring. |

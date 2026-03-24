@@ -64,3 +64,40 @@ async def test_scrape_target_no_proxy_by_default(tmp_path):
 
     assert result.status == "success"
     assert "proxy" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_proxy_passed_to_pagination_fetches(tmp_path):
+    """proxy_url should be forwarded to pagination page fetches too."""
+    target = _target(
+        fetcher="basic",
+        pagination={"next": "a.next-page", "max_pages": 3},
+    )
+    retry = RetryConfig()
+    captured_proxies: list[str | None] = []
+    call_count = 0
+
+    def fake_get(url, **kwargs):
+        nonlocal call_count
+        captured_proxies.append(kwargs.get("proxy"))
+        call_count += 1
+        resp = MagicMock()
+        resp.status = 200
+        resp.css = MagicMock(side_effect=lambda sel: (
+            # Return a "next" link on page 1, nothing on page 2.
+            [MagicMock(**{"attrib": {"href": "https://example.com/page2"}})]
+            if sel == "a.next-page" and call_count == 1
+            else [MagicMock(text="Title")]
+        ))
+        return resp
+
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+        mock_fetcher.get = fake_get
+        result = await scrape_target(
+            target, adaptive=False, retry=retry,
+            adaptive_dir=str(tmp_path), proxy_url="http://proxy:8080",
+        )
+
+    assert result.pages_scraped == 2
+    # Both the initial fetch and the pagination fetch got the proxy.
+    assert all(p == "http://proxy:8080" for p in captured_proxies)

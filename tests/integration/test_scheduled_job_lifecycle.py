@@ -56,7 +56,7 @@ async def test_scheduled_job_create_list_delete(client):
 async def test_scheduler_respects_priority_and_browser(client, monkeypatch):
     scheduler = get_scheduler()
     pool = get_worker_pool()
-    enqueued: list[tuple[str, str, bool, str | None]] = []
+    enqueued: list[tuple[str, str, bool, str | None, str]] = []
 
     async def capture_enqueue(
         job_id: str,
@@ -67,7 +67,7 @@ async def test_scheduler_respects_priority_and_browser(client, monkeypatch):
         run_id: str | None = None,
         trigger: str = "adhoc",
     ):
-        enqueued.append((job_id, priority, needs_browser, run_id))
+        enqueued.append((job_id, priority, needs_browser, run_id, trigger))
 
     monkeypatch.setattr(pool, "enqueue", capture_enqueue)
 
@@ -96,11 +96,12 @@ target:
     await scheduler._trigger_job(job_id)
 
     assert len(enqueued) == 1
-    enqueued_job_id, priority, needs_browser, run_id = enqueued[0]
+    enqueued_job_id, priority, needs_browser, run_id, trigger = enqueued[0]
     assert enqueued_job_id == job_id
     assert priority == "high"
     assert needs_browser is True
     assert run_id is not None
+    assert trigger == "scheduled"
 
 
 @pytest.mark.asyncio
