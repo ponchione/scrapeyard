@@ -38,8 +38,8 @@ def _row_to_job(row: tuple) -> Job:
 def _row_to_job_run(row: aiosqlite.Row) -> JobRun:
     return JobRun(
         run_id=row[0], job_id=row[1], status=row[2], trigger=row[3],
-        config_hash=row[4], started_at=row[5], completed_at=row[6],
-        record_count=row[7], error_count=row[8],
+        config_hash=row[4], started_at=parse_dt(row[5]),  # type: ignore[arg-type]
+        completed_at=parse_dt(row[6]), record_count=row[7], error_count=row[8],
     )
 
 

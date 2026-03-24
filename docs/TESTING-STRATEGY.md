@@ -18,7 +18,7 @@ tests:
 - Static checks: `poetry run ruff check src tests`
 - Automated tests: `poetry run pytest -q`
 - Live Redis lane: `./scripts/run_live_redis_tests.sh`
-- Current result on 2026-03-19: `198 passed, 3 skipped`
+- Current result on 2026-03-24: `279 passed, 3 skipped`
 
 The fast confidence layer still uses the monkeypatched integration harness, but
 Scrapeyard now also has a dedicated live Redis automation lane for real queue
@@ -37,8 +37,8 @@ Run on every change and before any manual QA session.
 
 Purpose:
 
-- Protects validation, storage, scheduler, formatting, cleanup, and route
-  behavior.
+- Protects validation, storage, scheduler, result grouping, cleanup, proxy
+  resolution, rate limiting, and route behavior.
 - Confirms sync-wait semantics at the API level.
 - Does not prove Redis connectivity, queue durability, or embedded `arq`
   execution.

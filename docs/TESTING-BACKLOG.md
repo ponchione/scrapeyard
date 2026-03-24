@@ -1,9 +1,10 @@
 # Testing Backlog
 
-Last updated: 2026-03-19
+Last updated: 2026-03-24
 
-This file tracks the remaining automated testing work after the live Redis lane
-was added and the Eyeboxapp Brownells validation was completed.
+This file tracks the remaining automated testing work.
+
+Current baseline: `279 passed` (251 unit + 28 integration), 3 skipped (live Redis).
 
 ## Completed Recently
 
@@ -11,6 +12,11 @@ was added and the Eyeboxapp Brownells validation was completed.
 - Live Redis queue-path automation added in `tests/live_redis/`
 - Brownells two-phase Eyeboxapp validation completed manually
 - Adaptive browser regression fixed and covered by unit tests
+- Run model / API contract: full unit + integration coverage (epics 1-6)
+- Proxy resolution: 11 unit tests covering all precedence combinations and `direct` sentinel
+- Rate limiter: 10 unit tests covering `LocalDomainRateLimiter` and mock-Redis `RedisDomainRateLimiter`
+- API edge cases: 404 on missing job, `latest=false` without `run_id`, `delete_results=true`
+- Scheduler trigger assertion: integration test now verifies `trigger="scheduled"` is passed
 
 ## Remaining Automated Test Items
 

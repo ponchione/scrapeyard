@@ -69,7 +69,7 @@ class JobRun(BaseModel):
         default=JobStatus.running, description="Run outcome"
     )
     trigger: str = Field(
-        ..., description="What initiated this run: adhoc, scheduled, manual"
+        ..., description="What initiated this run: adhoc, scheduled"
     )
     config_hash: str = Field(
         ..., description="SHA-256 of the config YAML used for this run"

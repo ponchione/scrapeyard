@@ -150,3 +150,40 @@ def test_domain_rate_limit_shared_from_env(monkeypatch):
     from scrapeyard.common.settings import ServiceSettings
     settings = ServiceSettings()
     assert settings.domain_rate_limit_shared is False
+
+
+class TestInitRateLimiter:
+    """Verify init_rate_limiter selects the right implementation."""
+
+    def test_returns_local_when_redis_is_none(self):
+        from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
+        from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
+        try:
+            limiter = init_rate_limiter(redis=None)
+            assert isinstance(limiter, LocalDomainRateLimiter)
+        finally:
+            reset_rate_limiter()
+
+    def test_returns_local_when_shared_disabled(self, monkeypatch):
+        monkeypatch.setenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", "false")
+        from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
+        from scrapeyard.common.settings import get_settings
+        from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
+        from unittest.mock import MagicMock
+        get_settings.cache_clear()
+        try:
+            limiter = init_rate_limiter(redis=MagicMock())
+            assert isinstance(limiter, LocalDomainRateLimiter)
+        finally:
+            reset_rate_limiter()
+            get_settings.cache_clear()
+
+    def test_returns_redis_when_shared_and_redis_provided(self):
+        from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
+        from scrapeyard.engine.rate_limiter import RedisDomainRateLimiter
+        from unittest.mock import MagicMock
+        try:
+            limiter = init_rate_limiter(redis=MagicMock())
+            assert isinstance(limiter, RedisDomainRateLimiter)
+        finally:
+            reset_rate_limiter()

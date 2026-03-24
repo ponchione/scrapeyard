@@ -72,7 +72,7 @@ def test_missing_config_hash_raises():
 # -- Trigger values ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("trigger", ["adhoc", "scheduled", "manual"])
+@pytest.mark.parametrize("trigger", ["adhoc", "scheduled"])
 def test_valid_trigger_values(trigger):
     run = _make_job_run(trigger=trigger)
     assert run.trigger == trigger

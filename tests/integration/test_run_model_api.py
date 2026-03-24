@@ -208,3 +208,80 @@ async def test_results_include_run_id(client, monkeypatch):
     job_data = job_resp.json()
     assert len(job_data["runs"]) == 1
     assert results_data["run_id"] == job_data["runs"][0]["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_get_nonexistent_job_returns_404(client):
+    """GET /jobs/{id} with a non-existent ID should return 404."""
+    resp = await client.get("/jobs/does-not-exist")
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_results_latest_false_without_run_id_returns_400(client, monkeypatch):
+    """GET /results/{id}?latest=false without run_id should return 400."""
+
+    async def _fake_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Hello"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+
+    response = await client.post(
+        "/scrape",
+        content=_adhoc_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    for _ in range(40):
+        r = await client.get(f"/results/{job_id}")
+        if r.status_code == 200:
+            break
+        await asyncio.sleep(0.05)
+
+    resp = await client.get(f"/results/{job_id}?latest=false")
+    assert resp.status_code == 400
+    assert "run_id" in resp.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_delete_job_with_delete_results(client, monkeypatch):
+    """DELETE /jobs/{id}?delete_results=true should succeed."""
+
+    async def _fake_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Hello"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+
+    response = await client.post(
+        "/scrape",
+        content=_adhoc_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    for _ in range(40):
+        r = await client.get(f"/jobs/{job_id}")
+        if r.json()["status"] in ("complete", "partial", "failed"):
+            break
+        await asyncio.sleep(0.05)
+
+    resp = await client.delete(f"/jobs/{job_id}?delete_results=true")
+    assert resp.status_code == 204
+
+    # Confirm job is gone.
+    resp = await client.get(f"/jobs/{job_id}")
+    assert resp.status_code == 404
