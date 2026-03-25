@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from scrapling import Adaptor
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
@@ -328,6 +329,49 @@ class TestEnrichItemDetection:
         el = _mock_element(text="In Stock")
         enrich_item_detection(item, el, None, stock_cfg)
         assert item["stock_signal"] == "In Stock"
+        assert item["stock_status"] == "in_stock"
+
+    def test_falls_back_to_legacy_stock_status_when_stock_signal_is_blank(self):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {
+            "name": "Widget",
+            "price": None,
+            "stock_signal": "   ",
+            "stock_status": "In Stock",
+        }
+        el = _mock_element(text="In Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["stock_signal"] == "In Stock"
+        assert item["stock_status"] == "in_stock"
+
+    def test_preserves_list_valued_legacy_stock_status_as_stock_signal(self):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {
+            "name": "Widget",
+            "price": None,
+            "stock_status": ["In Stock", "Ships Free"],
+        }
+        el = _mock_element(text="In Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["stock_signal"] == ["In Stock", "Ships Free"]
+        assert item["stock_status"] == "in_stock"
+
+    @pytest.mark.parametrize(
+        "raw_stock",
+        [None, "", "   ", [], ["", "   "], ["   "], ()],
+    )
+    def test_does_not_invent_stock_signal_when_legacy_raw_value_is_empty(self, raw_stock):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {"name": "Widget", "price": None, "stock_status": raw_stock}
+        el = _mock_element(text="In Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert "stock_signal" not in item
         assert item["stock_status"] == "in_stock"
 
     def test_no_configs_adds_defaults(self):
