@@ -5,10 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from scrapeyard.config import (
+    MapDetectionConfig,  # noqa: F401
     ScrapeConfig,
+    StockDetectionConfig,  # noqa: F401
     TargetConfig,
     WebhookStatus,
     apply_transforms,
@@ -232,6 +235,35 @@ targets:
         assert config.target.browser is not None
         assert config.target.adaptive_domain is None
 
+    def test_root_template_yaml_matches_current_output_shape(self):
+        template_path = Path(__file__).resolve().parents[2] / "template.yaml"
+        raw = yaml.safe_load(template_path.read_text())
+
+        assert raw["output"] == {"group_by": "target"}
+
+    def test_eyebox_smoke_yaml_loads_and_matches_current_shape(self):
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "docs/test-configs/brownells-optics-smoke.yaml"
+        )
+        raw = yaml.safe_load(config_path.read_text())
+        config = load_config(config_path.read_text())
+
+        assert raw["project"] == "eyebox"
+        assert raw["name"] == "brownells-optics"
+        assert raw["adaptive"] is False
+        assert raw["webhook"]["on"] == ["complete", "partial"]
+        assert raw["output"] == {"group_by": "merge"}
+        assert config.webhook is not None
+        assert [status.value for status in config.webhook.on] == ["complete", "partial"]
+        assert config.execution.fail_strategy.value == "partial"
+        assert config.execution.delay_between == 3
+        assert config.execution.domain_rate_limit == 2
+        assert config.target is not None
+        assert config.target.fetcher.value == "dynamic"
+        assert config.target.pagination is not None
+        assert config.target.pagination.max_pages == 3
+
 
 # --- Webhook Config ---
 
@@ -324,3 +356,117 @@ class TestProxyConfig:
     def test_proxy_config_requires_url(self):
         with pytest.raises(ValidationError):
             ScrapeConfig(**_tier1_config(proxy={}))
+
+
+class TestMapDetectionConfig:
+    """MapDetectionConfig schema parsing and validation."""
+
+    def test_target_with_map_detection_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    map_detection={
+                        "text_patterns": ["add to cart to see price", "call for price"],
+                        "css_selectors": [".map-price-message"],
+                        "price_value_patterns": ["$0.00"],
+                    }
+                )
+            )
+        )
+        assert config.target.map_detection is not None
+        assert len(config.target.map_detection.text_patterns) == 2
+        assert len(config.target.map_detection.css_selectors) == 1
+        assert len(config.target.map_detection.price_value_patterns) == 1
+
+    def test_target_without_map_detection_defaults_to_none(self):
+        config = ScrapeConfig(**_tier1_config())
+        assert config.target.map_detection is None
+
+    def test_map_detection_empty_lists_default(self):
+        config = ScrapeConfig(
+            **_tier1_config(target=_target_dict(map_detection={}))
+        )
+        assert config.target.map_detection is not None
+        assert config.target.map_detection.text_patterns == []
+        assert config.target.map_detection.css_selectors == []
+        assert config.target.map_detection.price_value_patterns == []
+
+    def test_map_detection_yaml_round_trip(self):
+        yaml_str = """
+project: demo
+name: job1
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+  map_detection:
+    text_patterns:
+      - "add to cart to see price"
+      - "call for price"
+    css_selectors:
+      - ".map-price-message"
+    price_value_patterns:
+      - "$0.00"
+"""
+        config = load_config(yaml_str)
+        assert config.target.map_detection is not None
+        assert "add to cart to see price" in config.target.map_detection.text_patterns
+
+
+class TestStockDetectionConfig:
+    """StockDetectionConfig schema parsing and validation."""
+
+    def test_target_with_stock_detection_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    stock_detection={
+                        "in_stock": {"text_patterns": ["in stock", "available"]},
+                        "out_of_stock": {"text_patterns": ["out of stock", "sold out"]},
+                    }
+                )
+            )
+        )
+        assert config.target.stock_detection is not None
+        assert config.target.stock_detection.in_stock is not None
+        assert len(config.target.stock_detection.in_stock.text_patterns) == 2
+        assert config.target.stock_detection.out_of_stock is not None
+        assert config.target.stock_detection.limited_stock is None
+
+    def test_target_without_stock_detection_defaults_to_none(self):
+        config = ScrapeConfig(**_tier1_config())
+        assert config.target.stock_detection is None
+
+    def test_stock_detection_with_css_selectors(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    stock_detection={
+                        "in_stock": {
+                            "text_patterns": ["in stock"],
+                            "css_selectors": [".in-stock-badge"],
+                        },
+                    }
+                )
+            )
+        )
+        sd = config.target.stock_detection
+        assert sd.in_stock.css_selectors == [".in-stock-badge"]
+
+    def test_stock_detection_yaml_round_trip(self):
+        yaml_str = """
+project: demo
+name: job1
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+  stock_detection:
+    in_stock:
+      text_patterns: ["in stock"]
+    out_of_stock:
+      text_patterns: ["out of stock"]
+"""
+        config = load_config(yaml_str)
+        assert config.target.stock_detection is not None
+        assert config.target.stock_detection.in_stock is not None
