@@ -18,6 +18,10 @@ def enrich_item_detection(
     vis, display_text = detect_pricing_visibility(item_data, element, map_config)
     item_data["pricing_visibility"] = vis
     item_data["display_price_text"] = display_text
+    if "stock_signal" not in item_data:
+        raw_stock = item_data.get("stock_status")
+        if isinstance(raw_stock, str) and raw_stock.strip():
+            item_data["stock_signal"] = raw_stock
     item_data["stock_status"] = detect_stock_status(item_data, element, stock_config)
 
 

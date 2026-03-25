@@ -320,6 +320,16 @@ class TestEnrichItemDetection:
         assert item["display_price_text"] is None
         assert item["stock_status"] == "out_of_stock"
 
+    def test_preserves_raw_stock_status_as_stock_signal_before_canonicalizing(self):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {"name": "Widget", "price": None, "stock_status": "In Stock"}
+        el = _mock_element(text="In Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["stock_signal"] == "In Stock"
+        assert item["stock_status"] == "in_stock"
+
     def test_no_configs_adds_defaults(self):
         item = {"name": "Widget", "price": "$10.00"}
         el = _mock_element(text="")

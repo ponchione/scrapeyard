@@ -34,6 +34,8 @@ target:
   #   price_value_patterns:
   #     - "$0.00"
   # Stock status detection (optional). Patterns keyed by status value.
+  # `stock_status` is system-generated from stock_detection; use a selector
+  # like `stock_signal` if you want to preserve raw availability text.
   # stock_detection:
   #   in_stock:
   #     text_patterns: ["in stock", "available"]
