@@ -243,6 +243,8 @@ When `item_selector` is set, Scrapeyard matches each repeated item container and
 applies the field selectors relative to that item, returning one record per
 match instead of page-wide parallel arrays.
 This is the preferred mode for product grids and other repeated card layouts.
+`stock_status` is a system-generated detection field; if you want to keep the
+raw extracted availability text, map it to a selector such as `stock_signal`.
 
 ### Scheduled job
 

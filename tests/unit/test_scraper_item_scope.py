@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.config.schema import (
+    FetcherType,
+    RetryConfig,
+    StockDetectionConfig,
+    StockPatternConfig,
+    TargetConfig,
+)
 from scrapeyard.engine.scraper import scrape_target
 
 
@@ -28,8 +34,22 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
     page = _Node(
         css_map={
             ".product-card": [
-                _Node(css_map={".title": [_Node(text="A")], ".price": [_Node(text="$10")]}),
-                _Node(css_map={".title": [_Node(text="B")], ".price": [_Node(text="$20")]}),
+                _Node(
+                    text="A $10 In Stock",
+                    css_map={
+                        ".title": [_Node(text="A")],
+                        ".price": [_Node(text="$10")],
+                        ".stock": [_Node(text="In Stock")],
+                    },
+                ),
+                _Node(
+                    text="B $20 In Stock",
+                    css_map={
+                        ".title": [_Node(text="B")],
+                        ".price": [_Node(text="$20")],
+                        ".stock": [_Node(text="In Stock")],
+                    },
+                ),
             ]
         }
     )
@@ -39,7 +59,10 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
         url="https://example.com/products",
         fetcher=FetcherType.basic,
         item_selector=".product-card",
-        selectors={"name": ".title", "price": ".price"},
+        selectors={"name": ".title", "price": ".price", "stock_signal": ".stock"},
+        stock_detection=StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"])
+        ),
     )
 
     with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
@@ -56,16 +79,18 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
         {
             "name": "A",
             "price": "$10",
+            "stock_signal": "In Stock",
             "pricing_visibility": "explicit",
             "display_price_text": None,
-            "stock_status": "unknown",
+            "stock_status": "in_stock",
         },
         {
             "name": "B",
             "price": "$20",
+            "stock_signal": "In Stock",
             "pricing_visibility": "explicit",
             "display_price_text": None,
-            "stock_status": "unknown",
+            "stock_status": "in_stock",
         },
     ]
     assert result.pages_scraped == 1

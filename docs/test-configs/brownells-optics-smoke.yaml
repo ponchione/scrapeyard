@@ -50,7 +50,7 @@ target:
     url:
       query: "a.category-slider__item__title::attr(href)"
       transform: 'prepend("https://www.brownells.com")'
-    stock_status: "div.product-item-inventory span::text"
+    stock_signal: "div.product-item-inventory span::text"
     image_url: "a.category-slider__item__img img::attr(src)"
   map_detection:
     text_patterns:
