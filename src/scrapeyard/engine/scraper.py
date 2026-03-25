@@ -13,8 +13,9 @@ from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.engine.detection import enrich_item_detection
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.selectors import extract_item_selectors, extract_selectors
+from scrapeyard.engine.selectors import extract_selectors, select_items
 from scrapeyard.models.job import ErrorType
 
 logger = logging.getLogger(__name__)
@@ -23,10 +24,20 @@ _BROWSER_TIMEOUT_MS = 60000
 
 
 def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
-    """Extract either a single page-wide record or multiple item-scoped records."""
+    """Extract records and enrich with pricing visibility and stock status detection."""
     if target.item_selector is not None:
-        return extract_item_selectors(page, target.item_selector, target.selectors)
-    return [extract_selectors(page, target.selectors)]
+        items = select_items(page, target.item_selector)
+        data = [extract_selectors(item, target.selectors) for item in items]
+    else:
+        items = [page]
+        data = [extract_selectors(page, target.selectors)]
+
+    for item_data, element in zip(data, items):
+        enrich_item_detection(
+            item_data, element, target.map_detection, target.stock_detection,
+        )
+
+    return data
 
 
 def _normalized_adaptive_domain(target: TargetConfig) -> str:

@@ -5,7 +5,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
-from scrapeyard.engine.detection import detect_pricing_visibility, detect_stock_status
+from scrapeyard.engine.detection import (
+    detect_pricing_visibility,
+    detect_stock_status,
+    enrich_item_detection,
+)
 
 
 def _mock_element(text: str = "", css_results: dict[str, list] | None = None):
@@ -269,3 +273,38 @@ class TestDetectStockStatus:
         )
         el = _mock_element(text="in stock")
         assert detect_stock_status({}, el, config) == "in_stock"
+
+
+class TestEnrichItemDetection:
+    """enrich_item_detection adds fields to item dicts."""
+
+    def test_adds_all_fields_with_both_configs(self):
+        map_cfg = MapDetectionConfig(text_patterns=["add to cart to see price"])
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"])
+        )
+        item = {"name": "Widget", "price": None}
+        el = _mock_element(text="Add to Cart to See Price - In Stock")
+        enrich_item_detection(item, el, map_cfg, stock_cfg)
+        assert item["pricing_visibility"] == "map"
+        assert item["display_price_text"] == "Add to Cart to See Price"
+        assert item["stock_status"] == "in_stock"
+
+    def test_explicit_price_with_stock(self):
+        stock_cfg = StockDetectionConfig(
+            out_of_stock=StockPatternConfig(text_patterns=["out of stock"]),
+        )
+        item = {"name": "Widget", "price": "$49.99"}
+        el = _mock_element(text="Out of Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["pricing_visibility"] == "explicit"
+        assert item["display_price_text"] is None
+        assert item["stock_status"] == "out_of_stock"
+
+    def test_no_configs_adds_defaults(self):
+        item = {"name": "Widget", "price": "$10.00"}
+        el = _mock_element(text="")
+        enrich_item_detection(item, el, None, None)
+        assert item["pricing_visibility"] == "explicit"
+        assert item["display_price_text"] is None
+        assert item["stock_status"] == "unknown"
