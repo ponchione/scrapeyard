@@ -71,10 +71,20 @@ class ValidationResult:
 class ResultValidator:
     """Validates scraped data against :class:`ValidationConfig` rules."""
 
+    _HIDDEN_PRICE_VISIBILITIES = {"map", "cart_only", "call_for_price"}
+
     def __init__(self, config: ValidationConfig) -> None:
         self._required_fields = config.required_fields
         self._min_results = config.min_results
         self._on_empty = config.on_empty
+
+    def _has_required_field(self, field: str, record: dict[str, Any]) -> bool:
+        value = record.get(field)
+        if value not in (None, ""):
+            return True
+        if field != "price":
+            return False
+        return record.get("pricing_visibility") in self._HIDDEN_PRICE_VISIBILITIES
 
     def validate(self, data: list[dict[str, Any]]) -> ValidationResult:
         if len(data) < self._min_results:
@@ -86,8 +96,7 @@ class ResultValidator:
 
         for field in self._required_fields:
             for i, record in enumerate(data):
-                value = record.get(field)
-                if value is None or value == "":
+                if not self._has_required_field(field, record):
                     return ValidationResult(
                         passed=False,
                         action=self._on_empty,

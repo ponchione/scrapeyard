@@ -29,7 +29,11 @@ def _make_target(url: str) -> MagicMock:
     return target
 
 
-def _make_config(*targets: MagicMock, on_empty: OnEmptyAction):
+def _make_config(
+    *targets: MagicMock,
+    on_empty: OnEmptyAction,
+    required_fields: list[str] | None = None,
+):
     cfg = MagicMock()
     cfg.project = "test"
     cfg.name = "test-job"
@@ -41,7 +45,11 @@ def _make_config(*targets: MagicMock, on_empty: OnEmptyAction):
     cfg.adaptive = False
     cfg.schedule = None
     cfg.retry = MagicMock()
-    cfg.validation = MagicMock(required_fields=["title"], min_results=1, on_empty=on_empty)
+    cfg.validation = MagicMock(
+        required_fields=required_fields or ["title"],
+        min_results=1,
+        on_empty=on_empty,
+    )
     cfg.output.group_by = "target"
     cfg.webhook = None
     cfg.proxy = None
@@ -194,6 +202,46 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     result_store.save_result.assert_called_once()
     error = error_store.log_error.call_args[0][0]
     assert error.action_taken == ActionTaken.retry
+
+
+@pytest.mark.asyncio
+async def test_required_price_keeps_map_listing_after_validation(mock_stores):
+    job_store, result_store, error_store, circuit_breaker = mock_stores
+    job_store.get_job = AsyncMock(return_value=_make_job())
+    job_store.update_job = AsyncMock()
+
+    map_priced = TargetResult(
+        url="http://a.com",
+        status="success",
+        data=[{"title": "ok", "price": None, "pricing_visibility": "map"}],
+    )
+
+    with patch("scrapeyard.queue.worker.load_config") as mock_load, \
+         patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_load.return_value = _make_config(
+            _make_target("http://a.com"),
+            on_empty=OnEmptyAction.skip,
+            required_fields=["price"],
+        )
+        mock_scrape.return_value = map_priced
+
+        await scrape_task(
+            "job-1",
+            "yaml",
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    final_update = job_store.update_job.call_args_list[-1][0][0]
+    assert final_update.status == JobStatus.complete
+    result_store.save_result.assert_called_once()
+    assert result_store.save_result.call_args.kwargs["record_count"] == 1
+    error_store.log_error.assert_not_called()
 
 
 @pytest.mark.asyncio

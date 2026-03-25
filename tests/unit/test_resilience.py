@@ -110,6 +110,26 @@ class TestResultValidator:
         result = v.validate([{"title": ""}])
         assert result.passed is False
 
+    def test_required_price_allows_map_visibility_when_missing(self):
+        v = ResultValidator(ValidationConfig(required_fields=["price"]))
+        result = v.validate([{"title": "hello", "price": None, "pricing_visibility": "map"}])
+        assert result.passed is True
+
+    @pytest.mark.parametrize("visibility", ["cart_only", "call_for_price"])
+    def test_required_price_allows_hidden_price_visibilities_when_missing(self, visibility: str):
+        v = ResultValidator(ValidationConfig(required_fields=["price"]))
+        result = v.validate([{"title": "hello", "price": None, "pricing_visibility": visibility}])
+        assert result.passed is True
+
+    @pytest.mark.parametrize("visibility", ["missing", "unknown", "explicit"])
+    def test_required_price_fails_for_non_hidden_price_visibilities_when_missing(
+        self, visibility: str
+    ):
+        v = ResultValidator(ValidationConfig(required_fields=["price"]))
+        result = v.validate([{"title": "hello", "price": None, "pricing_visibility": visibility}])
+        assert result.passed is False
+        assert "price" in result.message
+
     def test_action_is_on_empty(self):
         v = ResultValidator(ValidationConfig(on_empty=OnEmptyAction.fail))
         result = v.validate([])
