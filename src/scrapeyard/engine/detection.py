@@ -202,9 +202,25 @@ def _get_element_text(element: Any) -> str:
     if element is None:
         return ""
     if isinstance(element, str):
-        return element
-    text = getattr(element, "text", None)
-    return text if isinstance(text, str) else ""
+        return _normalize_text(element)
+
+    get_all_text = getattr(element, "get_all_text", None)
+    if callable(get_all_text):
+        text = _normalize_text(get_all_text())
+        if text:
+            return text
+
+    return _normalize_text(getattr(element, "text", None))
+
+
+def _normalize_text(value: Any) -> str:
+    """Normalize Scrapling text values into usable strings."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text == "None":
+        return ""
+    return text
 
 
 def _css_select(element: Any, selector: str) -> list[Any]:
