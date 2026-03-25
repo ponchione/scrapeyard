@@ -8,6 +8,15 @@ from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
 from scrapeyard.config.transforms import apply_transforms, parse_transform
 
 
+def select_items(page: Any, item_selector: SelectorValue) -> list[Any]:
+    """Return raw DOM elements matched by *item_selector*.
+
+    Used by the detection pipeline to access elements alongside extracted data.
+    """
+    query, sel_type, _ = _unpack_selector(item_selector)
+    return _select_elements(page, query, sel_type)
+
+
 def extract_item_selectors(
     page: Any,
     item_selector: SelectorValue,
