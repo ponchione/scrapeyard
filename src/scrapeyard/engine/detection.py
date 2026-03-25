@@ -8,6 +8,19 @@ from typing import Any
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 
 
+def enrich_item_detection(
+    item_data: dict[str, Any],
+    element: Any,
+    map_config: MapDetectionConfig | None,
+    stock_config: StockDetectionConfig | None,
+) -> None:
+    """Add pricing_visibility, display_price_text, and stock_status to *item_data* in-place."""
+    vis, display_text = detect_pricing_visibility(item_data, element, map_config)
+    item_data["pricing_visibility"] = vis
+    item_data["display_price_text"] = display_text
+    item_data["stock_status"] = detect_stock_status(item_data, element, stock_config)
+
+
 def detect_pricing_visibility(
     item_data: dict[str, Any],
     element: Any,

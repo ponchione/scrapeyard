@@ -53,7 +53,19 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
 
     assert result.status == "success"
     assert result.data == [
-        {"name": "A", "price": "$10"},
-        {"name": "B", "price": "$20"},
+        {
+            "name": "A",
+            "price": "$10",
+            "pricing_visibility": "explicit",
+            "display_price_text": None,
+            "stock_status": "unknown",
+        },
+        {
+            "name": "B",
+            "price": "$20",
+            "pricing_visibility": "explicit",
+            "display_price_text": None,
+            "stock_status": "unknown",
+        },
     ]
     assert result.pages_scraped == 1
