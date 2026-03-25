@@ -37,8 +37,8 @@ target:
   # `stock_status` is system-generated from stock_detection; use a selector
   # like `stock_signal` if you want to preserve raw availability text.
   # Legacy raw `stock_status` selector output is copied into `stock_signal`
-  # during enrichment for backward compatibility, but new configs should use
-  # `stock_signal` directly.
+  # during enrichment only when `stock_signal` is missing or blank. New
+  # configs should use `stock_signal` directly.
   # stock_detection:
   #   in_stock:
   #     text_patterns: ["in stock", "available"]
