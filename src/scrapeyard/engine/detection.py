@@ -18,9 +18,9 @@ def enrich_item_detection(
     vis, display_text = detect_pricing_visibility(item_data, element, map_config)
     item_data["pricing_visibility"] = vis
     item_data["display_price_text"] = display_text
-    if "stock_signal" not in item_data:
+    if not _has_usable_stock_signal(item_data.get("stock_signal")):
         raw_stock = item_data.get("stock_status")
-        if isinstance(raw_stock, str) and raw_stock.strip():
+        if _has_usable_stock_signal(raw_stock):
             item_data["stock_signal"] = raw_stock
     item_data["stock_status"] = detect_stock_status(item_data, element, stock_config)
 
@@ -225,6 +225,15 @@ def _normalize_text(value: Any) -> str:
     if not text or text == "None":
         return ""
     return text
+
+
+def _has_usable_stock_signal(value: Any) -> bool:
+    """Return True when *value* contains non-empty raw selector output."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(item, str) and item.strip() for item in value)
+    return False
 
 
 def _css_select(element: Any, selector: str) -> list[Any]:
