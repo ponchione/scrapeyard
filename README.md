@@ -245,9 +245,9 @@ match instead of page-wide parallel arrays.
 This is the preferred mode for product grids and other repeated card layouts.
 `stock_status` is a system-generated detection field; if you want to keep the
 raw extracted availability text, map it to a selector such as `stock_signal`.
-For backward compatibility, legacy selector output written to raw
-`stock_status` is preserved into `stock_signal` during enrichment, but new
-configs should use `stock_signal` directly.
+For backward compatibility, legacy raw `stock_status` selector output is copied
+into `stock_signal` during enrichment only when `stock_signal` is missing or
+blank. New configs should use `stock_signal` directly.
 
 ### Scheduled job
 
