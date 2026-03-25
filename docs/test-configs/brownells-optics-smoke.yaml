@@ -1,40 +1,34 @@
-# Brownells optics smoke test
-#
-# Purpose:
-# - Verify async queue submission from an external client
-# - Verify dynamic/browser execution still works
-# - Verify selectors extract at least a few product cards
-# - Verify webhook delivery back to Eyeboxapp
-#
-# Notes:
-# - Keeps pagination to one page to reduce runtime and flake surface
-# - Keeps adaptive disabled so the first pass isolates base scraping behavior
+# Brownells - Optics Smoke Test Config
+# Retailer: Brownells (brownells.com)
+# Known URL patterns: /optics/reflex-red-dot-sights/red-dot-sights/ and /optics/scopes/rifle-scopes/
+# Notes: Reduced to a single red-dot target for manual ad-hoc validation. Holographic products
+# appear under the red-dot category path. Pagination uses ?page=N.
 
 project: eyebox
-name: brownells-optics-smoke
+name: brownells-optics
 adaptive: false
 
 webhook:
   url: http://host.docker.internal:19057/ingest
-  on: [complete, partial, failed]
+  "on": [complete, partial]
 
 execution:
   concurrency: 1
-  delay_between: 1
-  domain_rate_limit: 1
+  delay_between: 3
+  domain_rate_limit: 2
   mode: async
   priority: normal
   fail_strategy: partial
 
 retry:
-  max_attempts: 2
+  max_attempts: 3
   backoff: exponential
-  backoff_max: 15
+  backoff_max: 30
   retryable_status: [429, 500, 502, 503, 504]
 
 validation:
   required_fields: [name, price, url]
-  min_results: 3
+  min_results: 5
   on_empty: warn
 
 output:
@@ -58,6 +52,30 @@ target:
       transform: 'prepend("https://www.brownells.com")'
     stock_status: "div.product-item-inventory span::text"
     image_url: "a.category-slider__item__img img::attr(src)"
+  map_detection:
+    text_patterns:
+      - "add to cart for price"
+      - "see price in cart"
+      - "price too low to display"
+      - "call for price"
+    css_selectors:
+      - ".map-price-notice"
+      - "[data-map-restricted]"
+    price_value_patterns:
+      - "$0.00"
+      - ""
+  stock_detection:
+    in_stock:
+      text_patterns: ["in stock", "add to cart"]
+      css_selectors: [".product-item-inventory .in-stock"]
+    out_of_stock:
+      text_patterns: ["out of stock", "sold out", "unavailable"]
+    limited_stock:
+      text_patterns: ["only", "few left", "low stock"]
+    backorder:
+      text_patterns: ["backorder", "backordered"]
+    preorder:
+      text_patterns: ["preorder", "pre-order"]
   pagination:
     next: "li.plp-pagination-next a"
-    max_pages: 1
+    max_pages: 3
