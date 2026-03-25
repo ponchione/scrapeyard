@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from scrapeyard.config.schema import MapDetectionConfig
+from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 
 
 def detect_pricing_visibility(
@@ -83,6 +83,71 @@ def detect_pricing_visibility(
 
     # Config exists but nothing matched
     return ("missing", None)
+
+
+# ---------------------------------------------------------------------------
+# Stock status detection
+# ---------------------------------------------------------------------------
+
+# Priority order for stock status detection — most restrictive first.
+_STOCK_PRIORITY = [
+    "out_of_stock",
+    "backorder",
+    "preorder",
+    "limited_stock",
+    "in_stock",
+]
+
+
+def detect_stock_status(
+    item_data: dict[str, Any],
+    element: Any,
+    config: StockDetectionConfig | None,
+) -> str:
+    """Classify a listing's stock status.
+
+    Parameters
+    ----------
+    item_data:
+        Extracted field dict (unused today, reserved for future field-based stock signals).
+    element:
+        Raw DOM element for CSS/text inspection.
+    config:
+        Stock detection config from the retailer YAML, or ``None``.
+
+    Returns
+    -------
+    str
+        One of the six canonical ``stock_status`` values.
+    """
+    if config is None:
+        return "unknown"
+
+    item_text = _get_element_text(element)
+
+    for status in _STOCK_PRIORITY:
+        patterns: StockPatternConfig | None = getattr(config, status, None)
+        if patterns is None:
+            continue
+        if _stock_patterns_match(item_text, element, patterns):
+            return status
+
+    return "unknown"
+
+
+def _stock_patterns_match(
+    item_text: str,
+    element: Any,
+    patterns: StockPatternConfig,
+) -> bool:
+    """Return True if any text pattern or CSS selector in *patterns* matches."""
+    for tp in patterns.text_patterns:
+        if _text_contains(item_text, tp):
+            return True
+    for selector in patterns.css_selectors:
+        if _css_select(element, selector):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

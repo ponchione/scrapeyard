@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from scrapeyard.config.schema import MapDetectionConfig
-from scrapeyard.engine.detection import detect_pricing_visibility
+from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
+from scrapeyard.engine.detection import detect_pricing_visibility, detect_stock_status
 
 
 def _mock_element(text: str = "", css_results: dict[str, list] | None = None):
@@ -196,3 +196,76 @@ class TestDetectPricingVisibilityMissing:
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "missing"
         assert text is None
+
+
+class TestDetectStockStatus:
+    """Stock status detection from text patterns and CSS selectors."""
+
+    def test_no_config_returns_unknown(self):
+        assert detect_stock_status({}, _mock_element(), None) == "unknown"
+
+    def test_in_stock_text_pattern(self):
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        el = _mock_element(text="In Stock - Ships Free")
+        assert detect_stock_status({}, el, config) == "in_stock"
+
+    def test_out_of_stock_text_pattern(self):
+        config = StockDetectionConfig(
+            out_of_stock=StockPatternConfig(text_patterns=["out of stock", "sold out"]),
+        )
+        el = _mock_element(text="Currently Sold Out")
+        assert detect_stock_status({}, el, config) == "out_of_stock"
+
+    def test_limited_stock_text_pattern(self):
+        config = StockDetectionConfig(
+            limited_stock=StockPatternConfig(text_patterns=["only", "low stock"]),
+        )
+        el = _mock_element(text="Only 3 Left!")
+        assert detect_stock_status({}, el, config) == "limited_stock"
+
+    def test_backorder_text_pattern(self):
+        config = StockDetectionConfig(
+            backorder=StockPatternConfig(text_patterns=["backorder"]),
+        )
+        el = _mock_element(text="Available on Backorder")
+        assert detect_stock_status({}, el, config) == "backorder"
+
+    def test_preorder_text_pattern(self):
+        config = StockDetectionConfig(
+            preorder=StockPatternConfig(text_patterns=["pre-order", "preorder"]),
+        )
+        el = _mock_element(text="Pre-Order Now")
+        assert detect_stock_status({}, el, config) == "preorder"
+
+    def test_css_selector_match(self):
+        child = _mock_element(text="")
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(css_selectors=[".in-stock-badge"]),
+        )
+        el = _mock_element(text="", css_results={".in-stock-badge": [child]})
+        assert detect_stock_status({}, el, config) == "in_stock"
+
+    def test_priority_out_of_stock_over_in_stock(self):
+        """When both match, out_of_stock wins (higher priority)."""
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["stock"]),
+            out_of_stock=StockPatternConfig(text_patterns=["out of stock"]),
+        )
+        el = _mock_element(text="Out of Stock")
+        assert detect_stock_status({}, el, config) == "out_of_stock"
+
+    def test_no_match_returns_unknown(self):
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        el = _mock_element(text="Some unrelated text")
+        assert detect_stock_status({}, el, config) == "unknown"
+
+    def test_case_insensitive_matching(self):
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["IN STOCK"]),
+        )
+        el = _mock_element(text="in stock")
+        assert detect_stock_status({}, el, config) == "in_stock"
