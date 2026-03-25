@@ -54,6 +54,30 @@ target:
       transform: 'prepend("https://www.brownells.com")'
     stock_signal: "div.product-item-inventory span::text"
     image_url: "a.category-slider__item__img img::attr(src)"
+  map_detection:
+    text_patterns:
+      - "add to cart for price"
+      - "see price in cart"
+      - "price too low to display"
+      - "call for price"
+    css_selectors:
+      - ".map-price-notice"
+      - "[data-map-restricted]"
+    price_value_patterns:
+      - "$0.00"
+      - ""
+  stock_detection:
+    in_stock:
+      text_patterns: ["in stock", "add to cart"]
+      css_selectors: [".product-item-inventory .in-stock"]
+    out_of_stock:
+      text_patterns: ["out of stock", "sold out", "unavailable"]
+    limited_stock:
+      text_patterns: ["only", "few left", "low stock"]
+    backorder:
+      text_patterns: ["backorder", "backordered"]
+    preorder:
+      text_patterns: ["preorder", "pre-order"]
   pagination:
     next: "li.plp-pagination-next a"
     max_pages: 3

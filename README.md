@@ -243,11 +243,23 @@ When `item_selector` is set, Scrapeyard matches each repeated item container and
 applies the field selectors relative to that item, returning one record per
 match instead of page-wide parallel arrays.
 This is the preferred mode for product grids and other repeated card layouts.
+
+### Raw vs Generated Fields
+
+Selectors should populate raw retailer fields such as `name`, `price`, `url`,
+`stock_signal`, `manufacturer`, `sku`, `mpn`, and `upc` when those values are
+actually exposed on the listing card or page you are scraping. Do not invent
+selectors for identifier fields that are only available deeper in the retailer
+flow.
+
 `stock_status` is a system-generated detection field; if you want to keep the
 raw extracted availability text, map it to a selector such as `stock_signal`.
 For backward compatibility, legacy raw `stock_status` selector output is copied
 into `stock_signal` during enrichment only when `stock_signal` is missing or
 blank. New configs should use `stock_signal` directly.
+Scrapeyard also generates `pricing_visibility` and `display_price_text` during
+MAP detection, so those names should not be used as raw selector keys in new
+configs.
 
 ### Scheduled job
 

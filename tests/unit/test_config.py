@@ -261,8 +261,31 @@ targets:
         assert config.execution.domain_rate_limit == 2
         assert config.target is not None
         assert config.target.fetcher.value == "dynamic"
+        assert "stock_signal" in raw["target"]["selectors"]
+        assert "stock_status" not in raw["target"]["selectors"]
+        assert raw["target"]["map_detection"]["text_patterns"]
+        assert raw["target"]["stock_detection"]["in_stock"]["text_patterns"]
         assert config.target.pagination is not None
         assert config.target.pagination.max_pages == 3
+
+    def test_eyebox_validation_yaml_keeps_detection_contract_in_parity(self):
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "docs/test-configs/brownells-optics-validation.yaml"
+        )
+        raw = yaml.safe_load(config_path.read_text())
+        config = load_config(config_path.read_text())
+
+        assert raw["project"] == "eyebox"
+        assert raw["name"] == "brownells-optics-validation"
+        assert raw["adaptive"] is True
+        assert "stock_signal" in raw["target"]["selectors"]
+        assert "stock_status" not in raw["target"]["selectors"]
+        assert raw["target"]["map_detection"]["text_patterns"]
+        assert raw["target"]["stock_detection"]["in_stock"]["text_patterns"]
+        assert config.target is not None
+        assert config.target.map_detection is not None
+        assert config.target.stock_detection is not None
 
 
 # --- Webhook Config ---
