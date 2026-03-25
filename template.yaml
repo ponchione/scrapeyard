@@ -23,6 +23,22 @@ target:
     link:
       query: "a::attr(href)"
       transform: prepend("https://example.com")
+  # MAP pricing detection (optional). When present, listings without a numeric
+  # price are classified into pricing_visibility states.
+  # map_detection:
+  #   text_patterns:
+  #     - "add to cart to see price"
+  #     - "call for price"
+  #   css_selectors:
+  #     - ".map-price-message"
+  #   price_value_patterns:
+  #     - "$0.00"
+  # Stock status detection (optional). Patterns keyed by status value.
+  # stock_detection:
+  #   in_stock:
+  #     text_patterns: ["in stock", "available"]
+  #   out_of_stock:
+  #     text_patterns: ["out of stock", "sold out"]
   pagination:
     next: ".pagination-next"
     max_pages: 5
@@ -53,7 +69,6 @@ execution:
 #   cron: "0 * * * *"
 
 output:
-  format: json+markdown
   group_by: target
 
 # Uncomment to notify another system when this job finishes.
