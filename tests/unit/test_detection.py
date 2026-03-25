@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from scrapling import Adaptor
+
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 from scrapeyard.engine.detection import (
     detect_pricing_visibility,
@@ -145,6 +147,15 @@ class TestDetectPricingVisibilityMap:
         assert vis == "map"
         assert text == "Price Too Low To Advertise"
 
+    def test_text_pattern_uses_descendant_text_on_real_adaptor(self):
+        html = '<div class="product"><span class="map-copy">Add to Cart to See Price</span></div>'
+        el = Adaptor(html).css(".product")[0]
+        config = MapDetectionConfig(text_patterns=["add to cart to see price"])
+        item = {"price": None}
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "map"
+        assert text == "Add to Cart to See Price"
+
 
 class TestDetectPricingVisibilityCartOnly:
     """Pattern matches but no display text -> cart_only."""
@@ -274,6 +285,14 @@ class TestDetectStockStatus:
         el = _mock_element(text="in stock")
         assert detect_stock_status({}, el, config) == "in_stock"
 
+    def test_stock_detection_uses_descendant_text_on_real_adaptor(self):
+        html = '<div class="availability"><span class="status">In Stock - Ships Free</span></div>'
+        el = Adaptor(html).css(".availability")[0]
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        assert detect_stock_status({}, el, config) == "in_stock"
+
 
 class TestEnrichItemDetection:
     """enrich_item_detection adds fields to item dicts."""
@@ -308,3 +327,12 @@ class TestEnrichItemDetection:
         assert item["pricing_visibility"] == "explicit"
         assert item["display_price_text"] is None
         assert item["stock_status"] == "unknown"
+
+    def test_css_display_text_uses_full_text_not_adaptor_none_sentinel(self):
+        html = '<div class="map-message"><span>Add to Cart to See Price</span></div>'
+        el = Adaptor(html).css(".map-message")[0]
+        map_cfg = MapDetectionConfig(css_selectors=[".map-message"])
+        item = {"name": "Widget", "price": None}
+        vis, text = detect_pricing_visibility(item, el, map_cfg)
+        assert vis == "map"
+        assert text == "Add to Cart to See Price"
