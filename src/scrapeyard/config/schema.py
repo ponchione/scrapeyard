@@ -82,6 +82,71 @@ class WebhookStatus(str, Enum):
     failed = "failed"
 
 
+class PricingVisibility(str, Enum):
+    """Canonical pricing visibility states (Doc 1 Section 12.1)."""
+
+    explicit = "explicit"
+    map = "map"
+    cart_only = "cart_only"
+    call_for_price = "call_for_price"
+    missing = "missing"
+    unknown = "unknown"
+
+
+class StockStatus(str, Enum):
+    """Canonical stock status values (Doc 1 Section 12.2)."""
+
+    in_stock = "in_stock"
+    limited_stock = "limited_stock"
+    out_of_stock = "out_of_stock"
+    backorder = "backorder"
+    preorder = "preorder"
+    unknown = "unknown"
+
+
+# --- Detection Config Models ---
+
+
+class MapDetectionConfig(BaseModel):
+    """MAP pricing detection patterns for a target (Doc 2 Section 2.2)."""
+
+    text_patterns: list[str] = Field(
+        default_factory=list,
+        description="Text strings to match case-insensitively in item content",
+    )
+    css_selectors: list[str] = Field(
+        default_factory=list,
+        description="CSS selectors whose presence indicates MAP pricing",
+    )
+    price_value_patterns: list[str] = Field(
+        default_factory=list,
+        description="Raw price field values that indicate MAP (e.g. '$0.00', '')",
+    )
+
+
+class StockPatternConfig(BaseModel):
+    """Pattern set for a single stock status value."""
+
+    text_patterns: list[str] = Field(
+        default_factory=list,
+        description="Text strings to match case-insensitively in item content",
+    )
+    css_selectors: list[str] = Field(
+        default_factory=list,
+        description="CSS selectors whose presence indicates this stock state",
+    )
+
+
+class StockDetectionConfig(BaseModel):
+    """Stock status detection patterns, keyed by status value (Doc 1 Section 12.2)."""
+
+    in_stock: Optional[StockPatternConfig] = None
+    out_of_stock: Optional[StockPatternConfig] = None
+    limited_stock: Optional[StockPatternConfig] = None
+    backorder: Optional[StockPatternConfig] = None
+    preorder: Optional[StockPatternConfig] = None
+
+
 # --- Selector Models ---
 
 
@@ -155,6 +220,14 @@ class TargetConfig(BaseModel):
     proxy: Optional[ProxyConfig] = Field(
         default=None,
         description="Target-level proxy override. Takes precedence over job and service defaults.",
+    )
+    map_detection: Optional[MapDetectionConfig] = Field(
+        default=None,
+        description="MAP pricing detection patterns. When present, enables pricing visibility classification.",
+    )
+    stock_detection: Optional[StockDetectionConfig] = Field(
+        default=None,
+        description="Stock status detection patterns, keyed by status value.",
     )
 
 
