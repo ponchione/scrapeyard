@@ -10,6 +10,7 @@ data/
 *.egg-info/
 .idea/
 /work-orders
+.worktrees/
 
 .claude
 CLAUDE.md
