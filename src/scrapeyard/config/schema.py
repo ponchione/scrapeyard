@@ -120,7 +120,7 @@ class MapDetectionConfig(BaseModel):
     )
     price_value_patterns: list[str] = Field(
         default_factory=list,
-        description="Raw price field values that indicate MAP (e.g. '$0.00', '')",
+        description="Raw price field values that indicate MAP (e.g. '<hidden-price>', '[price hidden]')",
     )
 
 
