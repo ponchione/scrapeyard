@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+import math
 from typing import Any
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
+
+_NUMERIC_PRICE_RE = re.compile(r"^\s*[$€£]?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?\s*$")
 
 
 def enrich_item_detection(
@@ -173,19 +176,17 @@ def _stock_patterns_match(
 
 
 def _is_numeric_price(value: Any) -> bool:
-    """Return True if *value* represents a positive numeric price."""
+    """Return True if *value* looks like a numeric price."""
     if value is None:
         return False
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return math.isfinite(value)
     s = str(value).strip()
     if not s:
         return False
-    cleaned = re.sub(r"[^\d.]", "", s)
-    if not cleaned:
-        return False
-    try:
-        return float(cleaned) > 0
-    except ValueError:
-        return False
+    return _NUMERIC_PRICE_RE.fullmatch(s) is not None
 
 
 def _text_contains(haystack: str, needle: str) -> bool:
