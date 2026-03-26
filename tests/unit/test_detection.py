@@ -64,6 +64,33 @@ class TestDetectPricingVisibilityExplicit:
         assert vis == "explicit"
         assert text is None
 
+    def test_zero_string_price_with_map_detection_is_explicit(self):
+        config = MapDetectionConfig(text_patterns=["add to cart to see price"])
+        item = {"price": "0"}
+        el = _mock_element(text="Add to Cart to See Price")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_raw_numeric_zero_returns_explicit(self):
+        item = {"price": 0}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_raw_numeric_zero_point_zero_returns_explicit(self):
+        item = {"price": 0.0}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    @pytest.mark.parametrize("price", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_raw_float_prices_are_not_explicit(self, price):
+        item = {"price": price}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "unknown"
+        assert text is None
+
 
 class TestDetectPricingVisibilityUnknown:
     """No price + no map_detection config -> unknown."""
@@ -157,6 +184,14 @@ class TestDetectPricingVisibilityMap:
         assert vis == "map"
         assert text == "Add to Cart to See Price"
 
+    def test_embedded_digits_in_price_are_not_treated_as_numeric(self):
+        config = MapDetectionConfig(text_patterns=["map 0"])
+        item = {"price": "MAP 0"}
+        el = _mock_element(text="MAP 0")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "map"
+        assert text == "MAP 0"
+
 
 class TestDetectPricingVisibilityCartOnly:
     """Pattern matches but no display text -> cart_only."""
@@ -173,9 +208,9 @@ class TestDetectPricingVisibilityCartOnly:
         assert vis == "cart_only"
         assert text is None
 
-    def test_price_value_pattern_match(self):
-        config = MapDetectionConfig(price_value_patterns=["$0.00"])
-        item = {"price": "$0.00"}
+    def test_non_numeric_price_value_pattern_match(self):
+        config = MapDetectionConfig(price_value_patterns=["see in cart"])
+        item = {"price": "see in cart"}
         el = _mock_element(text="")
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "cart_only"
@@ -187,6 +222,14 @@ class TestDetectPricingVisibilityCartOnly:
         el = _mock_element(text="")
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "cart_only"
+        assert text is None
+
+    def test_zero_dollar_price_value_pattern_is_explicit(self):
+        config = MapDetectionConfig(price_value_patterns=["$0.00"])
+        item = {"price": "$0.00"}
+        el = _mock_element(text="")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "explicit"
         assert text is None
 
 
