@@ -306,6 +306,22 @@ class TestDetectStockStatus:
         el = _mock_element(text="", css_results={".in-stock-badge": [child]})
         assert detect_stock_status({}, el, config) == "in_stock"
 
+    def test_stock_signal_extracted_signal_drives_classification_when_dom_text_is_blank(self):
+        config = StockDetectionConfig(
+            backorder=StockPatternConfig(text_patterns=["backorder"]),
+        )
+        item = {"stock_signal": "Available on Backorder"}
+        el = _mock_element(text="")
+        assert detect_stock_status(item, el, config) == "backorder"
+
+    def test_list_valued_stock_signal_drives_classification_when_dom_text_is_blank(self):
+        config = StockDetectionConfig(
+            limited_stock=StockPatternConfig(text_patterns=["low stock"]),
+        )
+        item = {"stock_signal": ["Low Stock", "Ships Free"]}
+        el = _mock_element(text="")
+        assert detect_stock_status(item, el, config) == "limited_stock"
+
     def test_priority_out_of_stock_over_in_stock(self):
         """When both match, out_of_stock wins (higher priority)."""
         config = StockDetectionConfig(
@@ -328,6 +344,15 @@ class TestDetectStockStatus:
         )
         el = _mock_element(text="in stock")
         assert detect_stock_status({}, el, config) == "in_stock"
+
+    def test_css_selector_fallback_still_works_when_stock_signal_text_does_not_match(self):
+        child = _mock_element(text="")
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(css_selectors=[".in-stock-badge"]),
+        )
+        item = {"stock_signal": "Ships Tomorrow"}
+        el = _mock_element(text="", css_results={".in-stock-badge": [child]})
+        assert detect_stock_status(item, el, config) == "in_stock"
 
     def test_stock_detection_uses_descendant_text_on_real_adaptor(self):
         html = '<div class="availability"><span class="status">In Stock - Ships Free</span></div>'
@@ -389,6 +414,16 @@ class TestEnrichItemDetection:
         assert item["stock_signal"] == "In Stock"
         assert item["stock_status"] == "in_stock"
 
+    def test_legacy_stock_status_fallback_drives_canonical_status_when_dom_text_is_blank(self):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {"name": "Widget", "price": None, "stock_status": "In Stock"}
+        el = _mock_element(text="")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["stock_signal"] == "In Stock"
+        assert item["stock_status"] == "in_stock"
+
     def test_preserves_list_valued_legacy_stock_status_as_stock_signal(self):
         stock_cfg = StockDetectionConfig(
             in_stock=StockPatternConfig(text_patterns=["in stock"]),
@@ -399,6 +434,22 @@ class TestEnrichItemDetection:
             "stock_status": ["In Stock", "Ships Free"],
         }
         el = _mock_element(text="In Stock")
+        enrich_item_detection(item, el, None, stock_cfg)
+        assert item["stock_signal"] == ["In Stock", "Ships Free"]
+        assert item["stock_status"] == "in_stock"
+
+    def test_list_valued_legacy_stock_status_fallback_drives_canonical_status_when_dom_text_is_blank(
+        self,
+    ):
+        stock_cfg = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+        item = {
+            "name": "Widget",
+            "price": None,
+            "stock_status": ["In Stock", "Ships Free"],
+        }
+        el = _mock_element(text="")
         enrich_item_detection(item, el, None, stock_cfg)
         assert item["stock_signal"] == ["In Stock", "Ships Free"]
         assert item["stock_status"] == "in_stock"

@@ -129,7 +129,8 @@ def detect_stock_status(
     Parameters
     ----------
     item_data:
-        Extracted field dict (unused today, reserved for future field-based stock signals).
+        Extracted field dict. ``stock_signal`` is checked first as the raw
+        availability text source before falling back to DOM text and CSS selectors.
     element:
         Raw DOM element for CSS/text inspection.
     config:
@@ -143,6 +144,15 @@ def detect_stock_status(
     if config is None:
         return "unknown"
 
+    extracted_signal_text = _normalize_stock_signal_text(item_data.get("stock_signal"))
+    if extracted_signal_text:
+        for status in _STOCK_PRIORITY:
+            patterns: StockPatternConfig | None = getattr(config, status, None)
+            if patterns is None:
+                continue
+            if _stock_text_patterns_match(extracted_signal_text, patterns):
+                return status
+
     item_text = _get_element_text(element)
 
     for status in _STOCK_PRIORITY:
@@ -155,15 +165,22 @@ def detect_stock_status(
     return "unknown"
 
 
+def _stock_text_patterns_match(item_text: str, patterns: StockPatternConfig) -> bool:
+    """Return True if any text pattern in *patterns* matches *item_text*."""
+    for tp in patterns.text_patterns:
+        if _text_contains(item_text, tp):
+            return True
+    return False
+
+
 def _stock_patterns_match(
     item_text: str,
     element: Any,
     patterns: StockPatternConfig,
 ) -> bool:
     """Return True if any text pattern or CSS selector in *patterns* matches."""
-    for tp in patterns.text_patterns:
-        if _text_contains(item_text, tp):
-            return True
+    if _stock_text_patterns_match(item_text, patterns):
+        return True
     for selector in patterns.css_selectors:
         if _css_select(element, selector):
             return True
@@ -235,6 +252,16 @@ def _has_usable_stock_signal(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(isinstance(item, str) and item.strip() for item in value)
     return False
+
+
+def _normalize_stock_signal_text(value: Any) -> str:
+    """Normalize raw extracted stock signal values into matchable text."""
+    if isinstance(value, str):
+        return _normalize_text(value)
+    if isinstance(value, (list, tuple)):
+        parts = [_normalize_text(item) for item in value if isinstance(item, str)]
+        return " ".join(part for part in parts if part)
+    return ""
 
 
 def _css_select(element: Any, selector: str) -> list[Any]:
