@@ -49,6 +49,30 @@ class TestDetectPricingVisibilityExplicit:
         assert vis == "explicit"
         assert text is None
 
+    def test_spaced_dollar_price_returns_explicit(self):
+        item = {"price": "$ 299.99"}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_currency_code_price_returns_explicit(self):
+        item = {"price": "USD 299.99"}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_yen_price_returns_explicit(self):
+        item = {"price": "¥2999"}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_per_unit_price_returns_explicit(self):
+        item = {"price": "299.99 ea"}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
     def test_explicit_overrides_map_detection_config(self):
         """Numeric price -> explicit regardless of MAP config."""
         config = MapDetectionConfig(
@@ -191,6 +215,14 @@ class TestDetectPricingVisibilityMap:
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "map"
         assert text == "MAP 0"
+
+    def test_hidden_price_string_with_digits_is_not_treated_as_numeric(self):
+        config = MapDetectionConfig(text_patterns=["see price $0.00 in cart"])
+        item = {"price": "see price $0.00 in cart"}
+        el = _mock_element(text="see price $0.00 in cart")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "map"
+        assert text == "see price $0.00 in cart"
 
 
 class TestDetectPricingVisibilityCartOnly:

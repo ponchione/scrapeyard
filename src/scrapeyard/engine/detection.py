@@ -8,7 +8,11 @@ from typing import Any
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 
-_NUMERIC_PRICE_RE = re.compile(r"^\s*[$€£]?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?\s*$")
+_NUMERIC_PRICE_RE = re.compile(
+    r"^\s*(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
+    r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:\s*ea)?\s*$",
+    re.IGNORECASE,
+)
 
 
 def enrich_item_detection(
