@@ -23,8 +23,9 @@ target:
     link:
       query: "a::attr(href)"
       transform: prepend("https://example.com")
-  # MAP pricing detection (optional). When present, listings without a numeric
-  # price are classified into pricing_visibility states.
+  # MAP pricing detection (optional). Numeric prices are always classified as
+  # explicit; use this block for non-numeric sentinel values and retailer cues
+  # that indicate pricing_visibility states.
   # map_detection:
   #   text_patterns:
   #     - "add to cart to see price"
@@ -32,8 +33,10 @@ target:
   #   css_selectors:
   #     - ".map-price-message"
   #   price_value_patterns:
-  #     - "$0.00"
+  #     - "<hidden-price>"
   # Stock status detection (optional). Patterns keyed by status value.
+  # `stock_signal` is checked first, then DOM text and CSS selectors, so use
+  # it when you want the raw availability text to participate in detection.
   # `stock_status` is system-generated from stock_detection; use a selector
   # like `stock_signal` if you want to preserve raw availability text.
   # Legacy raw `stock_status` selector output is copied into `stock_signal`

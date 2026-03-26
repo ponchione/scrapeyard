@@ -64,8 +64,8 @@ target:
       - ".map-price-notice"
       - "[data-map-restricted]"
     price_value_patterns:
-      - "$0.00"
-      - ""
+      - "<hidden-price>"
+      - "[price hidden]"
   stock_detection:
     in_stock:
       text_patterns: ["in stock", "add to cart"]

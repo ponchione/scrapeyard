@@ -391,7 +391,7 @@ class TestMapDetectionConfig:
                     map_detection={
                         "text_patterns": ["add to cart to see price", "call for price"],
                         "css_selectors": [".map-price-message"],
-                        "price_value_patterns": ["$0.00"],
+                        "price_value_patterns": ["<hidden-price>"],
                     }
                 )
             )
@@ -429,7 +429,7 @@ target:
     css_selectors:
       - ".map-price-message"
     price_value_patterns:
-      - "$0.00"
+      - "<hidden-price>"
 """
         config = load_config(yaml_str)
         assert config.target.map_detection is not None

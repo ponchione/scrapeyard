@@ -254,12 +254,15 @@ flow.
 
 `stock_status` is a system-generated detection field; if you want to keep the
 raw extracted availability text, map it to a selector such as `stock_signal`.
-For backward compatibility, legacy raw `stock_status` selector output is copied
-into `stock_signal` during enrichment only when `stock_signal` is missing or
-blank. New configs should use `stock_signal` directly.
+Scrapeyard checks `stock_signal` first, then falls back to DOM text and CSS
+selectors during stock detection. For backward compatibility, legacy raw
+`stock_status` selector output is copied into `stock_signal` during enrichment
+only when `stock_signal` is missing or blank. New configs should use
+`stock_signal` directly.
 Scrapeyard also generates `pricing_visibility` and `display_price_text` during
-MAP detection, so those names should not be used as raw selector keys in new
-configs.
+MAP detection. Numeric prices are always classified as `explicit`; use
+`map_detection` for non-numeric sentinel values and retailer cues instead of
+raw selector keys in new configs.
 
 ### Scheduled job
 
