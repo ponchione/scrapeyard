@@ -106,7 +106,7 @@ class TestRunCreation:
         job = _make_job(current_run_id="run-abc")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -165,7 +165,7 @@ class TestRunCreation:
         job = _make_job(current_run_id="run-hash")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -212,7 +212,7 @@ class TestRunCreation:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -262,7 +262,7 @@ class TestRunFinalization:
         job = _make_job(current_run_id="run-fin")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         success_result = TargetResult(
             url="http://example.com", status="success",
@@ -331,7 +331,7 @@ class TestRunFinalization:
         job = _make_job(current_run_id="run-err")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         # A success result so the job completes normally.
         success_result = TargetResult(
@@ -380,7 +380,7 @@ class TestRunFinalization:
         job = _make_job(current_run_id="run-fail")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         fail_result = TargetResult(
             url="http://example.com", status="failed",
@@ -433,7 +433,7 @@ class TestRunFinalization:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         success_result = TargetResult(
             url="http://example.com", status="success",
@@ -496,7 +496,7 @@ class TestRunCrashHandling:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         # Make load_config raise so we hit the crash handler.
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
@@ -553,7 +553,7 @@ class TestRunCrashHandling:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
@@ -596,7 +596,7 @@ class TestRunCrashHandling:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
@@ -636,7 +636,7 @@ class TestRunCrashHandling:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         # load_config raises to trigger the crash handler, then get_db will
         # also fail because we reset_db. The task must not raise.
@@ -675,7 +675,7 @@ class TestErrorLoggingWithRunId:
         job = _make_job(current_run_id="run-err-tag")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []
@@ -727,7 +727,7 @@ class TestErrorLoggingWithRunId:
         job = _make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job = AsyncMock()
+        job_store.update_job_status = AsyncMock()
 
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []

@@ -64,7 +64,7 @@ async def test_webhook_dispatched_on_complete(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
     webhook_config = WebhookConfig(url="https://hooks.example.com/callback")
@@ -104,7 +104,7 @@ async def test_no_webhook_when_not_configured(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
 
@@ -137,7 +137,7 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     webhook_config = WebhookConfig(url="https://hooks.example.com/callback")
 
@@ -167,7 +167,7 @@ async def test_webhook_status_not_in_on_list(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
     # Only fire on "failed", but job will complete
@@ -205,7 +205,7 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
     webhook_config = WebhookConfig(

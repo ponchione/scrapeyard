@@ -46,6 +46,11 @@ def _row_to_job_run(row: aiosqlite.Row) -> JobRun:
 class SQLiteJobStore:
     """SQLite implementation of :class:`~scrapeyard.storage.protocols.JobStore`."""
 
+    @staticmethod
+    def _raise_if_missing_job(cursor: aiosqlite.Cursor, job_id: str) -> None:
+        if cursor.rowcount == 0:
+            raise KeyError(f"Job not found: {job_id!r}")
+
     async def save_job(self, job: Job) -> str:
         async with get_db("jobs.db") as db:
             try:
@@ -96,8 +101,39 @@ class SQLiteJobStore:
                 ),
             )
             await db.commit()
-            if cursor.rowcount == 0:
-                raise KeyError(f"Job not found: {job.job_id!r}")
+            self._raise_if_missing_job(cursor, job.job_id)
+
+    async def update_job_status(self, job: Job) -> None:
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """UPDATE jobs SET status=?, updated_at=?,
+                   current_run_id=?
+                   WHERE job_id=?""",
+                (
+                    job.status.value,
+                    fmt_dt(job.updated_at),
+                    job.current_run_id,
+                    job.job_id,
+                ),
+            )
+            await db.commit()
+            self._raise_if_missing_job(cursor, job.job_id)
+
+    async def update_job_schedule_state(self, job: Job) -> None:
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """UPDATE jobs SET schedule_cron=?, schedule_enabled=?,
+                   updated_at=?
+                   WHERE job_id=?""",
+                (
+                    job.schedule_cron,
+                    int(job.schedule_enabled),
+                    fmt_dt(job.updated_at),
+                    job.job_id,
+                ),
+            )
+            await db.commit()
+            self._raise_if_missing_job(cursor, job.job_id)
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
