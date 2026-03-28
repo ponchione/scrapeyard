@@ -9,6 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.dependencies import (
+    close_webhook_dispatcher,
     get_circuit_breaker,
     get_error_store,
     get_job_store,
@@ -99,6 +100,9 @@ async def test_app(monkeypatch):
     finally:
         scheduler.shutdown()
         await pool.stop()
+        await close_webhook_dispatcher(
+            timeout=settings.workers_shutdown_grace_seconds,
+        )
         await close_db()
 
 

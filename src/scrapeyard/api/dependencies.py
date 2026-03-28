@@ -58,6 +58,13 @@ def get_webhook_dispatcher() -> HttpWebhookDispatcher:
     return HttpWebhookDispatcher()
 
 
+async def close_webhook_dispatcher(*, timeout: float | None = None) -> None:
+    """Close the cached webhook dispatcher if it has been instantiated."""
+    if get_webhook_dispatcher.cache_info().currsize == 0:
+        return
+    await get_webhook_dispatcher().shutdown(timeout=timeout)
+
+
 # Rate limiter — set during lifespan startup, not @lru_cache, because
 # RedisDomainRateLimiter needs an async Redis connection that isn't
 # available at import time.
