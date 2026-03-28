@@ -18,6 +18,7 @@ class ServiceSettings(BaseSettings):
     workers_max_browsers: int = 2
     workers_memory_limit_mb: int = 4096
     sync_timeout_seconds: int = 15
+    sync_poll_delay_seconds: float = 0.5
     workers_shutdown_grace_seconds: int = 30
     workers_running_lease_seconds: int = 300
 

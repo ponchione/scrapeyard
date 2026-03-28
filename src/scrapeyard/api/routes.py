@@ -76,9 +76,10 @@ async def _wait_for_queued_job(
     queued_job: QueueJobHandle,
     *,
     timeout_seconds: int,
+    poll_delay_seconds: float,
 ) -> bool:
     try:
-        await queued_job.result(timeout=timeout_seconds, poll_delay=0.05)
+        await queued_job.result(timeout=timeout_seconds, poll_delay=poll_delay_seconds)
     except asyncio.TimeoutError:
         return False
     return True
@@ -148,6 +149,7 @@ async def scrape(
     completed = await _wait_for_queued_job(
         queued_job,
         timeout_seconds=settings.sync_timeout_seconds,
+        poll_delay_seconds=settings.sync_poll_delay_seconds,
     )
     if not completed:
         return _queued_response(job.job_id)
