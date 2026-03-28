@@ -3,10 +3,11 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import scrapeyard.storage.cleanup as cleanup_module
 from scrapeyard.storage.cleanup import run_cleanup
 from scrapeyard.storage.database import get_db, init_db, reset_db
 
@@ -46,6 +47,10 @@ async def _insert_meta(
             (job_id, project, run_id, file_path, created_at),
         )
         await db.commit()
+
+
+async def _run_to_thread(func, *args, **kwargs):
+    return func(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -117,3 +122,46 @@ async def test_run_cleanup_prunes_per_job_independently(db_and_dirs):
 
     assert count_a == 2
     assert count_b == 1
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_offloads_prune_directory_removal(db_and_dirs):
+    results_dir = db_and_dirs
+    now = datetime.now(timezone.utc)
+    result_store = AsyncMock()
+    result_store.delete_expired = AsyncMock(return_value=0)
+
+    old_run_dir = _create_result_on_disk(results_dir, "proj", "job1", "run-0")
+    await _insert_meta(
+        "job-1",
+        "proj",
+        "run-0",
+        str(old_run_dir),
+        (now - timedelta(hours=3)).isoformat(),
+    )
+    for index in (1, 2):
+        run_dir = _create_result_on_disk(results_dir, "proj", "job1", f"run-{index}")
+        await _insert_meta(
+            "job-1",
+            "proj",
+            f"run-{index}",
+            str(run_dir),
+            (now - timedelta(hours=2 - index)).isoformat(),
+        )
+
+    with patch.object(
+        cleanup_module.asyncio,
+        "to_thread",
+        new_callable=AsyncMock,
+    ) as mock_to_thread:
+        mock_to_thread.side_effect = _run_to_thread
+        async with get_db("results_meta.db") as db:
+            await run_cleanup(
+                result_store,
+                retention_days=30,
+                max_results_per_job=2,
+                db=db,
+            )
+
+    assert mock_to_thread.await_args.args[0] is cleanup_module.remove_directories
+    assert mock_to_thread.await_args.args[1] == [str(old_run_dir)]

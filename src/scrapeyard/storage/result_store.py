@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import shutil
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +10,12 @@ from typing import Any, Awaitable, Callable
 
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.storage.database import get_db
+from scrapeyard.storage.filesystem import (
+    prepare_directory,
+    read_json_file,
+    remove_directories,
+    write_json_file,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,12 +66,10 @@ class LocalResultStore:
         project, job_name = await self._job_lookup(job_id)
         run_id = run_id or generate_run_id()
         run_dir = self._results_dir / project / job_name / run_id
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
-        run_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(prepare_directory, run_dir)
 
         path = run_dir / "results.json"
-        path.write_text(json.dumps(data, default=str, indent=2))
+        await asyncio.to_thread(write_json_file, path, data)
 
         async with get_db("results_meta.db") as db:
             await db.execute(
@@ -124,7 +127,7 @@ class LocalResultStore:
 
         result_run_id, file_path = row
         path = Path(file_path) / "results.json"
-        data = json.loads(path.read_text())
+        data = await asyncio.to_thread(read_json_file, path)
         return ResultPayload(run_id=result_run_id, data=data)
 
     async def delete_results(self, job_id: str) -> None:
@@ -134,10 +137,11 @@ class LocalResultStore:
                 "SELECT file_path FROM results_meta WHERE job_id=?", (job_id,)
             )
             rows = await cursor.fetchall()
-            for (file_path,) in rows:
-                run_dir = Path(file_path)
-                if run_dir.exists():
-                    shutil.rmtree(run_dir)
+            if rows:
+                await asyncio.to_thread(
+                    remove_directories,
+                    [file_path for (file_path,) in rows],
+                )
             await db.execute("DELETE FROM results_meta WHERE job_id=?", (job_id,))
             await db.commit()
 
@@ -152,11 +156,11 @@ class LocalResultStore:
                 (cutoff,),
             )
             rows = await cursor.fetchall()
-            for row_id, file_path in rows:
-                run_dir = Path(file_path)
-                if run_dir.exists():
-                    shutil.rmtree(run_dir)
             if rows:
+                await asyncio.to_thread(
+                    remove_directories,
+                    [file_path for _, file_path in rows],
+                )
                 ids = [r[0] for r in rows]
                 placeholders = ",".join("?" for _ in ids)
                 await db.execute(

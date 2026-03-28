@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
-from pathlib import Path
 
 import aiosqlite
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.storage.database import get_db
+from scrapeyard.storage.filesystem import remove_directories
 from scrapeyard.storage.protocols import ResultStore
 
 logger = logging.getLogger(__name__)
@@ -57,12 +56,11 @@ async def run_cleanup(
     )
     excess_rows = await cursor.fetchall()
 
-    for row_id, file_path in excess_rows:
-        run_dir = Path(file_path)
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
-
     if excess_rows:
+        await asyncio.to_thread(
+            remove_directories,
+            [file_path for _, file_path in excess_rows],
+        )
         ids = [r[0] for r in excess_rows]
         placeholders = ",".join("?" for _ in ids)
         await db.execute(
