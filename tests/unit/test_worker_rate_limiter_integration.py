@@ -29,7 +29,7 @@ async def test_scrape_task_calls_rate_limiter_acquire():
     job = _make_job()
     job_store = AsyncMock()
     job_store.get_job.return_value = job
-    job_store.update_job.side_effect = lambda j: None
+    job_store.update_job_status.side_effect = lambda j: None
 
     rate_limiter = AsyncMock()
     rate_limiter.acquire = AsyncMock()

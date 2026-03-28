@@ -126,7 +126,7 @@ class SchedulerService:
             "updated_at": datetime.now(timezone.utc),
             "current_run_id": run_id,
         })
-        await self._job_store.update_job(queued_job)
+        await self._job_store.update_job_status(queued_job)
         await self._pool.enqueue(
             job.job_id,
             job.config_yaml,

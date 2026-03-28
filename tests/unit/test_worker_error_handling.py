@@ -32,7 +32,7 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
     async def capture_update(j):
         updated_jobs.append(j)
 
-    job_store.update_job.side_effect = capture_update
+    job_store.update_job_status.side_effect = capture_update
 
     await scrape_task(
         job.job_id,
@@ -90,7 +90,7 @@ async def test_scrape_task_skips_completed_duplicate_run():
         rate_limiter=LocalDomainRateLimiter(),
     )
 
-    job_store.update_job.assert_not_called()
+    job_store.update_job_status.assert_not_called()
     result_store.save_result.assert_not_called()
     error_store.log_error.assert_not_called()
 
@@ -117,7 +117,7 @@ async def test_scrape_task_skips_recent_running_duplicate():
         rate_limiter=LocalDomainRateLimiter(),
     )
 
-    job_store.update_job.assert_not_called()
+    job_store.update_job_status.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -136,7 +136,7 @@ async def test_scrape_task_reclaims_stale_running_job():
     async def capture_update(job):
         updated_jobs.append(job)
 
-    job_store.update_job.side_effect = capture_update
+    job_store.update_job_status.side_effect = capture_update
 
     with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=MagicMock(status="failed", data=[], errors=["boom"], pages_scraped=0, error_type=None, http_status=None, error_detail="boom"))):
         await scrape_task(

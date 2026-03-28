@@ -45,7 +45,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -78,7 +78,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job.call_args_list[-1][0][0]
+    final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.partial
 
 
@@ -88,7 +88,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -121,7 +121,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job.call_args_list[-1][0][0]
+    final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.failed
     result_store.save_result.assert_not_called()
 
@@ -132,7 +132,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -165,7 +165,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job.call_args_list[-1][0][0]
+    final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.complete
     result_store.save_result.assert_called_once()
 
@@ -176,7 +176,7 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(
         url="http://a.com", status="success", data=[{"title": "A"}, {"title": "B"}]
@@ -221,7 +221,7 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = _make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job = AsyncMock()
+    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])

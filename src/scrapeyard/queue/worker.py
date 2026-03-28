@@ -67,7 +67,7 @@ async def scrape_task(
             "status": JobStatus.running,
             "updated_at": started_at,
         })
-        await job_store.update_job(job)
+        await job_store.update_job_status(job)
 
         if run_id is not None:
             config_hash = hashlib.sha256(
@@ -426,7 +426,7 @@ async def scrape_task(
             "updated_at": completed_at,
             "current_run_id": run_id,
         })
-        await job_store.update_job(job)
+        await job_store.update_job_status(job)
     except Exception:
         logger.exception("scrape_task crashed for job_id=%s", job_id)
         try:
@@ -435,7 +435,7 @@ async def scrape_task(
                 "status": JobStatus.failed,
                 "updated_at": datetime.now(timezone.utc),
             })
-            await job_store.update_job(job)
+            await job_store.update_job_status(job)
         except Exception:
             logger.exception("Failed to mark job %s as failed", job_id)
         if run_id is not None:

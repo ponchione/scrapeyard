@@ -96,6 +96,60 @@ async def test_update_job(store):
     assert fetched.current_run_id == "20260318-120000-abcd1234"
 
 
+async def test_update_job_status_preserves_job_definition(store):
+    job = _make_job(
+        config_yaml="target: https://example.com\nselectors:\n  title: h1",
+        schedule_cron="*/5 * * * *",
+        schedule_enabled=False,
+    )
+    await store.save_job(job)
+
+    updated = job.model_copy(update={
+        "status": JobStatus.running,
+        "updated_at": datetime(2026, 1, 2, 8, 30, 0),
+        "current_run_id": "run-123",
+    })
+    await store.update_job_status(updated)
+
+    fetched = await store.get_job("j-1")
+    assert fetched.project == job.project
+    assert fetched.name == job.name
+    assert fetched.config_yaml == job.config_yaml
+    assert fetched.created_at == job.created_at
+    assert fetched.schedule_cron == job.schedule_cron
+    assert fetched.schedule_enabled == job.schedule_enabled
+    assert fetched.status == JobStatus.running
+    assert fetched.updated_at == datetime(2026, 1, 2, 8, 30, 0)
+    assert fetched.current_run_id == "run-123"
+
+
+async def test_update_job_schedule_state_preserves_job_definition(store):
+    job = _make_job(
+        status=JobStatus.running,
+        config_yaml="target: https://example.com\nselectors:\n  title: h1",
+        current_run_id="run-456",
+    )
+    await store.save_job(job)
+
+    updated = job.model_copy(update={
+        "schedule_cron": "0 * * * *",
+        "schedule_enabled": False,
+        "updated_at": datetime(2026, 1, 3, 9, 45, 0),
+    })
+    await store.update_job_schedule_state(updated)
+
+    fetched = await store.get_job("j-1")
+    assert fetched.project == job.project
+    assert fetched.name == job.name
+    assert fetched.status == job.status
+    assert fetched.config_yaml == job.config_yaml
+    assert fetched.created_at == job.created_at
+    assert fetched.current_run_id == job.current_run_id
+    assert fetched.schedule_cron == "0 * * * *"
+    assert fetched.schedule_enabled is False
+    assert fetched.updated_at == datetime(2026, 1, 3, 9, 45, 0)
+
+
 async def test_save_and_get_preserves_disabled_schedule(store):
     job = _make_job(schedule_cron="*/5 * * * *", schedule_enabled=False)
     await store.save_job(job)
@@ -109,3 +163,9 @@ async def test_update_nonexistent_raises(store):
     job = _make_job(job_id="ghost")
     with pytest.raises(KeyError, match="Job not found"):
         await store.update_job(job)
+
+
+async def test_update_job_status_nonexistent_raises(store):
+    job = _make_job(job_id="ghost")
+    with pytest.raises(KeyError, match="Job not found"):
+        await store.update_job_status(job)
