@@ -1,8 +1,10 @@
 """Test result retention cleanup."""
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
+import scrapeyard.storage.result_store as result_store_module
 from scrapeyard.storage.database import init_db, reset_db
 from scrapeyard.storage.result_store import LocalResultStore
 
@@ -19,6 +21,10 @@ async def store(tmp_path):
     store = LocalResultStore(str(results_dir), _lookup)
     yield store
     reset_db()
+
+
+async def _run_to_thread(func, *args, **kwargs):
+    return func(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -66,3 +72,33 @@ async def test_delete_expired_keeps_fresh_results(store):
         )
         row = await cursor.fetchone()
     assert row[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_offloads_directory_removal(store):
+    meta = await store.save_result("job-3", [{"url": "http://example.com"}])
+    run_id = meta.run_id
+
+    from scrapeyard.storage.database import get_db
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+            (old_date, run_id),
+        )
+        await db.commit()
+
+    with patch.object(
+        result_store_module.asyncio,
+        "to_thread",
+        new_callable=AsyncMock,
+    ) as mock_to_thread:
+        mock_to_thread.side_effect = _run_to_thread
+        deleted = await store.delete_expired(30)
+
+    assert deleted == 1
+    assert mock_to_thread.await_args == call(
+        result_store_module.remove_directories,
+        [meta.file_path],
+    )

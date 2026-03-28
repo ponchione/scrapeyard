@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import AsyncMock, call, patch
 
+import scrapeyard.storage.result_store as result_store_module
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
@@ -12,6 +14,10 @@ from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
 async def _lookup(job_id: str) -> tuple[str, str]:
     """Stub job lookup returning fixed project/name."""
     return ("acme", "scrape-prices")
+
+
+async def _run_to_thread(func, *args, **kwargs):
+    return func(*args, **kwargs)
 
 
 @pytest.fixture()
@@ -115,3 +121,61 @@ async def test_save_result_writes_json_file(store, tmp_path):
     results_dir = tmp_path / "results" / "acme" / "scrape-prices" / run_id
     json_path = results_dir / "results.json"
     assert json_path.exists()
+
+
+async def test_save_result_offloads_filesystem_work(store):
+    data = [{"price": 9.99}]
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-1"
+
+    with patch.object(
+        result_store_module.asyncio,
+        "to_thread",
+        new_callable=AsyncMock,
+    ) as mock_to_thread:
+        mock_to_thread.side_effect = _run_to_thread
+        await store.save_result("j-1", data, run_id="run-1")
+
+    assert mock_to_thread.await_args_list == [
+        call(result_store_module.prepare_directory, run_dir),
+        call(result_store_module.write_json_file, run_dir / "results.json", data),
+    ]
+
+
+async def test_get_result_offloads_json_read(store):
+    data = [{"price": 9.99}]
+    meta = await store.save_result("j-1", data, run_id="run-1")
+    json_path = store._results_dir / "acme" / "scrape-prices" / "run-1" / "results.json"
+
+    with patch.object(
+        result_store_module.asyncio,
+        "to_thread",
+        new_callable=AsyncMock,
+    ) as mock_to_thread:
+        mock_to_thread.side_effect = _run_to_thread
+        payload = await store.get_result("j-1", meta.run_id)
+
+    assert payload.data == data
+    assert mock_to_thread.await_args == call(
+        result_store_module.read_json_file,
+        json_path,
+    )
+
+
+async def test_delete_results_offloads_directory_removal(store):
+    first = await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
+    second = await store.save_result("j-1", [{"price": 19.99}], run_id="run-2")
+
+    with patch.object(
+        result_store_module.asyncio,
+        "to_thread",
+        new_callable=AsyncMock,
+    ) as mock_to_thread:
+        mock_to_thread.side_effect = _run_to_thread
+        await store.delete_results("j-1")
+
+    assert mock_to_thread.await_count == 1
+    assert mock_to_thread.await_args.args[0] is result_store_module.remove_directories
+    assert set(mock_to_thread.await_args.args[1]) == {
+        first.file_path,
+        second.file_path,
+    }
