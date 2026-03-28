@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.database import close_db, get_db, init_db
 
 
 async def test_init_db_creates_databases(tmp_path):
@@ -75,3 +75,30 @@ async def test_get_db_unknown_name(tmp_path):
     with pytest.raises(ValueError, match="Unknown database"):
         async with get_db("nope.db"):
             pass
+
+
+async def test_get_db_reuses_cached_connection(tmp_path):
+    """Repeated access to the same DB should reuse the cached connection."""
+    await init_db(str(tmp_path / "db"))
+
+    async with get_db("jobs.db") as first:
+        pass
+
+    async with get_db("jobs.db") as second:
+        pass
+
+    assert first is second
+
+
+async def test_init_db_switches_cached_connections_for_new_path(tmp_path):
+    """Reinitializing to a new DB dir should not reuse the old connection."""
+    await init_db(str(tmp_path / "db-1"))
+    async with get_db("jobs.db") as first:
+        pass
+
+    await init_db(str(tmp_path / "db-2"))
+    async with get_db("jobs.db") as second:
+        pass
+
+    assert first is not second
+    await close_db()

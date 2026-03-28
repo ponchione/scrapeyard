@@ -68,6 +68,10 @@ def mock_stores():
     return job_store, result_store, error_store, circuit_breaker
 
 
+def _first_logged_error(error_store: AsyncMock):
+    return error_store.log_errors.call_args[0][0][0]
+
+
 @pytest.mark.asyncio
 async def test_validation_warn_keeps_data_and_completes(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
@@ -96,7 +100,7 @@ async def test_validation_warn_keeps_data_and_completes(mock_stores):
     final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.complete
     result_store.save_result.assert_called_once()
-    error = error_store.log_error.call_args[0][0]
+    error = _first_logged_error(error_store)
     assert error.action_taken == ActionTaken.warn
 
 
@@ -134,7 +138,7 @@ async def test_validation_skip_discards_invalid_target_but_keeps_job_complete(mo
     assert final_update.status == JobStatus.complete
     result_store.save_result.assert_called_once()
     assert result_store.save_result.call_args.kwargs["record_count"] == 1
-    error = error_store.log_error.call_args[0][0]
+    error = _first_logged_error(error_store)
     assert error.action_taken == ActionTaken.skip
 
 
@@ -166,7 +170,7 @@ async def test_validation_fail_marks_target_failed(mock_stores):
     final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.failed
     result_store.save_result.assert_not_called()
-    error = error_store.log_error.call_args[0][0]
+    error = _first_logged_error(error_store)
     assert error.action_taken == ActionTaken.fail
 
 
@@ -200,7 +204,7 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     assert final_update.status == JobStatus.complete
     assert mock_scrape.call_count == 2
     result_store.save_result.assert_called_once()
-    error = error_store.log_error.call_args[0][0]
+    error = _first_logged_error(error_store)
     assert error.action_taken == ActionTaken.retry
 
 
@@ -241,7 +245,7 @@ async def test_required_price_keeps_map_listing_after_validation(mock_stores):
     assert final_update.status == JobStatus.complete
     result_store.save_result.assert_called_once()
     assert result_store.save_result.call_args.kwargs["record_count"] == 1
-    error_store.log_error.assert_not_called()
+    error_store.log_errors.assert_not_called()
 
 
 @pytest.mark.asyncio

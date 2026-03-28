@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
-from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import ErrorType, Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
 
 
@@ -92,7 +93,7 @@ async def test_scrape_task_skips_completed_duplicate_run():
 
     job_store.update_job_status.assert_not_called()
     result_store.save_result.assert_not_called()
-    error_store.log_error.assert_not_called()
+    error_store.log_errors.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -152,3 +153,61 @@ async def test_scrape_task_reclaims_stale_running_job():
 
     assert updated_jobs
     assert updated_jobs[0].status == JobStatus.running
+
+
+@pytest.mark.asyncio
+async def test_scrape_task_batches_multiple_target_errors():
+    job = _make_job()
+    job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.update_job_status = AsyncMock()
+
+    error_store = AsyncMock()
+
+    fail_result = TargetResult(
+        url="http://example.com",
+        status="failed",
+        data=[],
+        errors=["timeout", "proxy refused"],
+        pages_scraped=0,
+        error_type=ErrorType.timeout,
+    )
+
+    with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=fail_result)), \
+         patch("scrapeyard.queue.worker.load_config") as mock_load, \
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+        cfg = mock_load.return_value
+        cfg.project = "test"
+        cfg.name = "crash-test"
+        cfg.resolved_targets.return_value = [MagicMock(url="http://example.com", fetcher=MagicMock(value="basic"), proxy=None)]
+        cfg.execution.concurrency = 1
+        cfg.execution.delay_between = 0
+        cfg.execution.domain_rate_limit = 0
+        cfg.execution.fail_strategy = MagicMock(value="partial")
+        cfg.adaptive = False
+        cfg.schedule = None
+        cfg.retry = MagicMock()
+        cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
+        cfg.output.group_by = "target"
+        cfg.webhook = None
+        cfg.proxy = None
+
+        await scrape_task(
+            job.job_id,
+            "project: test\nname: crash-test\ntarget:\n  url: http://example.com\n  selectors:\n    title: h1",
+            job_store=job_store,
+            result_store=AsyncMock(),
+            error_store=error_store,
+            circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    error_store.log_errors.assert_called_once()
+    logged_errors = error_store.log_errors.call_args[0][0]
+    assert len(logged_errors) == 2
+    assert [record.error_message for record in logged_errors] == ["timeout", "proxy refused"]

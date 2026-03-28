@@ -102,6 +102,7 @@ async def scrape_task(
             domain: str,
             adaptive: bool,
             result: TargetResult,
+            pending_errors: list[ErrorRecord],
             *,
             attempt: int = 1,
             proxy_url: str | None = None,
@@ -114,7 +115,7 @@ async def scrape_task(
                 return result
 
             action = ActionTaken(validation.action.value)
-            await _log_error(
+            pending_errors.append(_build_error_record(
                 job_id,
                 run_id or "",
                 config.project,
@@ -124,8 +125,7 @@ async def scrape_task(
                 None,
                 target_cfg.fetcher.value,
                 action,
-                error_store,
-            )
+            ))
 
             if validation.action == OnEmptyAction.warn:
                 logger.warning("Validation warning for %s: %s", target_cfg.url, validation.message)
@@ -164,7 +164,7 @@ async def scrape_task(
                 logger.info("Recording failure for domain %s after validation retry", domain)
                 circuit_breaker.record_failure(domain)
                 for _ in retry_result.errors:
-                    await _log_error(
+                    pending_errors.append(_build_error_record(
                         job_id,
                         run_id or "",
                         config.project,
@@ -174,8 +174,7 @@ async def scrape_task(
                         None,
                         target_cfg.fetcher.value,
                         ActionTaken.fail,
-                        error_store,
-                    )
+                    ))
                 return retry_result
 
             circuit_breaker.record_success(domain)
@@ -183,7 +182,7 @@ async def scrape_task(
             if retry_validation.passed:
                 return retry_result
 
-            await _log_error(
+            pending_errors.append(_build_error_record(
                 job_id,
                 run_id or "",
                 config.project,
@@ -193,8 +192,7 @@ async def scrape_task(
                 None,
                 target_cfg.fetcher.value,
                 ActionTaken.fail,
-                error_store,
-            )
+            ))
             return TargetResult(
                 url=target_cfg.url,
                 status="failed",
@@ -204,78 +202,94 @@ async def scrape_task(
             )
 
         async def _process_target(target_cfg: Any) -> TargetResult:
-            async with sem:
-                domain = urlparse(target_cfg.url).netloc
+            pending_errors: list[ErrorRecord] = []
+            try:
+                async with sem:
+                    domain = urlparse(target_cfg.url).netloc
 
-                # Circuit breaker check.
-                try:
-                    circuit_breaker.check(domain)
-                except CircuitOpenError as exc:
-                    logger.info("Circuit breaker open for %s", domain)
-                    tr = TargetResult(url=target_cfg.url, status="failed", errors=[str(exc)])
-                    await _log_error(
-                        job_id, run_id or "", config.project,
-                        target_cfg.url, 0,
-                        ErrorType.network_error, None, "circuit_breaker",
-                        ActionTaken.circuit_break, error_store,
-                    )
-                    return tr
+                    # Circuit breaker check.
+                    try:
+                        circuit_breaker.check(domain)
+                    except CircuitOpenError as exc:
+                        logger.info("Circuit breaker open for %s", domain)
+                        tr = TargetResult(url=target_cfg.url, status="failed", errors=[str(exc)])
+                        pending_errors.append(_build_error_record(
+                            job_id,
+                            run_id or "",
+                            config.project,
+                            target_cfg.url,
+                            0,
+                            ErrorType.network_error,
+                            None,
+                            "circuit_breaker",
+                            ActionTaken.circuit_break,
+                        ))
+                        return tr
 
-                # Domain rate limiting (shared across jobs when Redis-backed).
-                await rate_limiter.acquire(domain, domain_rate_limit)
+                    # Domain rate limiting (shared across jobs when Redis-backed).
+                    await rate_limiter.acquire(domain, domain_rate_limit)
 
-                # Spec 6.1: adaptive defaults to True for scheduled jobs, False for on-demand.
-                if config.adaptive is not None:
-                    adaptive = config.adaptive
-                else:
-                    adaptive = config.schedule is not None
+                    # Spec 6.1: adaptive defaults to True for scheduled jobs, False for on-demand.
+                    if config.adaptive is not None:
+                        adaptive = config.adaptive
+                    else:
+                        adaptive = config.schedule is not None
 
-                # Resolve proxy for this target.
-                proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
+                    # Resolve proxy for this target.
+                    proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
 
-                if proxy_url:
-                    logger.info(
-                        "Scraping %s with fetcher=%s adaptive=%s proxy=%s",
-                        target_cfg.url, target_cfg.fetcher.value, adaptive,
-                        redact_proxy_url(proxy_url),
-                    )
-                else:
-                    logger.info(
-                        "Scraping %s with fetcher=%s adaptive=%s",
-                        target_cfg.url, target_cfg.fetcher.value, adaptive,
-                    )
-                result = await scrape_target(
-                    target_cfg, adaptive, config.retry,
-                    adaptive_dir=adaptive_dir, proxy_url=proxy_url,
-                )
-
-                if result.status == "success":
-                    circuit_breaker.record_success(domain)
-                    result = await _apply_validation(
-                        target_cfg, domain, adaptive, result, proxy_url=proxy_url,
-                    )
-                else:
-                    logger.warning(
-                        "Recording failure for domain %s type=%s status=%s detail=%s",
-                        domain,
-                        result.error_type.value if result.error_type else ErrorType.http_error.value,
-                        result.http_status,
-                        result.error_detail or "; ".join(result.errors) or "unknown error",
-                    )
-                    circuit_breaker.record_failure(domain)
-                    for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
-                        await _log_error(
-                            job_id, run_id or "", config.project,
-                            target_cfg.url, 1,
-                            result.error_type or ErrorType.http_error,
-                            result.http_status,
-                            target_cfg.fetcher.value,
-                            ActionTaken.fail,
-                            error_store,
-                            error_message=err_msg,
+                    if proxy_url:
+                        logger.info(
+                            "Scraping %s with fetcher=%s adaptive=%s proxy=%s",
+                            target_cfg.url, target_cfg.fetcher.value, adaptive,
+                            redact_proxy_url(proxy_url),
                         )
+                    else:
+                        logger.info(
+                            "Scraping %s with fetcher=%s adaptive=%s",
+                            target_cfg.url, target_cfg.fetcher.value, adaptive,
+                        )
+                    result = await scrape_target(
+                        target_cfg, adaptive, config.retry,
+                        adaptive_dir=adaptive_dir, proxy_url=proxy_url,
+                    )
 
-                return result
+                    if result.status == "success":
+                        circuit_breaker.record_success(domain)
+                        result = await _apply_validation(
+                            target_cfg,
+                            domain,
+                            adaptive,
+                            result,
+                            pending_errors,
+                            proxy_url=proxy_url,
+                        )
+                    else:
+                        logger.warning(
+                            "Recording failure for domain %s type=%s status=%s detail=%s",
+                            domain,
+                            result.error_type.value if result.error_type else ErrorType.http_error.value,
+                            result.http_status,
+                            result.error_detail or "; ".join(result.errors) or "unknown error",
+                        )
+                        circuit_breaker.record_failure(domain)
+                        for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
+                            pending_errors.append(_build_error_record(
+                                job_id,
+                                run_id or "",
+                                config.project,
+                                target_cfg.url,
+                                1,
+                                result.error_type or ErrorType.http_error,
+                                result.http_status,
+                                target_cfg.fetcher.value,
+                                ActionTaken.fail,
+                                error_message=err_msg,
+                            ))
+
+                    return result
+            finally:
+                await _flush_errors(error_store, pending_errors)
 
         # Process targets with delay_between staggering.
         tasks: list[asyncio.Task] = []
@@ -487,7 +501,7 @@ def _should_skip_delivery(
     return lease_age < running_lease_seconds
 
 
-async def _log_error(
+def _build_error_record(
     job_id: str,
     run_id: str,
     project: str,
@@ -497,11 +511,10 @@ async def _log_error(
     http_status: int | None,
     fetcher_used: str,
     action: ActionTaken,
-    error_store: ErrorStore,
     error_message: str | None = None,
-) -> None:
-    """Helper to log a structured error record."""
-    record = ErrorRecord(
+) -> ErrorRecord:
+    """Build a structured error record for deferred persistence."""
+    return ErrorRecord(
         job_id=job_id,
         run_id=run_id,
         project=project,
@@ -513,4 +526,11 @@ async def _log_error(
         error_message=error_message,
         action_taken=action,
     )
-    await error_store.log_error(record)
+
+
+async def _flush_errors(
+    error_store: ErrorStore, errors: list[ErrorRecord],
+) -> None:
+    if not errors:
+        return
+    await error_store.log_errors(errors)

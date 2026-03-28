@@ -21,7 +21,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.main import app
 from scrapeyard.queue.worker import scrape_task
-from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.database import close_db, init_db
 
 
 class _FakeQueuedJob:
@@ -99,7 +99,7 @@ async def test_app(monkeypatch):
     finally:
         scheduler.shutdown()
         await pool.stop()
-        reset_db()
+        await close_db()
 
 
 @pytest.fixture()

@@ -64,6 +64,20 @@ async def test_log_error_null_optionals(store):
     assert results[0].selectors_matched is None
 
 
+async def test_log_errors_batches_multiple_records(store):
+    await store.log_errors(
+        [
+            _make_error(job_id="j-1", error_message="first"),
+            _make_error(job_id="j-2", error_message="second"),
+        ]
+    )
+
+    results = await store.query_errors(ErrorFilters())
+    assert len(results) == 2
+    assert {result.job_id for result in results} == {"j-1", "j-2"}
+    assert {result.error_message for result in results} == {"first", "second"}
+
+
 async def test_filter_by_project(store):
     await store.log_error(_make_error(project="acme", job_id="j-1"))
     await store.log_error(_make_error(project="other", job_id="j-2"))
