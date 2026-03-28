@@ -10,7 +10,11 @@ from arq.connections import RedisSettings, create_pool
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from scrapeyard.api.dependencies import get_scheduler, get_worker_pool
+from scrapeyard.api.dependencies import (
+    close_webhook_dispatcher,
+    get_scheduler,
+    get_worker_pool,
+)
 from scrapeyard.common.settings import get_settings
 from scrapeyard.main import app
 from scrapeyard.storage.database import init_db, reset_db
@@ -86,6 +90,9 @@ async def live_app() -> AsyncIterator:
             scheduler.shutdown()
         if pool is not None:
             await pool.stop()
+        await close_webhook_dispatcher(
+            timeout=settings.workers_shutdown_grace_seconds,
+        )
         if redis is not None:
             await redis.flushdb()
             await redis.aclose()

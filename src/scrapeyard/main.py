@@ -8,10 +8,12 @@ from fastapi import FastAPI
 
 from scrapeyard import __version__
 from scrapeyard.api.dependencies import (
+    close_webhook_dispatcher,
     get_error_store,
     get_job_store,
     get_result_store,
     get_scheduler,
+    get_webhook_dispatcher,
     get_worker_pool,
     init_rate_limiter,
 )
@@ -44,6 +46,8 @@ async def lifespan(app: FastAPI):
     app.state.job_store = get_job_store()
     app.state.error_store = get_error_store()
     app.state.result_store = get_result_store()
+    app.state.webhook_dispatcher = get_webhook_dispatcher()
+    await app.state.webhook_dispatcher.startup()
 
     # 4. Worker pool
     pool = get_worker_pool()
@@ -72,6 +76,7 @@ async def lifespan(app: FastAPI):
         pass
     scheduler.shutdown()
     await pool.stop()
+    await close_webhook_dispatcher(timeout=settings.workers_shutdown_grace_seconds)
     await close_db()
 
 

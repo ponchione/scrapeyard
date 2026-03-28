@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -87,11 +86,9 @@ async def test_webhook_dispatched_on_complete(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
-        # Let any create_task webhooks run.
-        await asyncio.sleep(0)
 
-    webhook_dispatcher.dispatch.assert_called_once()
-    call_args = webhook_dispatcher.dispatch.call_args
+    webhook_dispatcher.submit.assert_awaited_once()
+    call_args = webhook_dispatcher.submit.call_args
     assert call_args[0][0] is webhook_config
     payload = call_args[0][1]
     assert payload["event"] == "job.complete"
@@ -126,9 +123,8 @@ async def test_no_webhook_when_not_configured(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
-        await asyncio.sleep(0)
 
-    webhook_dispatcher.dispatch.assert_not_called()
+    webhook_dispatcher.submit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -194,9 +190,8 @@ async def test_webhook_status_not_in_on_list(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
-        await asyncio.sleep(0)
 
-    webhook_dispatcher.dispatch.assert_not_called()
+    webhook_dispatcher.submit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -231,10 +226,9 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
             webhook_dispatcher=webhook_dispatcher,
         )
-        await asyncio.sleep(0)
 
-    webhook_dispatcher.dispatch.assert_called_once()
-    payload = webhook_dispatcher.dispatch.call_args[0][1]
+    webhook_dispatcher.submit.assert_awaited_once()
+    payload = webhook_dispatcher.submit.call_args[0][1]
     assert payload["run_id"] is None
     assert payload["result_path"] is None
     assert payload["results_url"] is None

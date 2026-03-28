@@ -411,7 +411,8 @@ async def scrape_task(
                 )
                 await db.commit()
 
-        # Webhook dispatch (fire-and-forget).
+        # Webhook dispatch is submitted to the dispatcher so it can track
+        # and drain outstanding deliveries during shutdown.
         completed_at = datetime.now(timezone.utc)
         latest_job = await job_store.get_job(job_id)
         if _run_superseded(latest_job, run_id):
@@ -431,7 +432,7 @@ async def scrape_task(
                 started_at=started_at.isoformat(),
                 completed_at=completed_at.isoformat(),
             )
-            asyncio.create_task(webhook_dispatcher.dispatch(config.webhook, payload))
+            await webhook_dispatcher.submit(config.webhook, payload)
 
         # Update job status.
         job = await job_store.get_job(job_id)
