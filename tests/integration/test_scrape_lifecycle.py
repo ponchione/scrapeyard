@@ -197,11 +197,15 @@ async def test_sync_scrape_returns_202_when_timeout_expires(client, monkeypatch)
     pool = get_worker_pool()
     settings = get_settings()
     original_timeout = settings.sync_timeout_seconds
+    original_poll_delay = settings.sync_poll_delay_seconds
     settings.sync_timeout_seconds = 0
+    settings.sync_poll_delay_seconds = 0.25
+    observed: dict[str, float | int | None] = {}
 
     class _SlowQueuedJob:
         async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
-            del poll_delay
+            observed["timeout"] = timeout
+            observed["poll_delay"] = poll_delay
             if timeout == 0:
                 raise asyncio.TimeoutError
             await asyncio.sleep(0.01)
@@ -211,15 +215,19 @@ async def test_sync_scrape_returns_202_when_timeout_expires(client, monkeypatch)
 
     monkeypatch.setattr(pool, "enqueue", _enqueue)
 
-    response = await client.post(
-        "/scrape",
-        content=_sync_scrape_yaml(),
-        headers={"content-type": "application/x-yaml"},
-    )
-
-    settings.sync_timeout_seconds = original_timeout
+    try:
+        response = await client.post(
+            "/scrape",
+            content=_sync_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+    finally:
+        settings.sync_timeout_seconds = original_timeout
+        settings.sync_poll_delay_seconds = original_poll_delay
 
     assert response.status_code == 202
     payload = response.json()
     assert payload["status"] == "queued"
     assert payload["poll_url"].startswith("/results/")
+    assert observed["timeout"] == 0
+    assert observed["poll_delay"] == 0.25

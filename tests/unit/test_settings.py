@@ -35,6 +35,10 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.workers_memory_limit_mb == 4096
 
+    def test_sync_poll_delay_seconds_default(self):
+        settings = ServiceSettings()
+        assert settings.sync_poll_delay_seconds == 0.5
+
     def test_scheduler_jitter_max_seconds_default(self):
         settings = ServiceSettings()
         assert settings.scheduler_jitter_max_seconds == 120
@@ -89,6 +93,11 @@ class TestServiceSettingsFromEnv:
         with patch.dict(os.environ, {"SCRAPEYARD_STORAGE_RESULTS_DIR": "/tmp/results"}):
             settings = ServiceSettings()
         assert settings.storage_results_dir == "/tmp/results"
+
+    def test_reads_sync_poll_delay_seconds(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_SYNC_POLL_DELAY_SECONDS": "0.25"}):
+            settings = ServiceSettings()
+        assert settings.sync_poll_delay_seconds == 0.25
 
     def test_reads_circuit_breaker_cooldown_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS": "600"}):

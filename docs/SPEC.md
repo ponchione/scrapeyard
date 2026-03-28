@@ -94,7 +94,7 @@ The service is designed to be project-agnostic. Any project (job-scout, a produc
 2. FastAPI validates the config against the schema.
 3. Job is persisted and enqueued to the arq queue via Redis with assigned priority.
 4. Worker picks up the job, executes via Scrapling, formats results, and writes to storage.
-5. If the request is in sync-wait mode, the API waits for queued job completion up to `sync_timeout_seconds`.
+5. If the request is in sync-wait mode, the API waits for queued job completion up to `sync_timeout_seconds`, polling Redis every `sync_poll_delay_seconds`.
 6. If the job completes within the wait window, the API returns `200` with results inline.
 7. Otherwise, the API returns `202 Accepted` with a `job_id` for polling.
 8. Client retrieves results via `GET /results/{job_id}`.
@@ -116,7 +116,7 @@ In `auto` mode, the API waits for completion only for simple jobs:
 
 | Condition | Response |
 |---|---|
-| Single target, no pagination, basic fetcher | Wait up to `sync_timeout_seconds`; return `200` if complete, else `202` |
+| Single target, no pagination, basic fetcher | Wait up to `sync_timeout_seconds`, polling every `sync_poll_delay_seconds`; return `200` if complete, else `202` |
 | Multi-target, pagination, or stealthy/dynamic fetcher | `202 Accepted` immediately; poll `GET /results/{job_id}` |
 
 The caller can override this behavior explicitly:
@@ -125,7 +125,7 @@ The caller can override this behavior explicitly:
 execution:
   mode: async   # enqueue and return 202 immediately
   # or
-  mode: sync    # enqueue, then wait up to sync_timeout_seconds
+  mode: sync    # enqueue, then wait up to sync_timeout_seconds while polling at sync_poll_delay_seconds
 ```
 
 `sync` never bypasses the worker path. It means "wait on the queued job up to timeout," not "execute inline in the API process."
@@ -135,6 +135,7 @@ Recommended service-level setting:
 ```yaml
 api:
   sync_timeout_seconds: 15
+  sync_poll_delay_seconds: 0.5
 ```
 
 ---
@@ -756,7 +757,7 @@ The following decisions were locked on 2026-03-18 to guide implementation:
 
 1. **Queue persistence:** v1 uses Redis-backed `arq`, not an in-memory queue. Queue durability is part of the core architecture.
 2. **Execution path:** all jobs are enqueued first. The API never runs scrape jobs inline.
-3. **Sync semantics:** `execution.mode: sync` means "wait on queued completion up to `sync_timeout_seconds`," then fall back to `202 Accepted` if unfinished.
+3. **Sync semantics:** `execution.mode: sync` means "wait on queued completion up to `sync_timeout_seconds`, polling every `sync_poll_delay_seconds`," then fall back to `202 Accepted` if unfinished.
 4. **Auto response heuristic:** in `auto` mode, wait only for single-target, non-paginated, `basic` fetcher jobs. All other jobs return `202` immediately after enqueue.
 5. **Config validation depth:** submission-time validation is static only; no live fetches or selector probing during `POST /scrape` or `POST /jobs`.
 6. **Adaptive domain handling:** adaptive fingerprints are scoped by `project + adaptive_domain`, where `adaptive_domain` defaults to the normalized hostname and can be overridden explicitly per target.

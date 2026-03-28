@@ -44,7 +44,7 @@ Request flow:
 2. The config is validated with Pydantic models.
 3. A job record is written to `jobs.db`.
 4. The job is enqueued on Redis with a per-run delivery ID.
-5. `POST /scrape` may wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`.
+5. `POST /scrape` may wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`, polling Redis every `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS`.
 6. The worker executes targets, applies retries, rate limiting, validation, and formatting.
 7. Results are written to disk and indexed in `results_meta.db`.
 8. Errors are written to `errors.db`.
@@ -160,6 +160,7 @@ All service settings use the `SCRAPEYARD_` prefix.
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser-based jobs |
 | `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` | `4096` | Reject new jobs when RSS exceeds this limit |
 | `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | How long sync mode waits on queued completion |
+| `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS` | `0.5` | How often sync mode polls Redis while waiting for queued completion |
 | `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` | `30` | Grace period for worker drain on shutdown |
 | `SCRAPEYARD_WORKERS_RUNNING_LEASE_SECONDS` | `300` | Lease used to recover stale running jobs |
 | `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS` | `120` | Random jitter applied to scheduled jobs |
@@ -630,7 +631,7 @@ Everything else returns `202` immediately after enqueueing.
 
 You can override this with:
 
-- `execution.mode: sync`: always wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`, then fall back to `202`
+- `execution.mode: sync`: always wait on queued completion up to `SCRAPEYARD_SYNC_TIMEOUT_SECONDS`, polling Redis every `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS`, then fall back to `202`
 - `execution.mode: async`: always return `202` after enqueueing
 
 ### Adaptive mode
