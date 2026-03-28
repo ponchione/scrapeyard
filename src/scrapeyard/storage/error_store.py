@@ -37,29 +37,41 @@ class SQLiteErrorStore:
     """SQLite implementation of :class:`~scrapeyard.storage.protocols.ErrorStore`."""
 
     async def log_error(self, error: ErrorRecord) -> None:
+        await self.log_errors([error])
+
+    async def log_errors(self, errors: list[ErrorRecord]) -> None:
+        if not errors:
+            return
+
+        rows = [
+            (
+                error.job_id,
+                error.run_id,
+                error.project,
+                error.target_url,
+                error.attempt,
+                fmt_dt(error.timestamp),
+                error.error_type.value,
+                error.http_status,
+                error.fetcher_used,
+                error.error_message,
+                json.dumps(error.selectors_matched)
+                if error.selectors_matched is not None
+                else None,
+                error.action_taken.value,
+                int(error.resolved),
+            )
+            for error in errors
+        ]
         async with get_db("errors.db") as db:
-            await db.execute(
+            await db.executemany(
                 """INSERT INTO errors
                    (job_id, run_id, project, target_url, attempt,
                     timestamp, error_type, http_status, fetcher_used,
                     error_message, selectors_matched, action_taken,
                     resolved)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    error.job_id,
-                    error.run_id,
-                    error.project,
-                    error.target_url,
-                    error.attempt,
-                    fmt_dt(error.timestamp),
-                    error.error_type.value,
-                    error.http_status,
-                    error.fetcher_used,
-                    error.error_message,
-                    json.dumps(error.selectors_matched) if error.selectors_matched is not None else None,
-                    error.action_taken.value,
-                    int(error.resolved),
-                ),
+                rows,
             )
             await db.commit()
 

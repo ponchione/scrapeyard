@@ -668,7 +668,7 @@ class TestRunCrashHandling:
 class TestErrorLoggingWithRunId:
     @pytest.mark.asyncio
     async def test_errors_tagged_with_correct_run_id(self, tmp_path):
-        """_log_error creates ErrorRecord with the run_id from the task."""
+        """Batched error records preserve the run_id from the task."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
@@ -680,10 +680,10 @@ class TestErrorLoggingWithRunId:
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []
 
-        async def capture_error(record: ErrorRecord) -> None:
-            logged_errors.append(record)
+        async def capture_errors(records: list[ErrorRecord]) -> None:
+            logged_errors.extend(records)
 
-        error_store.log_error.side_effect = capture_error
+        error_store.log_errors.side_effect = capture_errors
 
         fail_result = TargetResult(
             url="http://example.com", status="failed",
@@ -732,10 +732,10 @@ class TestErrorLoggingWithRunId:
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []
 
-        async def capture_error(record: ErrorRecord) -> None:
-            logged_errors.append(record)
+        async def capture_errors(records: list[ErrorRecord]) -> None:
+            logged_errors.extend(records)
 
-        error_store.log_error.side_effect = capture_error
+        error_store.log_errors.side_effect = capture_errors
 
         fail_result = TargetResult(
             url="http://example.com", status="failed",

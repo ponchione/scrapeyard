@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.resources
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,20 +19,31 @@ _DB_MIGRATIONS: dict[str, list[str]] = {
 
 # Module-level cache of database directory after init.
 _db_dir: Path | None = None
+_db_connections: dict[str, aiosqlite.Connection] = {}
+_db_locks: dict[str, asyncio.Lock] = {}
+_db_lock_owners: dict[str, asyncio.Task[object] | None] = {}
+_db_lock_depths: dict[str, int] = {}
 
 
 def reset_db() -> None:
-    """Clear the module-level database directory, signalling teardown."""
+    """Clear module-level database state, signalling teardown."""
     global _db_dir  # noqa: PLW0603
     _db_dir = None
+    _db_locks.clear()
+    _db_lock_owners.clear()
+    _db_lock_depths.clear()
+
+
+async def _close_cached_connections() -> None:
+    connections = list(_db_connections.values())
+    _db_connections.clear()
+    for conn in connections:
+        await conn.close()
 
 
 async def close_db() -> None:
-    """Close database subsystem state.
-
-    Connections are opened per-operation via :func:`get_db`; this function
-    exists to provide an explicit shutdown hook for app lifespan teardown.
-    """
+    """Close cached SQLite connections and clear module-level state."""
+    await _close_cached_connections()
     reset_db()
 
 
@@ -45,6 +57,9 @@ async def init_db(db_dir: str) -> None:
     """
     global _db_dir  # noqa: PLW0603
     db_path = Path(db_dir)
+    if _db_connections and _db_dir != db_path:
+        await _close_cached_connections()
+        reset_db()
     db_path.mkdir(parents=True, exist_ok=True)
     _db_dir = db_path
 
@@ -60,9 +75,19 @@ async def init_db(db_dir: str) -> None:
             await db.commit()
 
 
+async def _get_cached_connection(db_name: str) -> aiosqlite.Connection:
+    connection = _db_connections.get(db_name)
+    if connection is None:
+        if _db_dir is None:
+            raise RuntimeError("Database not initialised — call init_db() first")
+        connection = await aiosqlite.connect(_db_dir / db_name)
+        _db_connections[db_name] = connection
+    return connection
+
+
 @asynccontextmanager
 async def get_db(db_name: str) -> AsyncIterator[aiosqlite.Connection]:
-    """Yield an :class:`aiosqlite.Connection` to the named database.
+    """Yield a cached :class:`aiosqlite.Connection` to the named database.
 
     Parameters
     ----------
@@ -80,5 +105,24 @@ async def get_db(db_name: str) -> AsyncIterator[aiosqlite.Connection]:
         raise RuntimeError("Database not initialised — call init_db() first")
     if db_name not in _DB_MIGRATIONS:
         raise ValueError(f"Unknown database: {db_name!r}")
-    async with aiosqlite.connect(_db_dir / db_name) as db:
-        yield db
+
+    lock = _db_locks.setdefault(db_name, asyncio.Lock())
+    owner = asyncio.current_task()
+    acquired_here = _db_lock_owners.get(db_name) is not owner
+    if acquired_here:
+        await lock.acquire()
+        _db_lock_owners[db_name] = owner
+        _db_lock_depths[db_name] = 0
+
+    _db_lock_depths[db_name] = _db_lock_depths.get(db_name, 0) + 1
+    try:
+        yield await _get_cached_connection(db_name)
+    finally:
+        depth = _db_lock_depths[db_name] - 1
+        if depth == 0:
+            _db_lock_depths.pop(db_name, None)
+            _db_lock_owners.pop(db_name, None)
+            if acquired_here:
+                lock.release()
+        else:
+            _db_lock_depths[db_name] = depth

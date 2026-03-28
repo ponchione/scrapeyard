@@ -8,6 +8,9 @@ target:
   fetcher: dynamic
   # Optional override for adaptive fingerprint sharing.
   # adaptive_domain: example.com
+  # Optional per-target proxy override (takes precedence over job-level proxy).
+  # proxy:
+  #   url: "http://user:pass@gate.provider.com:7777"
   browser:
     timeout_ms: 90000
     disable_resources: true
@@ -55,10 +58,15 @@ target:
 # and true for scheduled jobs.
 adaptive: true
 
+# Optional job-level proxy (applies to all targets unless overridden).
+# proxy:
+#   url: "http://user:pass@gate.provider.com:7777"
+
 retry:
   max_attempts: 3
   backoff: exponential
   backoff_max: 30
+  # retryable_status: [429, 500, 502, 503, 504]
 
 validation:
   required_fields: [title, link]
@@ -71,10 +79,12 @@ execution:
   domain_rate_limit: 3
   mode: auto
   priority: normal
+  fail_strategy: partial
 
 # Uncomment for recurring jobs.
 # schedule:
 #   cron: "0 * * * *"
+#   enabled: true
 
 output:
   group_by: target
