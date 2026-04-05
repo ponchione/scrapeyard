@@ -59,6 +59,9 @@ async def scrape_task(
 
         settings = get_settings()
         adaptive_dir = str(Path(settings.adaptive_dir) / config.project)
+        run_artifacts_dir = None if run_id is None else str(
+            Path(settings.storage_results_dir) / config.project / job.name / run_id / "artifacts"
+        )
         if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
             logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
             return
@@ -121,10 +124,11 @@ async def scrape_task(
                 config.project,
                 target_cfg.url,
                 attempt,
-                ErrorType.content_empty,
+                _validation_error_type(result),
                 None,
                 target_cfg.fetcher.value,
                 action,
+                error_message=validation.message,
             ))
 
             if validation.action == OnEmptyAction.warn:
@@ -140,6 +144,7 @@ async def scrape_task(
                     data=[],
                     errors=[validation.message],
                     pages_scraped=result.pages_scraped,
+                    debug=result.debug,
                 )
 
             if validation.action == OnEmptyAction.fail:
@@ -150,6 +155,9 @@ async def scrape_task(
                     data=[],
                     errors=[validation.message],
                     pages_scraped=result.pages_scraped,
+                    error_type=_validation_error_type(result),
+                    error_detail=validation.message,
+                    debug=result.debug,
                 )
 
             logger.info("Retrying target %s after validation failure: %s", target_cfg.url, validation.message)
@@ -159,6 +167,7 @@ async def scrape_task(
                 config.retry,
                 adaptive_dir=adaptive_dir,
                 proxy_url=proxy_url,
+                artifacts_dir=None if run_artifacts_dir is None else str(Path(run_artifacts_dir) / domain),
             )
             if retry_result.status != "success":
                 logger.info("Recording failure for domain %s after validation retry", domain)
@@ -170,10 +179,11 @@ async def scrape_task(
                         config.project,
                         target_cfg.url,
                         attempt + 1,
-                        ErrorType.http_error,
-                        None,
+                        retry_result.error_type or ErrorType.http_error,
+                        retry_result.http_status,
                         target_cfg.fetcher.value,
                         ActionTaken.fail,
+                        error_message=retry_result.error_detail or "; ".join(retry_result.errors),
                     ))
                 return retry_result
 
@@ -188,10 +198,11 @@ async def scrape_task(
                 config.project,
                 target_cfg.url,
                 attempt + 1,
-                ErrorType.content_empty,
+                _validation_error_type(retry_result),
                 None,
                 target_cfg.fetcher.value,
                 ActionTaken.fail,
+                error_message=retry_validation.message,
             ))
             return TargetResult(
                 url=target_cfg.url,
@@ -199,6 +210,9 @@ async def scrape_task(
                 data=[],
                 errors=[retry_validation.message],
                 pages_scraped=retry_result.pages_scraped,
+                error_type=_validation_error_type(retry_result),
+                error_detail=retry_validation.message,
+                debug=retry_result.debug,
             )
 
         async def _process_target(target_cfg: Any) -> TargetResult:
@@ -252,6 +266,7 @@ async def scrape_task(
                     result = await scrape_target(
                         target_cfg, adaptive, config.retry,
                         adaptive_dir=adaptive_dir, proxy_url=proxy_url,
+                        artifacts_dir=None if run_artifacts_dir is None else str(Path(run_artifacts_dir) / domain),
                     )
 
                     if result.status == "success":
@@ -331,59 +346,72 @@ async def scrape_task(
             else:
                 final_status = JobStatus.complete
 
-        # Format and save results if we have data.
+        # Format and save results, including debug metadata for zero-result and failed runs.
         save_meta = None
-        if flat_data:
-            latest_job = await job_store.get_job(job_id)
-            if _run_superseded(latest_job, run_id):
-                logger.info(
-                    "Skipping result save for superseded job_id=%s run_id=%s",
-                    job_id, run_id,
-                )
-                return
-            job_meta = {
-                "project": config.project,
-                "name": config.name,
-                "job_id": job_id,
-                "status": final_status.value,
-                "completed_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-                "errors": all_errors,
-            }
-            group_by = config.output.group_by
-
-            if group_by == GroupBy.merge:
-                merged: list[Any] = []
-                for tr in all_results:
-                    for item in tr.data:
-                        if isinstance(item, dict):
-                            item["_source"] = urlparse(
-                                tr.url
-                            ).netloc
-                        merged.append(item)
-                output_data = {**job_meta, "results": merged}
-            else:
-                grouped: dict[str, Any] = {}
-                for tr in all_results:
-                    if not tr.data:
-                        continue
-                    domain = urlparse(tr.url).netloc
-                    grouped[domain] = {
-                        "status": tr.status,
-                        "count": len(tr.data),
-                        "data": tr.data,
-                    }
-                output_data = {
-                    **job_meta, "results": grouped,
-                }
-            save_meta = await result_store.save_result(
-                job_id,
-                output_data,
-                run_id=run_id,
-                status=final_status.value,
-                record_count=len(flat_data),
+        latest_job = await job_store.get_job(job_id)
+        if _run_superseded(latest_job, run_id):
+            logger.info(
+                "Skipping result save for superseded job_id=%s run_id=%s",
+                job_id, run_id,
             )
+            return
+        job_meta = {
+            "project": config.project,
+            "name": config.name,
+            "job_id": job_id,
+            "status": final_status.value,
+            "completed_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+            "errors": all_errors,
+            "targets": [
+                {
+                    "url": tr.url,
+                    "status": tr.status,
+                    "count": len(tr.data),
+                    "pages_scraped": tr.pages_scraped,
+                    "error_type": tr.error_type.value if tr.error_type else None,
+                    "error_detail": tr.error_detail,
+                    "errors": tr.errors,
+                    "debug": tr.debug,
+                }
+                for tr in all_results
+            ],
+        }
+        group_by = config.output.group_by
+
+        if group_by == GroupBy.merge:
+            merged: list[Any] = []
+            for tr in all_results:
+                for item in tr.data:
+                    if isinstance(item, dict):
+                        item["_source"] = urlparse(
+                            tr.url
+                        ).netloc
+                    merged.append(item)
+            output_data = {**job_meta, "results": merged}
+        else:
+            grouped: dict[str, Any] = {}
+            for tr in all_results:
+                domain = urlparse(tr.url).netloc
+                grouped[domain] = {
+                    "status": tr.status,
+                    "count": len(tr.data),
+                    "data": tr.data,
+                    "debug": tr.debug,
+                    "error_type": tr.error_type.value if tr.error_type else None,
+                    "error_detail": tr.error_detail,
+                }
+            output_data = {
+                **job_meta, "results": grouped,
+            }
+        save_meta = await result_store.save_result(
+            job_id,
+            output_data,
+            run_id=run_id,
+            status=final_status.value,
+            record_count=len(flat_data),
+        )
 
         # Finalize run row.
         if run_id is not None:
@@ -500,6 +528,19 @@ def _should_skip_delivery(
 
     lease_age = (now - job.updated_at).total_seconds()
     return lease_age < running_lease_seconds
+
+
+def _validation_error_type(result: TargetResult) -> ErrorType:
+    if result.error_type is not None:
+        return result.error_type
+    if result.debug and isinstance(result.debug, dict):
+        classification = result.debug.get("classification")
+        if classification is not None:
+            try:
+                return ErrorType(classification)
+            except ValueError:
+                pass
+    return ErrorType.content_empty
 
 
 def _build_error_record(

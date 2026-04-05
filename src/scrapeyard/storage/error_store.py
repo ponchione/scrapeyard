@@ -75,7 +75,12 @@ class SQLiteErrorStore:
             )
             await db.commit()
 
-    async def query_errors(self, filters: ErrorFilters) -> list[ErrorRecord]:
+    async def query_errors(
+        self,
+        filters: ErrorFilters,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ErrorRecord]:
         clauses: list[str] = []
         params: list[object] = []
 
@@ -100,7 +105,13 @@ class SQLiteErrorStore:
         )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY timestamp"
+        sql += " ORDER BY timestamp DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset > 0:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
 
         async with get_db("errors.db") as db:
             cursor = await db.execute(sql, params)

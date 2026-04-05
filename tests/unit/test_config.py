@@ -100,6 +100,11 @@ class TestResolvedTargets:
                         "timeout_ms": 90000,
                         "disable_resources": False,
                         "network_idle": True,
+                        "click_selector": "button.accept-age-gate",
+                        "click_timeout_ms": 3000,
+                        "click_wait_ms": 750,
+                        "wait_for_selector": ".product-card a",
+                        "wait_ms": 1500,
                     },
                 )
             )
@@ -110,6 +115,11 @@ class TestResolvedTargets:
         assert config.target.browser.timeout_ms == 90000
         assert config.target.browser.disable_resources is False
         assert config.target.browser.network_idle is True
+        assert config.target.browser.click_selector == "button.accept-age-gate"
+        assert config.target.browser.click_timeout_ms == 3000
+        assert config.target.browser.click_wait_ms == 750
+        assert config.target.browser.wait_for_selector == ".product-card a"
+        assert config.target.browser.wait_ms == 1500
 
 
 # --- Transform Parser ---

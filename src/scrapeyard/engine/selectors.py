@@ -17,6 +17,12 @@ def select_items(page: Any, item_selector: SelectorValue) -> list[Any]:
     return _select_elements(page, query, sel_type)
 
 
+def count_selector_matches(scope: Any, selector: SelectorValue) -> int:
+    """Return the number of raw matches for *selector* within *scope*."""
+    query, sel_type, _ = _unpack_selector(selector)
+    return len(_select_elements(scope, query, sel_type))
+
+
 def extract_item_selectors(
     page: Any,
     item_selector: SelectorValue,

@@ -199,26 +199,45 @@ class SQLiteJobStore:
             return count, last
 
     async def list_jobs_with_stats(
-        self, project: str | None = None,
+        self,
+        project: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[tuple[Job, int, datetime | None]]:
-        """List jobs with derived run_count and last_run_at via LEFT JOIN."""
+        """List jobs with derived run_count and last_run_at, newest activity first."""
         async with get_db("jobs.db") as db:
-            # Build the column list matching _row_to_job field order
             job_cols = (
                 "j.job_id, j.project, j.name, j.status, j.config_yaml, "
                 "j.created_at, j.updated_at, j.schedule_cron, "
                 "j.schedule_enabled, j.current_run_id"
             )
             sql = (
-                f"SELECT {job_cols}, COUNT(r.run_id) AS run_count, "
-                "MAX(r.started_at) AS last_run_at "
-                "FROM jobs j LEFT JOIN job_runs r ON j.job_id = r.job_id"
+                "WITH job_stats AS ("
+                "    SELECT job_id, COUNT(run_id) AS run_count, "
+                "           MAX(started_at) AS last_run_at "
+                "    FROM job_runs "
+                "    GROUP BY job_id"
+                ") "
+                f"SELECT {job_cols}, "
+                "COALESCE(s.run_count, 0) AS run_count, "
+                "s.last_run_at "
+                "FROM jobs j "
+                "LEFT JOIN job_stats s ON j.job_id = s.job_id"
             )
-            params: list[str] = []
+            params: list[object] = []
             if project:
                 sql += " WHERE j.project = ?"
                 params.append(project)
-            sql += " GROUP BY j.job_id"
+            sql += (
+                " ORDER BY COALESCE(s.last_run_at, j.updated_at, j.created_at) DESC, "
+                "j.created_at DESC, j.job_id DESC"
+            )
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset > 0:
+                sql += " LIMIT -1 OFFSET ?"
+                params.append(offset)
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
             result = []

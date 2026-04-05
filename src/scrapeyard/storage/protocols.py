@@ -35,7 +35,10 @@ class JobStore(Protocol):
     ) -> tuple[int, datetime | None]: ...
 
     async def list_jobs_with_stats(
-        self, project: str | None = None,
+        self,
+        project: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[tuple[Job, int, datetime | None]]: ...
 
 
@@ -69,5 +72,8 @@ class ErrorStore(Protocol):
     async def log_errors(self, errors: list[ErrorRecord]) -> None: ...
 
     async def query_errors(
-        self, filters: ErrorFilters,
+        self,
+        filters: ErrorFilters,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ErrorRecord]: ...

@@ -55,6 +55,18 @@ async def test_errors_invalid_error_type_returns_400(client):
 
 
 @pytest.mark.asyncio
+async def test_jobs_limit_above_max_returns_400(client):
+    response = await client.get("/jobs?limit=501")
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_errors_limit_above_max_returns_400(client):
+    response = await client.get("/errors?limit=501")
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_async_scrape_enqueue_memory_error_returns_503_and_removes_job(client, monkeypatch):
     """Async enqueue rejection should return 503 without leaving a stranded job."""
     pool = get_worker_pool()

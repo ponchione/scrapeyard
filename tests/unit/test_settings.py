@@ -43,6 +43,14 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.scheduler_jitter_max_seconds == 120
 
+    def test_admin_read_default_limit_default(self):
+        settings = ServiceSettings()
+        assert settings.admin_read_default_limit == 100
+
+    def test_admin_read_max_limit_default(self):
+        settings = ServiceSettings()
+        assert settings.admin_read_max_limit == 500
+
     def test_storage_retention_days_default(self):
         settings = ServiceSettings()
         assert settings.storage_retention_days == 30
@@ -93,6 +101,16 @@ class TestServiceSettingsFromEnv:
         with patch.dict(os.environ, {"SCRAPEYARD_STORAGE_RESULTS_DIR": "/tmp/results"}):
             settings = ServiceSettings()
         assert settings.storage_results_dir == "/tmp/results"
+
+    def test_reads_admin_read_default_limit(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_ADMIN_READ_DEFAULT_LIMIT": "25"}):
+            settings = ServiceSettings()
+        assert settings.admin_read_default_limit == 25
+
+    def test_reads_admin_read_max_limit(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_ADMIN_READ_MAX_LIMIT": "250"}):
+            settings = ServiceSettings()
+        assert settings.admin_read_max_limit == 250
 
     def test_reads_sync_poll_delay_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_SYNC_POLL_DELAY_SECONDS": "0.25"}):
