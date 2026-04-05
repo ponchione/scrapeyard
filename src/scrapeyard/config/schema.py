@@ -196,6 +196,26 @@ class BrowserConfig(BaseModel):
         default=False,
         description="Whether browser fetches should wait for network idle",
     )
+    click_selector: str | None = Field(
+        default=None,
+        description="Optional CSS selector to click before extracting data (for consent/age gates)",
+    )
+    click_timeout_ms: int | None = Field(
+        default=3000,
+        description="Optional timeout in milliseconds for click_selector before falling through",
+    )
+    click_wait_ms: int | None = Field(
+        default=None,
+        description="Optional extra browser wait in milliseconds after click_selector is clicked",
+    )
+    wait_for_selector: str | None = Field(
+        default=None,
+        description="Optional CSS selector to wait for before extracting data",
+    )
+    wait_ms: int | None = Field(
+        default=None,
+        description="Optional extra browser wait in milliseconds after page load/selector wait",
+    )
 
 
 class TargetConfig(BaseModel):

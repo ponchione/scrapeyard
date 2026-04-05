@@ -10,6 +10,7 @@ import pytest
 from scrapeyard.common.settings import get_settings
 from scrapeyard.api.dependencies import get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import ErrorType
 
 
 def _async_scrape_yaml() -> str:
@@ -116,6 +117,55 @@ async def test_errors_are_recorded_on_failed_scrape(client, monkeypatch):
     assert len(errors) >= 1
     assert all(e["job_id"] == job_id for e in errors)
     assert any(e["error_message"] == "boom" for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_failed_scrape_results_still_expose_target_debug(client, monkeypatch):
+    async def _failing_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="failed",
+            data=[],
+            errors=["selector miss"],
+            pages_scraped=1,
+            error_type=ErrorType.selector_miss,
+            error_detail="selector miss",
+            debug={
+                "fetcher": "dynamic",
+                "final_url": "https://example.com/catalog",
+                "page_title": "Catalog",
+                "main_document_status": 200,
+                "item_selector_count": 1,
+                "selector_counts": {"title": 0},
+                "html_excerpt": "<main>Catalog</main>",
+                "screenshot_path": None,
+                "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
+                "classification": "selector_miss",
+            },
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _failing_scrape_target)
+
+    response = await client.post(
+        "/scrape",
+        content=_async_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    for _ in range(40):
+        results_response = await client.get(f"/results/{job_id}")
+        if results_response.status_code == 200:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail("Timed out waiting for failed-run results payload")
+
+    payload = results_response.json()["results"]
+    assert payload["status"] == "failed"
+    assert payload["targets"][0]["debug"]["classification"] == "selector_miss"
+    assert payload["results"]["example.com"]["debug"]["final_url"] == "https://example.com/catalog"
 
 
 @pytest.mark.asyncio

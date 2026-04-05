@@ -85,6 +85,33 @@ async def _wait_for_queued_job(
     return True
 
 
+def _resolve_admin_read_limit(limit: int | None) -> int:
+    settings = get_settings()
+    resolved_limit = limit or settings.admin_read_default_limit
+    if resolved_limit > settings.admin_read_max_limit:
+        raise ValueError(
+            f"Invalid 'limit': {resolved_limit}. "
+            f"Maximum is {settings.admin_read_max_limit}."
+        )
+    return resolved_limit
+
+
+def _set_pagination_headers(
+    response: Response,
+    *,
+    limit: int,
+    offset: int,
+    item_count: int,
+    has_more: bool,
+) -> None:
+    response.headers["X-Scrapeyard-Limit"] = str(limit)
+    response.headers["X-Scrapeyard-Offset"] = str(offset)
+    response.headers["X-Scrapeyard-Item-Count"] = str(item_count)
+    response.headers["X-Scrapeyard-Has-More"] = "true" if has_more else "false"
+    if has_more:
+        response.headers["X-Scrapeyard-Next-Offset"] = str(offset + item_count)
+
+
 @router.post("/scrape")
 async def scrape(
     request: Request,
@@ -226,11 +253,36 @@ async def create_job(
 
 @router.get("/jobs")
 async def list_jobs(
+    response: Response,
     project: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
     job_store: JobStore = Depends(get_job_store),
 ) -> list[dict[str, Any]]:
     """List jobs, optionally filtered by project."""
-    rows = await job_store.list_jobs_with_stats(project)
+    try:
+        resolved_limit = _resolve_admin_read_limit(limit)
+    except ValueError as exc:
+        return Response(
+            content=_json_encode({"error": str(exc)}),
+            status_code=400,
+            media_type="application/json",
+        )
+
+    rows = await job_store.list_jobs_with_stats(
+        project,
+        limit=resolved_limit + 1,
+        offset=offset,
+    )
+    has_more = len(rows) > resolved_limit
+    rows = rows[:resolved_limit]
+    _set_pagination_headers(
+        response,
+        limit=resolved_limit,
+        offset=offset,
+        item_count=len(rows),
+        has_more=has_more,
+    )
     return [
         {
             "job_id": job.job_id,
@@ -370,13 +422,24 @@ async def get_results(
 
 @router.get("/errors")
 async def get_errors(
+    response: Response,
     project: Optional[str] = Query(None),
     job_id: Optional[str] = Query(None),
     since: Optional[str] = Query(None),
     error_type: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
     error_store: ErrorStore = Depends(get_error_store),
 ):
     """Query error records with optional filters."""
+    try:
+        resolved_limit = _resolve_admin_read_limit(limit)
+    except ValueError as exc:
+        return Response(
+            content=_json_encode({"error": str(exc)}),
+            status_code=400,
+            media_type="application/json",
+        )
     try:
         since_dt = datetime.fromisoformat(since) if since else None
     except ValueError:
@@ -400,7 +463,20 @@ async def get_errors(
         since=since_dt,
         error_type=error_type_enum,
     )
-    errors = await error_store.query_errors(filters)
+    errors = await error_store.query_errors(
+        filters,
+        limit=resolved_limit + 1,
+        offset=offset,
+    )
+    has_more = len(errors) > resolved_limit
+    errors = errors[:resolved_limit]
+    _set_pagination_headers(
+        response,
+        limit=resolved_limit,
+        offset=offset,
+        item_count=len(errors),
+        has_more=has_more,
+    )
     return [
         {
             "job_id": e.job_id,

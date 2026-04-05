@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,12 +16,70 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.detection import enrich_item_detection
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.selectors import extract_selectors, select_items
+from scrapeyard.engine.selectors import count_selector_matches, extract_selectors, select_items
 from scrapeyard.models.job import ErrorType
 
 logger = logging.getLogger(__name__)
 
 _BROWSER_TIMEOUT_MS = 60000
+_HTML_EXCERPT_CHARS = 2000
+
+_CHALLENGE_MARKERS = (
+    "captcha",
+    "cf-challenge",
+    "challenge page",
+    "verify you are human",
+    "press and hold",
+    "security check",
+    "bot verification",
+)
+_CONSENT_MARKERS = (
+    "cookie consent",
+    "consent",
+    "privacy settings",
+    "accept cookies",
+    "your privacy choices",
+)
+_LOGIN_MARKERS = (
+    "sign in",
+    "log in",
+    "my account",
+    "login required",
+)
+_BLOCK_MARKERS = (
+    "access denied",
+    "access blocked",
+    "temporarily blocked",
+    "request blocked",
+    "forbidden",
+)
+_PROXY_MARKERS = (
+    "proxy",
+    "407",
+    "tunnel",
+    "authentication required",
+    "econnrefused",
+    "connection refused",
+)
+_BROWSER_ERROR_MARKERS = (
+    "playwright",
+    "browser",
+    "page.goto",
+    "target page",
+    "executable",
+    "chromium",
+    "webkit",
+    "firefox",
+)
+_NETWORK_ERROR_MARKERS = (
+    "connection",
+    "dns",
+    "tls",
+    "ssl",
+    "certificate",
+    "network",
+    "socket",
+)
 
 
 def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
@@ -91,6 +150,13 @@ class TargetResult:
     error_type: ErrorType | None = None
     http_status: int | None = None
     error_detail: str | None = None
+    debug: dict[str, Any] | None = None
+
+
+@dataclass
+class FetchOutcome:
+    page: Any
+    debug: dict[str, Any]
 
 
 def _get_fetcher(fetcher_type: FetcherType) -> Any:
@@ -106,51 +172,197 @@ def _get_fetcher(fetcher_type: FetcherType) -> Any:
 class FetchError(Exception):
     """Non-retryable HTTP error."""
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, debug: dict[str, Any] | None = None) -> None:
         self.status = status
+        self.debug = debug
         super().__init__(f"HTTP {status}")
 
 
-def _classify_fetch_exception(exc: Exception, fetcher_type: FetcherType) -> tuple[ErrorType, int | None]:
+def _token_match(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _classify_fetch_exception(
+    exc: Exception,
+    fetcher_type: FetcherType,
+) -> tuple[ErrorType, int | None, dict[str, Any] | None]:
     """Map low-level fetch exceptions to structured Scrapeyard error types."""
+    debug = getattr(exc, "debug", None)
     if isinstance(exc, RetryableError):
-        return ErrorType.http_error, exc.status
+        if exc.status == 404:
+            return ErrorType.http_not_found, exc.status, debug
+        if exc.status in {401, 403, 429}:
+            return ErrorType.blocked_response, exc.status, debug
+        return ErrorType.http_error, exc.status, debug
     if isinstance(exc, FetchError):
-        return ErrorType.http_error, exc.status
+        if exc.status == 404:
+            return ErrorType.http_not_found, exc.status, exc.debug
+        if exc.status in {401, 403, 429}:
+            if exc.debug and _classify_page_signals(exc.debug) in {
+                ErrorType.challenge_page,
+                ErrorType.consent_gate,
+                ErrorType.login_gate,
+            }:
+                return _classify_page_signals(exc.debug), exc.status, exc.debug
+            return ErrorType.blocked_response, exc.status, exc.debug
+        return ErrorType.http_error, exc.status, exc.debug
     if isinstance(exc, asyncio.TimeoutError):
-        return ErrorType.timeout, None
+        return (
+            ErrorType.navigation_timeout if fetcher_type != FetcherType.basic else ErrorType.timeout,
+            None,
+            debug,
+        )
 
     detail = f"{type(exc).__name__}: {exc}".lower()
-    if fetcher_type != FetcherType.basic and any(
-        token in detail
-        for token in (
-            "playwright",
-            "browser",
-            "page.goto",
-            "target page",
-            "executable",
-            "chromium",
-            "webkit",
-            "firefox",
-        )
-    ):
-        return ErrorType.browser_error, None
+    if _token_match(detail, _PROXY_MARKERS):
+        return ErrorType.proxy_rejected, None, debug
+    if fetcher_type != FetcherType.basic and _token_match(detail, _BROWSER_ERROR_MARKERS):
+        return ErrorType.browser_error, None, debug
+    if isinstance(exc, (ConnectionError, OSError)) or _token_match(detail, _NETWORK_ERROR_MARKERS):
+        return ErrorType.network_error, None, debug
 
-    if isinstance(exc, (ConnectionError, OSError)) or any(
-        token in detail
-        for token in (
-            "connection",
-            "dns",
-            "tls",
-            "ssl",
-            "certificate",
-            "network",
-            "socket",
-        )
-    ):
-        return ErrorType.network_error, None
+    return ErrorType.http_error, None, debug
 
-    return ErrorType.http_error, None
+
+def _default_debug_blob(
+    fetcher_type: FetcherType,
+    target: TargetConfig,
+    url: str,
+) -> dict[str, Any]:
+    browser = target.browser
+    return {
+        "fetcher": fetcher_type.value,
+        "final_url": url,
+        "page_title": None,
+        "main_document_status": None,
+        "item_selector_count": None,
+        "selector_counts": {},
+        "html_excerpt": None,
+        "screenshot_path": None,
+        "browser_settings": {
+            "timeout_ms": browser.timeout_ms if browser is not None else _BROWSER_TIMEOUT_MS,
+            "disable_resources": True if browser is None else browser.disable_resources,
+            "network_idle": False if browser is None else browser.network_idle,
+            "click_selector": None if browser is None else browser.click_selector,
+            "click_timeout_ms": None if browser is None else browser.click_timeout_ms,
+            "click_wait_ms": None if browser is None else browser.click_wait_ms,
+            "wait_for_selector": None if browser is None else browser.wait_for_selector,
+            "wait_ms": None if browser is None else browser.wait_ms,
+        },
+    }
+
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _truncate_text(value: str, limit: int = _HTML_EXCERPT_CHARS) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def _response_text(page: Any) -> str:
+    text = _normalize_text(getattr(page, "text", None) or getattr(page, "body", None))
+    if text:
+        return text
+    return _normalize_text(page)
+
+
+def _response_title(page: Any) -> str | None:
+    for attr in ("title",):
+        value = getattr(page, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    html = _response_text(page)
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if match:
+        return _truncate_text(match.group(1), 300)
+    return None
+
+
+def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
+    item_selector_count = None
+    selector_scope = page
+    if target.item_selector is not None:
+        items = select_items(page, target.item_selector)
+        item_selector_count = len(items)
+        if items:
+            selector_scope = items[0]
+    selector_counts = {
+        name: count_selector_matches(selector_scope, selector)
+        for name, selector in target.selectors.items()
+    }
+    return {
+        "item_selector_count": item_selector_count,
+        "selector_counts": selector_counts,
+    }
+
+
+def _has_extracted_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_extracted_value(item) for item in value)
+    return True
+
+
+def _classify_page_signals(debug: dict[str, Any]) -> ErrorType | None:
+    blob = "\n".join(
+        part.lower() for part in (
+            _normalize_text(debug.get("page_title")),
+            _normalize_text(debug.get("html_excerpt")),
+        ) if part
+    )
+    if not blob:
+        return None
+    if _token_match(blob, _CHALLENGE_MARKERS):
+        return ErrorType.challenge_page
+    if _token_match(blob, _CONSENT_MARKERS):
+        return ErrorType.consent_gate
+    if _token_match(blob, _LOGIN_MARKERS):
+        return ErrorType.login_gate
+    if _token_match(blob, _BLOCK_MARKERS):
+        return ErrorType.blocked_response
+    return None
+
+
+def _classify_rendered_outcome(
+    debug: dict[str, Any],
+    data: list[dict[str, Any]],
+    *,
+    has_item_selector: bool,
+) -> ErrorType | None:
+    signal_classification = _classify_page_signals(debug)
+    if signal_classification is not None:
+        return signal_classification
+
+    selector_counts = debug.get("selector_counts") or {}
+    item_selector_count = debug.get("item_selector_count")
+
+    if has_item_selector:
+        if item_selector_count is None:
+            return None
+        if item_selector_count == 0:
+            return ErrorType.rendered_empty
+        if not any(count > 0 for count in selector_counts.values()):
+            return ErrorType.selector_miss
+        return None
+
+    if selector_counts and not any(count > 0 for count in selector_counts.values()):
+        return ErrorType.rendered_empty
+    if any(_has_extracted_value(value) for row in data for value in row.values()):
+        return None
+    if selector_counts and any(count > 0 for count in selector_counts.values()):
+        return ErrorType.selector_miss
+    return ErrorType.rendered_empty
 
 
 async def _fetch_page(
@@ -162,7 +374,8 @@ async def _fetch_page(
     retryable_status: set[int],
     adaptive_dir: str,
     proxy_url: str | None = None,
-) -> Any:
+    artifacts_dir: str | None = None,
+) -> FetchOutcome:
     """Fetch a single page using the appropriate Scrapling method.
 
     Raises :class:`RetryableError` for retryable HTTP status codes,
@@ -173,21 +386,18 @@ async def _fetch_page(
         adaptive=adaptive,
         adaptive_dir=adaptive_dir,
     )
+    debug = _default_debug_blob(fetcher_type, target, url)
 
     if proxy_url is not None:
         call_kwargs["proxy"] = proxy_url
 
     if fetcher_type == FetcherType.basic:
-        # Fetcher.get is synchronous — run in thread pool.
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: fetcher_cls.get(url, **call_kwargs),
         )
     else:
-        # Browser-backed fetchers need more headroom than simple HTTP fetches,
-        # and dropping non-essential resources reduces load-event stalls on
-        # heavy retail pages.
         browser = target.browser
         call_kwargs.setdefault(
             "timeout",
@@ -201,15 +411,59 @@ async def _fetch_page(
             "network_idle",
             False if browser is None else browser.network_idle,
         )
-        # StealthyFetcher / PlayWrightFetcher have async_fetch.
+        if browser is not None and browser.wait_for_selector:
+            call_kwargs.setdefault("wait_selector", browser.wait_for_selector)
+        if browser is not None and browser.wait_ms is not None:
+            call_kwargs.setdefault("wait", browser.wait_ms)
+
+        capture: dict[str, Any] = {}
+
+        async def _page_action(page: Any) -> Any:
+            if browser is not None and browser.click_selector:
+                try:
+                    await page.locator(browser.click_selector).click(timeout=browser.click_timeout_ms)
+                    if browser.click_wait_ms is not None:
+                        await page.wait_for_timeout(browser.click_wait_ms)
+                except Exception:
+                    logger.info(
+                        "Optional browser click_selector did not resolve or click: %s",
+                        browser.click_selector,
+                    )
+            capture["final_url"] = getattr(page, "url", None)
+            try:
+                capture["page_title"] = await page.title()
+            except Exception:
+                capture["page_title"] = None
+            try:
+                capture["html_excerpt"] = _truncate_text(await page.content())
+            except Exception:
+                capture["html_excerpt"] = None
+            if artifacts_dir is not None:
+                artifacts_path = Path(artifacts_dir)
+                artifacts_path.mkdir(parents=True, exist_ok=True)
+                screenshot_path = artifacts_path / f"{fetcher_type.value}-main.png"
+                try:
+                    await page.screenshot(path=str(screenshot_path), full_page=True)
+                    capture["screenshot_path"] = str(screenshot_path)
+                except Exception:
+                    capture["screenshot_path"] = None
+            return page
+
+        call_kwargs["page_action"] = _page_action
         response = await fetcher_cls.async_fetch(url, **call_kwargs)
+        debug.update(capture)
+
+    debug["main_document_status"] = getattr(response, "status", None)
+    debug["final_url"] = debug.get("final_url") or getattr(response, "url", None) or url
+    debug["page_title"] = debug.get("page_title") or _response_title(response)
+    debug["html_excerpt"] = debug.get("html_excerpt") or (_truncate_text(_response_text(response)) or None)
 
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)
-        raise FetchError(response.status)
+        raise FetchError(response.status, debug=debug)
 
-    return response
+    return FetchOutcome(page=response, debug=debug)
 
 
 async def scrape_target(
@@ -218,6 +472,7 @@ async def scrape_target(
     retry: RetryConfig,
     adaptive_dir: str | None = None,
     proxy_url: str | None = None,
+    artifacts_dir: str | None = None,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination.
 
@@ -235,7 +490,6 @@ async def scrape_target(
     if adaptive_dir is None:
         adaptive_dir = get_settings().adaptive_dir
 
-    # Ensure adaptive directory exists.
     Path(adaptive_dir).mkdir(parents=True, exist_ok=True)
 
     fetcher_cls = _get_fetcher(target.fetcher)
@@ -243,10 +497,22 @@ async def scrape_target(
     retryable_status = set(retry.retryable_status)
 
     try:
-        page = await retry_handler.execute(
-            _fetch_page, fetcher_cls, target.url, target, target.fetcher,
-            adaptive, retryable_status, adaptive_dir, proxy_url,
+        outcome = await retry_handler.execute(
+            _fetch_page,
+            fetcher_cls,
+            target.url,
+            target,
+            target.fetcher,
+            adaptive,
+            retryable_status,
+            adaptive_dir,
+            proxy_url,
+            artifacts_dir,
         )
+        page = outcome.page
+        result.debug = outcome.debug
+        result.debug.update(_selector_debug(page, target))
+
         data = _extract_page_data(page, target)
         if adaptive:
             missing = []
@@ -266,12 +532,10 @@ async def scrape_target(
         result.data.extend(data)
         result.pages_scraped = 1
 
-        # Pagination — resolve each "next" href against the *current* page URL,
-        # not the original target URL, so relative links work across pages.
         if target.pagination:
             max_pages = target.pagination.max_pages
             next_selector = target.pagination.next
-            current_url = target.url
+            current_url = result.debug.get("final_url") or target.url
             for _ in range(max_pages - 1):
                 next_links = page.css(next_selector)
                 if not next_links:
@@ -281,19 +545,36 @@ async def scrape_target(
                 if not next_url:
                     break
 
-                page = await retry_handler.execute(
-                    _fetch_page, fetcher_cls, next_url, target, target.fetcher,
-                    adaptive, retryable_status, adaptive_dir, proxy_url,
+                next_outcome = await retry_handler.execute(
+                    _fetch_page,
+                    fetcher_cls,
+                    next_url,
+                    target,
+                    target.fetcher,
+                    adaptive,
+                    retryable_status,
+                    adaptive_dir,
+                    proxy_url,
+                    artifacts_dir,
                 )
-                current_url = next_url
+                page = next_outcome.page
+                current_url = next_outcome.debug.get("final_url") or next_url
                 data = _extract_page_data(page, target)
                 result.data.extend(data)
                 result.pages_scraped += 1
 
+        rendered_classification = _classify_rendered_outcome(
+            result.debug,
+            result.data,
+            has_item_selector=target.item_selector is not None,
+        )
+        if rendered_classification is not None:
+            result.debug["classification"] = rendered_classification.value
+
         result.status = "success"
 
     except Exception as exc:
-        error_type, http_status = _classify_fetch_exception(exc, target.fetcher)
+        error_type, http_status, debug = _classify_fetch_exception(exc, target.fetcher)
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         logger.exception(
             "Scrape target failed: url=%s fetcher=%s classified_as=%s detail=%s",
@@ -306,6 +587,8 @@ async def scrape_target(
         result.error_type = error_type
         result.http_status = http_status
         result.error_detail = detail
+        result.debug = debug or _default_debug_blob(target.fetcher, target, target.url)
+        result.debug.setdefault("classification", error_type.value)
         result.errors.append(detail)
 
     return result

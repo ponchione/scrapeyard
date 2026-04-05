@@ -26,6 +26,10 @@ class ServiceSettings(BaseSettings):
     redis_dsn: str = "redis://redis:6379/0"
     queue_name: str = "scrapeyard"
 
+    # Admin/API read paths
+    admin_read_default_limit: int = 100
+    admin_read_max_limit: int = 500
+
     # Scheduler
     scheduler_jitter_max_seconds: int = 120
 

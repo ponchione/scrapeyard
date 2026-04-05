@@ -228,3 +228,50 @@ async def test_list_jobs_with_stats_aggregated(store):
 
     assert by_id["j-1"] == (2, datetime(2026, 3, 5, 15, 0, 0))
     assert by_id["j-2"] == (1, datetime(2026, 3, 3, 12, 0, 0))
+
+
+async def test_list_jobs_with_stats_orders_by_latest_activity_desc(store):
+    await store.save_job(
+        _make_job(
+            job_id="j-1",
+            name="run-newest",
+            created_at=datetime(2026, 3, 1, 8, 0, 0),
+        )
+    )
+    await store.save_job(
+        _make_job(
+            job_id="j-2",
+            name="updated-no-run",
+            created_at=datetime(2026, 3, 1, 7, 0, 0),
+            updated_at=datetime(2026, 3, 5, 9, 0, 0),
+        )
+    )
+    await store.save_job(
+        _make_job(
+            job_id="j-3",
+            name="run-older",
+            created_at=datetime(2026, 3, 1, 6, 0, 0),
+        )
+    )
+
+    await _insert_run("r-1", "j-1", "complete", "adhoc", "aaa", "2026-03-06T12:00:00")
+    await _insert_run("r-2", "j-3", "complete", "adhoc", "bbb", "2026-03-04T12:00:00")
+
+    results = await store.list_jobs_with_stats()
+
+    assert [job.job_id for job, _, _ in results] == ["j-1", "j-2", "j-3"]
+
+
+async def test_list_jobs_with_stats_respects_limit_and_offset(store):
+    for i in range(4):
+        await store.save_job(
+            _make_job(
+                job_id=f"j-{i}",
+                name=f"job-{i}",
+                created_at=datetime(2026, 3, 1, 8 + i, 0, 0),
+            )
+        )
+
+    results = await store.list_jobs_with_stats(limit=2, offset=1)
+
+    assert [job.job_id for job, _, _ in results] == ["j-2", "j-1"]
