@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, cast, Protocol
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.jobs import Job
@@ -67,7 +68,7 @@ class WorkerPool:
         try:
             statm = Path("/proc/self/statm").read_text()
             rss_pages = int(statm.split()[1])
-            page_size = 4096
+            page_size = os.sysconf("SC_PAGE_SIZE")
             rss_mb = (rss_pages * page_size) / (1024 * 1024)
         except (OSError, IndexError, ValueError):
             return True
@@ -87,7 +88,7 @@ class WorkerPool:
             default_queue_name=self._queue_name,
         )
         self._worker = Worker(
-            functions=[func(self._run_job, name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
+            functions=[func(cast(Any, self._run_job), name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
             redis_pool=self._redis,
             queue_name=self._queue_name,
             handle_signals=False,
@@ -106,7 +107,8 @@ class WorkerPool:
         if not self._started:
             return
 
-        assert self._worker is not None
+        if self._worker is None:
+            raise RuntimeError("WorkerPool.stop() called but worker was never started")
 
         self._worker.allow_pick_jobs = False
         grace_seconds = get_settings().workers_shutdown_grace_seconds
@@ -159,7 +161,8 @@ class WorkerPool:
         if not self._started:
             await self.start()
 
-        assert self._redis is not None
+        if self._redis is None:
+            raise RuntimeError("WorkerPool.enqueue() called but Redis pool is not connected")
         offset_ms = _PRIORITY_OFFSETS_MS[priority]
         defer_until = datetime.now(timezone.utc) + timedelta(milliseconds=offset_ms)
         queued = await self._redis.enqueue_job(
@@ -174,9 +177,15 @@ class WorkerPool:
             _defer_until=defer_until,
         )
         if queued is None:
-            assert run_id is not None
+            if run_id is None:
+                raise RuntimeError("Enqueue returned None but no run_id was provided for job lookup")
             return Job(run_id, redis=self._redis, _queue_name=self._queue_name)
         return queued
+
+    @property
+    def redis(self) -> ArqRedis | None:
+        """Return the active Redis pool, if the worker pool is started."""
+        return self._redis
 
     @property
     def active_tasks(self) -> int:

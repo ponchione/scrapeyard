@@ -10,6 +10,6 @@ async def test_reset_db_clears_state(tmp_path):
     await init_db(str(tmp_path / "db"))
     from scrapeyard.storage import database
 
-    assert database._db_dir is not None
+    assert database._default_manager._db_dir is not None
     reset_db()
-    assert database._db_dir is None
+    assert database._default_manager._db_dir is None

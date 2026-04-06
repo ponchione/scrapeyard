@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ class _FakeNode:
     def __init__(self, text: str = "", css_map: dict[str, list] | None = None):
         self.text = text
         self._css_map = css_map or {}
-        self.attrib = {}
+        self.attrib: dict[str, str] = {}
 
     def css(self, selector: str):
         return self._css_map.get(selector, [])
@@ -26,14 +27,14 @@ class _FakeNode:
         return self.text
 
 
-def _target(fetcher: FetcherType = FetcherType.basic, **overrides) -> TargetConfig:
-    base = {
+def _target(fetcher: FetcherType = FetcherType.basic, **overrides: Any) -> TargetConfig:
+    base: dict[str, Any] = {
         "url": "https://example.com",
         "fetcher": fetcher,
         "selectors": {"title": "h1"},
     }
     base.update(overrides)
-    return TargetConfig(**base)
+    return TargetConfig.model_validate(base)
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun
-from scrapeyard.storage.result_store import ResultPayload, SaveResultMeta
+from scrapeyard.storage.types import ResultPayload, SaveResultMeta
 
 
 class JobStore(Protocol):
@@ -41,6 +41,35 @@ class JobStore(Protocol):
         offset: int = 0,
     ) -> list[tuple[Job, int, datetime | None]]: ...
 
+    async def summary_by_project(self) -> list[tuple[str, str, int]]: ...
+
+    async def create_run(
+        self,
+        run_id: str,
+        job_id: str,
+        trigger: str,
+        config_hash: str,
+        started_at: datetime,
+    ) -> None: ...
+
+    async def finalize_run(
+        self,
+        run_id: str,
+        status: str,
+        record_count: int,
+        error_count: int,
+    ) -> None: ...
+
+    async def fail_run(self, run_id: str) -> None:
+        """Mark a running run as failed (crash recovery)."""
+        ...
+
+    async def list_scheduled_jobs(
+        self,
+    ) -> list[tuple[str, str, bool]]:
+        """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
+        ...
+
 
 class ResultStore(Protocol):
     """Async interface for scrape result persistence."""
@@ -63,6 +92,8 @@ class ResultStore(Protocol):
 
     async def delete_expired(self, retention_days: int) -> int: ...
 
+    async def prune_excess_per_job(self, max_results_per_job: int) -> int: ...
+
 
 class ErrorStore(Protocol):
     """Async interface for structured error record persistence."""
@@ -77,3 +108,7 @@ class ErrorStore(Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> list[ErrorRecord]: ...
+
+    async def count_errors_for_run(self, run_id: str) -> int: ...
+
+    async def delete_errors_for_job(self, job_id: str) -> None: ...

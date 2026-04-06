@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
 from scrapeyard.config.transforms import apply_transforms, parse_transform
@@ -21,17 +21,6 @@ def count_selector_matches(scope: Any, selector: SelectorValue) -> int:
     """Return the number of raw matches for *selector* within *scope*."""
     query, sel_type, _ = _unpack_selector(selector)
     return len(_select_elements(scope, query, sel_type))
-
-
-def extract_item_selectors(
-    page: Any,
-    item_selector: SelectorValue,
-    selectors: dict[str, SelectorValue],
-) -> list[dict[str, Any]]:
-    """Apply field selectors relative to each matched item container."""
-    query, sel_type, _ = _unpack_selector(item_selector)
-    items = _select_elements(page, query, sel_type)
-    return [extract_selectors(item, selectors) for item in items]
 
 
 def extract_selectors(page: Any, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
@@ -84,9 +73,13 @@ def _unpack_selector(selector: SelectorValue) -> tuple[str, SelectorType, str | 
 
 def _select_elements(scope: Any, query: str, selector_type: SelectorType) -> list[Any]:
     """Select elements from a page or item scope using CSS or XPath."""
-    if selector_type == SelectorType.xpath:
-        return scope.xpath(query)
-    return scope.css(query)
+    select_fn = getattr(scope, "xpath" if selector_type == SelectorType.xpath else "css", None)
+    if select_fn is None:
+        return []
+    try:
+        return cast(list[Any], select_fn(query))
+    except Exception:
+        return []
 
 
 def _element_text(element: Any) -> str:

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -32,6 +33,30 @@ class _FakeQueuedJob:
     async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
         del poll_delay
         await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
+
+
+async def poll_until_ready(
+    fetch: Callable[[], Awaitable[object]],
+    is_ready: Callable[[object], bool],
+    *,
+    timeout_seconds: float = 5.0,
+    initial_delay_seconds: float = 0.02,
+    max_delay_seconds: float = 0.2,
+    failure_message: str = "Timed out waiting for condition",
+) -> object:
+    """Poll until is_ready(fetch()) becomes true, using a small back-off."""
+    deadline = time.monotonic() + timeout_seconds
+    delay = initial_delay_seconds
+    last_value: object | None = None
+
+    while time.monotonic() < deadline:
+        last_value = await fetch()
+        if is_ready(last_value):
+            return last_value
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay_seconds)
+
+    raise AssertionError(f"{failure_message}. Last value: {last_value!r}")
 
 
 @pytest.fixture()

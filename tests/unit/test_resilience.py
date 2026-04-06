@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,10 +22,14 @@ from scrapeyard.engine.resilience import (
 
 
 class TestRetryHandler:
-    def _config(self, **overrides) -> RetryConfig:
-        defaults = {"max_attempts": 3, "backoff": BackoffStrategy.exponential, "backoff_max": 30}
+    def _config(self, **overrides: Any) -> RetryConfig:
+        defaults: dict[str, Any] = {
+            "max_attempts": 3,
+            "backoff": BackoffStrategy.exponential,
+            "backoff_max": 30,
+        }
         defaults.update(overrides)
-        return RetryConfig(**defaults)
+        return RetryConfig.model_validate(defaults)
 
     async def test_succeeds_first_try(self):
         handler = RetryHandler(self._config())
@@ -48,33 +52,37 @@ class TestRetryHandler:
             await handler.execute(fn)
         assert fn.call_count == 2
 
-    async def test_exponential_backoff_timing(self):
+    async def test_exponential_backoff_delays(self):
         handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.exponential))
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])
-        start = asyncio.get_event_loop().time()
-        await handler.execute(fn)
-        elapsed = asyncio.get_event_loop().time() - start
-        # 1s + 2s = 3s minimum
-        assert elapsed >= 2.5
+        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await handler.execute(fn)
+        assert result == "ok"
+        # exponential: 2^0=1s, 2^1=2s
+        delays = [call.args[0] for call in mock_sleep.call_args_list]
+        assert delays == [1.0, 2.0]
 
-    async def test_linear_backoff(self):
+    async def test_linear_backoff_delays(self):
         handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.linear))
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])
-        start = asyncio.get_event_loop().time()
-        await handler.execute(fn)
-        elapsed = asyncio.get_event_loop().time() - start
-        # 1s + 2s = 3s minimum
-        assert elapsed >= 2.5
+        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await handler.execute(fn)
+        assert result == "ok"
+        # linear: 1s, 2s
+        delays = [call.args[0] for call in mock_sleep.call_args_list]
+        assert delays == [1.0, 2.0]
 
     async def test_backoff_capped_at_max(self):
         handler = RetryHandler(
             self._config(max_attempts=2, backoff=BackoffStrategy.exponential, backoff_max=1)
         )
         fn = AsyncMock(side_effect=[RetryableError(503), "ok"])
-        start = asyncio.get_event_loop().time()
-        await handler.execute(fn)
-        elapsed = asyncio.get_event_loop().time() - start
-        assert elapsed < 2.0
+        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await handler.execute(fn)
+        assert result == "ok"
+        # exponential 2^0=1.0, capped at backoff_max=1
+        delays = [call.args[0] for call in mock_sleep.call_args_list]
+        assert delays == [1.0]
 
     async def test_non_retryable_error_propagates(self):
         handler = RetryHandler(self._config())

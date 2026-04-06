@@ -165,6 +165,20 @@ def test_proxy_url_from_env(monkeypatch):
     assert settings.proxy_url == "http://gate.example.com:7777"
 
 
+def test_log_level_defaults_to_info(monkeypatch):
+    monkeypatch.delenv("SCRAPEYARD_LOG_LEVEL", raising=False)
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.log_level == "INFO"
+
+
+def test_log_level_from_env(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_LOG_LEVEL", "debug")
+    from scrapeyard.common.settings import ServiceSettings
+    settings = ServiceSettings()
+    assert settings.log_level == "debug"
+
+
 def test_domain_rate_limit_shared_defaults_true(monkeypatch):
     monkeypatch.delenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", raising=False)
     from scrapeyard.common.settings import ServiceSettings

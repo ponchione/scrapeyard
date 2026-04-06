@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime
 
 import pytest
@@ -17,15 +18,15 @@ async def store(tmp_path):
     return SQLiteJobStore()
 
 
-def _make_job(**overrides) -> Job:
-    defaults = {
+def _make_job(**overrides: Any) -> Job:
+    defaults: dict[str, Any] = {
         "job_id": "j-1",
         "project": "acme",
         "name": "scrape-prices",
         "config_yaml": "target: https://example.com",
     }
     defaults.update(overrides)
-    return Job(**defaults)
+    return Job.model_validate(defaults)
 
 
 async def test_save_and_get(store):

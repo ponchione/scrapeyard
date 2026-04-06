@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from tests.integration.conftest import poll_until_ready
 from scrapeyard.engine.scraper import TargetResult
 
 
@@ -76,12 +77,11 @@ async def test_webhook_received_after_async_job(client, monkeypatch):
     assert response.status_code in (200, 202)
     job_id = response.json()["job_id"]
 
-    # Wait for the async job to complete.
-    for _ in range(40):
-        job_resp = await client.get(f"/jobs/{job_id}")
-        if job_resp.json()["status"] in ("complete", "partial", "failed"):
-            break
-        await asyncio.sleep(0.05)
+    await poll_until_ready(
+        lambda: client.get(f"/jobs/{job_id}"),
+        lambda response: response.json()["status"] in ("complete", "partial", "failed"),
+        failure_message=f"Timed out waiting for terminal status for {job_id}",
+    )
 
     # Give the create_task webhook a tick to run.
     await asyncio.sleep(0.1)
@@ -123,13 +123,12 @@ async def test_webhook_failure_does_not_affect_job(client, monkeypatch):
     assert response.status_code in (200, 202)
     job_id = response.json()["job_id"]
 
-    # Wait for job completion.
-    for _ in range(40):
-        job_resp = await client.get(f"/jobs/{job_id}")
-        status = job_resp.json()["status"]
-        if status in ("complete", "partial", "failed"):
-            break
-        await asyncio.sleep(0.05)
+    job_resp = await poll_until_ready(
+        lambda: client.get(f"/jobs/{job_id}"),
+        lambda response: response.json()["status"] in ("complete", "partial", "failed"),
+        failure_message=f"Timed out waiting for terminal status for {job_id}",
+    )
+    status = job_resp.json()["status"]
 
     assert status == "complete"
 
@@ -167,11 +166,11 @@ async def test_no_webhook_block_completes_normally(client, monkeypatch):
     assert response.status_code in (200, 202)
     job_id = response.json()["job_id"]
 
-    for _ in range(40):
-        job_resp = await client.get(f"/jobs/{job_id}")
-        if job_resp.json()["status"] in ("complete", "partial", "failed"):
-            break
-        await asyncio.sleep(0.05)
+    await poll_until_ready(
+        lambda: client.get(f"/jobs/{job_id}"),
+        lambda response: response.json()["status"] in ("complete", "partial", "failed"),
+        failure_message=f"Timed out waiting for terminal status for {job_id}",
+    )
 
     await asyncio.sleep(0.1)
 

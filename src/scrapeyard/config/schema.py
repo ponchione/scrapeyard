@@ -196,6 +196,22 @@ class BrowserConfig(BaseModel):
         default=False,
         description="Whether browser fetches should wait for network idle",
     )
+    stealth: bool = Field(
+        default=False,
+        description="Enable stealth mode to reduce bot detection (Playwright anti-fingerprinting)",
+    )
+    hide_canvas: bool = Field(
+        default=False,
+        description="Mask HTML canvas fingerprinting when stealth is enabled",
+    )
+    useragent: str | None = Field(
+        default=None,
+        description="Custom User-Agent string override for browser fetches",
+    )
+    extra_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Additional HTTP headers injected into every browser request",
+    )
     click_selector: str | None = Field(
         default=None,
         description="Optional CSS selector to click before extracting data (for consent/age gates)",

@@ -37,20 +37,15 @@ class ServiceSettings(BaseSettings):
     storage_retention_days: int = 30
     storage_results_dir: str = "/data/results"
     storage_max_results_per_job: int = 100
-
-    # Data directories
     db_dir: str = "/data/db"
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
 
-    # Circuit breaker
+    # Resilience / runtime
     circuit_breaker_max_failures: int = 3
     circuit_breaker_cooldown_seconds: int = 300
-
-    # Proxy
     proxy_url: str = ""
-
-    # Cross-job rate limiting
+    log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
 
     model_config = {"env_prefix": "SCRAPEYARD_"}
