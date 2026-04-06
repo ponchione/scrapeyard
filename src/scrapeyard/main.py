@@ -21,23 +21,81 @@ from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
 from scrapeyard.storage.cleanup import start_cleanup_loop
-from scrapeyard.storage.database import close_db, get_db, init_db
+from scrapeyard.storage.database import close_db, init_db
 
-_start_time: float = 0.0
-_projects_cache: dict[str, dict] = {}
-_projects_cache_refreshed_at: float = 0.0
-_PROJECTS_CACHE_TTL_SECONDS = 5.0
+
+class HealthCache:
+    """Encapsulates health-endpoint state: uptime tracking and project summary cache."""
+
+    def __init__(self, cache_ttl_seconds: float = 5.0) -> None:
+        self.start_time: float = 0.0
+        self._projects_cache: dict[str, dict] = {}
+        self._projects_cache_refreshed_at: float = 0.0
+        self._cache_ttl = cache_ttl_seconds
+
+    def mark_started(self) -> None:
+        self.start_time = time.monotonic()
+
+    @property
+    def uptime(self) -> float:
+        return time.monotonic() - self.start_time if self.start_time else 0.0
+
+    async def project_summary(self) -> dict[str, dict]:
+        now = time.monotonic()
+        if now - self._projects_cache_refreshed_at < self._cache_ttl:
+            return self._projects_cache
+
+        rows: list[tuple[str, str, int]] = []
+        try:
+            rows = await get_job_store().summary_by_project()
+        except RuntimeError:
+            rows = []
+
+        summary: dict[str, dict] = {}
+        for project, status, count in rows:
+            project_entry = summary.setdefault(
+                project,
+                {
+                    "job_count": 0,
+                    "status": "healthy",
+                    "status_counts": {
+                        "queued": 0,
+                        "running": 0,
+                        "complete": 0,
+                        "partial": 0,
+                        "failed": 0,
+                    },
+                },
+            )
+            project_entry["job_count"] += count
+            if status in project_entry["status_counts"]:
+                project_entry["status_counts"][status] += count
+
+        for project_entry in summary.values():
+            counts = project_entry["status_counts"]
+            if counts["failed"] > 0:
+                project_entry["status"] = "failing"
+            elif counts["partial"] > 0 or counts["running"] > 0:
+                project_entry["status"] = "degraded"
+            else:
+                project_entry["status"] = "healthy"
+
+        self._projects_cache = summary
+        self._projects_cache_refreshed_at = now
+        return summary
+
+
+_health = HealthCache()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Orchestrate startup and shutdown in dependency order."""
-    global _start_time  # noqa: PLW0603
-    _start_time = time.monotonic()
+    _health.mark_started()
 
     # 1. Settings & logging
     settings = get_settings()
-    setup_logging(settings.log_dir)
+    setup_logging(settings.log_dir, settings.log_level)
 
     # 2. Database
     await init_db(settings.db_dir)
@@ -56,7 +114,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize rate limiter with the pool's Redis connection for cross-job
     # domain rate limiting. Falls back to local when Redis is unavailable.
-    init_rate_limiter(redis=getattr(pool, "_redis", None))
+    init_rate_limiter(redis=pool.redis)
 
     # 5. Scheduler (re-registers persisted jobs on start)
     scheduler = get_scheduler()
@@ -90,64 +148,13 @@ app = FastAPI(
 app.include_router(router)
 
 
-async def _project_health_summary() -> dict[str, dict]:
-    global _projects_cache_refreshed_at  # noqa: PLW0603
-    global _projects_cache  # noqa: PLW0603
-    now = time.monotonic()
-    if now - _projects_cache_refreshed_at < _PROJECTS_CACHE_TTL_SECONDS:
-        return _projects_cache
-
-    rows: list[tuple[str, str, int]] = []
-    try:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
-            )
-            rows = await cursor.fetchall()
-    except RuntimeError:
-        rows = []
-
-    summary: dict[str, dict] = {}
-    for project, status, count in rows:
-        project_entry = summary.setdefault(
-            project,
-            {
-                "job_count": 0,
-                "status": "healthy",
-                "status_counts": {
-                    "queued": 0,
-                    "running": 0,
-                    "complete": 0,
-                    "partial": 0,
-                    "failed": 0,
-                },
-            },
-        )
-        project_entry["job_count"] += count
-        if status in project_entry["status_counts"]:
-            project_entry["status_counts"][status] += count
-
-    for project_entry in summary.values():
-        counts = project_entry["status_counts"]
-        if counts["failed"] > 0:
-            project_entry["status"] = "failing"
-        elif counts["partial"] > 0 or counts["running"] > 0:
-            project_entry["status"] = "degraded"
-        else:
-            project_entry["status"] = "healthy"
-
-    _projects_cache = summary
-    _projects_cache_refreshed_at = now
-    return summary
-
-
 @app.get("/health")
 async def health() -> dict:
     """Service health check endpoint with detailed status."""
     pool = get_worker_pool()
 
-    uptime = time.monotonic() - _start_time if _start_time else 0.0
-    projects = await _project_health_summary()
+    uptime = _health.uptime
+    projects = await _health.project_summary()
 
     # Determine overall status based on active task load.
     status = "ok"

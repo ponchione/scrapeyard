@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,16 @@ def _mock_element(text: str = "", css_results: dict[str, list] | None = None):
 
     el.css.side_effect = _css_side_effect
     return el
+
+
+def _adaptor_element(html: str, selector: str):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The 'strip_cdata' option of HTMLParser\(\) has never done anything and will eventually be removed\.",
+            category=DeprecationWarning,
+        )
+        return Adaptor(html).css(selector)[0]
 
 
 class TestDetectPricingVisibilityExplicit:
@@ -201,7 +212,7 @@ class TestDetectPricingVisibilityMap:
 
     def test_text_pattern_uses_descendant_text_on_real_adaptor(self):
         html = '<div class="product"><span class="map-copy">Add to Cart to See Price</span></div>'
-        el = Adaptor(html).css(".product")[0]
+        el = _adaptor_element(html, ".product")
         config = MapDetectionConfig(text_patterns=["add to cart to see price"])
         item = {"price": None}
         vis, text = detect_pricing_visibility(item, el, config)
@@ -388,7 +399,7 @@ class TestDetectStockStatus:
 
     def test_stock_detection_uses_descendant_text_on_real_adaptor(self):
         html = '<div class="availability"><span class="status">In Stock - Ships Free</span></div>'
-        el = Adaptor(html).css(".availability")[0]
+        el = _adaptor_element(html, ".availability")
         config = StockDetectionConfig(
             in_stock=StockPatternConfig(text_patterns=["in stock"]),
         )
@@ -510,7 +521,7 @@ class TestEnrichItemDetection:
 
     def test_css_display_text_uses_full_text_not_adaptor_none_sentinel(self):
         html = '<div class="map-message"><span>Add to Cart to See Price</span></div>'
-        el = Adaptor(html).css(".map-message")[0]
+        el = _adaptor_element(html, ".map-message")
         map_cfg = MapDetectionConfig(css_selectors=[".map-message"])
         item = {"name": "Widget", "price": None}
         vis, text = detect_pricing_visibility(item, el, map_cfg)

@@ -14,6 +14,11 @@ from scrapeyard.config.schema import WebhookConfig
 
 logger = logging.getLogger(__name__)
 
+# Defaults for retry behaviour.
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_BACKOFF_BASE = 1.0  # seconds
+_DEFAULT_BACKOFF_MAX = 30.0  # seconds
+
 
 class WebhookDispatcher(Protocol):
     """Async interface for dispatching webhook notifications."""
@@ -24,22 +29,29 @@ class WebhookDispatcher(Protocol):
 
 
 class HttpWebhookDispatcher:
-    """Webhook dispatcher with a shared httpx client and tracked tasks.
+    """Webhook dispatcher with retry, shared httpx client, and tracked tasks.
 
-    Exceptions (timeouts, connection errors, non-2xx responses) are caught
-    and logged at WARNING level. Successful dispatches are logged at INFO.
-    The full payload is only logged at DEBUG.
+    On transient failures (connection errors, timeouts, 5xx responses) the
+    dispatcher retries with exponential backoff up to *max_retries* times.
+    4xx responses are considered permanent and are **not** retried.
     """
 
     def __init__(
         self,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        *,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        backoff_base: float = _DEFAULT_BACKOFF_BASE,
+        backoff_max: float = _DEFAULT_BACKOFF_MAX,
     ) -> None:
         self._client_factory = client_factory or httpx.AsyncClient
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._accepting_tasks = True
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._backoff_max = backoff_max
 
     @property
     def pending_tasks(self) -> int:
@@ -49,35 +61,79 @@ class HttpWebhookDispatcher:
         """Re-enable task submission after a prior shutdown."""
         self._accepting_tasks = True
 
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff: base * 2^attempt, capped at backoff_max."""
+        return float(min(self._backoff_base * (2 ** attempt), self._backoff_max))
+
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        """5xx and 429 are retryable; 4xx (except 429) are permanent."""
+        return status_code >= 500 or status_code == 429
+
     async def dispatch(self, config: WebhookConfig, payload: dict) -> None:
         url = str(config.url)
         logger.debug("Webhook payload for %s: %s", url, payload)
 
-        start = time.monotonic()
-        try:
-            client = await self._get_client()
-            response = await client.post(
-                url,
-                json=payload,
-                headers=config.headers,
-                timeout=config.timeout,
-            )
-            elapsed_ms = (time.monotonic() - start) * 1000
+        last_exc: Exception | None = None
+        for attempt in range(1 + self._max_retries):
+            start = time.monotonic()
+            try:
+                client = await self._get_client()
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers=config.headers,
+                    timeout=config.timeout,
+                )
+                elapsed_ms = (time.monotonic() - start) * 1000
 
-            if response.is_success:
-                logger.info(
-                    "Webhook dispatched to %s — %d in %.0fms",
-                    url, response.status_code, elapsed_ms,
-                )
-            else:
+                if response.is_success:
+                    logger.info(
+                        "Webhook dispatched to %s — %d in %.0fms (attempt %d)",
+                        url, response.status_code, elapsed_ms, attempt + 1,
+                    )
+                    return
+
+                # Permanent client error — don't retry.
+                if not self._is_retryable_status(response.status_code):
+                    logger.warning(
+                        "Webhook to %s returned %d in %.0fms — not retryable",
+                        url, response.status_code, elapsed_ms,
+                    )
+                    return
+
                 logger.warning(
-                    "Webhook to %s returned %d in %.0fms",
+                    "Webhook to %s returned %d in %.0fms (attempt %d/%d)",
                     url, response.status_code, elapsed_ms,
+                    attempt + 1, 1 + self._max_retries,
                 )
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.warning(
-                "Webhook to %s failed after %.0fms: %s", url, elapsed_ms, exc,
+
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                last_exc = exc
+                logger.warning(
+                    "Webhook to %s failed after %.0fms: %s (attempt %d/%d)",
+                    url, elapsed_ms, exc, attempt + 1, 1 + self._max_retries,
+                )
+
+            # Sleep before next retry (unless this was the last attempt).
+            if attempt < self._max_retries:
+                delay = self._backoff_delay(attempt)
+                logger.debug(
+                    "Webhook retry to %s in %.1fs", url, delay,
+                )
+                await asyncio.sleep(delay)
+
+        # All attempts exhausted.
+        if last_exc:
+            logger.error(
+                "Webhook to %s failed after %d attempts — giving up: %s",
+                url, 1 + self._max_retries, last_exc,
+            )
+        else:
+            logger.error(
+                "Webhook to %s returned retryable status after %d attempts — giving up",
+                url, 1 + self._max_retries,
             )
 
     async def submit(self, config: WebhookConfig, payload: dict) -> None:

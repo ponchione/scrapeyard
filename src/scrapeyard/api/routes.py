@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
-import asyncio
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
@@ -55,9 +55,7 @@ def _should_wait_for_completion(config: Any) -> bool:
     target = targets[0]
     if target.pagination is not None:
         return False
-    if target.fetcher != FetcherType.basic:
-        return False
-    return True
+    return bool(target.fetcher == FetcherType.basic)
 
 
 def _queued_response(job_id: str) -> Response:
@@ -121,22 +119,14 @@ async def scrape(
 ) -> Response:
     """Submit an ad-hoc scrape request."""
     if not _is_yaml_request(request):
-        return Response(
-            content=_json_encode({"error": "Content-Type must be application/x-yaml"}),
-            status_code=415,
-            media_type="application/json",
-        )
+        return _error_response(415, "Content-Type must be application/x-yaml")
 
     body = await request.body()
     config_yaml = body.decode("utf-8")
     try:
         config = load_config(config_yaml)
     except Exception as exc:
-        return Response(
-            content=_json_encode({"error": f"Invalid config: {exc}"}),
-            status_code=422,
-            media_type="application/json",
-        )
+        return _error_response(422, f"Invalid config: {exc}")
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -163,11 +153,7 @@ async def scrape(
     except MemoryError:
         logger.warning("Rejecting async scrape job %s due to pool memory pressure", job.job_id)
         await job_store.delete_job(job.job_id)
-        return Response(
-            content=_json_encode({"error": "Server at capacity — try again later"}),
-            status_code=503,
-            media_type="application/json",
-        )
+        return _error_response(503, "Server at capacity — try again later")
 
     if not _should_wait_for_completion(config):
         return _queued_response(job.job_id)
@@ -202,25 +188,20 @@ async def create_job(
     request: Request,
     job_store: JobStore = Depends(get_job_store),
     scheduler: SchedulerService = Depends(get_scheduler),
-):
+) -> Any:
     """Create a scheduled job. Requires a schedule block in the config."""
+    if not _is_yaml_request(request):
+        return _error_response(415, "Content-Type must be application/x-yaml")
+
     body = await request.body()
     config_yaml = body.decode("utf-8")
     try:
         config = load_config(config_yaml)
     except Exception as exc:
-        return Response(
-            content=_json_encode({"error": f"Invalid config: {exc}"}),
-            status_code=422,
-            media_type="application/json",
-        )
+        return _error_response(422, f"Invalid config: {exc}")
 
     if config.schedule is None:
-        return Response(
-            content=_json_encode({"error": "A 'schedule' block is required for POST /jobs"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, "A 'schedule' block is required for POST /jobs")
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -233,14 +214,8 @@ async def create_job(
     try:
         await job_store.save_job(job)
     except DuplicateJobError as exc:
-        return Response(
-            content=_json_encode({
-                "error": (
-                    f"Job name {exc.name!r} already exists in project {exc.project!r}"
-                )
-            }),
-            status_code=409,
-            media_type="application/json",
+        return _error_response(
+            409, f"Job name {exc.name!r} already exists in project {exc.project!r}"
         )
     scheduler.register_job(job.job_id, config.schedule.cron, enabled=config.schedule.enabled)
     return {
@@ -251,23 +226,19 @@ async def create_job(
     }
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=None)
 async def list_jobs(
     response: Response,
-    project: Optional[str] = Query(None),
-    limit: Optional[int] = Query(None, ge=1),
+    project: str | None = Query(None),
+    limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     job_store: JobStore = Depends(get_job_store),
-) -> list[dict[str, Any]]:
+) -> Any:
     """List jobs, optionally filtered by project."""
     try:
         resolved_limit = _resolve_admin_read_limit(limit)
     except ValueError as exc:
-        return Response(
-            content=_json_encode({"error": str(exc)}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, str(exc))
 
     rows = await job_store.list_jobs_with_stats(
         project,
@@ -305,16 +276,12 @@ async def get_job(
     job_id: str,
     job_store: JobStore = Depends(get_job_store),
     scheduler: SchedulerService = Depends(get_scheduler),
-):
+) -> Any:
     """Get a single job by ID."""
     try:
         job = await job_store.get_job(job_id)
     except KeyError:
-        return Response(
-            content=_json_encode({"error": f"Job {job_id!r} not found"}),
-            status_code=404,
-            media_type="application/json",
-        )
+        return _error_response(404, f"Job {job_id!r} not found")
 
     runs = await job_store.get_job_runs(job_id, limit=10)
     run_count, last_run_at = await job_store.get_job_run_stats(job_id)
@@ -355,12 +322,19 @@ async def delete_job(
     delete_results: bool = Query(False),
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
+    error_store: ErrorStore = Depends(get_error_store),
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Response:
     """Delete a job by ID."""
+    try:
+        await job_store.get_job(job_id)
+    except KeyError:
+        return _error_response(404, f"Job {job_id!r} not found")
+
     scheduler.remove_job(job_id)
     if delete_results:
         await result_store.delete_results(job_id)
+    await error_store.delete_errors_for_job(job_id)
     await job_store.delete_job(job_id)
     return Response(status_code=204)
 
@@ -369,20 +343,16 @@ async def delete_job(
 async def get_results(
     job_id: str,
     latest: bool = Query(True),
-    run_id: Optional[str] = Query(None),
+    run_id: str | None = Query(None),
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
-):
+) -> Any:
     """Get results for a job."""
     # Check job exists.
     try:
         job = await job_store.get_job(job_id)
     except KeyError:
-        return Response(
-            content=_json_encode({"error": f"Job {job_id!r} not found"}),
-            status_code=404,
-            media_type="application/json",
-        )
+        return _error_response(404, f"Job {job_id!r} not found")
 
     # If job is still running, return 202.
     if job.status in (JobStatus.queued, JobStatus.running):
@@ -397,20 +367,12 @@ async def get_results(
         )
 
     if run_id is None and not latest:
-        return Response(
-            content=_json_encode({"error": "Provide run_id when latest=false"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, "Provide run_id when latest=false")
 
     try:
         payload = await result_store.get_result(job_id, run_id=run_id)
     except KeyError:
-        return Response(
-            content=_json_encode({"error": f"No results found for job {job_id!r}"}),
-            status_code=404,
-            media_type="application/json",
-        )
+        return _error_response(404, f"No results found for job {job_id!r}")
 
     return {
         "job_id": job_id,
@@ -420,42 +382,30 @@ async def get_results(
     }
 
 
-@router.get("/errors")
+@router.get("/errors", response_model=None)
 async def get_errors(
     response: Response,
-    project: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    since: Optional[str] = Query(None),
-    error_type: Optional[str] = Query(None),
-    limit: Optional[int] = Query(None, ge=1),
+    project: str | None = Query(None),
+    job_id: str | None = Query(None),
+    since: str | None = Query(None),
+    error_type: str | None = Query(None),
+    limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     error_store: ErrorStore = Depends(get_error_store),
-):
+) -> Any:
     """Query error records with optional filters."""
     try:
         resolved_limit = _resolve_admin_read_limit(limit)
     except ValueError as exc:
-        return Response(
-            content=_json_encode({"error": str(exc)}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, str(exc))
     try:
         since_dt = datetime.fromisoformat(since) if since else None
     except ValueError:
-        return Response(
-            content=_json_encode({"error": f"Invalid 'since' format: {since!r}"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, f"Invalid 'since' format: {since!r}")
     try:
         error_type_enum = ErrorType(error_type) if error_type else None
     except ValueError:
-        return Response(
-            content=_json_encode({"error": f"Invalid 'error_type': {error_type!r}"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return _error_response(400, f"Invalid 'error_type': {error_type!r}")
 
     filters = ErrorFilters(
         project=project,
@@ -499,3 +449,12 @@ async def get_errors(
 
 def _json_encode(data: Any) -> bytes:
     return json.dumps(data).encode("utf-8")
+
+
+def _error_response(status_code: int, message: str) -> Response:
+    """Return a JSON error response with a consistent structure."""
+    return Response(
+        content=_json_encode({"error": message}),
+        status_code=status_code,
+        media_type="application/json",
+    )

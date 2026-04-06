@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from typing import cast
 
 import aiosqlite
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.models.job import Job, JobRun, JobStatus
 from scrapeyard.storage.database import get_db
+
+
+_JOB_COLUMNS = (
+    "job_id, project, name, status, config_yaml, "
+    "created_at, updated_at, schedule_cron, schedule_enabled, "
+    "current_run_id"
+)
+
+_JOB_RUN_COLUMNS = (
+    "run_id, job_id, status, trigger, config_hash, "
+    "started_at, completed_at, record_count, error_count"
+)
 
 
 class DuplicateJobError(Exception):
@@ -20,18 +34,21 @@ class DuplicateJobError(Exception):
         super().__init__(f"Job {name!r} already exists in project {project!r}")
 
 
-def _row_to_job(row: tuple) -> Job:
+def _row_to_job(row: Sequence[object]) -> Job:
+    created_at = parse_dt(cast(str | None, row[5]))
+    if created_at is None:
+        raise ValueError("Job row is missing created_at")
     return Job(
-        job_id=row[0],
-        project=row[1],
-        name=row[2],
-        status=JobStatus(row[3]),
-        config_yaml=row[4],
-        created_at=parse_dt(row[5]),  # type: ignore[arg-type]
-        updated_at=parse_dt(row[6]),
-        schedule_cron=row[7],
+        job_id=cast(str, row[0]),
+        project=cast(str, row[1]),
+        name=cast(str, row[2]),
+        status=JobStatus(cast(str, row[3])),
+        config_yaml=cast(str, row[4]),
+        created_at=created_at,
+        updated_at=parse_dt(cast(str | None, row[6])),
+        schedule_cron=cast(str | None, row[7]),
         schedule_enabled=bool(row[8]),
-        current_run_id=row[9],
+        current_run_id=cast(str | None, row[9]),
     )
 
 
@@ -45,6 +62,16 @@ def _row_to_job_run(row: aiosqlite.Row) -> JobRun:
 
 class SQLiteJobStore:
     """SQLite implementation of :class:`~scrapeyard.storage.protocols.JobStore`."""
+
+    async def _execute_write(
+        self,
+        sql: str,
+        params: Sequence[object] = (),
+    ) -> aiosqlite.Cursor:
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(sql, params)
+            await db.commit()
+            return cursor
 
     @staticmethod
     def _raise_if_missing_job(cursor: aiosqlite.Cursor, job_id: str) -> None:
@@ -80,68 +107,59 @@ class SQLiteJobStore:
         return job.job_id
 
     async def update_job(self, job: Job) -> None:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """UPDATE jobs SET project=?, name=?, status=?,
-                   config_yaml=?, created_at=?, updated_at=?,
-                   schedule_cron=?, schedule_enabled=?,
-                   current_run_id=?
-                   WHERE job_id=?""",
-                (
-                    job.project,
-                    job.name,
-                    job.status.value,
-                    job.config_yaml,
-                    fmt_dt(job.created_at),
-                    fmt_dt(job.updated_at),
-                    job.schedule_cron,
-                    int(job.schedule_enabled),
-                    job.current_run_id,
-                    job.job_id,
-                ),
-            )
-            await db.commit()
-            self._raise_if_missing_job(cursor, job.job_id)
+        cursor = await self._execute_write(
+            """UPDATE jobs SET project=?, name=?, status=?,
+               config_yaml=?, created_at=?, updated_at=?,
+               schedule_cron=?, schedule_enabled=?,
+               current_run_id=?
+               WHERE job_id=?""",
+            (
+                job.project,
+                job.name,
+                job.status.value,
+                job.config_yaml,
+                fmt_dt(job.created_at),
+                fmt_dt(job.updated_at),
+                job.schedule_cron,
+                int(job.schedule_enabled),
+                job.current_run_id,
+                job.job_id,
+            ),
+        )
+        self._raise_if_missing_job(cursor, job.job_id)
 
     async def update_job_status(self, job: Job) -> None:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """UPDATE jobs SET status=?, updated_at=?,
-                   current_run_id=?
-                   WHERE job_id=?""",
-                (
-                    job.status.value,
-                    fmt_dt(job.updated_at),
-                    job.current_run_id,
-                    job.job_id,
-                ),
-            )
-            await db.commit()
-            self._raise_if_missing_job(cursor, job.job_id)
+        cursor = await self._execute_write(
+            """UPDATE jobs SET status=?, updated_at=?,
+               current_run_id=?
+               WHERE job_id=?""",
+            (
+                job.status.value,
+                fmt_dt(job.updated_at),
+                job.current_run_id,
+                job.job_id,
+            ),
+        )
+        self._raise_if_missing_job(cursor, job.job_id)
 
     async def update_job_schedule_state(self, job: Job) -> None:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """UPDATE jobs SET schedule_cron=?, schedule_enabled=?,
-                   updated_at=?
-                   WHERE job_id=?""",
-                (
-                    job.schedule_cron,
-                    int(job.schedule_enabled),
-                    fmt_dt(job.updated_at),
-                    job.job_id,
-                ),
-            )
-            await db.commit()
-            self._raise_if_missing_job(cursor, job.job_id)
+        cursor = await self._execute_write(
+            """UPDATE jobs SET schedule_cron=?, schedule_enabled=?,
+               updated_at=?
+               WHERE job_id=?""",
+            (
+                job.schedule_cron,
+                int(job.schedule_enabled),
+                fmt_dt(job.updated_at),
+                job.job_id,
+            ),
+        )
+        self._raise_if_missing_job(cursor, job.job_id)
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT job_id, project, name, status, config_yaml, "
-                "created_at, updated_at, schedule_cron, schedule_enabled, "
-                "current_run_id "
-                "FROM jobs WHERE job_id=?",
+                f"SELECT {_JOB_COLUMNS} FROM jobs WHERE job_id=?",
                 (job_id,),
             )
             row = await cursor.fetchone()
@@ -153,18 +171,12 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db:
             if project is not None:
                 cursor = await db.execute(
-                    "SELECT job_id, project, name, status, config_yaml, "
-                    "created_at, updated_at, schedule_cron, schedule_enabled, "
-                    "current_run_id "
-                    "FROM jobs WHERE project=?",
+                    f"SELECT {_JOB_COLUMNS} FROM jobs WHERE project=?",
                     (project,),
                 )
             else:
                 cursor = await db.execute(
-                    "SELECT job_id, project, name, status, config_yaml, "
-                    "created_at, updated_at, schedule_cron, schedule_enabled, "
-                    "current_run_id "
-                    "FROM jobs"
+                    f"SELECT {_JOB_COLUMNS} FROM jobs"
                 )
             rows = await cursor.fetchall()
         return [_row_to_job(r) for r in rows]
@@ -173,9 +185,7 @@ class SQLiteJobStore:
         """Return the last N runs for a job, newest first."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT run_id, job_id, status, trigger, config_hash, "
-                "started_at, completed_at, record_count, error_count "
-                "FROM job_runs WHERE job_id = ? "
+                f"SELECT {_JOB_RUN_COLUMNS} FROM job_runs WHERE job_id = ? "
                 "ORDER BY started_at DESC LIMIT ?",
                 (job_id, limit),
             )
@@ -206,11 +216,7 @@ class SQLiteJobStore:
     ) -> list[tuple[Job, int, datetime | None]]:
         """List jobs with derived run_count and last_run_at, newest activity first."""
         async with get_db("jobs.db") as db:
-            job_cols = (
-                "j.job_id, j.project, j.name, j.status, j.config_yaml, "
-                "j.created_at, j.updated_at, j.schedule_cron, "
-                "j.schedule_enabled, j.current_run_id"
-            )
+            job_cols = ", ".join(f"j.{c.strip()}" for c in _JOB_COLUMNS.split(","))
             sql = (
                 "WITH job_stats AS ("
                 "    SELECT job_id, COUNT(run_id) AS run_count, "
@@ -252,7 +258,88 @@ class SQLiteJobStore:
                 result.append((job, run_count, last_run_at))
             return result
 
+    async def summary_by_project(self) -> list[tuple[str, str, int]]:
+        """Return grouped job counts by project and status."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
+            )
+            return [
+                (row[0], row[1], row[2])
+                for row in await cursor.fetchall()
+            ]
+
+    async def create_run(
+        self,
+        run_id: str,
+        job_id: str,
+        trigger: str,
+        config_hash: str,
+        started_at: datetime,
+    ) -> None:
+        """Insert a new job_runs row with status='running'."""
+        await self._execute_write(
+            """INSERT INTO job_runs
+               (run_id, job_id, status, trigger,
+                config_hash, started_at)
+               VALUES (?, ?, 'running', ?, ?, ?)""",
+            (
+                run_id, job_id, trigger,
+                config_hash,
+                fmt_dt(started_at),
+            ),
+        )
+
+    async def finalize_run(
+        self,
+        run_id: str,
+        status: str,
+        record_count: int,
+        error_count: int,
+    ) -> None:
+        """Update a job_runs row with final status, counts, and completed_at."""
+        await self._execute_write(
+            """UPDATE job_runs
+               SET status = ?, completed_at = ?,
+                   record_count = ?, error_count = ?
+               WHERE run_id = ?""",
+            (
+                status,
+                fmt_dt(datetime.now(timezone.utc)),
+                record_count,
+                error_count,
+                run_id,
+            ),
+        )
+
+    async def fail_run(self, run_id: str) -> None:
+        """Mark a running run as failed (crash recovery)."""
+        await self._execute_write(
+            """UPDATE job_runs
+               SET status = 'failed',
+                   completed_at = ?
+               WHERE run_id = ?
+                 AND status = 'running'""",
+            (
+                fmt_dt(datetime.now(timezone.utc)),
+                run_id,
+            ),
+        )
+
+    async def list_scheduled_jobs(self) -> list[tuple[str, str, bool]]:
+        """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                "SELECT job_id, schedule_cron, schedule_enabled "
+                "FROM jobs WHERE schedule_cron IS NOT NULL"
+            )
+            return [
+                (row[0], row[1], bool(row[2]))
+                for row in await cursor.fetchall()
+            ]
+
     async def delete_job(self, job_id: str) -> None:
         async with get_db("jobs.db") as db:
+            await db.execute("DELETE FROM job_runs WHERE job_id=?", (job_id,))
             await db.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
             await db.commit()

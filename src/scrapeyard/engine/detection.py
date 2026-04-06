@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import math
-from typing import Any
+from typing import Any, cast
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 
@@ -151,10 +151,10 @@ def detect_stock_status(
     extracted_signal_text = _normalize_stock_signal_text(item_data.get("stock_signal"))
     if extracted_signal_text:
         for status in _STOCK_PRIORITY:
-            patterns: StockPatternConfig | None = getattr(config, status, None)
-            if patterns is None:
+            extracted_patterns: StockPatternConfig | None = getattr(config, status, None)
+            if extracted_patterns is None:
                 continue
-            if _stock_text_patterns_match(extracted_signal_text, patterns):
+            if _stock_text_patterns_match(extracted_signal_text, extracted_patterns):
                 return status
 
     item_text = _get_element_text(element)
@@ -228,19 +228,19 @@ def _get_element_text(element: Any) -> str:
     if element is None:
         return ""
     if isinstance(element, str):
-        return _normalize_text(element)
+        return _clean_element_text(element)
 
     get_all_text = getattr(element, "get_all_text", None)
     if callable(get_all_text):
-        text = _normalize_text(get_all_text())
+        text = _clean_element_text(get_all_text())
         if text:
             return text
 
-    return _normalize_text(getattr(element, "text", None))
+    return _clean_element_text(getattr(element, "text", None))
 
 
-def _normalize_text(value: Any) -> str:
-    """Normalize Scrapling text values into usable strings."""
+def _clean_element_text(value: Any) -> str:
+    """Clean Scrapling element text: strip whitespace, filter 'None' literals."""
     if not isinstance(value, str):
         return ""
     text = value.strip()
@@ -261,9 +261,9 @@ def _has_usable_stock_signal(value: Any) -> bool:
 def _normalize_stock_signal_text(value: Any) -> str:
     """Normalize raw extracted stock signal values into matchable text."""
     if isinstance(value, str):
-        return _normalize_text(value)
+        return _clean_element_text(value)
     if isinstance(value, (list, tuple)):
-        parts = [_normalize_text(item) for item in value if isinstance(item, str)]
+        parts = [_clean_element_text(item) for item in value if isinstance(item, str)]
         return " ".join(part for part in parts if part)
     return ""
 
@@ -274,6 +274,6 @@ def _css_select(element: Any, selector: str) -> list[Any]:
     if css_fn is None:
         return []
     try:
-        return css_fn(selector)
+        return cast(list[Any], css_fn(selector))
     except Exception:
         return []

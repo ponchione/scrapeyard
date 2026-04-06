@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime
 
 import pytest
@@ -17,8 +18,8 @@ async def store(tmp_path):
     return SQLiteErrorStore()
 
 
-def _make_error(**overrides) -> ErrorRecord:
-    defaults = {
+def _make_error(**overrides: Any) -> ErrorRecord:
+    defaults: dict[str, Any] = {
         "job_id": "j-1",
         "run_id": "run-1",
         "project": "acme",
@@ -33,7 +34,7 @@ def _make_error(**overrides) -> ErrorRecord:
         "action_taken": ActionTaken.retry,
     }
     defaults.update(overrides)
-    return ErrorRecord(**defaults)
+    return ErrorRecord.model_validate(defaults)
 
 
 async def test_log_and_query_all(store):

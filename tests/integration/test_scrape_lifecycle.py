@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from tests.integration.conftest import poll_until_ready
 from scrapeyard.common.settings import get_settings
 from scrapeyard.api.dependencies import get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
@@ -69,17 +70,14 @@ async def test_scrape_lifecycle_eventually_returns_results(client, monkeypatch):
     payload = response.json()
     job_id = payload["job_id"]
 
-    for _ in range(40):
-        results_response = await client.get(f"/results/{job_id}")
-        if results_response.status_code == 200:
-            results_payload = results_response.json()
-            assert results_payload["job_id"] == job_id
-            assert "results" in results_payload
-            return
-        assert results_response.status_code == 202
-        await asyncio.sleep(0.05)
-
-    pytest.fail("Timed out waiting for /results/{job_id} to return 200")
+    results_response = await poll_until_ready(
+        lambda: client.get(f"/results/{job_id}"),
+        lambda response: response.status_code == 200,
+        failure_message=f"Timed out waiting for /results/{job_id} to return 200",
+    )
+    results_payload = results_response.json()
+    assert results_payload["job_id"] == job_id
+    assert "results" in results_payload
 
 
 @pytest.mark.asyncio
@@ -103,13 +101,12 @@ async def test_errors_are_recorded_on_failed_scrape(client, monkeypatch):
     assert response.status_code == 202
     job_id = response.json()["job_id"]
 
-    for _ in range(40):
-        job_response = await client.get(f"/jobs/{job_id}")
-        assert job_response.status_code == 200
-        status = job_response.json()["status"]
-        if status in {"failed", "partial", "complete"}:
-            break
-        await asyncio.sleep(0.05)
+    job_response = await poll_until_ready(
+        lambda: client.get(f"/jobs/{job_id}"),
+        lambda response: response.status_code == 200 and response.json()["status"] in {"failed", "partial", "complete"},
+        failure_message=f"Timed out waiting for terminal status for {job_id}",
+    )
+    assert job_response.status_code == 200
 
     errors_response = await client.get(f"/errors?job_id={job_id}")
     assert errors_response.status_code == 200
@@ -154,13 +151,11 @@ async def test_failed_scrape_results_still_expose_target_debug(client, monkeypat
     assert response.status_code == 202
     job_id = response.json()["job_id"]
 
-    for _ in range(40):
-        results_response = await client.get(f"/results/{job_id}")
-        if results_response.status_code == 200:
-            break
-        await asyncio.sleep(0.05)
-    else:
-        pytest.fail("Timed out waiting for failed-run results payload")
+    results_response = await poll_until_ready(
+        lambda: client.get(f"/results/{job_id}"),
+        lambda response: response.status_code == 200,
+        failure_message="Timed out waiting for failed-run results payload",
+    )
 
     payload = results_response.json()["results"]
     assert payload["status"] == "failed"

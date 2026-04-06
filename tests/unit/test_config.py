@@ -156,9 +156,9 @@ class TestParseTransform:
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"
 
-    def test_join_identity_on_single_string(self):
-        fn = parse_transform("join:,")
-        assert fn("hello") == "hello"
+    def test_join_raises_not_supported(self):
+        with pytest.raises(ValueError, match="list-level operation"):
+            parse_transform("join:,")
 
     def test_unknown_transform_raises(self):
         with pytest.raises(ValueError, match="Unknown transform"):

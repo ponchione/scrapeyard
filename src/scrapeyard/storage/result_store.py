@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -16,23 +16,7 @@ from scrapeyard.storage.filesystem import (
     remove_directories,
     write_json_file,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ResultPayload:
-    """Wrapper returned by get_result with run context."""
-
-    run_id: str
-    data: Any
-
-
-@dataclass(frozen=True, slots=True)
-class SaveResultMeta:
-    """Metadata returned from a save_result call."""
-
-    run_id: str
-    file_path: str
-    record_count: int | None
+from scrapeyard.storage.types import ResultPayload, SaveResultMeta
 
 
 class LocalResultStore:
@@ -54,6 +38,30 @@ class LocalResultStore:
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
 
+    async def _delete_by_ids(
+        self,
+        db: Any,
+        rows: Sequence[Sequence[Any]],
+    ) -> int:
+        if not rows:
+            return 0
+
+        ids = [row[0] for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        await db.execute(
+            f"DELETE FROM results_meta WHERE id IN ({placeholders})",
+            ids,
+        )
+        await db.commit()
+        # Delete files after metadata so a crash leaves orphaned files
+        # (recoverable) rather than orphaned metadata rows pointing to
+        # missing files.
+        await asyncio.to_thread(
+            remove_directories,
+            [file_path for _, file_path in rows],
+        )
+        return len(rows)
+
     async def save_result(
         self,
         job_id: str,
@@ -72,12 +80,10 @@ class LocalResultStore:
         await asyncio.to_thread(write_json_file, path, data)
 
         async with get_db("results_meta.db") as db:
+            # Single atomic statement — the UNIQUE index on (job_id, run_id)
+            # lets INSERT OR REPLACE handle the upsert without a separate DELETE.
             await db.execute(
-                "DELETE FROM results_meta WHERE job_id=? AND run_id=?",
-                (job_id, run_id),
-            )
-            await db.execute(
-                """INSERT INTO results_meta
+                """INSERT OR REPLACE INTO results_meta
                    (job_id, project, run_id, status, record_count,
                     file_path, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -155,17 +161,24 @@ class LocalResultStore:
                 "SELECT id, file_path FROM results_meta WHERE created_at < ?",
                 (cutoff,),
             )
-            rows = await cursor.fetchall()
-            if rows:
-                await asyncio.to_thread(
-                    remove_directories,
-                    [file_path for _, file_path in rows],
-                )
-                ids = [r[0] for r in rows]
-                placeholders = ",".join("?" for _ in ids)
-                await db.execute(
-                    f"DELETE FROM results_meta WHERE id IN ({placeholders})",
-                    ids,
-                )
-                await db.commit()
-        return len(rows)
+            rows = list(await cursor.fetchall())
+            return await self._delete_by_ids(db, rows)
+
+    async def prune_excess_per_job(self, max_results_per_job: int) -> int:
+        """Delete result runs exceeding the per-job retention limit."""
+        async with get_db("results_meta.db") as db:
+            cursor = await db.execute(
+                """
+                SELECT id, file_path FROM (
+                    SELECT id, file_path,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY job_id
+                               ORDER BY created_at DESC
+                           ) AS rn
+                    FROM results_meta
+                ) WHERE rn > ?
+                """,
+                (max_results_per_job,),
+            )
+            rows = list(await cursor.fetchall())
+            return await self._delete_by_ids(db, rows)

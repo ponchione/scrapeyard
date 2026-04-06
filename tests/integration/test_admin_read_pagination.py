@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime
 
 import pytest
@@ -10,19 +11,19 @@ from scrapeyard.api.dependencies import get_error_store, get_job_store
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, Job
 
 
-def _make_job(**overrides) -> Job:
-    defaults = {
+def _make_job(**overrides: Any) -> Job:
+    defaults: dict[str, Any] = {
         "job_id": "job-1",
         "project": "integ",
         "name": "job-name",
         "config_yaml": "target: https://example.com",
     }
     defaults.update(overrides)
-    return Job(**defaults)
+    return Job.model_validate(defaults)
 
 
-def _make_error(**overrides) -> ErrorRecord:
-    defaults = {
+def _make_error(**overrides: Any) -> ErrorRecord:
+    defaults: dict[str, Any] = {
         "job_id": "job-1",
         "run_id": "run-1",
         "project": "integ",
@@ -37,7 +38,7 @@ def _make_error(**overrides) -> ErrorRecord:
         "action_taken": ActionTaken.retry,
     }
     defaults.update(overrides)
-    return ErrorRecord(**defaults)
+    return ErrorRecord.model_validate(defaults)
 
 
 @pytest.mark.asyncio

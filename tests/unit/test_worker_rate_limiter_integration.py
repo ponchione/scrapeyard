@@ -7,26 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
-
-
-def _make_job(**overrides):
-    defaults = {
-        "job_id": "j-rate",
-        "project": "test",
-        "name": "rate-test",
-        "config_yaml": "",
-        "status": JobStatus.queued,
-    }
-    defaults.update(overrides)
-    return Job(**defaults)
+from tests.unit.worker_helpers import make_job
 
 
 @pytest.mark.asyncio
 async def test_scrape_task_calls_rate_limiter_acquire():
     """The rate_limiter.acquire() should be called for each target's domain."""
-    job = _make_job()
+    job = make_job(job_id="j-rate", name="rate-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
     job_store.update_job_status.side_effect = lambda j: None

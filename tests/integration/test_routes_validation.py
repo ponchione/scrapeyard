@@ -41,6 +41,17 @@ async def test_jobs_bad_yaml_returns_422(client):
 
 
 @pytest.mark.asyncio
+async def test_jobs_rejects_non_yaml_content_type(client):
+    response = await client.post(
+        "/jobs",
+        content="project: integ\nname: nope",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 415
+    assert "application/x-yaml" in response.json()["error"]
+
+
+@pytest.mark.asyncio
 async def test_errors_invalid_since_returns_400(client):
     """Invalid ISO date in 'since' param should return 400."""
     response = await client.get("/errors?since=not-a-date")

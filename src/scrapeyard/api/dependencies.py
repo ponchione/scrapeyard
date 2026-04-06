@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from arq.connections import RedisSettings
+from arq.connections import ArqRedis, RedisSettings
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.rate_limiter import (
@@ -18,22 +18,23 @@ from scrapeyard.queue.worker import scrape_task
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
 @lru_cache(maxsize=1)
-def get_job_store() -> SQLiteJobStore:
+def get_job_store() -> JobStore:
     return SQLiteJobStore()
 
 
 @lru_cache(maxsize=1)
-def get_error_store() -> SQLiteErrorStore:
+def get_error_store() -> ErrorStore:
     return SQLiteErrorStore()
 
 
 @lru_cache(maxsize=1)
-def get_result_store() -> LocalResultStore:
+def get_result_store() -> ResultStore:
     settings = get_settings()
     job_store = get_job_store()
 
@@ -65,39 +66,57 @@ async def close_webhook_dispatcher(*, timeout: float | None = None) -> None:
     await get_webhook_dispatcher().shutdown(timeout=timeout)
 
 
-# Rate limiter — set during lifespan startup, not @lru_cache, because
-# RedisDomainRateLimiter needs an async Redis connection that isn't
-# available at import time.
-_rate_limiter: DomainRateLimiter | None = None
+class _RateLimiterHolder:
+    """Holds the rate limiter singleton.
 
-
-def init_rate_limiter(redis: object | None = None) -> DomainRateLimiter:
-    """Create and store the rate limiter singleton.
-
-    Called from lifespan after Redis is available. When
-    domain_rate_limit_shared is True and a redis handle is provided,
-    returns RedisDomainRateLimiter; otherwise LocalDomainRateLimiter.
+    Not @lru_cache because RedisDomainRateLimiter needs an async Redis
+    connection that isn't available at import time.
     """
-    global _rate_limiter
-    settings = get_settings()
-    if settings.domain_rate_limit_shared and redis is not None:
-        _rate_limiter = RedisDomainRateLimiter(redis)
-    else:
-        _rate_limiter = LocalDomainRateLimiter()
-    return _rate_limiter
+
+    def __init__(self) -> None:
+        self._instance: DomainRateLimiter | None = None
+
+    def init(self, redis: ArqRedis | None = None) -> DomainRateLimiter:
+        """Create and store the rate limiter.
+
+        Called from lifespan after Redis is available. When
+        domain_rate_limit_shared is True and a redis handle is provided,
+        uses RedisDomainRateLimiter; otherwise LocalDomainRateLimiter.
+        """
+        settings = get_settings()
+        if settings.domain_rate_limit_shared and redis is not None:
+            self._instance = RedisDomainRateLimiter(redis)
+        else:
+            self._instance = LocalDomainRateLimiter()
+        return self._instance
+
+    def get(self) -> DomainRateLimiter:
+        """Return the rate limiter. Auto-initialises on first call if needed."""
+        if self._instance is None:
+            return self.init()
+        return self._instance
+
+    def reset(self) -> None:
+        """Clear the singleton (for test teardown)."""
+        self._instance = None
+
+
+_rate_limiter_holder = _RateLimiterHolder()
+
+
+def init_rate_limiter(redis: ArqRedis | None = None) -> DomainRateLimiter:
+    """Create and store the rate limiter singleton."""
+    return _rate_limiter_holder.init(redis)
 
 
 def get_rate_limiter() -> DomainRateLimiter:
     """Return the rate limiter singleton. Must call init_rate_limiter() first."""
-    if _rate_limiter is None:
-        return init_rate_limiter()
-    return _rate_limiter
+    return _rate_limiter_holder.get()
 
 
 def reset_rate_limiter() -> None:
     """Reset the rate limiter singleton (for test teardown)."""
-    global _rate_limiter
-    _rate_limiter = None
+    _rate_limiter_holder.reset()
 
 
 @lru_cache(maxsize=1)

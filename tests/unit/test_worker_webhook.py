@@ -6,62 +6,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.config.schema import FailStrategy, WebhookConfig, WebhookStatus
+from scrapeyard.config.schema import WebhookConfig, WebhookStatus
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.worker import scrape_task
-
-
-def _make_job(job_id: str = "job-1") -> Job:
-    return Job(
-        job_id=job_id, project="test", name="test-job",
-        config_yaml="", status=JobStatus.queued,
-    )
-
-
-def _make_target(url: str) -> MagicMock:
-    target = MagicMock(url=url, proxy=None)
-    target.fetcher.value = "basic"
-    return target
-
-
-def _make_config_mock(*, webhook: WebhookConfig | None = None):
-    cfg = MagicMock()
-    cfg.project = "test"
-    cfg.name = "test-job"
-    cfg.resolved_targets.return_value = [_make_target("http://a.com")]
-    cfg.execution.concurrency = 1
-    cfg.execution.delay_between = 0
-    cfg.execution.domain_rate_limit = 0
-    cfg.execution.fail_strategy = FailStrategy.partial
-    cfg.adaptive = False
-    cfg.schedule = None
-    cfg.retry = MagicMock()
-    cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-    cfg.output.group_by = "target"
-    cfg.webhook = webhook
-    cfg.proxy = None
-    return cfg
-
-
-@pytest.fixture
-def mock_stores():
-    job_store = AsyncMock()
-    result_store = AsyncMock()
-    error_store = AsyncMock()
-    circuit_breaker = MagicMock()
-    circuit_breaker.check = MagicMock()
-    circuit_breaker.record_success = MagicMock()
-    circuit_breaker.record_failure = MagicMock()
-    return job_store, result_store, error_store, circuit_breaker
+from tests.unit.worker_helpers import make_job, make_config_mock
 
 
 @pytest.mark.asyncio
 async def test_webhook_dispatched_on_complete(mock_stores):
     """Webhook fires when config has webhook and status matches."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -76,7 +32,7 @@ async def test_webhook_dispatched_on_complete(mock_stores):
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
-        mock_load.return_value = _make_config_mock(webhook=webhook_config)
+        mock_load.return_value = make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
         await scrape_task(
@@ -99,7 +55,7 @@ async def test_webhook_dispatched_on_complete(mock_stores):
 async def test_no_webhook_when_not_configured(mock_stores):
     """No webhook attempt when config.webhook is None."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -113,7 +69,7 @@ async def test_no_webhook_when_not_configured(mock_stores):
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
-        mock_load.return_value = _make_config_mock(webhook=None)
+        mock_load.return_value = make_config_mock(webhook=None)
         mock_scrape.return_value = success_result
 
         await scrape_task(
@@ -131,7 +87,7 @@ async def test_no_webhook_when_not_configured(mock_stores):
 async def test_no_webhook_when_dispatcher_is_none(mock_stores):
     """No webhook attempt when webhook_dispatcher is None (sync path)."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -145,7 +101,7 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
-        mock_load.return_value = _make_config_mock(webhook=webhook_config)
+        mock_load.return_value = make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
         # No webhook_dispatcher passed — should not crash
@@ -161,7 +117,7 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
 async def test_webhook_status_not_in_on_list(mock_stores):
     """Webhook does NOT fire when status is not in config.on list."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -180,7 +136,7 @@ async def test_webhook_status_not_in_on_list(mock_stores):
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
-        mock_load.return_value = _make_config_mock(webhook=webhook_config)
+        mock_load.return_value = make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = success_result
 
         await scrape_task(
@@ -195,12 +151,18 @@ async def test_webhook_status_not_in_on_list(mock_stores):
 
 
 @pytest.mark.asyncio
-async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
-    """Webhook fires with run_id=None when job has no data."""
+async def test_webhook_fires_with_save_meta_on_failed_results(mock_stores):
+    """Webhook fires with save_meta fields when job fails (0 records)."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
+
+    # Worker always calls save_result, even on failure.  Configure
+    # the mock so webhook payload assertions can check real values.
+    result_store.save_result.return_value = MagicMock(
+        run_id="fail-run-1", file_path="/tmp/results/fail", record_count=0,
+    )
 
     webhook_dispatcher = AsyncMock()
     webhook_config = WebhookConfig(
@@ -216,7 +178,7 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
-        mock_load.return_value = _make_config_mock(webhook=webhook_config)
+        mock_load.return_value = make_config_mock(webhook=webhook_config)
         mock_scrape.return_value = fail_result
 
         await scrape_task(
@@ -229,8 +191,7 @@ async def test_webhook_fires_with_none_meta_on_empty_results(mock_stores):
 
     webhook_dispatcher.submit.assert_awaited_once()
     payload = webhook_dispatcher.submit.call_args[0][1]
-    assert payload["run_id"] is None
-    assert payload["result_path"] is None
-    assert payload["results_url"] is None
+    assert payload["run_id"] == "fail-run-1"
+    assert payload["result_path"] == "/tmp/results/fail"
     assert payload["result_count"] == 0
     assert payload["event"] == "job.failed"

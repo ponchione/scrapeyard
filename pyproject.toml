@@ -22,12 +22,18 @@ httpx = "^0.28"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
 pytest-asyncio = "^0.25"
+pytest-timeout = "^2.4.0"
 ruff = "^0.9"
 respx = "^0.22.0"
+pytest-cov = "^6.0"
+mypy = "^1.20.0"
+pip-audit = "^2.9.0"
+types-pyyaml = "^6.0.12.20250915"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--cov=scrapeyard --cov-report=term-missing:skip-covered --cov-report=html --cov-fail-under=80 --timeout=60"
 markers = [
     "live_redis: exercises the real Redis-backed queue path",
 ]
@@ -35,6 +41,65 @@ markers = [
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "C4", "SIM"]
+ignore = ["E501", "I001", "UP035", "UP038", "SIM105", "SIM110"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/scrapeyard/api/routes.py" = ["B008"]
+"src/scrapeyard/config/schema.py" = ["UP007"]
+"src/scrapeyard/models/job.py" = ["UP007"]
+"tests/**/*.py" = ["B007", "C408", "SIM117"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+# Start strict on well-typed modules, expand incrementally.
+# Run: poetry run mypy src/scrapeyard/models src/scrapeyard/config src/scrapeyard/common src/scrapeyard/api src/scrapeyard/storage
+
+[[tool.mypy.overrides]]
+module = [
+    "scrapeyard.models.*",
+    "scrapeyard.config.*",
+    "scrapeyard.common.*",
+    "scrapeyard.api.*",
+    "scrapeyard.storage.*",
+]
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "scrapling.*",
+    "arq.*",
+    "apscheduler.*",
+    "aiosqlite.*",
+]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["scrapeyard"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+skip_covered = true
+sort = "Cover"
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.$",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "Scrapeyard coverage report"
 
 [build-system]
 requires = ["poetry-core"]
