@@ -84,6 +84,18 @@ class TestDetectPricingVisibilityExplicit:
         assert vis == "explicit"
         assert text is None
 
+    def test_tokenized_price_array_returns_explicit(self):
+        item = {"price": ["$", "99.99"], "original_price": ["$", "259.99"]}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_tokenized_price_range_returns_explicit(self):
+        item = {"price": ["From", "$", "99.99", "to", "$", "129.99"]}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
     def test_explicit_overrides_map_detection_config(self):
         """Numeric price -> explicit regardless of MAP config."""
         config = MapDetectionConfig(
@@ -262,6 +274,14 @@ class TestDetectPricingVisibilityCartOnly:
     def test_empty_string_price_value_pattern(self):
         config = MapDetectionConfig(price_value_patterns=[""])
         item = {"price": ""}
+        el = _mock_element(text="")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "cart_only"
+        assert text is None
+
+    def test_tokenized_hidden_price_value_pattern_returns_cart_only(self):
+        config = MapDetectionConfig(price_value_patterns=["see price in cart"])
+        item = {"price": ["see", "price", "in", "cart"]}
         el = _mock_element(text="")
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "cart_only"
