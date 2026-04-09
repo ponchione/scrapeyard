@@ -9,6 +9,7 @@ from typing import cast
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
 from scrapeyard.storage.database import get_db
+from scrapeyard.storage.error_queries import build_query_errors_query
 
 
 def _row_to_error(row: Sequence[object]) -> ErrorRecord:
@@ -84,38 +85,7 @@ class SQLiteErrorStore:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[ErrorRecord]:
-        clauses: list[str] = []
-        params: list[object] = []
-
-        if filters.project is not None:
-            clauses.append("project = ?")
-            params.append(filters.project)
-        if filters.job_id is not None:
-            clauses.append("job_id = ?")
-            params.append(filters.job_id)
-        if filters.since is not None:
-            clauses.append("timestamp >= ?")
-            params.append(fmt_dt(filters.since))
-        if filters.error_type is not None:
-            clauses.append("error_type = ?")
-            params.append(filters.error_type.value)
-
-        sql = (
-            "SELECT id, job_id, run_id, project, target_url, attempt, "
-            "timestamp, error_type, http_status, fetcher_used, "
-            "error_message, selectors_matched, action_taken, resolved "
-            "FROM errors"
-        )
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY timestamp DESC, id DESC"
-        if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-        elif offset > 0:
-            sql += " LIMIT -1 OFFSET ?"
-            params.append(offset)
-
+        sql, params = build_query_errors_query(filters, limit, offset)
         async with get_db("errors.db") as db:
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()

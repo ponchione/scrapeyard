@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+from scrapeyard.common.time import utc_now
 
 
 class JobStatus(str, Enum):
@@ -33,6 +31,7 @@ class ErrorType(str, Enum):
     login_gate = "login_gate"
     rendered_empty = "rendered_empty"
     selector_miss = "selector_miss"
+    selector_engine_error = "selector_engine_error"
     navigation_timeout = "navigation_timeout"
     proxy_rejected = "proxy_rejected"
     http_not_found = "http_not_found"
@@ -60,7 +59,7 @@ class Job(BaseModel):
     name: str = Field(..., description="Job name within the project")
     status: JobStatus = Field(default=JobStatus.queued, description="Current job status")
     config_yaml: str = Field(..., description="Raw YAML config for this job")
-    created_at: datetime = Field(default_factory=_utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
     updated_at: Optional[datetime] = None
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
     schedule_enabled: bool = Field(default=True, description="Whether the schedule is enabled")
@@ -83,7 +82,7 @@ class JobRun(BaseModel):
     config_hash: str = Field(
         ..., description="SHA-256 of the config YAML used for this run"
     )
-    started_at: datetime = Field(default_factory=_utcnow)
+    started_at: datetime = Field(default_factory=utc_now)
     completed_at: Optional[datetime] = None
     record_count: Optional[int] = None
     error_count: int = Field(default=0)
@@ -97,7 +96,7 @@ class ErrorRecord(BaseModel):
     project: str
     target_url: str
     attempt: int
-    timestamp: datetime = Field(default_factory=_utcnow)
+    timestamp: datetime = Field(default_factory=utc_now)
     error_type: ErrorType
     http_status: Optional[int] = None
     fetcher_used: str

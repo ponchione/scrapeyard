@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -16,7 +15,8 @@ from scrapeyard.api.dependencies import (
     get_scheduler,
     get_worker_pool,
 )
-from scrapeyard.api.response_utils import json_error, json_response
+from scrapeyard.api.query_parsing import parse_error_filters
+from scrapeyard.api.response_utils import json_error, json_response, no_content_response
 from scrapeyard.api.scrape_submission import submit_scrape_job
 from scrapeyard.api.serializers import (
     serialize_error_record,
@@ -29,7 +29,7 @@ from scrapeyard.api.serializers import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
-from scrapeyard.models.job import ErrorFilters, ErrorType, Job, JobStatus
+from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
@@ -237,7 +237,7 @@ async def delete_job(
         await result_store.delete_results(job_id)
     await error_store.delete_errors_for_job(job_id)
     await job_store.delete_job(job_id)
-    return Response(status_code=204)
+    return no_content_response()
 
 
 @router.get("/results/{job_id}", response_model=None)
@@ -292,16 +292,14 @@ async def get_errors(
         resolved_limit = _resolve_admin_read_limit(limit)
     except ValueError as exc:
         return json_error(400, str(exc))
-    try:
-        since_dt = datetime.fromisoformat(since) if since else None
-    except ValueError:
-        return json_error(400, f"Invalid 'since' format: {since!r}")
-    try:
-        error_type_enum = ErrorType(error_type) if error_type else None
-    except ValueError:
-        return json_error(400, f"Invalid 'error_type': {error_type!r}")
-
-    filters = ErrorFilters(project=project, job_id=job_id, since=since_dt, error_type=error_type_enum)
+    filters = parse_error_filters(
+        project=project,
+        job_id=job_id,
+        since=since,
+        error_type=error_type,
+    )
+    if isinstance(filters, Response):
+        return filters
     errors = await error_store.query_errors(filters, limit=resolved_limit + 1, offset=offset)
     has_more = len(errors) > resolved_limit
     errors = errors[:resolved_limit]

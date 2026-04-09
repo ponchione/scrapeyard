@@ -31,18 +31,24 @@ from scrapeyard.engine.fetch_classifier import (
 )
 from scrapeyard.engine.pagination import paginate_target, resolve_href
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.scrape_models import FetchError, FetchOutcome, TargetResult
-from scrapeyard.engine.selectors import count_selector_matches, extract_selectors, select_items
+from scrapeyard.engine.scrape_models import FetchError, FetchOutcome, TargetResult, TargetStatus
+from scrapeyard.engine.selectors import (
+    SelectorExecutionError,
+    count_selector_matches_strict,
+    extract_selectors_strict,
+    select_items_strict,
+)
+from scrapeyard.models.job import ErrorType
 
 
 def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
     """Extract records and enrich with pricing visibility and stock status detection."""
     if target.item_selector is not None:
-        items = select_items(page, target.item_selector)
-        data = [extract_selectors(item, target.selectors) for item in items]
+        items = select_items_strict(page, target.item_selector)
+        data = [extract_selectors_strict(item, target.selectors) for item in items]
     else:
         items = [page]
-        data = [extract_selectors(page, target.selectors)]
+        data = [extract_selectors_strict(page, target.selectors)]
 
     for item_data, element in zip(data, items, strict=False):
         enrich_item_detection(item_data, element, target.map_detection, target.stock_detection)
@@ -96,12 +102,12 @@ def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
     item_selector_count = None
     selector_scope = page
     if target.item_selector is not None:
-        items = select_items(page, target.item_selector)
+        items = select_items_strict(page, target.item_selector)
         item_selector_count = len(items)
         if items:
             selector_scope = items[0]
     selector_counts = {
-        name: count_selector_matches(selector_scope, selector)
+        name: count_selector_matches_strict(selector_scope, selector, field_name=name)
         for name, selector in target.selectors.items()
     }
     return {
@@ -182,7 +188,7 @@ def _finalize_target_success(result: TargetResult, target: TargetConfig) -> None
     )
     if rendered_classification is not None and result.debug is not None:
         result.debug["classification"] = rendered_classification.value
-    result.status = "success"
+    result.status = TargetStatus.success
 
 
 async def scrape_target(
@@ -239,10 +245,19 @@ async def scrape_target(
             artifacts_dir=artifacts_dir,
         )
         _finalize_target_success(result, target)
+    except SelectorExecutionError as exc:
+        detail = str(exc)
+        result.status = TargetStatus.failed
+        result.error_type = ErrorType.selector_engine_error
+        result.error_detail = detail
+        result.debug = result.debug or default_debug_blob(target.fetcher, target, target.url)
+        result.debug["classification"] = ErrorType.selector_engine_error.value
+        result.debug["selector_failure"] = exc.debug
+        result.errors.append(detail)
     except Exception as exc:
         error_type, http_status, debug = classify_fetch_exception(exc, target.fetcher)
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-        result.status = "failed"
+        result.status = TargetStatus.failed
         result.error_type = error_type
         result.http_status = http_status
         result.error_detail = detail

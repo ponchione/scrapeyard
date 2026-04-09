@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
-from typing import cast
+from datetime import datetime
 
 import aiosqlite
 
-from scrapeyard.common.dt import fmt_dt, parse_dt
-from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.common.dt import fmt_dt
+from scrapeyard.common.time import utc_now
+from scrapeyard.models.job import Job, JobRun
 from scrapeyard.storage.database import get_db
-
-
-_JOB_COLUMNS = (
-    "job_id, project, name, status, config_yaml, "
-    "created_at, updated_at, schedule_cron, schedule_enabled, "
-    "current_run_id"
+from scrapeyard.storage.job_queries import (
+    PROJECT_SUMMARY_QUERY,
+    SCHEDULED_JOBS_QUERY,
+    build_list_jobs_with_stats_query,
 )
-
-_JOB_RUN_COLUMNS = (
-    "run_id, job_id, status, trigger, config_hash, "
-    "started_at, completed_at, record_count, error_count"
+from scrapeyard.storage.job_rows import (
+    row_to_job,
+    row_to_job_run,
+    row_to_job_with_stats,
+    row_to_project_summary,
+    row_to_schedule_state,
 )
+from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS
 
 
 class DuplicateJobError(Exception):
@@ -32,32 +33,6 @@ class DuplicateJobError(Exception):
         self.project = project
         self.name = name
         super().__init__(f"Job {name!r} already exists in project {project!r}")
-
-
-def _row_to_job(row: Sequence[object]) -> Job:
-    created_at = parse_dt(cast(str | None, row[5]))
-    if created_at is None:
-        raise ValueError("Job row is missing created_at")
-    return Job(
-        job_id=cast(str, row[0]),
-        project=cast(str, row[1]),
-        name=cast(str, row[2]),
-        status=JobStatus(cast(str, row[3])),
-        config_yaml=cast(str, row[4]),
-        created_at=created_at,
-        updated_at=parse_dt(cast(str | None, row[6])),
-        schedule_cron=cast(str | None, row[7]),
-        schedule_enabled=bool(row[8]),
-        current_run_id=cast(str | None, row[9]),
-    )
-
-
-def _row_to_job_run(row: aiosqlite.Row) -> JobRun:
-    return JobRun(
-        run_id=row[0], job_id=row[1], status=row[2], trigger=row[3],
-        config_hash=row[4], started_at=parse_dt(row[5]),  # type: ignore[arg-type]
-        completed_at=parse_dt(row[6]), record_count=row[7], error_count=row[8],
-    )
 
 
 class SQLiteJobStore:
@@ -159,37 +134,37 @@ class SQLiteJobStore:
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                f"SELECT {_JOB_COLUMNS} FROM jobs WHERE job_id=?",
+                f"SELECT {JOB_COLUMNS} FROM jobs WHERE job_id=?",
                 (job_id,),
             )
             row = await cursor.fetchone()
         if row is None:
             raise KeyError(f"Job not found: {job_id!r}")
-        return _row_to_job(row)
+        return row_to_job(row)
 
     async def list_jobs(self, project: str | None = None) -> list[Job]:
         async with get_db("jobs.db") as db:
             if project is not None:
                 cursor = await db.execute(
-                    f"SELECT {_JOB_COLUMNS} FROM jobs WHERE project=?",
+                    f"SELECT {JOB_COLUMNS} FROM jobs WHERE project=?",
                     (project,),
                 )
             else:
                 cursor = await db.execute(
-                    f"SELECT {_JOB_COLUMNS} FROM jobs"
+                    f"SELECT {JOB_COLUMNS} FROM jobs"
                 )
             rows = await cursor.fetchall()
-        return [_row_to_job(r) for r in rows]
+        return [row_to_job(row) for row in rows]
 
     async def get_job_runs(self, job_id: str, limit: int = 10) -> list[JobRun]:
         """Return the last N runs for a job, newest first."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                f"SELECT {_JOB_RUN_COLUMNS} FROM job_runs WHERE job_id = ? "
+                f"SELECT {JOB_RUN_COLUMNS} FROM job_runs WHERE job_id = ? "
                 "ORDER BY started_at DESC LIMIT ?",
                 (job_id, limit),
             )
-            return [_row_to_job_run(row) for row in await cursor.fetchall()]
+            return [row_to_job_run(row) for row in await cursor.fetchall()]
 
     async def get_job_run_stats(
         self, job_id: str,
@@ -215,59 +190,18 @@ class SQLiteJobStore:
         offset: int = 0,
     ) -> list[tuple[Job, int, datetime | None]]:
         """List jobs with derived run_count and last_run_at, newest activity first."""
+        sql, params = build_list_jobs_with_stats_query(project, limit, offset)
         async with get_db("jobs.db") as db:
-            job_cols = ", ".join(f"j.{c.strip()}" for c in _JOB_COLUMNS.split(","))
-            sql = (
-                "WITH job_stats AS ("
-                "    SELECT job_id, COUNT(run_id) AS run_count, "
-                "           MAX(started_at) AS last_run_at "
-                "    FROM job_runs "
-                "    GROUP BY job_id"
-                ") "
-                f"SELECT {job_cols}, "
-                "COALESCE(s.run_count, 0) AS run_count, "
-                "s.last_run_at "
-                "FROM jobs j "
-                "LEFT JOIN job_stats s ON j.job_id = s.job_id"
-            )
-            params: list[object] = []
-            if project:
-                sql += " WHERE j.project = ?"
-                params.append(project)
-            sql += (
-                " ORDER BY COALESCE(s.last_run_at, j.updated_at, j.created_at) DESC, "
-                "j.created_at DESC, j.job_id DESC"
-            )
-            if limit is not None:
-                sql += " LIMIT ? OFFSET ?"
-                params.extend([limit, offset])
-            elif offset > 0:
-                sql += " LIMIT -1 OFFSET ?"
-                params.append(offset)
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
-            result = []
-            for row in rows:
-                job = _row_to_job(row[:10])
-                run_count = row[10]
-                last_run_at = (
-                    datetime.fromisoformat(row[11])
-                    if row[11]
-                    else None
-                )
-                result.append((job, run_count, last_run_at))
-            return result
+        return [row_to_job_with_stats(row) for row in rows]
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]:
         """Return grouped job counts by project and status."""
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
-            )
-            return [
-                (row[0], row[1], row[2])
-                for row in await cursor.fetchall()
-            ]
+            cursor = await db.execute(PROJECT_SUMMARY_QUERY)
+            rows = await cursor.fetchall()
+        return [row_to_project_summary(row) for row in rows]
 
     async def create_run(
         self,
@@ -305,7 +239,7 @@ class SQLiteJobStore:
                WHERE run_id = ?""",
             (
                 status,
-                fmt_dt(datetime.now(timezone.utc)),
+                fmt_dt(utc_now()),
                 record_count,
                 error_count,
                 run_id,
@@ -321,7 +255,7 @@ class SQLiteJobStore:
                WHERE run_id = ?
                  AND status = 'running'""",
             (
-                fmt_dt(datetime.now(timezone.utc)),
+                fmt_dt(utc_now()),
                 run_id,
             ),
         )
@@ -329,14 +263,9 @@ class SQLiteJobStore:
     async def list_scheduled_jobs(self) -> list[tuple[str, str, bool]]:
         """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                "SELECT job_id, schedule_cron, schedule_enabled "
-                "FROM jobs WHERE schedule_cron IS NOT NULL"
-            )
-            return [
-                (row[0], row[1], bool(row[2]))
-                for row in await cursor.fetchall()
-            ]
+            cursor = await db.execute(SCHEDULED_JOBS_QUERY)
+            rows = await cursor.fetchall()
+        return [row_to_schedule_state(row) for row in rows]
 
     async def delete_job(self, job_id: str) -> None:
         async with get_db("jobs.db") as db:

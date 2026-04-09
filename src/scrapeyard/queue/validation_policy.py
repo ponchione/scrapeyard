@@ -8,7 +8,7 @@ from typing import Awaitable, Callable
 
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
-from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
 from scrapeyard.queue.error_records import build_error_record, validation_error_type
 
@@ -36,7 +36,7 @@ async def apply_validation(
     attempt: int = 1,
 ) -> TargetResult:
     """Validate a successful result; retry once on validation failure."""
-    if result.status != "success":
+    if result.status is not TargetStatus.success:
         return result
 
     validation = validator.validate(result.data)
@@ -65,7 +65,7 @@ async def apply_validation(
         logger.info("Skipping invalid result for %s: %s", target_cfg.url, validation.message)
         return TargetResult(
             url=target_cfg.url,
-            status="success",
+            status=TargetStatus.success,
             data=[],
             errors=[validation.message],
             pages_scraped=result.pages_scraped,
@@ -76,7 +76,7 @@ async def apply_validation(
         logger.info("Failing target %s due to validation: %s", target_cfg.url, validation.message)
         return TargetResult(
             url=target_cfg.url,
-            status="failed",
+            status=TargetStatus.failed,
             data=[],
             errors=[validation.message],
             pages_scraped=result.pages_scraped,
@@ -94,7 +94,7 @@ async def apply_validation(
         proxy_url=proxy_url,
         artifacts_dir=_build_retry_artifacts_dir(run_artifacts_dir, domain),
     )
-    if retry_result.status != "success":
+    if retry_result.status is not TargetStatus.success:
         logger.info("Recording failure for domain %s after validation retry", domain)
         circuit_breaker.record_failure(domain)
         for _ in retry_result.errors:
@@ -131,7 +131,7 @@ async def apply_validation(
     ))
     return TargetResult(
         url=target_cfg.url,
-        status="failed",
+        status=TargetStatus.failed,
         data=[],
         errors=[retry_validation.message],
         pages_scraped=retry_result.pages_scraped,

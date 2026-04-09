@@ -50,15 +50,15 @@ def test_can_accept_returns_true_when_limit_negative():
 
 def test_can_accept_returns_true_on_oserror():
     pool = _make_pool(memory_limit_mb=512)
-    with patch("scrapeyard.queue.pool.Path.read_text", side_effect=OSError("no proc")):
+    with patch("scrapeyard.queue.memory.Path.read_text", side_effect=OSError("no proc")):
         assert pool.can_accept() is True
 
 
 def test_can_accept_returns_false_when_over_limit():
     pool = _make_pool(memory_limit_mb=100)
     with (
-        patch("scrapeyard.queue.pool.Path.read_text", return_value="50000 30000 1000 500 0 2000 0"),
-        patch("scrapeyard.queue.pool.os.sysconf", return_value=4096),
+        patch("scrapeyard.queue.memory.Path.read_text", return_value="50000 30000 1000 500 0 2000 0"),
+        patch("scrapeyard.queue.memory.os.sysconf", return_value=4096),
     ):
         assert pool.can_accept() is False
 
@@ -66,8 +66,8 @@ def test_can_accept_returns_false_when_over_limit():
 def test_can_accept_returns_true_when_under_limit():
     pool = _make_pool(memory_limit_mb=500)
     with (
-        patch("scrapeyard.queue.pool.Path.read_text", return_value="50000 10000 1000 500 0 2000 0"),
-        patch("scrapeyard.queue.pool.os.sysconf", return_value=4096),
+        patch("scrapeyard.queue.memory.Path.read_text", return_value="50000 10000 1000 500 0 2000 0"),
+        patch("scrapeyard.queue.memory.os.sysconf", return_value=4096),
     ):
         assert pool.can_accept() is True
 

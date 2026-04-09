@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.models.job import JobStatus
@@ -114,7 +115,7 @@ class SchedulerService:
         run_id = generate_run_id()
         queued_job = job.model_copy(update={
             "status": JobStatus.queued,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": utc_now(),
             "current_run_id": run_id,
         })
         await self._job_store.update_job_status(queued_job)

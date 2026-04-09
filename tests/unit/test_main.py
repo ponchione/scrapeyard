@@ -14,20 +14,15 @@ import scrapeyard.main as main_module
 
 @pytest.mark.asyncio
 async def test_health_cache_project_summary_classifies_statuses():
-    cache = main_module.HealthCache(cache_ttl_seconds=60)
     fake_store = MagicMock(summary_by_project=AsyncMock(return_value=[
         ("healthy-project", "complete", 2),
         ("degraded-project", "running", 1),
         ("degraded-project", "partial", 1),
         ("failing-project", "failed", 1),
     ]))
+    cache = main_module.HealthCache(lambda: fake_store, cache_ttl_seconds=60)
 
-    original_get_job_store = main_module.get_job_store
-    main_module.get_job_store = lambda: fake_store
-    try:
-        summary = await cache.project_summary()
-    finally:
-        main_module.get_job_store = original_get_job_store
+    summary = await cache.project_summary()
 
     assert summary["healthy-project"]["status"] == "healthy"
     assert summary["degraded-project"]["status"] == "degraded"
@@ -37,16 +32,11 @@ async def test_health_cache_project_summary_classifies_statuses():
 
 @pytest.mark.asyncio
 async def test_health_cache_uses_cached_summary_until_ttl_expires():
-    cache = main_module.HealthCache(cache_ttl_seconds=60)
     fake_store = MagicMock(summary_by_project=AsyncMock(return_value=[("proj", "complete", 1)]))
+    cache = main_module.HealthCache(lambda: fake_store, cache_ttl_seconds=60)
 
-    original_get_job_store = main_module.get_job_store
-    main_module.get_job_store = lambda: fake_store
-    try:
-        first = await cache.project_summary()
-        second = await cache.project_summary()
-    finally:
-        main_module.get_job_store = original_get_job_store
+    first = await cache.project_summary()
+    second = await cache.project_summary()
 
     assert first == second
     fake_store.summary_by_project.assert_awaited_once()
@@ -54,14 +44,12 @@ async def test_health_cache_uses_cached_summary_until_ttl_expires():
 
 @pytest.mark.asyncio
 async def test_health_cache_returns_empty_summary_when_store_unavailable():
-    cache = main_module.HealthCache(cache_ttl_seconds=60)
+    cache = main_module.HealthCache(
+        lambda: (_ for _ in ()).throw(RuntimeError("not ready")),
+        cache_ttl_seconds=60,
+    )
 
-    original_get_job_store = main_module.get_job_store
-    main_module.get_job_store = lambda: (_ for _ in ()).throw(RuntimeError("not ready"))
-    try:
-        summary = await cache.project_summary()
-    finally:
-        main_module.get_job_store = original_get_job_store
+    summary = await cache.project_summary()
 
     assert summary == {}
 
@@ -94,13 +82,19 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "setup_logging", MagicMock())
     monkeypatch.setattr(main_module, "init_db", AsyncMock())
-    monkeypatch.setattr(main_module, "get_job_store", lambda: "job-store")
-    monkeypatch.setattr(main_module, "get_error_store", lambda: "error-store")
-    monkeypatch.setattr(main_module, "get_result_store", lambda: "result-store")
-    monkeypatch.setattr(main_module, "get_webhook_dispatcher", lambda: webhook_dispatcher)
-    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime_services",
+        lambda: main_module.RuntimeServices(
+            job_store="job-store",
+            error_store="error-store",
+            result_store="result-store",
+            webhook_dispatcher=webhook_dispatcher,
+            worker_pool=pool,
+            scheduler=scheduler,
+        ),
+    )
     monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
-    monkeypatch.setattr(main_module, "get_scheduler", lambda: scheduler)
     monkeypatch.setattr(main_module, "start_cleanup_loop", lambda _store: cleanup_task)
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
@@ -132,7 +126,8 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
     monkeypatch.setattr(main_module._health, "project_summary", AsyncMock(return_value={"proj": {"status": "healthy"}}))
     monkeypatch.setattr(main_module._health, "start_time", 1.0)
-    monkeypatch.setattr(main_module.time, "monotonic", lambda: 13.3)
+    import scrapeyard.runtime.health as runtime_health
+    monkeypatch.setattr(runtime_health.time, "monotonic", lambda: 13.3)
 
     result = await main_module.health()
 

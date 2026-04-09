@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import timedelta
 from typing import Any, cast, Protocol
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
@@ -13,6 +11,8 @@ from arq.jobs import Job
 from arq.worker import Worker, func
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.time import utc_now
+from scrapeyard.queue.memory import get_process_rss_mb
 
 _ARQ_FUNCTION_NAME = "scrape_job"
 _KEEP_RESULT_SECONDS = 3600
@@ -65,12 +65,8 @@ class WorkerPool:
         """Return True if current RSS is within limits."""
         if self._memory_limit_mb <= 0:
             return True
-        try:
-            statm = Path("/proc/self/statm").read_text()
-            rss_pages = int(statm.split()[1])
-            page_size = os.sysconf("SC_PAGE_SIZE")
-            rss_mb = (rss_pages * page_size) / (1024 * 1024)
-        except (OSError, IndexError, ValueError):
+        rss_mb = get_process_rss_mb()
+        if rss_mb is None:
             return True
         return rss_mb < self._memory_limit_mb
 
@@ -154,7 +150,7 @@ class WorkerPool:
         trigger: str = "adhoc",
     ) -> QueueJobHandle:
         """Enqueue a scrape job and return a handle for awaiting completion."""
-        if not self._check_memory():
+        if not self.can_accept():
             raise MemoryError(
                 f"Process memory exceeds {self._memory_limit_mb}MB limit — rejecting task"
             )
@@ -164,7 +160,7 @@ class WorkerPool:
         if self._redis is None:
             raise RuntimeError("WorkerPool.enqueue() called but Redis pool is not connected")
         offset_ms = _PRIORITY_OFFSETS_MS[priority]
-        defer_until = datetime.now(timezone.utc) + timedelta(milliseconds=offset_ms)
+        defer_until = utc_now() + timedelta(milliseconds=offset_ms)
         queued = await self._redis.enqueue_job(
             _ARQ_FUNCTION_NAME,
             job_id,
