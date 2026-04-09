@@ -14,6 +14,17 @@ _NUMERIC_PRICE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PRICE_RANGE_RE = re.compile(
+    r"^\s*(?:from\s+)?"
+    r"(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
+    r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?"
+    r"(?:\s*(?:-|to)\s*"
+    r"(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
+    r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)?"
+    r"(?:\s*ea)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def enrich_item_detection(
     item_data: dict[str, Any],
@@ -96,7 +107,7 @@ def detect_pricing_visibility(
     # Price value patterns (never produce display text)
     if not matched:
         price_raw = item_data.get("price")
-        price_str = str(price_raw) if price_raw is not None else ""
+        price_str = _normalize_price_text(price_raw)
         for pattern in config.price_value_patterns:
             if pattern == price_str:
                 matched = True
@@ -197,17 +208,17 @@ def _stock_patterns_match(
 
 
 def _is_numeric_price(value: Any) -> bool:
-    """Return True if *value* looks like a numeric price."""
+    """Return True if *value* looks like an explicit numeric price or range."""
     if value is None:
         return False
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
         return math.isfinite(value)
-    s = str(value).strip()
+    s = _normalize_price_text(value)
     if not s:
         return False
-    return _NUMERIC_PRICE_RE.fullmatch(s) is not None
+    return _NUMERIC_PRICE_RE.fullmatch(s) is not None or _PRICE_RANGE_RE.fullmatch(s) is not None
 
 
 def _text_contains(haystack: str, needle: str) -> bool:
@@ -247,6 +258,16 @@ def _clean_element_text(value: Any) -> str:
     if not text or text == "None":
         return ""
     return text
+
+
+def _normalize_price_text(value: Any) -> str:
+    """Normalize extracted price values into comparable text for detection."""
+    if isinstance(value, str):
+        return _clean_element_text(value)
+    if isinstance(value, (list, tuple)):
+        parts = [_clean_element_text(item) for item in value if isinstance(item, str)]
+        return " ".join(part for part in parts if part)
+    return ""
 
 
 def _has_usable_stock_signal(value: Any) -> bool:
