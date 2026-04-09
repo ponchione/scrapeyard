@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 
 from arq.connections import ArqRedis, RedisSettings
@@ -21,6 +22,16 @@ from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
+
+
+@dataclass(frozen=True)
+class RuntimeServices:
+    job_store: JobStore
+    error_store: ErrorStore
+    result_store: ResultStore
+    webhook_dispatcher: HttpWebhookDispatcher
+    worker_pool: WorkerPool
+    scheduler: SchedulerService
 
 
 @lru_cache(maxsize=1)
@@ -119,6 +130,21 @@ def reset_rate_limiter() -> None:
     _rate_limiter_holder.reset()
 
 
+def reset_cached_dependencies() -> None:
+    """Clear cached dependency singletons and reset non-cached runtime holders."""
+    for cached_fn in (
+        get_job_store,
+        get_error_store,
+        get_result_store,
+        get_circuit_breaker,
+        get_webhook_dispatcher,
+        get_worker_pool,
+        get_scheduler,
+    ):
+        cached_fn.cache_clear()
+    reset_rate_limiter()
+
+
 @lru_cache(maxsize=1)
 def get_worker_pool() -> WorkerPool:
     settings = get_settings()
@@ -166,4 +192,16 @@ def get_scheduler() -> SchedulerService:
         worker_pool=get_worker_pool(),
         job_store=get_job_store(),
         jitter_max_seconds=settings.scheduler_jitter_max_seconds,
+    )
+
+
+def build_runtime_services() -> RuntimeServices:
+    """Materialize the cached runtime singletons used during app lifespan."""
+    return RuntimeServices(
+        job_store=get_job_store(),
+        error_store=get_error_store(),
+        result_store=get_result_store(),
+        webhook_dispatcher=get_webhook_dispatcher(),
+        worker_pool=get_worker_pool(),
+        scheduler=get_scheduler(),
     )

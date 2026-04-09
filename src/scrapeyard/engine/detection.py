@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import re
+import logging
 import math
+import re
 from typing import Any, cast
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
+
+logger = logging.getLogger(__name__)
 
 _NUMERIC_PRICE_RE = re.compile(
     r"^\s*(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
@@ -296,5 +299,11 @@ def _css_select(element: Any, selector: str) -> list[Any]:
         return []
     try:
         return cast(list[Any], css_fn(selector))
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "Suppressing detection CSS selector failure for %s: %s",
+            selector,
+            exc,
+            exc_info=exc,
+        )
         return []

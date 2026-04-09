@@ -12,12 +12,20 @@ from scrapeyard.models.job import ErrorType
 
 
 class _FakeNode:
-    def __init__(self, text: str = "", css_map: dict[str, list] | None = None):
+    def __init__(
+        self,
+        text: str = "",
+        css_map: dict[str, list] | None = None,
+        css_errors: dict[str, Exception] | None = None,
+    ):
         self.text = text
         self._css_map = css_map or {}
+        self._css_errors = css_errors or {}
         self.attrib: dict[str, str] = {}
 
     def css(self, selector: str):
+        if selector in self._css_errors:
+            raise self._css_errors[selector]
         return self._css_map.get(selector, [])
 
     def xpath(self, selector: str):
@@ -185,3 +193,54 @@ async def test_scrape_target_classifies_selector_miss_when_items_exist(monkeypat
     assert result.debug is not None
     assert result.debug["item_selector_count"] == 1
     assert result.debug["classification"] == ErrorType.selector_miss.value
+
+
+@pytest.mark.asyncio
+async def test_scrape_target_distinguishes_selector_engine_failures_from_empty_results(monkeypatch, tmp_path):
+    item = _FakeNode(text="product card", css_map={"h2": []}, css_errors={".price": RuntimeError("selector engine failed")})
+    page = _FakeNode(
+        text="<html><title>Category</title><main>Products</main></html>",
+        css_map={".product-card": [item]},
+    )
+    page.status = 200
+    page.url = "https://example.com/category"
+
+    async def _return_page(*_args, **_kwargs):
+        return FetchOutcome(
+            page=page,
+            debug={
+                "fetcher": "dynamic",
+                "final_url": "https://example.com/category",
+                "page_title": "Category",
+                "main_document_status": 200,
+                "html_excerpt": "<main>Products</main>",
+                "screenshot_path": None,
+                "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
+            },
+        )
+
+    monkeypatch.setattr("scrapeyard.engine.scraper._fetch_page", _return_page)
+
+    result = await scrape_target(
+        _target(
+            FetcherType.dynamic,
+            item_selector=".product-card",
+            selectors={"title": "h2", "price": ".price"},
+        ),
+        adaptive=False,
+        retry=RetryConfig(max_attempts=1),
+        adaptive_dir=str(tmp_path),
+    )
+
+    assert result.status == "failed"
+    assert result.error_type == ErrorType.selector_engine_error
+    assert result.debug is not None
+    assert result.debug["classification"] == ErrorType.selector_engine_error.value
+    assert result.debug["selector_failure"] == {
+        "operation": "count_selector_matches",
+        "field_name": "price",
+        "query": ".price",
+        "selector_type": "css",
+        "exception_type": "RuntimeError",
+        "exception_message": "selector engine failed",
+    }

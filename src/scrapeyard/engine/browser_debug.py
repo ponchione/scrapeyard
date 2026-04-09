@@ -116,19 +116,23 @@ async def capture_browser_state(
             await page.locator(browser.click_selector).click(timeout=browser.click_timeout_ms)
             if browser.click_wait_ms is not None:
                 await page.wait_for_timeout(browser.click_wait_ms)
-        except Exception:
+        except Exception as exc:
             logger.info(
-                "Optional browser click_selector did not resolve or click: %s",
+                "Optional browser click_selector did not resolve or click: %s (%s: %s)",
                 browser.click_selector,
+                type(exc).__name__,
+                exc,
             )
     capture["final_url"] = getattr(page, "url", None)
     try:
         capture["page_title"] = await page.title()
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to capture browser page title: %s: %s", type(exc).__name__, exc, exc_info=exc)
         capture["page_title"] = None
     try:
         capture["html_excerpt"] = truncate_text(await page.content())
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to capture browser HTML excerpt: %s: %s", type(exc).__name__, exc, exc_info=exc)
         capture["html_excerpt"] = None
     if artifacts_dir is not None:
         artifacts_path = Path(artifacts_dir)
@@ -137,7 +141,14 @@ async def capture_browser_state(
         try:
             await page.screenshot(path=str(screenshot_path), full_page=True)
             capture["screenshot_path"] = str(screenshot_path)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Failed to capture browser screenshot at %s: %s: %s",
+                screenshot_path,
+                type(exc).__name__,
+                exc,
+                exc_info=exc,
+            )
             capture["screenshot_path"] = None
     return page
 

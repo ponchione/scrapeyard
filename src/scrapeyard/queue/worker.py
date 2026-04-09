@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlparse
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, GroupBy, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
-from scrapeyard.engine.scraper import TargetResult, scrape_target
+from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.models.job import ErrorRecord, JobStatus
 from scrapeyard.queue.error_records import build_error_record, validation_error_type
 from scrapeyard.queue.run_lifecycle import (
@@ -54,7 +55,7 @@ async def scrape_task(
 ) -> None:
     """Execute a complete scrape job."""
     try:
-        started_at = datetime.now(timezone.utc)
+        started_at = utc_now()
         config = load_config(config_yaml)
         job = await job_store.get_job(job_id)
 
@@ -112,7 +113,7 @@ async def scrape_task(
         )
         await finalize_run(run_id, final_status, len(flat_data), job_store, error_store)
 
-        completed_at = datetime.now(timezone.utc)
+        completed_at = utc_now()
         latest_job = await job_store.get_job(job_id)
         if _run_superseded(latest_job, run_id):
             logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
@@ -215,7 +216,7 @@ async def _fetch_and_validate_target(
         pending_errors=pending_errors,
     )
     if circuit_open is not None:
-        return TargetResult(url=target_cfg.url, status="failed", errors=[str(circuit_open)])
+        return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
 
     log_target_fetch(target_cfg, runtime)
     result = await scrape_target(
@@ -227,7 +228,7 @@ async def _fetch_and_validate_target(
         artifacts_dir=runtime.artifacts_dir,
     )
 
-    if result.status != "success":
+    if result.status is not TargetStatus.success:
         record_failed_target(
             runtime=runtime,
             result=result,
@@ -274,7 +275,7 @@ def _determine_final_status(
     flat_data: list[dict[str, Any]],
 ) -> JobStatus:
     """Determine the final job status based on results and fail_strategy."""
-    failed_count = sum(1 for result in all_results if result.status == "failed")
+    failed_count = sum(1 for result in all_results if result.status is TargetStatus.failed)
     fail_strategy = config.execution.fail_strategy
 
     if fail_strategy == FailStrategy.all_or_nothing:
@@ -304,12 +305,12 @@ def _format_output(
         "name": config.name,
         "job_id": job_id,
         "status": final_status.value,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": utc_now().isoformat(),
         "errors": all_errors,
         "targets": [
             {
                 "url": result.url,
-                "status": result.status,
+                "status": result.status_value,
                 "count": len(result.data),
                 "pages_scraped": result.pages_scraped,
                 "error_type": result.error_type.value if result.error_type else None,
@@ -334,7 +335,7 @@ def _format_output(
     for result in all_results:
         domain = urlparse(result.url).netloc
         grouped[domain] = {
-            "status": result.status,
+            "status": result.status_value,
             "count": len(result.data),
             "data": result.data,
             "debug": result.debug,

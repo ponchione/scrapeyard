@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import ExecutionMode, FetcherType
 from scrapeyard.models.job import Job
 from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
@@ -38,7 +38,7 @@ async def submit_scrape_job(
         project=config.project,
         name=f"{config.name}-{uuid.uuid4().hex[:8]}",
         config_yaml=config_yaml,
-        updated_at=datetime.now(timezone.utc),
+        updated_at=utc_now(),
         current_run_id=generate_run_id(),
     )
     await job_store.save_job(job)

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scrapeyard.common.time import utc_now
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.job_state import build_completed_job, build_failed_job, build_running_job
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
@@ -154,7 +155,7 @@ async def handle_crash(
     """Best-effort crash recovery: mark job and run as failed."""
     try:
         job = await job_store.get_job(job_id)
-        failed_job = build_failed_job(job, failed_at=datetime.now(timezone.utc))
+        failed_job = build_failed_job(job, failed_at=utc_now())
         await job_store.update_job_status(failed_job)
     except Exception:
         logger.exception("Failed to mark job %s as failed", job_id)

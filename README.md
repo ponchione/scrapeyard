@@ -20,7 +20,7 @@ It is designed for small-to-medium scraping workflows where you want:
 - per-target browser tuning and `adaptive_domain` overrides
 - selector transforms such as `trim`, `uppercase`, `prepend(...)`, and `regex(...)`
 - pagination support
-- result formatting as JSON, Markdown, HTML, or JSON+Markdown
+- JSON result artifacts exposed through the API and persisted per run
 - webhook notifications on job completion (fire-and-forget)
 - SQLite-backed job, error, and result metadata stores
 - filesystem-backed result artifacts
@@ -686,15 +686,11 @@ Run IDs look like:
 YYYYMMDD-HHMMSS-xxxxxxxx
 ```
 
-Artifacts written by format:
+Result artifacts:
 
-- `json` -> `results.json`
-- `markdown` -> `results.md`
-- `html` -> `raw.html`
-- `json+markdown` -> `results.json` and `results.md`
-
-Metadata for each run is stored in `results_meta.db`.
-When retrieving `json+markdown` results through the API, the service returns the JSON representation and keeps the extra Markdown artifact on disk.
+- each run writes `results.json` under the run directory
+- metadata for each run is stored in `results_meta.db`
+- the HTTP API always returns the JSON representation for stored results
 
 ## Scheduled Jobs
 
