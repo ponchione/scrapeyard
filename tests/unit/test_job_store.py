@@ -9,7 +9,11 @@ import pytest
 
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.database import init_db
-from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.job_store import (
+    DuplicateJobError,
+    SQLiteJobStore,
+    is_duplicate_job_integrity_error,
+)
 
 
 @pytest.fixture()
@@ -27,6 +31,28 @@ def _make_job(**overrides: Any) -> Job:
     }
     defaults.update(overrides)
     return Job.model_validate(defaults)
+
+
+def test_is_duplicate_job_integrity_error_matches_sqlite_unique_constraint() -> None:
+    assert is_duplicate_job_integrity_error(
+        "UNIQUE constraint failed: jobs.project, jobs.name"
+    )
+    assert is_duplicate_job_integrity_error(
+        "sqlite3.IntegrityError: jobs.project, jobs.name"
+    )
+    assert not is_duplicate_job_integrity_error(
+        "UNIQUE constraint failed: jobs.job_id"
+    )
+
+
+async def test_save_job_duplicate_name_raises_duplicate_job_error(store):
+    await store.save_job(_make_job(job_id="j-1", project="acme", name="shared"))
+
+    with pytest.raises(DuplicateJobError, match="already exists") as exc_info:
+        await store.save_job(_make_job(job_id="j-2", project="acme", name="shared"))
+
+    assert exc_info.value.project == "acme"
+    assert exc_info.value.name == "shared"
 
 
 async def test_save_and_get(store):

@@ -35,6 +35,14 @@ class DuplicateJobError(Exception):
         super().__init__(f"Job {name!r} already exists in project {project!r}")
 
 
+def is_duplicate_job_integrity_error(error: str | Exception) -> bool:
+    message = error if isinstance(error, str) else str(error)
+    return (
+        "UNIQUE constraint failed: jobs.project, jobs.name" in message
+        or "jobs.project, jobs.name" in message
+    )
+
+
 class SQLiteJobStore:
     """SQLite implementation of :class:`~scrapeyard.storage.protocols.JobStore`."""
 
@@ -52,6 +60,15 @@ class SQLiteJobStore:
     def _raise_if_missing_job(cursor: aiosqlite.Cursor, job_id: str) -> None:
         if cursor.rowcount == 0:
             raise KeyError(f"Job not found: {job_id!r}")
+
+    async def _execute_job_update(
+        self,
+        sql: str,
+        params: Sequence[object],
+        job_id: str,
+    ) -> None:
+        cursor = await self._execute_write(sql, params)
+        self._raise_if_missing_job(cursor, job_id)
 
     async def save_job(self, job: Job) -> str:
         async with get_db("jobs.db") as db:
@@ -75,14 +92,14 @@ class SQLiteJobStore:
                     ),
                 )
             except aiosqlite.IntegrityError as exc:
-                if "jobs.project, jobs.name" in str(exc) or "UNIQUE constraint failed: jobs.project, jobs.name" in str(exc):
+                if is_duplicate_job_integrity_error(exc):
                     raise DuplicateJobError(job.project, job.name) from exc
                 raise
             await db.commit()
         return job.job_id
 
     async def update_job(self, job: Job) -> None:
-        cursor = await self._execute_write(
+        await self._execute_job_update(
             """UPDATE jobs SET project=?, name=?, status=?,
                config_yaml=?, created_at=?, updated_at=?,
                schedule_cron=?, schedule_enabled=?,
@@ -100,11 +117,11 @@ class SQLiteJobStore:
                 job.current_run_id,
                 job.job_id,
             ),
+            job.job_id,
         )
-        self._raise_if_missing_job(cursor, job.job_id)
 
     async def update_job_status(self, job: Job) -> None:
-        cursor = await self._execute_write(
+        await self._execute_job_update(
             """UPDATE jobs SET status=?, updated_at=?,
                current_run_id=?
                WHERE job_id=?""",
@@ -114,11 +131,11 @@ class SQLiteJobStore:
                 job.current_run_id,
                 job.job_id,
             ),
+            job.job_id,
         )
-        self._raise_if_missing_job(cursor, job.job_id)
 
     async def update_job_schedule_state(self, job: Job) -> None:
-        cursor = await self._execute_write(
+        await self._execute_job_update(
             """UPDATE jobs SET schedule_cron=?, schedule_enabled=?,
                updated_at=?
                WHERE job_id=?""",
@@ -128,8 +145,8 @@ class SQLiteJobStore:
                 fmt_dt(job.updated_at),
                 job.job_id,
             ),
+            job.job_id,
         )
-        self._raise_if_missing_job(cursor, job.job_id)
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
