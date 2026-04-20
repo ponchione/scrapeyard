@@ -658,6 +658,13 @@ target:
     network_idle: false
 ```
 
+Compatibility note:
+
+- `dynamic` (`PlayWrightFetcher`) supports Playwright-only browser options such as `stealth`, `hide_canvas`, and `useragent`
+- `stealthy` (`StealthyFetcher` / Camoufox) does not accept those Playwright-only options
+- Scrapeyard filters the `browser:` block against the selected fetcher's supported `async_fetch()` signature before dispatching, so a shared browser config cannot accidentally break `stealthy` runs with `TypeError: unexpected keyword argument 'stealth'`
+- If a browser option appears to be ignored on `fetcher: stealthy`, check the upstream `StealthyFetcher.async_fetch()` signature first before assuming the YAML wiring is broken
+
 ### Failure handling
 
 `execution.fail_strategy` controls the final job status:
