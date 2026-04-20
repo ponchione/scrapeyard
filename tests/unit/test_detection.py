@@ -385,6 +385,14 @@ class TestDetectStockStatus:
         el = _mock_element(text="")
         assert detect_stock_status(item, el, config) == "limited_stock"
 
+    def test_tuple_stock_signal_ignores_empty_parts_and_non_strings(self):
+        config = StockDetectionConfig(
+            limited_stock=StockPatternConfig(text_patterns=["low stock"]),
+        )
+        item = {"stock_signal": ("", "Low Stock", None, "None")}
+        el = _mock_element(text="")
+        assert detect_stock_status(item, el, config) == "limited_stock"
+
     def test_priority_out_of_stock_over_in_stock(self):
         """When both match, out_of_stock wins (higher priority)."""
         config = StockDetectionConfig(

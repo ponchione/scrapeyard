@@ -25,10 +25,6 @@ _health = HealthCache(get_job_store)
 
 
 def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
-    app.state.job_store = services.job_store
-    app.state.error_store = services.error_store
-    app.state.result_store = services.result_store
-    app.state.webhook_dispatcher = services.webhook_dispatcher
     app.state.worker_pool = services.worker_pool
     app.state.scheduler = services.scheduler
 

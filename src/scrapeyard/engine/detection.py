@@ -75,51 +75,20 @@ def detect_pricing_visibility(
         return ("unknown", None)
 
     item_text = _get_element_text(element)
+    if _matches_call_for_price(item_text, config.text_patterns):
+        return ("call_for_price", None)
 
-    # Step 1: "call" patterns -> call_for_price
-    for pattern in config.text_patterns:
-        if "call" in pattern.lower() and _text_contains(item_text, pattern):
-            return ("call_for_price", None)
-
-    # Step 2-3: all remaining patterns -> map (with text) or cart_only (without)
-    display_text: str | None = None
-    matched = False
-
-    # Text patterns (skip "call" patterns already handled)
-    for pattern in config.text_patterns:
-        if "call" in pattern.lower():
-            continue
-        if _text_contains(item_text, pattern):
-            matched = True
-            display_text = _extract_display_text(item_text, pattern)
-            break
-
-    # CSS selectors
-    if not matched:
-        for selector in config.css_selectors:
-            hits = _css_select(element, selector)
-            if hits:
-                matched = True
-                for hit in hits:
-                    hit_text = _get_element_text(hit).strip()
-                    if hit_text:
-                        display_text = hit_text
-                        break
-                break
-
-    # Price value patterns (never produce display text)
-    if not matched:
-        price_raw = item_data.get("price")
-        price_str = _normalize_price_text(price_raw)
-        for pattern in config.price_value_patterns:
-            if pattern == price_str:
-                matched = True
-                break
-
-    if matched:
+    text_matched, display_text = _match_map_text_patterns(item_text, config.text_patterns)
+    if text_matched:
         return ("map", display_text) if display_text else ("cart_only", None)
 
-    # Config exists but nothing matched
+    css_matched, display_text = _match_map_css_selectors(element, config.css_selectors)
+    if css_matched:
+        return ("map", display_text) if display_text else ("cart_only", None)
+
+    if _match_map_price_value(item_data.get("price"), config.price_value_patterns):
+        return ("cart_only", None)
+
     return ("missing", None)
 
 
@@ -224,6 +193,41 @@ def _is_numeric_price(value: Any) -> bool:
     return _NUMERIC_PRICE_RE.fullmatch(s) is not None or _PRICE_RANGE_RE.fullmatch(s) is not None
 
 
+def _matches_call_for_price(item_text: str, patterns: list[str]) -> bool:
+    return any("call" in pattern.lower() and _text_contains(item_text, pattern) for pattern in patterns)
+
+
+def _match_map_text_patterns(item_text: str, patterns: list[str]) -> tuple[bool, str | None]:
+    for pattern in patterns:
+        if "call" in pattern.lower():
+            continue
+        if _text_contains(item_text, pattern):
+            return True, _extract_display_text(item_text, pattern)
+    return False, None
+
+
+def _match_map_css_selectors(element: Any, selectors: list[str]) -> tuple[bool, str | None]:
+    for selector in selectors:
+        hits = _css_select(element, selector)
+        if not hits:
+            continue
+        return True, _first_non_empty_element_text(hits)
+    return False, None
+
+
+def _match_map_price_value(price_raw: Any, patterns: list[str]) -> bool:
+    price_str = _normalize_price_text(price_raw)
+    return any(pattern == price_str for pattern in patterns)
+
+
+def _first_non_empty_element_text(elements: list[Any]) -> str | None:
+    for element in elements:
+        element_text = _get_element_text(element)
+        if element_text:
+            return element_text
+    return None
+
+
 def _text_contains(haystack: str, needle: str) -> bool:
     """Case-insensitive substring search."""
     return needle.lower() in haystack.lower()
@@ -265,12 +269,7 @@ def _clean_element_text(value: Any) -> str:
 
 def _normalize_price_text(value: Any) -> str:
     """Normalize extracted price values into comparable text for detection."""
-    if isinstance(value, str):
-        return _clean_element_text(value)
-    if isinstance(value, (list, tuple)):
-        parts = [_clean_element_text(item) for item in value if isinstance(item, str)]
-        return " ".join(part for part in parts if part)
-    return ""
+    return _normalize_matchable_text(value)
 
 
 def _has_usable_stock_signal(value: Any) -> bool:
@@ -284,6 +283,10 @@ def _has_usable_stock_signal(value: Any) -> bool:
 
 def _normalize_stock_signal_text(value: Any) -> str:
     """Normalize raw extracted stock signal values into matchable text."""
+    return _normalize_matchable_text(value)
+
+
+def _normalize_matchable_text(value: Any) -> str:
     if isinstance(value, str):
         return _clean_element_text(value)
     if isinstance(value, (list, tuple)):
