@@ -20,6 +20,7 @@ from scrapeyard.storage.filesystem import (
 from scrapeyard.storage.result_queries import (
     EXCESS_RESULTS_PER_JOB_QUERY,
     EXPIRED_RESULTS_QUERY,
+    JOB_RESULTS_DELETE_QUERY,
     build_result_lookup_query,
 )
 from scrapeyard.storage.types import ResultPayload, SaveResultMeta
@@ -135,17 +136,9 @@ class LocalResultStore:
     async def delete_results(self, job_id: str) -> None:
         """Delete all results for a job from disk and metadata DB."""
         async with get_db("results_meta.db") as db:
-            cursor = await db.execute(
-                "SELECT file_path FROM results_meta WHERE job_id=?", (job_id,)
-            )
-            rows = await cursor.fetchall()
-            if rows:
-                await asyncio.to_thread(
-                    remove_directories,
-                    [file_path for (file_path,) in rows],
-                )
-            await db.execute("DELETE FROM results_meta WHERE job_id=?", (job_id,))
-            await db.commit()
+            cursor = await db.execute(JOB_RESULTS_DELETE_QUERY, (job_id,))
+            rows = list(await cursor.fetchall())
+            await self._delete_by_ids(db, rows)
 
     async def delete_expired(self, retention_days: int) -> int:
         """Delete results older than *retention_days*. Returns count deleted."""

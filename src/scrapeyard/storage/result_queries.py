@@ -24,6 +24,10 @@ EXPIRED_RESULTS_QUERY = (
     "SELECT id, file_path FROM results_meta WHERE created_at < ?"
 )
 
+JOB_RESULTS_DELETE_QUERY = (
+    "SELECT id, file_path FROM results_meta WHERE job_id=?"
+)
+
 EXCESS_RESULTS_PER_JOB_QUERY = """
 SELECT id, file_path FROM (
     SELECT id, file_path,
