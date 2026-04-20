@@ -17,6 +17,72 @@ from scrapeyard.config.schema import BrowserConfig, FetcherType, TargetConfig
 logger = logging.getLogger(__name__)
 
 _HTML_EXCERPT_CHARS = 2000
+_EVENT_TEXT_CHARS = 300
+_MAX_CONSOLE_MESSAGES = 20
+_MAX_REQUEST_FAILURES = 20
+
+
+def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit: int) -> None:
+    items.append(entry)
+    if len(items) > limit:
+        del items[: len(items) - limit]
+
+
+def _safe_text_attr(value: Any, attr: str) -> str | None:
+    try:
+        raw = getattr(value, attr, None)
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    if callable(raw):
+        try:
+            raw = raw()
+        except Exception:
+            return None
+    text = truncate_text(coerce_to_text(raw), _EVENT_TEXT_CHARS)
+    return text or None
+
+
+def _register_console_capture(page: Any, capture: dict[str, Any]) -> None:
+    if not hasattr(page, "on"):
+        return
+
+    def _on_console(message: Any) -> None:
+        entry = {
+            "type": _safe_text_attr(message, "type") or "unknown",
+            "text": _safe_text_attr(message, "text") or "",
+        }
+        _bounded_append(capture["console_messages"], entry, limit=_MAX_CONSOLE_MESSAGES)
+
+    try:
+        page.on("console", _on_console)
+    except Exception as exc:
+        logger.debug("Failed to register browser console capture: %s: %s", type(exc).__name__, exc)
+
+
+def _register_request_failure_capture(page: Any, capture: dict[str, Any]) -> None:
+    if not hasattr(page, "on"):
+        return
+
+    def _on_request_failed(request: Any) -> None:
+        failure = None
+        try:
+            failure = request.failure() if hasattr(request, "failure") else None
+        except Exception:
+            failure = None
+        entry = {
+            "url": _safe_text_attr(request, "url") or "",
+            "method": _safe_text_attr(request, "method") or "unknown",
+            "resource_type": _safe_text_attr(request, "resource_type") or "unknown",
+            "error_text": _safe_text_attr(failure, "error_text") or "",
+        }
+        _bounded_append(capture["request_failures"], entry, limit=_MAX_REQUEST_FAILURES)
+
+    try:
+        page.on("requestfailed", _on_request_failed)
+    except Exception as exc:
+        logger.debug("Failed to register browser requestfailed capture: %s: %s", type(exc).__name__, exc)
 
 
 def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str) -> dict[str, Any]:
@@ -30,12 +96,22 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "selector_counts": {},
         "html_excerpt": None,
         "screenshot_path": None,
+        "console_messages": [],
+        "request_failures": [],
         "browser_settings": {
             "timeout_ms": browser.timeout_ms,
             "disable_resources": browser.disable_resources,
             "network_idle": browser.network_idle,
             "stealth": browser.stealth,
             "hide_canvas": browser.hide_canvas,
+            "real_chrome": browser.real_chrome,
+            "cdp_url": browser.cdp_url,
+            "nstbrowser_mode": browser.nstbrowser_mode,
+            "humanize": browser.humanize,
+            "os_randomize": browser.os_randomize,
+            "geoip": browser.geoip,
+            "disable_ads": browser.disable_ads,
+            "additional_arguments": browser.additional_arguments,
             "useragent": browser.useragent,
             "extra_headers": browser.extra_headers,
             "click_selector": browser.click_selector,
@@ -71,6 +147,8 @@ def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, pro
         "network_idle": browser.network_idle,
         "stealth": browser.stealth,
         "hide_canvas": browser.hide_canvas,
+        "real_chrome": browser.real_chrome,
+        "nstbrowser_mode": browser.nstbrowser_mode,
     }
     if proxy_url is not None:
         kwargs["proxy"] = proxy_url
@@ -78,6 +156,18 @@ def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, pro
         kwargs["useragent"] = browser.useragent
     if browser.extra_headers:
         kwargs["extra_headers"] = browser.extra_headers
+    if browser.cdp_url:
+        kwargs["cdp_url"] = browser.cdp_url
+    if browser.humanize is not None:
+        kwargs["humanize"] = browser.humanize
+    if browser.os_randomize:
+        kwargs["os_randomize"] = browser.os_randomize
+    if browser.geoip:
+        kwargs["geoip"] = browser.geoip
+    if browser.disable_ads:
+        kwargs["disable_ads"] = browser.disable_ads
+    if browser.additional_arguments:
+        kwargs["additional_arguments"] = browser.additional_arguments
     if browser.wait_for_selector:
         kwargs["wait_selector"] = browser.wait_for_selector
     if browser.wait_ms is not None:
@@ -128,6 +218,10 @@ async def capture_browser_state(
     artifacts_dir: str | None,
     capture: dict[str, Any],
 ) -> Any:
+    capture.setdefault("console_messages", [])
+    capture.setdefault("request_failures", [])
+    _register_console_capture(page, capture)
+    _register_request_failure_capture(page, capture)
     if browser is not None and browser.click_selector:
         try:
             await page.locator(browser.click_selector).click(timeout=browser.click_timeout_ms)

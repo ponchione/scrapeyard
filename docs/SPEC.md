@@ -256,10 +256,13 @@ output:
 
 Browser-backed targets may also provide an optional `browser` block. Browser options are filtered against the selected fetcher's supported `async_fetch()` parameters before dispatch:
 
-- `dynamic` / `PlayWrightFetcher` supports Playwright-oriented options including `stealth`, `hide_canvas`, and `useragent`
-- `stealthy` / `StealthyFetcher` does not support those Playwright-only options, so they are ignored rather than passed through
+- `dynamic` / `PlayWrightFetcher` supports Playwright-oriented options including `stealth`, `hide_canvas`, `real_chrome`, `cdp_url`, and `nstbrowser_mode`
+- `stealthy` / `StealthyFetcher` supports Camoufox-oriented options including `humanize`, `os_randomize`, `geoip`, `disable_ads`, and `additional_arguments`
+- unsupported browser options for the selected fetcher are ignored rather than passed through
 
 This compatibility filter prevents signature mismatches like `TypeError: StealthyFetcher.async_fetch() got an unexpected keyword argument 'stealth'` when configs reuse a shared browser tuning shape across fetchers.
+
+Hostile-retailer roadmap note: Scrapeyard intentionally stops short of offering proxy-pool management, automatic rotation, sticky-session orchestration, persistent hostile-site profiles, or retailer-specific challenge solvers as first-class features. Those larger session/platform investments remain deferred until simple proxy-backed validation proves they are necessary.
 
 #### Selector Syntax
 

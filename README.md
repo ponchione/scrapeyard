@@ -130,6 +130,13 @@ docker compose build
 docker compose up -d
 ```
 
+Force a fresh rebuild of the Scrapeyard image when browser-runtime dependencies
+change:
+
+```bash
+docker compose up -d --build --force-recreate scrapeyard
+```
+
 Check health:
 
 ```bash
@@ -145,8 +152,58 @@ docker compose down
 The default compose setup starts both Redis and Scrapeyard. It mounts a named
 volume at `/data` for databases, results, adaptive matching state, and logs,
 and a second named volume for Redis append-only durability. The Docker image
-also installs Playwright Chromium so `fetcher: dynamic` works inside the
-container.
+installs all browser runtimes that Scrapeyard advertises and then runs the app
+as a non-root user so Chromium sandboxing can work for `browser.stealth: true`:
+
+- Playwright Chromium for standard `fetcher: dynamic` runs
+- rebrowser Chromium for `fetcher: dynamic` with `browser.stealth: true`
+- Camoufox assets for `fetcher: stealthy`
+
+The compose service also sets `security_opt: [seccomp:unconfined]` because the
+rebrowser Chromium sandbox needs namespace syscalls that Docker's default
+seccomp profile blocks in this local hostile-retailer workflow.
+
+Quick in-container verification after a rebuild:
+
+```bash
+docker compose exec scrapeyard python -m playwright install --dry-run chromium
+docker compose exec scrapeyard python -m rebrowser_playwright install --dry-run chromium
+```
+
+Those dry runs should report installed browser locations instead of a missing
+module/command error. The container starts as root only long enough to refresh
+mounted volume ownership, restore the rebrowser `chrome_sandbox` helper's
+root-owned setuid bits, and then drops to the non-root `scrapeyard` user so
+existing `/data` volumes from older root-run images do not break startup.
+Restoring the dynamic-stealth runtime only fixes local browser correctness;
+hostile retailers may still require a better network identity or other anti-bot work.
+
+### Hostile-retailer scope and explicit non-goals
+
+Current hostile-retailer support is intentionally bounded:
+- Scrapeyard now provides working browser runtimes, bounded browser debug
+  observability, clearer challenge/interstitial classification, and a wider
+  anti-bot control surface for one-off validation.
+- Scrapeyard does not yet claim to be a full hostile-site access platform.
+
+Explicitly deferred for the current slice:
+- proxy pool management
+- automatic proxy rotation
+- sticky session orchestration as a product feature
+- long-lived browser profiles for hostile retailers
+- persistent cookie-jar/session warming workflows
+- retailer-specific challenge solvers
+
+Why this is deferred:
+- the Bass Pro / Cabela's audit proved local access problems and runtime gaps,
+  but it did not prove Scrapeyard needs a full proxy/session platform
+- the next decisive experiment remains smaller: validate a single good
+  residential proxy on the current browser paths before building bigger
+  infrastructure
+
+Revisit these deferred features only if proxy-backed validation still fails or
+shows a clear need for session persistence beyond the current request-scoped
+browser model.
 
 ## Environment Variables
 
@@ -727,7 +784,7 @@ Job records remain in `jobs.db` unless explicitly deleted.
 - `415 Content-Type must be application/x-yaml`: add `-H 'Content-Type: application/x-yaml'`
 - `404 No results found`: the job may still be running or may have failed before saving artifacts; check `GET /jobs/{job_id}` and `GET /errors`
 - `503 Service unavailable`: the worker pool rejected the job because the service is at capacity or above its memory limit
-- `browser_error` with missing Playwright executable: rebuild the Docker image so the bundled browser runtime is installed
+- `browser_error` with missing Playwright executable: rebuild the Docker image so the bundled Playwright and rebrowser browser runtimes are installed, then rerun the in-container dry-run checks in the Docker section
 
 ## Development
 

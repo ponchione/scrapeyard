@@ -124,6 +124,8 @@ async def test_scrape_target_collects_debug_for_rendered_empty(monkeypatch, tmp_
                 "main_document_status": 200,
                 "html_excerpt": "<main>No products yet</main>",
                 "screenshot_path": None,
+                "console_messages": [],
+                "request_failures": [],
                 "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
             },
         )
@@ -151,6 +153,50 @@ async def test_scrape_target_collects_debug_for_rendered_empty(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_scrape_target_classifies_akamai_interstitial_as_challenge_page(monkeypatch, tmp_path):
+    page = _FakeNode(
+        text="<html><title>Bass Pro Shops</title><main>Powered and protected by Akamai</main></html>",
+        css_map={".product-card": [], "h2": [], ".price": []},
+    )
+    page.status = 200
+    page.url = "https://example.com/category"
+
+    async def _return_page(*_args, **_kwargs):
+        return FetchOutcome(
+            page=page,
+            debug={
+                "fetcher": "dynamic",
+                "final_url": "https://example.com/category",
+                "page_title": "Bass Pro Shops",
+                "main_document_status": 200,
+                "html_excerpt": "Powered and protected by Akamai akam-sw.js install script sec-if-cpt-container",
+                "screenshot_path": None,
+                "console_messages": [{"type": "info", "text": "akam-sw.js install script booting"}],
+                "request_failures": [],
+                "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
+            },
+        )
+
+    monkeypatch.setattr("scrapeyard.engine.scraper._fetch_page", _return_page)
+
+    result = await scrape_target(
+        _target(
+            FetcherType.dynamic,
+            item_selector=".product-card",
+            selectors={"title": "h2", "price": ".price"},
+        ),
+        adaptive=False,
+        retry=RetryConfig(max_attempts=1),
+        adaptive_dir=str(tmp_path),
+    )
+
+    assert result.status == "success"
+    assert result.data == []
+    assert result.debug is not None
+    assert result.debug["classification"] == ErrorType.challenge_page.value
+
+
+@pytest.mark.asyncio
 async def test_scrape_target_classifies_selector_miss_when_items_exist(monkeypatch, tmp_path):
     item = _FakeNode(text="product card", css_map={"h2": [], ".price": []})
     page = _FakeNode(
@@ -170,6 +216,8 @@ async def test_scrape_target_classifies_selector_miss_when_items_exist(monkeypat
                 "main_document_status": 200,
                 "html_excerpt": "<main>Products</main>",
                 "screenshot_path": None,
+                "console_messages": [],
+                "request_failures": [],
                 "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
             },
         )
@@ -215,6 +263,8 @@ async def test_scrape_target_distinguishes_selector_engine_failures_from_empty_r
                 "main_document_status": 200,
                 "html_excerpt": "<main>Products</main>",
                 "screenshot_path": None,
+                "console_messages": [],
+                "request_failures": [],
                 "browser_settings": {"timeout_ms": 60000, "disable_resources": True, "network_idle": False},
             },
         )

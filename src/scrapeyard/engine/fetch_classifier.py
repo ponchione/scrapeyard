@@ -19,6 +19,11 @@ _CHALLENGE_MARKERS = (
     "press and hold",
     "security check",
     "bot verification",
+    "powered and protected by akamai",
+    "akam-sw.js",
+    "service worker bootstrap",
+    "sec-if-cpt-container",
+    "akamai",
 )
 _CONSENT_MARKERS = (
     "cookie consent",
@@ -73,12 +78,30 @@ def token_match(text: str, tokens: tuple[str, ...]) -> bool:
     return any(token in text for token in tokens)
 
 
+def _debug_signal_blob(debug: dict[str, Any]) -> str:
+    parts: list[str] = [
+        str(debug.get("page_title") or ""),
+        str(debug.get("html_excerpt") or ""),
+    ]
+    for message in debug.get("console_messages") or []:
+        if isinstance(message, dict):
+            parts.append(str(message.get("type") or ""))
+            parts.append(str(message.get("text") or ""))
+        else:
+            parts.append(str(message))
+    for failure in debug.get("request_failures") or []:
+        if isinstance(failure, dict):
+            parts.append(str(failure.get("url") or ""))
+            parts.append(str(failure.get("method") or ""))
+            parts.append(str(failure.get("resource_type") or ""))
+            parts.append(str(failure.get("error_text") or ""))
+        else:
+            parts.append(str(failure))
+    return "\n".join(part.lower() for part in parts if part)
+
+
 def classify_page_signals(debug: dict[str, Any]) -> ErrorType | None:
-    blob = "\n".join(
-        part.lower()
-        for part in (str(debug.get("page_title") or ""), str(debug.get("html_excerpt") or ""))
-        if part
-    )
+    blob = _debug_signal_blob(debug)
     if not blob:
         return None
     if token_match(blob, _CHALLENGE_MARKERS):
