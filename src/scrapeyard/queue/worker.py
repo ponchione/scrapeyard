@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -16,7 +17,6 @@ from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.models.job import ErrorRecord, JobStatus
-from scrapeyard.queue.error_records import build_error_record, validation_error_type
 from scrapeyard.queue.run_lifecycle import (
     build_run_paths,
     create_run_record,
@@ -40,6 +40,24 @@ from scrapeyard.webhook.dispatcher import WebhookDispatcher
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class JobExecutionContext:
+    config: ScrapeConfig
+    job: Any
+    settings: Any
+    started_at: datetime
+    adaptive_dir: str
+    run_artifacts_dir: str | None
+
+
+@dataclass(frozen=True)
+class PersistedJobResult:
+    final_status: JobStatus
+    flat_data: list[dict[str, Any]]
+    all_errors: list[str]
+    save_meta: Any
+
+
 async def scrape_task(
     job_id: str,
     config_yaml: str,
@@ -55,84 +73,178 @@ async def scrape_task(
 ) -> None:
     """Execute a complete scrape job."""
     try:
-        started_at = utc_now()
-        config = load_config(config_yaml)
-        job = await job_store.get_job(job_id)
-
-        settings = get_settings()
-        adaptive_dir, run_artifacts_dir = build_run_paths(
-            settings,
-            config.project,
-            job.name,
-            run_id,
-        )
-        if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
-            logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+        context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
+        if context is None:
             return
 
-        await mark_job_running(job_store, job, started_at)
-        await create_run_record(
-            job_store,
-            run_id=run_id,
-            job_id=job_id,
-            trigger=trigger,
-            config_yaml=config_yaml,
-            started_at=started_at,
-        )
-
-        all_results = await _process_all_targets(
-            config=config,
+        await _mark_run_started(context, job_id, run_id, trigger, config_yaml, job_store)
+        all_results = await _process_job_targets(
+            context=context,
             job_id=job_id,
             run_id=run_id,
-            adaptive_dir=adaptive_dir,
-            run_artifacts_dir=run_artifacts_dir,
-            settings=settings,
             circuit_breaker=circuit_breaker,
             rate_limiter=rate_limiter,
             error_store=error_store,
         )
-
-        flat_data, all_errors = _collect_result_payload(all_results)
-        final_status = _determine_final_status(config, all_results, flat_data)
-        if final_status == JobStatus.failed and config.execution.fail_strategy == FailStrategy.all_or_nothing:
-            flat_data.clear()
-
-        latest_job = await job_store.get_job(job_id)
-        if _run_superseded(latest_job, run_id):
-            logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
-            return
-
-        output_data = _format_output(config, all_results, flat_data, job_id, final_status, all_errors)
-        save_meta = await save_run_result(
+        persisted = await _persist_job_results(
+            context=context,
             job_id=job_id,
             run_id=run_id,
+            all_results=all_results,
+            job_store=job_store,
             result_store=result_store,
-            output_data=output_data,
-            final_status=final_status,
-            record_count=len(flat_data),
+            error_store=error_store,
         )
-        await finalize_run(run_id, final_status, len(flat_data), job_store, error_store)
-
-        completed_at = utc_now()
-        latest_job = await job_store.get_job(job_id)
-        if _run_superseded(latest_job, run_id):
-            logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+        if persisted is None:
             return
 
-        await dispatch_webhook(
-            webhook_dispatcher=webhook_dispatcher,
-            config=config,
+        await _finalize_job_execution(
+            context=context,
             job_id=job_id,
-            final_status=final_status,
-            save_meta=save_meta,
-            all_errors=all_errors,
-            started_at=started_at,
-            completed_at=completed_at,
+            run_id=run_id,
+            persisted=persisted,
+            job_store=job_store,
+            webhook_dispatcher=webhook_dispatcher,
         )
-        await update_job_completion(job_store, latest_job, final_status, completed_at, run_id)
     except Exception:
         logger.exception("scrape_task crashed for job_id=%s", job_id)
         await handle_crash(job_id, run_id, job_store)
+
+
+async def _load_job_execution_context(
+    job_id: str,
+    config_yaml: str,
+    run_id: str | None,
+    job_store: JobStore,
+) -> JobExecutionContext | None:
+    started_at = utc_now()
+    config = load_config(config_yaml)
+    job = await job_store.get_job(job_id)
+    settings = get_settings()
+    adaptive_dir, run_artifacts_dir = build_run_paths(
+        settings,
+        config.project,
+        job.name,
+        run_id,
+    )
+    if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
+        logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+        return None
+    return JobExecutionContext(
+        config=config,
+        job=job,
+        settings=settings,
+        started_at=started_at,
+        adaptive_dir=adaptive_dir,
+        run_artifacts_dir=run_artifacts_dir,
+    )
+
+
+async def _mark_run_started(
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    trigger: str,
+    config_yaml: str,
+    job_store: JobStore,
+) -> None:
+    await mark_job_running(job_store, context.job, context.started_at)
+    await create_run_record(
+        job_store,
+        run_id=run_id,
+        job_id=job_id,
+        trigger=trigger,
+        config_yaml=config_yaml,
+        started_at=context.started_at,
+    )
+
+
+async def _process_job_targets(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    circuit_breaker: CircuitBreaker,
+    rate_limiter: DomainRateLimiter,
+    error_store: ErrorStore,
+) -> list[TargetResult]:
+    return await _process_all_targets(
+        config=context.config,
+        job_id=job_id,
+        run_id=run_id,
+        adaptive_dir=context.adaptive_dir,
+        run_artifacts_dir=context.run_artifacts_dir,
+        settings=context.settings,
+        circuit_breaker=circuit_breaker,
+        rate_limiter=rate_limiter,
+        error_store=error_store,
+    )
+
+
+async def _persist_job_results(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    all_results: list[TargetResult],
+    job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
+) -> PersistedJobResult | None:
+    flat_data, all_errors = _collect_result_payload(all_results)
+    final_status = _determine_final_status(context.config, all_results, flat_data)
+    if final_status == JobStatus.failed and context.config.execution.fail_strategy == FailStrategy.all_or_nothing:
+        flat_data.clear()
+
+    latest_job = await job_store.get_job(job_id)
+    if _run_superseded(latest_job, run_id):
+        logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
+        return None
+
+    output_data = _format_output(context.config, all_results, flat_data, job_id, final_status, all_errors)
+    save_meta = await save_run_result(
+        job_id=job_id,
+        run_id=run_id,
+        result_store=result_store,
+        output_data=output_data,
+        final_status=final_status,
+        record_count=len(flat_data),
+    )
+    await finalize_run(run_id, final_status, len(flat_data), job_store, error_store)
+    return PersistedJobResult(
+        final_status=final_status,
+        flat_data=flat_data,
+        all_errors=all_errors,
+        save_meta=save_meta,
+    )
+
+
+async def _finalize_job_execution(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    persisted: PersistedJobResult,
+    job_store: JobStore,
+    webhook_dispatcher: WebhookDispatcher | None,
+) -> None:
+    completed_at = utc_now()
+    latest_job = await job_store.get_job(job_id)
+    if _run_superseded(latest_job, run_id):
+        logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+        return
+
+    await dispatch_webhook(
+        webhook_dispatcher=webhook_dispatcher,
+        config=context.config,
+        job_id=job_id,
+        final_status=persisted.final_status,
+        save_meta=persisted.save_meta,
+        all_errors=persisted.all_errors,
+        started_at=context.started_at,
+        completed_at=completed_at,
+    )
+    await update_job_completion(job_store, latest_job, persisted.final_status, completed_at, run_id)
 
 
 async def _process_all_targets(
@@ -374,19 +486,3 @@ async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> N
     await error_store.log_errors(errors)
 
 
-# Backwards-compatible aliases for focused unit tests.
-_build_run_paths = build_run_paths
-_mark_job_running = mark_job_running
-_create_run_record = create_run_record
-_save_run_result = save_run_result
-_update_job_completion = update_job_completion
-_finalize_run = finalize_run
-_dispatch_webhook = dispatch_webhook
-_handle_crash = handle_crash
-_resolve_target_runtime_context = resolve_target_runtime_context
-_guard_target_execution = guard_target_execution
-_log_target_fetch = log_target_fetch
-_record_failed_target = record_failed_target
-_apply_validation = apply_validation
-_build_error_record = build_error_record
-_validation_error_type = validation_error_type

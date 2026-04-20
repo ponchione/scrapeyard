@@ -254,6 +254,13 @@ output:
 | `selectors` | object | **Yes** | Named selector definitions (see below). |
 | `pagination` | object | No | Pagination rules (see below). |
 
+Browser-backed targets may also provide an optional `browser` block. Browser options are filtered against the selected fetcher's supported `async_fetch()` parameters before dispatch:
+
+- `dynamic` / `PlayWrightFetcher` supports Playwright-oriented options including `stealth`, `hide_canvas`, and `useragent`
+- `stealthy` / `StealthyFetcher` does not support those Playwright-only options, so they are ignored rather than passed through
+
+This compatibility filter prevents signature mismatches like `TypeError: StealthyFetcher.async_fetch() got an unexpected keyword argument 'stealth'` when configs reuse a shared browser tuning shape across fetchers.
+
 #### Selector Syntax
 
 Selectors support two forms:

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
+from functools import cache
 from pathlib import Path
 from typing import Any
+
+from scrapling import PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.config.schema import BrowserConfig, FetcherType, TargetConfig
 
@@ -47,8 +51,19 @@ def target_browser_config(target: TargetConfig) -> BrowserConfig:
     return target.browser or BrowserConfig()
 
 
-def browser_fetch_kwargs(target: TargetConfig, *, proxy_url: str | None) -> dict[str, Any]:
-    """Build browser-specific fetch kwargs from target config."""
+@cache
+def _supported_fetcher_kwargs(fetcher_type: FetcherType) -> set[str]:
+    fetcher_cls = {
+        FetcherType.dynamic: PlayWrightFetcher,
+        FetcherType.stealthy: StealthyFetcher,
+    }.get(fetcher_type)
+    if fetcher_cls is None:
+        return set()
+    return set(inspect.signature(fetcher_cls.async_fetch).parameters)
+
+
+def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, proxy_url: str | None) -> dict[str, Any]:
+    """Build browser-specific fetch kwargs from target config, filtered to the fetcher signature."""
     browser = target_browser_config(target)
     kwargs: dict[str, Any] = {
         "timeout": browser.timeout_ms,
@@ -67,7 +82,9 @@ def browser_fetch_kwargs(target: TargetConfig, *, proxy_url: str | None) -> dict
         kwargs["wait_selector"] = browser.wait_for_selector
     if browser.wait_ms is not None:
         kwargs["wait"] = browser.wait_ms
-    return kwargs
+
+    supported_kwargs = _supported_fetcher_kwargs(fetcher_type)
+    return {key: value for key, value in kwargs.items() if key in supported_kwargs}
 
 
 def coerce_to_text(value: Any) -> str:

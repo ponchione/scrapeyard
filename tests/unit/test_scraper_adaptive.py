@@ -142,7 +142,7 @@ async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
-    """Stealthy fetcher should get a longer timeout and resource suppression."""
+    """Stealthy fetcher should get a longer timeout and only supported browser kwargs."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -164,6 +164,9 @@ async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
         assert call_kwargs["timeout"] == 60000
         assert call_kwargs["disable_resources"] is True
         assert call_kwargs["network_idle"] is False
+        assert "stealth" not in call_kwargs
+        assert "hide_canvas" not in call_kwargs
+        assert "useragent" not in call_kwargs
 
 
 @pytest.mark.asyncio

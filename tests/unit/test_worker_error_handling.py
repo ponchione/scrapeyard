@@ -8,7 +8,8 @@ import pytest
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
-from scrapeyard.queue.worker import _finalize_run, scrape_task
+from scrapeyard.queue.run_lifecycle import finalize_run
+from scrapeyard.queue.worker import scrape_task
 from tests.unit.worker_helpers import make_job
 
 
@@ -113,6 +114,61 @@ async def test_scrape_task_skips_recent_running_duplicate():
 
 
 @pytest.mark.asyncio
+async def test_scrape_task_skips_result_persistence_when_run_becomes_superseded():
+    initial_job = make_job(job_id="test-job-1", name="crash-test", current_run_id="run-1")
+    superseded_job = initial_job.model_copy(update={"current_run_id": "run-2"})
+    job_store = AsyncMock()
+    job_store.get_job.side_effect = [initial_job, superseded_job]
+    result_store = AsyncMock()
+    error_store = AsyncMock()
+    circuit_breaker = MagicMock()
+
+    success_result = TargetResult(
+        url="http://example.com",
+        status="success",
+        data=[{"title": "ok"}],
+    )
+
+    with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=success_result)), \
+         patch("scrapeyard.queue.worker.load_config") as mock_load, \
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            storage_results_dir="/tmp/results",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+        mock_load.return_value = MagicMock(
+            project="test",
+            name="crash-test",
+            resolved_targets=MagicMock(return_value=[MagicMock(url="http://example.com", fetcher=MagicMock(value="basic"), proxy=None)]),
+            execution=MagicMock(concurrency=1, delay_between=0, domain_rate_limit=0, fail_strategy=MagicMock(value="partial")),
+            adaptive=False,
+            schedule=None,
+            retry=MagicMock(),
+            validation=MagicMock(required_fields=[], min_results=0, on_empty="warn"),
+            output=MagicMock(group_by="target"),
+            webhook=None,
+            proxy=None,
+        )
+
+        await scrape_task(
+            initial_job.job_id,
+            "project: test\nname: x\ntarget:\n  url: http://example.com\n  selectors:\n    t: h1",
+            run_id="run-1",
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    result_store.save_result.assert_not_called()
+    job_store.finalize_run.assert_not_called()
+    job_store.update_job_status.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_scrape_task_reclaims_stale_running_job():
     stale_job = make_job(job_id="test-job-1", name="crash-test", status=JobStatus.running).model_copy(
         update={
@@ -205,16 +261,16 @@ async def test_scrape_task_batches_multiple_target_errors():
 
 
 # ---------------------------------------------------------------------------
-# D2: _finalize_run cross-DB error handling
+# D2: finalize_run cross-DB error handling
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_finalize_run_skips_when_no_run_id():
-    """_finalize_run is a no-op when run_id is None."""
+    """finalize_run is a no-op when run_id is None."""
     job_store = AsyncMock()
     error_store = AsyncMock()
-    await _finalize_run(None, JobStatus.complete, 5, job_store, error_store)
+    await finalize_run(None, JobStatus.complete, 5, job_store, error_store)
     error_store.count_errors_for_run.assert_not_called()
     job_store.finalize_run.assert_not_called()
 
@@ -225,21 +281,21 @@ async def test_finalize_run_happy_path():
     job_store = AsyncMock()
     error_store = AsyncMock()
     error_store.count_errors_for_run.return_value = 3
-    await _finalize_run("run-1", JobStatus.complete, 10, job_store, error_store)
+    await finalize_run("run-1", JobStatus.complete, 10, job_store, error_store)
     error_store.count_errors_for_run.assert_awaited_once_with("run-1")
     job_store.finalize_run.assert_awaited_once_with("run-1", "complete", 10, 3)
 
 
 @pytest.mark.asyncio
 async def test_finalize_run_falls_back_to_fail_run_on_error():
-    """If finalize_run raises, _finalize_run falls back to fail_run."""
+    """If finalize_run raises, finalize_run falls back to fail_run."""
     job_store = AsyncMock()
     job_store.finalize_run.side_effect = RuntimeError("DB write failed")
     error_store = AsyncMock()
     error_store.count_errors_for_run.return_value = 0
 
     # Should not raise — catches internally.
-    await _finalize_run("run-2", JobStatus.complete, 5, job_store, error_store)
+    await finalize_run("run-2", JobStatus.complete, 5, job_store, error_store)
 
     job_store.finalize_run.assert_awaited_once()
     job_store.fail_run.assert_awaited_once_with("run-2")
@@ -247,7 +303,7 @@ async def test_finalize_run_falls_back_to_fail_run_on_error():
 
 @pytest.mark.asyncio
 async def test_finalize_run_survives_both_failures():
-    """If both finalize_run and fail_run raise, _finalize_run still doesn't crash."""
+    """If both finalize_run and fail_run raise, finalize_run still doesn't crash."""
     job_store = AsyncMock()
     job_store.finalize_run.side_effect = RuntimeError("DB write failed")
     job_store.fail_run.side_effect = RuntimeError("Fallback also failed")
@@ -255,7 +311,7 @@ async def test_finalize_run_survives_both_failures():
     error_store.count_errors_for_run.return_value = 0
 
     # Must not raise.
-    await _finalize_run("run-3", JobStatus.partial, 2, job_store, error_store)
+    await finalize_run("run-3", JobStatus.partial, 2, job_store, error_store)
 
     job_store.finalize_run.assert_awaited_once()
     job_store.fail_run.assert_awaited_once_with("run-3")

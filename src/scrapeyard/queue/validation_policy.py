@@ -43,49 +43,110 @@ async def apply_validation(
     if validation.passed:
         return result
 
-    pending_errors.append(build_error_record(
-        job_id,
-        run_id or "",
-        config.project,
-        target_cfg.url,
-        attempt,
-        validation_error_type(result),
-        None,
-        target_cfg.fetcher.value,
-        ActionTaken(validation.action.value),
-        error_message=validation.message,
-    ))
+    _record_validation_failure(
+        pending_errors=pending_errors,
+        job_id=job_id,
+        run_id=run_id,
+        config=config,
+        target_cfg=target_cfg,
+        attempt=attempt,
+        result=result,
+        action=ActionTaken(validation.action.value),
+        message=validation.message,
+    )
 
     if validation.action == OnEmptyAction.warn:
-        logger.warning("Validation warning for %s: %s", target_cfg.url, validation.message)
-        result.errors.append(validation.message)
-        return result
-
+        return _handle_warn_action(result, target_cfg, validation.message)
     if validation.action == OnEmptyAction.skip:
-        logger.info("Skipping invalid result for %s: %s", target_cfg.url, validation.message)
-        return TargetResult(
-            url=target_cfg.url,
-            status=TargetStatus.success,
-            data=[],
-            errors=[validation.message],
-            pages_scraped=result.pages_scraped,
-            debug=result.debug,
-        )
-
+        return _handle_skip_action(result, target_cfg, validation.message)
     if validation.action == OnEmptyAction.fail:
-        logger.info("Failing target %s due to validation: %s", target_cfg.url, validation.message)
-        return TargetResult(
-            url=target_cfg.url,
-            status=TargetStatus.failed,
-            data=[],
-            errors=[validation.message],
-            pages_scraped=result.pages_scraped,
-            error_type=validation_error_type(result),
-            error_detail=validation.message,
-            debug=result.debug,
-        )
+        return _handle_fail_action(result, target_cfg, validation.message)
 
     logger.info("Retrying target %s after validation failure: %s", target_cfg.url, validation.message)
+    return await _retry_after_validation_failure(
+        target_cfg=target_cfg,
+        domain=domain,
+        adaptive=adaptive,
+        pending_errors=pending_errors,
+        config=config,
+        adaptive_dir=adaptive_dir,
+        run_artifacts_dir=run_artifacts_dir,
+        job_id=job_id,
+        run_id=run_id,
+        circuit_breaker=circuit_breaker,
+        validator=validator,
+        scrape=scrape,
+        proxy_url=proxy_url,
+    )
+
+
+def _record_validation_failure(
+    *,
+    pending_errors: list[ErrorRecord],
+    job_id: str,
+    run_id: str | None,
+    config: ScrapeConfig,
+    target_cfg: TargetConfig,
+    attempt: int,
+    result: TargetResult,
+    action: ActionTaken,
+    message: str,
+) -> None:
+    pending_errors.append(
+        build_error_record(
+            job_id,
+            run_id or "",
+            config.project,
+            target_cfg.url,
+            attempt,
+            validation_error_type(result),
+            None,
+            target_cfg.fetcher.value,
+            action,
+            error_message=message,
+        )
+    )
+
+
+def _handle_warn_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
+    logger.warning("Validation warning for %s: %s", target_cfg.url, message)
+    result.errors.append(message)
+    return result
+
+
+def _handle_skip_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
+    logger.info("Skipping invalid result for %s: %s", target_cfg.url, message)
+    return TargetResult(
+        url=target_cfg.url,
+        status=TargetStatus.success,
+        data=[],
+        errors=[message],
+        pages_scraped=result.pages_scraped,
+        debug=result.debug,
+    )
+
+
+def _handle_fail_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
+    logger.info("Failing target %s due to validation: %s", target_cfg.url, message)
+    return _build_validation_failed_result(target_cfg, result, message)
+
+
+async def _retry_after_validation_failure(
+    *,
+    target_cfg: TargetConfig,
+    domain: str,
+    adaptive: bool,
+    pending_errors: list[ErrorRecord],
+    config: ScrapeConfig,
+    adaptive_dir: str,
+    run_artifacts_dir: str | None,
+    job_id: str,
+    run_id: str | None,
+    circuit_breaker: CircuitBreaker,
+    validator: ResultValidator,
+    scrape: ScrapeCallable,
+    proxy_url: str | None,
+) -> TargetResult:
     retry_result = await scrape(
         target_cfg,
         adaptive,
@@ -98,18 +159,20 @@ async def apply_validation(
         logger.info("Recording failure for domain %s after validation retry", domain)
         circuit_breaker.record_failure(domain)
         for _ in retry_result.errors:
-            pending_errors.append(build_error_record(
-                job_id,
-                run_id or "",
-                config.project,
-                target_cfg.url,
-                attempt + 1,
-                retry_result.error_type or ErrorType.http_error,
-                retry_result.http_status,
-                target_cfg.fetcher.value,
-                ActionTaken.fail,
-                error_message=retry_result.error_detail or "; ".join(retry_result.errors),
-            ))
+            pending_errors.append(
+                build_error_record(
+                    job_id,
+                    run_id or "",
+                    config.project,
+                    target_cfg.url,
+                    2,
+                    retry_result.error_type or ErrorType.http_error,
+                    retry_result.http_status,
+                    target_cfg.fetcher.value,
+                    ActionTaken.fail,
+                    error_message=retry_result.error_detail or "; ".join(retry_result.errors),
+                )
+            )
         return retry_result
 
     circuit_breaker.record_success(domain)
@@ -117,27 +180,34 @@ async def apply_validation(
     if retry_validation.passed:
         return retry_result
 
-    pending_errors.append(build_error_record(
-        job_id,
-        run_id or "",
-        config.project,
-        target_cfg.url,
-        attempt + 1,
-        validation_error_type(retry_result),
-        None,
-        target_cfg.fetcher.value,
-        ActionTaken.fail,
-        error_message=retry_validation.message,
-    ))
+    _record_validation_failure(
+        pending_errors=pending_errors,
+        job_id=job_id,
+        run_id=run_id,
+        config=config,
+        target_cfg=target_cfg,
+        attempt=2,
+        result=retry_result,
+        action=ActionTaken.fail,
+        message=retry_validation.message,
+    )
+    return _build_validation_failed_result(target_cfg, retry_result, retry_validation.message)
+
+
+def _build_validation_failed_result(
+    target_cfg: TargetConfig,
+    result: TargetResult,
+    message: str,
+) -> TargetResult:
     return TargetResult(
         url=target_cfg.url,
         status=TargetStatus.failed,
         data=[],
-        errors=[retry_validation.message],
-        pages_scraped=retry_result.pages_scraped,
-        error_type=validation_error_type(retry_result),
-        error_detail=retry_validation.message,
-        debug=retry_result.debug,
+        errors=[message],
+        pages_scraped=result.pages_scraped,
+        error_type=validation_error_type(result),
+        error_detail=message,
+        debug=result.debug,
     )
 
 
