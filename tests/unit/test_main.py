@@ -86,8 +86,6 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
         main_module,
         "build_runtime_services",
         lambda: main_module.RuntimeServices(
-            job_store="job-store",
-            error_store="error-store",
             result_store="result-store",
             webhook_dispatcher=webhook_dispatcher,
             worker_pool=pool,
@@ -100,9 +98,10 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
 
     async with main_module.lifespan(app):
-        assert app.state.job_store == "job-store"
-        assert app.state.error_store == "error-store"
-        assert app.state.result_store == "result-store"
+        assert not hasattr(app.state, "job_store")
+        assert not hasattr(app.state, "error_store")
+        assert not hasattr(app.state, "result_store")
+        assert not hasattr(app.state, "webhook_dispatcher")
         assert app.state.worker_pool is pool
         assert app.state.scheduler is scheduler
         assert app.state.cleanup_task is cleanup_task

@@ -26,8 +26,6 @@ from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 @dataclass(frozen=True)
 class RuntimeServices:
-    job_store: JobStore
-    error_store: ErrorStore
     result_store: ResultStore
     webhook_dispatcher: HttpWebhookDispatcher
     worker_pool: WorkerPool
@@ -198,8 +196,6 @@ def get_scheduler() -> SchedulerService:
 def build_runtime_services() -> RuntimeServices:
     """Materialize the cached runtime singletons used during app lifespan."""
     return RuntimeServices(
-        job_store=get_job_store(),
-        error_store=get_error_store(),
         result_store=get_result_store(),
         webhook_dispatcher=get_webhook_dispatcher(),
         worker_pool=get_worker_pool(),

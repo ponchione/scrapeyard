@@ -114,10 +114,6 @@ class DatabaseManager:
                 self._lock_depths[db_name] = depth
 
 
-# ---------------------------------------------------------------------------
-# Default singleton + module-level convenience functions (backward-compat)
-# ---------------------------------------------------------------------------
-
 _default_manager = DatabaseManager()
 
 

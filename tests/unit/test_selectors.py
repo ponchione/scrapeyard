@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scrapeyard.config.schema import SelectorLong, SelectorType
 from scrapeyard.engine.selectors import (
+    SelectorExecutionError,
     count_selector_matches,
+    count_selector_matches_strict,
     extract_selectors,
+    extract_selectors_strict,
     select_items,
+    select_items_strict,
 )
 
 
@@ -108,3 +114,36 @@ def test_count_selector_matches_returns_zero_for_invalid_selector_errors() -> No
             raise RuntimeError("selector engine failed")
 
     assert count_selector_matches(_ExplodingNode(), ".broken") == 0
+
+
+def test_extract_selectors_strict_raises_selector_execution_error_with_field_metadata() -> None:
+    class _ExplodingNode(_Node):
+        def css(self, query: str) -> list[object]:
+            raise ValueError(f"bad selector: {query}")
+
+    with pytest.raises(SelectorExecutionError) as exc_info:
+        extract_selectors_strict(_ExplodingNode(), {"title": "[broken"})
+
+    err = exc_info.value
+    assert err.operation == "extract_selectors"
+    assert err.field_name == "title"
+    assert err.query == "[broken"
+    assert err.debug["exception_type"] == "ValueError"
+
+
+def test_strict_selector_helpers_raise_same_selector_execution_error_shape() -> None:
+    class _ExplodingNode(_Node):
+        def xpath(self, query: str) -> list[object]:
+            raise RuntimeError(f"bad xpath: {query}")
+
+    selector = SelectorLong(query="//*[", type=SelectorType.xpath)
+
+    with pytest.raises(SelectorExecutionError) as select_exc:
+        select_items_strict(_ExplodingNode(), selector)
+    assert select_exc.value.operation == "select_items"
+    assert select_exc.value.field_name is None
+
+    with pytest.raises(SelectorExecutionError) as count_exc:
+        count_selector_matches_strict(_ExplodingNode(), selector, field_name="price")
+    assert count_exc.value.operation == "count_selector_matches"
+    assert count_exc.value.field_name == "price"

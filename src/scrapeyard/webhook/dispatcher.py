@@ -14,7 +14,6 @@ from scrapeyard.config.schema import WebhookConfig
 
 logger = logging.getLogger(__name__)
 
-# Defaults for retry behaviour.
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_BASE = 1.0  # seconds
 _DEFAULT_BACKOFF_MAX = 30.0  # seconds
@@ -94,7 +93,6 @@ class HttpWebhookDispatcher:
                     )
                     return
 
-                # Permanent client error — don't retry.
                 if not self._is_retryable_status(response.status_code):
                     logger.warning(
                         "Webhook to %s returned %d in %.0fms — not retryable",
@@ -116,7 +114,6 @@ class HttpWebhookDispatcher:
                     url, elapsed_ms, exc, attempt + 1, 1 + self._max_retries,
                 )
 
-            # Sleep before next retry (unless this was the last attempt).
             if attempt < self._max_retries:
                 delay = self._backoff_delay(attempt)
                 logger.debug(
@@ -124,7 +121,6 @@ class HttpWebhookDispatcher:
                 )
                 await asyncio.sleep(delay)
 
-        # All attempts exhausted.
         if last_exc:
             logger.error(
                 "Webhook to %s failed after %d attempts — giving up: %s",
