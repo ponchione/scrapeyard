@@ -204,6 +204,38 @@ class BrowserConfig(BaseModel):
         default=False,
         description="Mask HTML canvas fingerprinting when stealth is enabled",
     )
+    real_chrome: bool = Field(
+        default=False,
+        description="Launch a real Chrome channel instead of bundled Chromium when supported by the dynamic fetcher",
+    )
+    cdp_url: str | None = Field(
+        default=None,
+        description="Optional Chrome DevTools Protocol endpoint for attaching the dynamic fetcher to an existing browser",
+    )
+    nstbrowser_mode: bool = Field(
+        default=False,
+        description="Enable NSTBrowser integration mode for the dynamic fetcher when supported upstream",
+    )
+    humanize: bool | float | None = Field(
+        default=None,
+        description="Optional humanization delay/behavior override for the stealthy fetcher",
+    )
+    os_randomize: bool = Field(
+        default=False,
+        description="Randomize reported operating-system traits when supported by the stealthy fetcher",
+    )
+    geoip: bool = Field(
+        default=False,
+        description="Align stealthy browser geography signals with proxy geography when supported upstream",
+    )
+    disable_ads: bool = Field(
+        default=False,
+        description="Enable ad-blocking behavior for stealthy fetches when supported upstream",
+    )
+    additional_arguments: dict[str, object] = Field(
+        default_factory=dict,
+        description="Extra upstream stealthy/Camoufox arguments for narrowly scoped hostile-site probes",
+    )
     useragent: str | None = Field(
         default=None,
         description="Custom User-Agent string override for browser fetches",

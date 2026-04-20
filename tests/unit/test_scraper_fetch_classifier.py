@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from scrapeyard.config.schema import FetcherType
-from scrapeyard.engine.fetch_classifier import classify_fetch_exception
+from scrapeyard.engine.fetch_classifier import (
+    classify_fetch_exception,
+    classify_page_signals,
+    classify_rendered_outcome,
+)
 from scrapeyard.engine.scraper import FetchError
 from scrapeyard.engine.resilience import RetryableError
 from scrapeyard.models.job import ErrorType
@@ -41,3 +45,47 @@ def test_classify_fetch_exception_preserves_retryable_http_statuses():
     assert error_type == ErrorType.http_error
     assert http_status == 500
     assert debug is None
+
+
+def test_classify_page_signals_detects_akamai_interstitial_markers_in_html_excerpt():
+    debug = {
+        "page_title": "Bass Pro Shops",
+        "html_excerpt": "Powered and protected by Akamai akam-sw.js install script sec-if-cpt-container service worker bootstrap",
+    }
+
+    assert classify_page_signals(debug) == ErrorType.challenge_page
+
+
+def test_classify_page_signals_detects_akamai_interstitial_markers_in_console_and_request_failures():
+    debug = {
+        "page_title": None,
+        "html_excerpt": "<html><body>loading...</body></html>",
+        "console_messages": [
+            {"type": "info", "text": "akam-sw.js install script booting"},
+        ],
+        "request_failures": [
+            {
+                "url": "https://example.com/akam/sw.js",
+                "method": "GET",
+                "resource_type": "script",
+                "error_text": "service worker bootstrap failed after security check",
+            }
+        ],
+    }
+
+    assert classify_page_signals(debug) == ErrorType.challenge_page
+
+
+def test_classify_rendered_outcome_prefers_challenge_for_akamai_interstitial_over_rendered_empty():
+    debug = {
+        "page_title": "Bass Pro Shops",
+        "html_excerpt": "Powered and protected by Akamai akam-sw.js install script sec-if-cpt-container",
+        "selector_counts": {"title": 0},
+        "item_selector_count": 0,
+        "console_messages": [],
+        "request_failures": [],
+    }
+
+    result = classify_rendered_outcome(debug, data=[], has_item_selector=True)
+
+    assert result == ErrorType.challenge_page

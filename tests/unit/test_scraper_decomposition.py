@@ -20,6 +20,8 @@ def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():
         "network_idle": False,
         "stealth": False,
         "hide_canvas": False,
+        "real_chrome": False,
+        "nstbrowser_mode": False,
     }
 
 
@@ -38,6 +40,14 @@ def test_default_debug_blob_uses_browser_config_defaults_when_missing():
         "network_idle": False,
         "stealth": False,
         "hide_canvas": False,
+        "real_chrome": False,
+        "cdp_url": None,
+        "nstbrowser_mode": False,
+        "humanize": None,
+        "os_randomize": False,
+        "geoip": False,
+        "disable_ads": False,
+        "additional_arguments": {},
         "useragent": None,
         "extra_headers": {},
         "click_selector": None,
@@ -58,6 +68,9 @@ def test_browser_fetch_kwargs_includes_optional_browser_overrides_and_proxy():
             "network_idle": True,
             "stealth": True,
             "hide_canvas": True,
+            "real_chrome": True,
+            "cdp_url": "ws://browser.example/devtools/browser/abc",
+            "nstbrowser_mode": True,
             "useragent": "ua-test",
             "extra_headers": {"X-Test": "1"},
             "wait_for_selector": ".product-card",
@@ -74,7 +87,54 @@ def test_browser_fetch_kwargs_includes_optional_browser_overrides_and_proxy():
         "network_idle": True,
         "stealth": True,
         "hide_canvas": True,
+        "real_chrome": True,
+        "cdp_url": "ws://browser.example/devtools/browser/abc",
+        "nstbrowser_mode": True,
         "useragent": "ua-test",
+        "extra_headers": {"X-Test": "1"},
+        "wait_selector": ".product-card",
+        "wait": 1200,
+        "proxy": "http://proxy.local:8080",
+    }
+
+
+def test_stealthy_browser_fetch_kwargs_includes_optional_stealthy_overrides_and_proxy():
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.stealthy,
+        browser={
+            "timeout_ms": 90000,
+            "disable_resources": False,
+            "network_idle": True,
+            "stealth": True,
+            "hide_canvas": True,
+            "real_chrome": True,
+            "cdp_url": "ws://browser.example/devtools/browser/abc",
+            "nstbrowser_mode": True,
+            "humanize": 1.25,
+            "os_randomize": True,
+            "geoip": True,
+            "disable_ads": True,
+            "additional_arguments": {"screen": {"max_width": 1920}},
+            "useragent": "ua-test",
+            "extra_headers": {"X-Test": "1"},
+            "wait_for_selector": ".product-card",
+            "wait_ms": 1200,
+        },
+        selectors={"title": "h1"},
+    )
+
+    kwargs = browser_fetch_kwargs(target, FetcherType.stealthy, proxy_url="http://proxy.local:8080")
+
+    assert kwargs == {
+        "timeout": 90000,
+        "disable_resources": False,
+        "network_idle": True,
+        "humanize": 1.25,
+        "os_randomize": True,
+        "geoip": True,
+        "disable_ads": True,
+        "additional_arguments": {"screen": {"max_width": 1920}},
         "extra_headers": {"X-Test": "1"},
         "wait_selector": ".product-card",
         "wait": 1200,
@@ -92,6 +152,14 @@ def test_stealthy_browser_fetch_kwargs_drop_unsupported_playwright_only_options(
             "network_idle": True,
             "stealth": True,
             "hide_canvas": True,
+            "real_chrome": True,
+            "cdp_url": "ws://browser.example/devtools/browser/abc",
+            "nstbrowser_mode": True,
+            "humanize": True,
+            "os_randomize": False,
+            "geoip": False,
+            "disable_ads": False,
+            "additional_arguments": {"screen": {"max_width": 1920}},
             "useragent": "ua-test",
             "extra_headers": {"X-Test": "1"},
             "wait_for_selector": ".product-card",
@@ -102,15 +170,12 @@ def test_stealthy_browser_fetch_kwargs_drop_unsupported_playwright_only_options(
 
     kwargs = browser_fetch_kwargs(target, FetcherType.stealthy, proxy_url="http://proxy.local:8080")
 
-    assert kwargs == {
-        "timeout": 90000,
-        "disable_resources": False,
-        "network_idle": True,
-        "extra_headers": {"X-Test": "1"},
-        "wait_selector": ".product-card",
-        "wait": 1200,
-        "proxy": "http://proxy.local:8080",
-    }
+    assert "stealth" not in kwargs
+    assert "hide_canvas" not in kwargs
+    assert "real_chrome" not in kwargs
+    assert "cdp_url" not in kwargs
+    assert "nstbrowser_mode" not in kwargs
+    assert "useragent" not in kwargs
 
 
 def test_response_title_prefers_explicit_title_attribute():
