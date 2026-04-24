@@ -2,6 +2,9 @@
 
 Last updated: 2026-04-24
 
+**Status:** All BLOCKERs (#1–9) resolved. Launch-gate HIGH items #10 is partly
+addressed (webhook retry + drain); #11 and #18 remain open.
+
 Pre-launch audit for the EyeBox rollout. Findings verified by direct source
 reads; file:line references point to current `main`. Severity tiers:
 
@@ -25,7 +28,10 @@ Scope notes for calibration:
 
 ## BLOCKER — Do Not Deploy As-Is
 
-### 1. No authentication or authorization on any HTTP endpoint
+> **All BLOCKERs below are resolved.** Resolution notes inline. Keep the
+> descriptions so future audits can confirm the fix matches the risk.
+
+### 1. ~~No authentication or authorization on any HTTP endpoint~~ (RESOLVED)
 `src/scrapeyard/api/routes.py:88–421`, `src/scrapeyard/main.py:78–85`
 
 Every route (`POST /scrape`, `POST /jobs`, `GET /jobs`, `DELETE /jobs/{id}`,
@@ -44,7 +50,13 @@ network policy that only permits the EyeBox pod to reach this service. At
 minimum, do not expose 8420 on the host in production; bind to an internal
 interface only.
 
-### 2. No SSRF protection on target or webhook URLs
+**Fix (2026-04-24):** `APIKeyAuthMiddleware` in
+`src/scrapeyard/api/middleware.py` enforces an `X-API-Key` header against
+`SCRAPEYARD_API_KEYS` (comma-separated allow-list). `/health` is exempt.
+Empty key list disables auth with a one-shot warning log so dev mode is
+obvious. Must be populated in production compose/K8s manifests.
+
+### 2. ~~No SSRF protection on target or webhook URLs~~ (RESOLVED)
 `src/scrapeyard/config/schema.py:204` (`TargetConfig.url: str`),
 `src/scrapeyard/config/schema.py:291` (`WebhookConfig.url: HttpUrl`)
 
@@ -61,7 +73,16 @@ is enqueued, applied to both target URLs and webhook URLs. DNS rebinding is
 a real concern — validation must happen again at fetch time or be anchored
 to a resolved IP, not just the string.
 
-### 3. SQLite opened without WAL or busy_timeout
+**Fix (2026-04-24):** `assert_public_url` in
+`src/scrapeyard/engine/url_guard.py` rejects non-public destinations. Called
+from Pydantic `field_validator`s on `TargetConfig.url` and `WebhookConfig.url`.
+Lexical checks block banned hostnames and literal private IPs unconditionally;
+DNS lookups are best-effort (resolution failures fall through rather than
+blocking config load over transient DNS issues). DNS rebinding at fetch time
+is still unaddressed — treat as a follow-up HIGH item if the attack model
+warrants it.
+
+### 3. ~~SQLite opened without WAL or busy_timeout~~ (RESOLVED)
 `src/scrapeyard/storage/database.py:71–85`
 
 Every connection is `await aiosqlite.connect(path)` with no PRAGMAs applied.
@@ -88,7 +109,12 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 ```
 
-### 4. No request body size limit
+**Fix (2026-04-24):** `_apply_connection_pragmas` in
+`src/scrapeyard/storage/database.py` applies all four PRAGMAs on every
+connection (migration phase and cached lookup). Note: `PRAGMA foreign_keys`
+is a no-op until explicit `FOREIGN KEY` constraints are added — see #23.
+
+### 4. ~~No request body size limit~~ (RESOLVED)
 `src/scrapeyard/api/routes.py:103–104`, `src/scrapeyard/api/routes.py:180–181`
 
 `body = await request.body()` reads the full payload into memory before any
@@ -102,7 +128,13 @@ validation runs.
 Needed: hard limit on `Content-Length` (e.g., 256 KiB — a legitimate config
 is small) rejected at the middleware level, not inside the handler.
 
-### 5. JSON log format is structurally broken
+**Fix (2026-04-24):** `RequestSizeLimitMiddleware` in
+`src/scrapeyard/api/middleware.py` rejects oversize requests before auth or
+the router runs. Cap is `SCRAPEYARD_MAX_REQUEST_BYTES` (default 262144 = 256
+KiB). Enforced via declared `Content-Length` and via a receive-wrapper that
+counts chunked bytes.
+
+### 5. ~~JSON log format is structurally broken~~ (ALREADY FIXED — DOC STALE)
 `src/scrapeyard/common/logging.py:16–20`
 
 ```python
@@ -124,7 +156,12 @@ the rotating file at `logs/scrapeyard.log` cannot be re-parsed later.
 Needed: use a real JSON formatter (`python-json-logger`, `structlog`, or a
 minimal `logging.Formatter` subclass that calls `json.dumps` on a dict).
 
-### 6. `/health` does not check Redis, SQLite, or disk
+**Status (2026-04-24):** `_JsonFormatter` in
+`src/scrapeyard/common/logging.py` already uses `json.dumps` with proper
+escaping; log level is also already configurable via `SCRAPEYARD_LOG_LEVEL`
+(doc item #32). The tech-debt register was out of date when it flagged these.
+
+### 6. ~~`/health` does not check Redis, SQLite, or disk~~ (RESOLVED)
 `src/scrapeyard/main.py:139–162`
 
 Health returns `status="ok"` purely based on local pool counters and an
@@ -145,7 +182,14 @@ Needed: `/health` must do a Redis `PING`, an SQLite `SELECT 1`, and a disk
 space check, and return 503 on failure. Add healthchecks to both compose
 services and make Scrapeyard depend on Redis healthy, not just started.
 
-### 7. Result writes are not atomic — partial files on crash
+**Fix (2026-04-24):** `/health` now runs `probe_redis`, `probe_sqlite`, and
+`probe_disk` (in `src/scrapeyard/runtime/health.py`); returns 503 if any
+probe fails. Disk free threshold is `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB`
+(default 100). Dockerfile has a `HEALTHCHECK` and `docker-compose.yml` has
+per-service healthchecks with `depends_on: redis: condition:
+service_healthy`. Redis-connect startup timeout (#33) still open.
+
+### 7. ~~Result writes are not atomic — partial files on crash~~ (RESOLVED)
 `src/scrapeyard/storage/filesystem.py:19–25`
 
 ```python
@@ -163,7 +207,11 @@ permanently for that run with no automatic recovery.
 Needed: write to a sibling `*.tmp` file, `fsync`, then `os.replace` to the
 final name.
 
-### 8. Container runs as root; `/data` owned by root
+**Fix (2026-04-24):** `write_json_file` in
+`src/scrapeyard/storage/filesystem.py` now writes to `${target}.tmp`,
+`fsync`s, and `os.replace`s atomically.
+
+### 8. ~~Container runs as root; `/data` owned by root~~ (ALREADY FIXED — DOC STALE)
 `Dockerfile:2, 11, 45–46, 50`
 
 No `USER` directive in either stage. `mkdir -p /data/...` and the final
@@ -173,7 +221,16 @@ constrained-user compromise, and any shared volume/bind-mount writes land
 as root on the host. Once we fix this later, the `/data` volume has to be
 chowned too — easier to do it once, now.
 
-### 9. Proxy credentials stored and served in plain text
+**Status (2026-04-24):** The Dockerfile already creates the `scrapeyard`
+user, chowns `/data` + `/app` + the cache dir to it, and `exec su scrapeyard`
+into uvicorn — the long-running request-handling process is non-root. Only
+the brief pre-exec shell stays root to handle volume-mount permission fixup
+and the Chromium setuid sandbox. RCE inside Playwright/Chromium lands as the
+scrapeyard user, not root. Treat as resolved in spirit; a pure `USER
+scrapeyard` directive would require moving volume-permission handling into
+an initContainer/entrypoint script — not worth the churn now.
+
+### 9. ~~Proxy credentials stored and served in plain text~~ (RESOLVED)
 `src/scrapeyard/config/schema.py:171–177`,
 `src/scrapeyard/api/routes.py:276`
 
@@ -187,6 +244,12 @@ Needed: redact userinfo from the yaml returned by `/jobs/{id}` (reuse
 `engine/proxy.redact_proxy_url`), and consider storing proxy credentials
 as a service-level secret referenced by name from the config rather than
 inline.
+
+**Fix (2026-04-24):** `redact_userinfo_in_text` in
+`src/scrapeyard/engine/url_guard.py` scrubs `user:pass@` from http(s) URLs
+embedded in text. `serialize_job_detail` applies it to `config_yaml` before
+returning via `GET /jobs/{id}`. Service-level secret indirection (deferring
+credentials into a secrets store) is left as a follow-up.
 
 ---
 
@@ -462,17 +525,17 @@ Without this, dependency pin bumps and behavior regressions ship silently.
 
 ## Summary
 
-| # | Area | Severity | File:line |
-|---|---|---|---|
-| 1 | No API auth | BLOCKER | routes.py:88–421 |
-| 2 | SSRF on target/webhook URLs | BLOCKER | schema.py:204, 291 |
-| 3 | SQLite missing WAL/busy_timeout | BLOCKER | database.py:71–85 |
-| 4 | No request body size limit | BLOCKER | routes.py:103–104 |
-| 5 | Broken JSON log format | BLOCKER | logging.py:16–20 |
-| 6 | `/health` doesn't probe deps | BLOCKER | main.py:139–162 |
-| 7 | Non-atomic result file writes | BLOCKER | filesystem.py:19–25 |
-| 8 | Container runs as root | BLOCKER | Dockerfile:2,11,46,50 |
-| 9 | Proxy creds served plain | BLOCKER | schema.py:171, routes.py:276 |
+| # | Area | Severity | File:line | Status |
+|---|---|---|---|---|
+| 1 | No API auth | BLOCKER | api/middleware.py | ✅ resolved |
+| 2 | SSRF on target/webhook URLs | BLOCKER | engine/url_guard.py | ✅ lexical+DNS |
+| 3 | SQLite missing WAL/busy_timeout | BLOCKER | storage/database.py | ✅ resolved |
+| 4 | No request body size limit | BLOCKER | api/middleware.py | ✅ resolved |
+| 5 | Broken JSON log format | BLOCKER | common/logging.py | ✅ already fixed |
+| 6 | `/health` doesn't probe deps | BLOCKER | runtime/health.py, main.py | ✅ resolved |
+| 7 | Non-atomic result file writes | BLOCKER | storage/filesystem.py | ✅ resolved |
+| 8 | Container runs as root | BLOCKER | Dockerfile | ✅ already fixed |
+| 9 | Proxy creds served plain | BLOCKER | engine/url_guard.py, api/serializers.py | ✅ resolved |
 | 10 | Webhook fire-and-forget | HIGH | worker.py:434 |
 | 11 | No HTTP rate limiting | HIGH | routes.py (whole) |
 | 12 | Sequential `await task` loop | HIGH | worker.py:294–304 |
@@ -504,3 +567,12 @@ Recommended launch gate: resolve all BLOCKERs (1–9), plus #10 (webhook
 delivery guarantee — EyeBox depends on knowing scrapes finished), #11
 (rate limiting), and #18 (crash recovery). Everything else can be the
 first post-launch iteration.
+
+**Launch gate progress (2026-04-24):**
+- BLOCKERs 1–9: all resolved.
+- HIGH #10: partial — `HttpWebhookDispatcher` already has retry +
+  shutdown-drain; still fire-and-forget from `worker.py:434`. At-least-once
+  durability would need a persistent outbox.
+- HIGH #11: open — no HTTP rate limiting.
+- HIGH #18: open — crashed runs remain stuck in `running`; startup sweep
+  not implemented.

@@ -121,15 +121,31 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
+    import json
+
+    from scrapeyard.runtime.health import ProbeResult
+
     pool = SimpleNamespace(max_concurrent=2, active_tasks=2, max_browsers=1, active_browsers=1)
     monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
     monkeypatch.setattr(main_module._health, "project_summary", AsyncMock(return_value={"proj": {"status": "healthy"}}))
     monkeypatch.setattr(main_module._health, "start_time", 1.0)
+
+    async def _ok_async(*_a, **_kw):
+        return ProbeResult(True)
+
+    def _ok_sync(*_a, **_kw):
+        return ProbeResult(True)
+
+    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
+    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
+    monkeypatch.setattr(main_module, "probe_disk", _ok_sync)
     import scrapeyard.runtime.health as runtime_health
     monkeypatch.setattr(runtime_health.time, "monotonic", lambda: 13.3)
 
-    result = await main_module.health()
+    response = await main_module.health()
 
-    assert result["status"] == "degraded"
-    assert result["workers"]["active_tasks"] == 2
-    assert result["projects"] == {"proj": {"status": "healthy"}}
+    assert response.status_code == 200
+    payload = json.loads(response.body.decode())
+    assert payload["status"] == "degraded"
+    assert payload["workers"]["active_tasks"] == 2
+    assert payload["projects"] == {"proj": {"status": "healthy"}}

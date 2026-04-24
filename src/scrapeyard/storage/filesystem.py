@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,12 +18,20 @@ def prepare_directory(path: str | Path) -> None:
 
 
 def write_json_file(path: str | Path, data: Any) -> None:
-    """Serialize *data* to compact JSON at *path*."""
+    """Atomically serialize *data* to compact JSON at *path*.
+
+    Writes to a sibling ``*.tmp`` file, ``fsync``s it, then ``os.replace``s
+    onto the final name. A crash or ``ENOSPC`` mid-write leaves the target
+    path either unchanged or fully valid — never truncated.
+    """
     target = Path(path)
-    target.write_text(
-        json.dumps(data, default=str, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    payload = json.dumps(data, default=str, separators=(",", ":"))
+    tmp = target.with_name(target.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, target)
 
 
 def read_json_file(path: str | Path) -> Any:
