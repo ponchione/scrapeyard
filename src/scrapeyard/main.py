@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from scrapeyard import __version__
 from scrapeyard.api.dependencies import (
@@ -13,10 +14,11 @@ from scrapeyard.api.dependencies import (
     get_worker_pool,
     init_rate_limiter,
 )
+from scrapeyard.api.middleware import APIKeyAuthMiddleware, RequestSizeLimitMiddleware
 from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
-from scrapeyard.runtime.health import HealthCache
+from scrapeyard.runtime.health import HealthCache, probe_disk, probe_redis, probe_sqlite
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 
@@ -73,22 +75,56 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_settings_for_middleware = get_settings()
+# Order matters: last add_middleware() call becomes outermost. We want the
+# size-limit guard to run first so oversized payloads never reach the auth
+# check or the router.
+app.add_middleware(
+    APIKeyAuthMiddleware,
+    keys=_settings_for_middleware.parsed_api_keys(),
+    exempt_paths={"/health"},
+)
+app.add_middleware(
+    RequestSizeLimitMiddleware,
+    max_bytes=_settings_for_middleware.max_request_bytes,
+)
+
 app.include_router(router)
 
 
 @app.get("/health")
-async def health() -> dict:
-    """Service health check endpoint with detailed status."""
+async def health() -> JSONResponse:
+    """Service health check endpoint with detailed status.
+
+    Returns 200 when all dependencies (Redis, SQLite, disk) are reachable and
+    within thresholds; 503 otherwise so that container orchestrators can
+    recycle the process rather than sending it live traffic.
+    """
+    settings = get_settings()
     pool = get_worker_pool()
 
     uptime = _health.uptime
     projects = await _health.project_summary()
 
-    status = "ok"
-    if pool.active_tasks >= pool.max_concurrent:
-        status = "degraded"
+    redis_probe = await probe_redis(pool)
+    sqlite_probe = await probe_sqlite()
+    disk_probe = probe_disk(settings.storage_results_dir, settings.health_disk_free_min_mb)
 
-    return {
+    dependencies = {
+        "redis": {"ok": redis_probe.ok, "detail": redis_probe.detail},
+        "sqlite": {"ok": sqlite_probe.ok, "detail": sqlite_probe.detail},
+        "disk": {"ok": disk_probe.ok, "detail": disk_probe.detail},
+    }
+
+    all_ok = redis_probe.ok and sqlite_probe.ok and disk_probe.ok
+    if not all_ok:
+        status = "unhealthy"
+    elif pool.active_tasks >= pool.max_concurrent:
+        status = "degraded"
+    else:
+        status = "ok"
+
+    body = {
         "status": status,
         "uptime_seconds": round(uptime, 1),
         "workers": {
@@ -97,5 +133,7 @@ async def health() -> dict:
             "max_browsers": pool.max_browsers,
             "active_browsers": pool.active_browsers,
         },
+        "dependencies": dependencies,
         "projects": projects,
     }
+    return JSONResponse(status_code=200 if all_ok else 503, content=body)

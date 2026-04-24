@@ -23,6 +23,7 @@ COPY --from=builder /build/requirements.txt .
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        curl \
         libdbus-glib-1-2 \
         libgtk-3-0t64 \
         libxml2-dev \
@@ -61,5 +62,8 @@ RUN cp -r sql/ "$(python -c 'import scrapeyard, pathlib; print(pathlib.Path(scra
     && chmod 4755 /ms-playwright/chromium-1169/chrome-linux/chrome_sandbox
 
 EXPOSE 8420
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -fsS http://localhost:8420/health >/dev/null || exit 1
 
 CMD ["sh", "-lc", "mkdir -p /data/db /data/results /data/adaptive /data/logs \"$XDG_CACHE_HOME\" && chown -R scrapeyard:scrapeyard /app /data \"$XDG_CACHE_HOME\" && chown root:root \"$CHROME_DEVEL_SANDBOX\" && chmod 4755 \"$CHROME_DEVEL_SANDBOX\" && exec su scrapeyard -s /bin/sh -c 'uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420'"]

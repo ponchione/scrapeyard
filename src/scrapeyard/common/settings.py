@@ -44,7 +44,14 @@ class ServiceSettings(BaseSettings):
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
 
+    api_keys: str = ""
+    max_request_bytes: int = 262144
+    health_disk_free_min_mb: int = 100
+
     model_config = {"env_prefix": "SCRAPEYARD_"}
+
+    def parsed_api_keys(self) -> set[str]:
+        return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
 
 @lru_cache(maxsize=1)

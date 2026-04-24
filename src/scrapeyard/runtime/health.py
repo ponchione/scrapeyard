@@ -2,12 +2,57 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
+
+from scrapeyard.storage.database import get_db
+
+logger = logging.getLogger(__name__)
 
 ProjectSummaryRows = list[tuple[str, str, int]]
 JobStoreFactory = Callable[[], Any]
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    ok: bool
+    detail: str | None = None
+
+
+async def probe_redis(pool: Any) -> ProbeResult:
+    """Ping Redis through the worker pool's shared connection."""
+    redis = getattr(pool, "redis", None)
+    if redis is None:
+        return ProbeResult(False, "redis pool not connected")
+    try:
+        await redis.ping()
+    except Exception as exc:  # pragma: no cover — exercised via live tests
+        return ProbeResult(False, f"redis ping failed: {exc}")
+    return ProbeResult(True)
+
+
+async def probe_sqlite(db_name: str = "jobs.db") -> ProbeResult:
+    try:
+        async with get_db(db_name) as db:
+            await db.execute("SELECT 1")
+    except Exception as exc:  # pragma: no cover
+        return ProbeResult(False, f"sqlite probe failed: {exc}")
+    return ProbeResult(True)
+
+
+def probe_disk(path: str, min_free_mb: int) -> ProbeResult:
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError as exc:
+        return ProbeResult(False, f"disk_usage({path!r}) failed: {exc}")
+    free_mb = usage.free // (1024 * 1024)
+    if free_mb < min_free_mb:
+        return ProbeResult(False, f"only {free_mb}MB free on {path!r} (min {min_free_mb}MB)")
+    return ProbeResult(True, f"{free_mb}MB free")
 
 
 def build_project_summary(rows: ProjectSummaryRows) -> dict[str, dict[str, Any]]:

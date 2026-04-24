@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 
 # --- Enums ---
@@ -298,6 +300,15 @@ class TargetConfig(BaseModel):
         description="Stock status detection patterns, keyed by status value.",
     )
 
+    @field_validator("url")
+    @classmethod
+    def _reject_unsafe_url(cls, value: str) -> str:
+        try:
+            assert_public_url(value)
+        except UnsafeURLError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
+
 
 class RetryConfig(BaseModel):
     """Retry policy configuration."""
@@ -365,6 +376,15 @@ class WebhookConfig(BaseModel):
         default_factory=dict, description="Custom HTTP headers"
     )
     timeout: int = Field(default=10, description="Timeout in seconds")
+
+    @field_validator("url")
+    @classmethod
+    def _reject_unsafe_url(cls, value: HttpUrl) -> HttpUrl:
+        try:
+            assert_public_url(str(value))
+        except UnsafeURLError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
 
 
 # --- Top-Level Config ---

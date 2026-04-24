@@ -17,6 +17,18 @@ _DB_MIGRATIONS: dict[str, list[str]] = {
     "results_meta.db": ["003_create_results_meta.sql", "006_add_results_meta_indexes.sql", "008_results_meta_unique_job_run.sql"],
 }
 
+_CONNECTION_PRAGMAS: tuple[str, ...] = (
+    "PRAGMA journal_mode = WAL",
+    "PRAGMA busy_timeout = 5000",
+    "PRAGMA synchronous = NORMAL",
+    "PRAGMA foreign_keys = ON",
+)
+
+
+async def _apply_connection_pragmas(db: aiosqlite.Connection) -> None:
+    for pragma in _CONNECTION_PRAGMAS:
+        await db.execute(pragma)
+
 
 class DatabaseManager:
     """Encapsulates database directory, cached connections, and re-entrant locks.
@@ -64,7 +76,7 @@ class DatabaseManager:
 
         for db_name, migration_files in _DB_MIGRATIONS.items():
             async with aiosqlite.connect(db_path / db_name) as db:
-                await db.execute("PRAGMA journal_mode=WAL")
+                await _apply_connection_pragmas(db)
                 for migration_file in migration_files:
                     migration_sql = (sql_dir / migration_file).read_text()
                     await db.executescript(migration_sql)
@@ -76,7 +88,7 @@ class DatabaseManager:
             if self._db_dir is None:
                 raise RuntimeError("Database not initialised — call init_db() first")
             connection = await aiosqlite.connect(self._db_dir / db_name)
-            await connection.execute("PRAGMA journal_mode=WAL")
+            await _apply_connection_pragmas(connection)
             self._connections[db_name] = connection
         return connection
 

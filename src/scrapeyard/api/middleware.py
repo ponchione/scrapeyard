@@ -1,0 +1,128 @@
+"""ASGI middlewares: API key auth and request body size cap."""
+
+from __future__ import annotations
+
+import logging
+from typing import Iterable
+
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+logger = logging.getLogger(__name__)
+
+
+class RequestSizeLimitMiddleware:
+    """Reject requests whose body exceeds *max_bytes*.
+
+    Enforced via Content-Length header when present, and via a receive-wrapper
+    byte counter for chunked transfers.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = _header_value(scope.get("headers", []), b"content-length")
+        if content_length is not None:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                await _reject(scope, send, 400, "Invalid Content-Length")
+                return
+            if declared > self.max_bytes:
+                await _reject(scope, send, 413, "Request body too large")
+                return
+
+        consumed = 0
+        exceeded = False
+
+        async def limited_receive() -> Message:
+            nonlocal consumed, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                consumed += len(message.get("body", b""))
+                if consumed > self.max_bytes:
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        rejected = False
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal rejected
+            if exceeded and not rejected:
+                rejected = True
+                await _reject(scope, send, 413, "Request body too large")
+                return
+            if rejected:
+                return
+            await send(message)
+
+        await self.app(scope, limited_receive, guarded_send)
+
+
+class APIKeyAuthMiddleware:
+    """Require a valid ``X-API-Key`` header on every non-exempt request.
+
+    If *keys* is empty, the middleware is a no-op (useful for local dev) and
+    logs a single warning on the first request to make the state obvious.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        keys: set[str],
+        exempt_paths: Iterable[str] = (),
+    ) -> None:
+        self.app = app
+        self.keys = set(keys)
+        self.exempt_paths = set(exempt_paths)
+        self._warned_open = False
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not self.keys:
+            if not self._warned_open:
+                self._warned_open = True
+                logger.warning(
+                    "API key auth is disabled (SCRAPEYARD_API_KEYS is empty); "
+                    "all endpoints are unauthenticated"
+                )
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("path") in self.exempt_paths:
+            await self.app(scope, receive, send)
+            return
+
+        provided = _header_value(scope.get("headers", []), b"x-api-key")
+        if provided is None or provided.decode("latin-1") not in self.keys:
+            await _reject(scope, send, 401, "Missing or invalid API key")
+            return
+
+        await self.app(scope, receive, send)
+
+
+def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes | None:
+    lowered = name.lower()
+    for key, value in headers:
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+async def _reject(scope: Scope, send: Send, status_code: int, message: str) -> None:
+    response = JSONResponse(status_code=status_code, content={"error": message})
+    await response(scope, _noop_receive, send)
+
+
+async def _noop_receive() -> Message:
+    return {"type": "http.disconnect"}
