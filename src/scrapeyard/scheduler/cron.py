@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.models.job import JobStatus
 
 from scrapeyard.queue.pool import WorkerPool
-from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.protocols import JobStore
 
 
 class SchedulerService:
@@ -33,7 +34,7 @@ class SchedulerService:
     def __init__(
         self,
         worker_pool: WorkerPool,
-        job_store: SQLiteJobStore,
+        job_store: JobStore,
         jitter_max_seconds: int = 120,
     ) -> None:
         self._pool = worker_pool
@@ -82,19 +83,10 @@ class SchedulerService:
 
     async def start(self) -> None:
         """Start the scheduler and re-register all enabled scheduled jobs from the store."""
-        # Re-register persisted scheduled jobs.
-        # We need to scan all projects; use a direct DB query.
-        from scrapeyard.storage.database import get_db
-
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                "SELECT job_id, schedule_cron, schedule_enabled "
-                "FROM jobs WHERE schedule_cron IS NOT NULL"
-            )
-            rows = await cursor.fetchall()
+        rows = await self._job_store.list_scheduled_jobs()
 
         for job_id, cron_expr, schedule_enabled in rows:
-            self.register_job(job_id, cron_expr, enabled=bool(schedule_enabled))
+            self.register_job(job_id, cron_expr, enabled=schedule_enabled)
 
         self._scheduler.start()
 
@@ -123,7 +115,7 @@ class SchedulerService:
         run_id = generate_run_id()
         queued_job = job.model_copy(update={
             "status": JobStatus.queued,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": utc_now(),
             "current_run_id": run_id,
         })
         await self._job_store.update_job_status(queued_job)

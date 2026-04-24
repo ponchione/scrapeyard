@@ -1,78 +1,69 @@
 """FastAPI application entry point."""
-
 import asyncio
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from scrapeyard import __version__
 from scrapeyard.api.dependencies import (
-    get_error_store,
+    RuntimeServices,
+    build_runtime_services,
+    close_webhook_dispatcher,
     get_job_store,
-    get_result_store,
-    get_scheduler,
     get_worker_pool,
     init_rate_limiter,
 )
 from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
+from scrapeyard.runtime.health import HealthCache
 from scrapeyard.storage.cleanup import start_cleanup_loop
-from scrapeyard.storage.database import close_db, get_db, init_db
-
-_start_time: float = 0.0
-_projects_cache: dict[str, dict] = {}
-_projects_cache_refreshed_at: float = 0.0
-_PROJECTS_CACHE_TTL_SECONDS = 5.0
+from scrapeyard.storage.database import close_db, init_db
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Orchestrate startup and shutdown in dependency order."""
-    global _start_time  # noqa: PLW0603
-    _start_time = time.monotonic()
+_health = HealthCache(get_job_store)
 
-    # 1. Settings & logging
-    settings = get_settings()
-    setup_logging(settings.log_dir)
 
-    # 2. Database
-    await init_db(settings.db_dir)
+def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
+    app.state.worker_pool = services.worker_pool
+    app.state.scheduler = services.scheduler
 
-    # 3. Storage instances
-    app.state.job_store = get_job_store()
-    app.state.error_store = get_error_store()
-    app.state.result_store = get_result_store()
 
-    # 4. Worker pool
-    pool = get_worker_pool()
-    app.state.worker_pool = pool
-    await pool.start()
+async def _startup_runtime_services(app: FastAPI) -> None:
+    services = build_runtime_services()
+    _assign_runtime_services(app, services)
+    await services.webhook_dispatcher.startup()
+    await services.worker_pool.start()
+    init_rate_limiter(redis=services.worker_pool.redis)
+    await services.scheduler.start()
+    app.state.cleanup_task = start_cleanup_loop(services.result_store)
 
-    # Initialize rate limiter with the pool's Redis connection for cross-job
-    # domain rate limiting. Falls back to local when Redis is unavailable.
-    init_rate_limiter(redis=getattr(pool, "_redis", None))
 
-    # 5. Scheduler (re-registers persisted jobs on start)
-    scheduler = get_scheduler()
-    app.state.scheduler = scheduler
-    await scheduler.start()
-
-    # 6. Cleanup loop
-    app.state.cleanup_task = start_cleanup_loop(app.state.result_store)
-
-    yield
-
-    # Shutdown (reverse order)
+async def _shutdown_runtime_services(app: FastAPI, *, shutdown_grace_seconds: int) -> None:
     app.state.cleanup_task.cancel()
     try:
         await app.state.cleanup_task
     except asyncio.CancelledError:
         pass
-    scheduler.shutdown()
-    await pool.stop()
+    app.state.scheduler.shutdown()
+    await app.state.worker_pool.stop()
+    await close_webhook_dispatcher(timeout=shutdown_grace_seconds)
     await close_db()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Orchestrate startup and shutdown in dependency order."""
+    _health.mark_started()
+
+    settings = get_settings()
+    setup_logging(settings.log_dir, settings.log_level)
+    await init_db(settings.db_dir)
+    await _startup_runtime_services(app)
+
+    yield
+
+    await _shutdown_runtime_services(app, shutdown_grace_seconds=settings.workers_shutdown_grace_seconds)
 
 
 app = FastAPI(
@@ -85,66 +76,14 @@ app = FastAPI(
 app.include_router(router)
 
 
-async def _project_health_summary() -> dict[str, dict]:
-    global _projects_cache_refreshed_at  # noqa: PLW0603
-    global _projects_cache  # noqa: PLW0603
-    now = time.monotonic()
-    if now - _projects_cache_refreshed_at < _PROJECTS_CACHE_TTL_SECONDS:
-        return _projects_cache
-
-    rows: list[tuple[str, str, int]] = []
-    try:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
-            )
-            rows = await cursor.fetchall()
-    except RuntimeError:
-        rows = []
-
-    summary: dict[str, dict] = {}
-    for project, status, count in rows:
-        project_entry = summary.setdefault(
-            project,
-            {
-                "job_count": 0,
-                "status": "healthy",
-                "status_counts": {
-                    "queued": 0,
-                    "running": 0,
-                    "complete": 0,
-                    "partial": 0,
-                    "failed": 0,
-                },
-            },
-        )
-        project_entry["job_count"] += count
-        if status in project_entry["status_counts"]:
-            project_entry["status_counts"][status] += count
-
-    for project_entry in summary.values():
-        counts = project_entry["status_counts"]
-        if counts["failed"] > 0:
-            project_entry["status"] = "failing"
-        elif counts["partial"] > 0 or counts["running"] > 0:
-            project_entry["status"] = "degraded"
-        else:
-            project_entry["status"] = "healthy"
-
-    _projects_cache = summary
-    _projects_cache_refreshed_at = now
-    return summary
-
-
 @app.get("/health")
 async def health() -> dict:
     """Service health check endpoint with detailed status."""
     pool = get_worker_pool()
 
-    uptime = time.monotonic() - _start_time if _start_time else 0.0
-    projects = await _project_health_summary()
+    uptime = _health.uptime
+    projects = await _health.project_summary()
 
-    # Determine overall status based on active task load.
     status = "ok"
     if pool.active_tasks >= pool.max_concurrent:
         status = "degraded"

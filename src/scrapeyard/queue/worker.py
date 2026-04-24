@@ -3,27 +3,59 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FailStrategy, GroupBy, OnEmptyAction
-from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
+from scrapeyard.config.schema import FailStrategy, GroupBy, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, ResultValidator
-from scrapeyard.engine.scraper import TargetResult, scrape_target
-from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobStatus
-from scrapeyard.storage.database import get_db
+from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
+from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
+from scrapeyard.models.job import ErrorRecord, JobStatus
+from scrapeyard.queue.run_lifecycle import (
+    build_run_paths,
+    create_run_record,
+    dispatch_webhook,
+    finalize_run,
+    handle_crash,
+    mark_job_running,
+    save_run_result,
+    update_job_completion,
+)
+from scrapeyard.queue.target_execution import (
+    guard_target_execution,
+    log_target_fetch,
+    record_failed_target,
+    resolve_target_runtime_context,
+)
+from scrapeyard.queue.validation_policy import apply_validation
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.webhook.dispatcher import WebhookDispatcher
-from scrapeyard.webhook.payload import build_webhook_payload, should_fire
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class JobExecutionContext:
+    config: ScrapeConfig
+    job: Any
+    settings: Any
+    started_at: datetime
+    adaptive_dir: str
+    run_artifacts_dir: str | None
+
+
+@dataclass(frozen=True)
+class PersistedJobResult:
+    final_status: JobStatus
+    flat_data: list[dict[str, Any]]
+    all_errors: list[str]
+    save_meta: Any
 
 
 async def scrape_task(
@@ -39,440 +71,390 @@ async def scrape_task(
     rate_limiter: DomainRateLimiter,
     webhook_dispatcher: WebhookDispatcher | None = None,
 ) -> None:
-    """Execute a complete scrape job.
-
-    This is the top-level worker function that:
-
-    1. Parses the YAML config.
-    2. Updates job status to *running*.
-    3. Iterates resolved targets, respecting concurrency / delay / rate limits.
-    4. Applies circuit breaker per domain.
-    5. Validates results.
-    6. Saves output via *result_store*.
-    7. Logs errors via *error_store*.
-    8. Updates final job status.
-    """
+    """Execute a complete scrape job."""
     try:
-        started_at = datetime.now(timezone.utc)
-        config = load_config(config_yaml)
-        job = await job_store.get_job(job_id)
-
-        settings = get_settings()
-        adaptive_dir = str(Path(settings.adaptive_dir) / config.project)
-        if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
-            logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+        context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
+        if context is None:
             return
 
-        job = job.model_copy(update={
-            "status": JobStatus.running,
-            "updated_at": started_at,
-        })
-        await job_store.update_job_status(job)
-
-        if run_id is not None:
-            config_hash = hashlib.sha256(
-                config_yaml.encode()
-            ).hexdigest()
-            async with get_db("jobs.db") as db:
-                await db.execute(
-                    """INSERT INTO job_runs
-                       (run_id, job_id, status, trigger,
-                        config_hash, started_at)
-                       VALUES (?, ?, 'running', ?, ?, ?)""",
-                    (
-                        run_id, job_id, trigger,
-                        config_hash,
-                        started_at.isoformat(),
-                    ),
-                )
-                await db.commit()
-
-        targets = config.resolved_targets()
-        concurrency = config.execution.concurrency
-        delay_between = config.execution.delay_between
-        domain_rate_limit = config.execution.domain_rate_limit
-
-        all_results: list[TargetResult] = []
-        all_errors: list[str] = []
-        sem = asyncio.Semaphore(concurrency)
-        validator = ResultValidator(config.validation)
-
-        async def _apply_validation(
-            target_cfg: Any,
-            domain: str,
-            adaptive: bool,
-            result: TargetResult,
-            pending_errors: list[ErrorRecord],
-            *,
-            attempt: int = 1,
-            proxy_url: str | None = None,
-        ) -> TargetResult:
-            if result.status != "success":
-                return result
-
-            validation = validator.validate(result.data)
-            if validation.passed:
-                return result
-
-            action = ActionTaken(validation.action.value)
-            pending_errors.append(_build_error_record(
-                job_id,
-                run_id or "",
-                config.project,
-                target_cfg.url,
-                attempt,
-                ErrorType.content_empty,
-                None,
-                target_cfg.fetcher.value,
-                action,
-            ))
-
-            if validation.action == OnEmptyAction.warn:
-                logger.warning("Validation warning for %s: %s", target_cfg.url, validation.message)
-                result.errors.append(validation.message)
-                return result
-
-            if validation.action == OnEmptyAction.skip:
-                logger.info("Skipping invalid result for %s: %s", target_cfg.url, validation.message)
-                return TargetResult(
-                    url=target_cfg.url,
-                    status="success",
-                    data=[],
-                    errors=[validation.message],
-                    pages_scraped=result.pages_scraped,
-                )
-
-            if validation.action == OnEmptyAction.fail:
-                logger.info("Failing target %s due to validation: %s", target_cfg.url, validation.message)
-                return TargetResult(
-                    url=target_cfg.url,
-                    status="failed",
-                    data=[],
-                    errors=[validation.message],
-                    pages_scraped=result.pages_scraped,
-                )
-
-            logger.info("Retrying target %s after validation failure: %s", target_cfg.url, validation.message)
-            retry_result = await scrape_target(
-                target_cfg,
-                adaptive,
-                config.retry,
-                adaptive_dir=adaptive_dir,
-                proxy_url=proxy_url,
-            )
-            if retry_result.status != "success":
-                logger.info("Recording failure for domain %s after validation retry", domain)
-                circuit_breaker.record_failure(domain)
-                for _ in retry_result.errors:
-                    pending_errors.append(_build_error_record(
-                        job_id,
-                        run_id or "",
-                        config.project,
-                        target_cfg.url,
-                        attempt + 1,
-                        ErrorType.http_error,
-                        None,
-                        target_cfg.fetcher.value,
-                        ActionTaken.fail,
-                    ))
-                return retry_result
-
-            circuit_breaker.record_success(domain)
-            retry_validation = validator.validate(retry_result.data)
-            if retry_validation.passed:
-                return retry_result
-
-            pending_errors.append(_build_error_record(
-                job_id,
-                run_id or "",
-                config.project,
-                target_cfg.url,
-                attempt + 1,
-                ErrorType.content_empty,
-                None,
-                target_cfg.fetcher.value,
-                ActionTaken.fail,
-            ))
-            return TargetResult(
-                url=target_cfg.url,
-                status="failed",
-                data=[],
-                errors=[retry_validation.message],
-                pages_scraped=retry_result.pages_scraped,
-            )
-
-        async def _process_target(target_cfg: Any) -> TargetResult:
-            pending_errors: list[ErrorRecord] = []
-            try:
-                async with sem:
-                    domain = urlparse(target_cfg.url).netloc
-
-                    # Circuit breaker check.
-                    try:
-                        circuit_breaker.check(domain)
-                    except CircuitOpenError as exc:
-                        logger.info("Circuit breaker open for %s", domain)
-                        tr = TargetResult(url=target_cfg.url, status="failed", errors=[str(exc)])
-                        pending_errors.append(_build_error_record(
-                            job_id,
-                            run_id or "",
-                            config.project,
-                            target_cfg.url,
-                            0,
-                            ErrorType.network_error,
-                            None,
-                            "circuit_breaker",
-                            ActionTaken.circuit_break,
-                        ))
-                        return tr
-
-                    # Domain rate limiting (shared across jobs when Redis-backed).
-                    await rate_limiter.acquire(domain, domain_rate_limit)
-
-                    # Spec 6.1: adaptive defaults to True for scheduled jobs, False for on-demand.
-                    if config.adaptive is not None:
-                        adaptive = config.adaptive
-                    else:
-                        adaptive = config.schedule is not None
-
-                    # Resolve proxy for this target.
-                    proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
-
-                    if proxy_url:
-                        logger.info(
-                            "Scraping %s with fetcher=%s adaptive=%s proxy=%s",
-                            target_cfg.url, target_cfg.fetcher.value, adaptive,
-                            redact_proxy_url(proxy_url),
-                        )
-                    else:
-                        logger.info(
-                            "Scraping %s with fetcher=%s adaptive=%s",
-                            target_cfg.url, target_cfg.fetcher.value, adaptive,
-                        )
-                    result = await scrape_target(
-                        target_cfg, adaptive, config.retry,
-                        adaptive_dir=adaptive_dir, proxy_url=proxy_url,
-                    )
-
-                    if result.status == "success":
-                        circuit_breaker.record_success(domain)
-                        result = await _apply_validation(
-                            target_cfg,
-                            domain,
-                            adaptive,
-                            result,
-                            pending_errors,
-                            proxy_url=proxy_url,
-                        )
-                    else:
-                        logger.warning(
-                            "Recording failure for domain %s type=%s status=%s detail=%s",
-                            domain,
-                            result.error_type.value if result.error_type else ErrorType.http_error.value,
-                            result.http_status,
-                            result.error_detail or "; ".join(result.errors) or "unknown error",
-                        )
-                        circuit_breaker.record_failure(domain)
-                        for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
-                            pending_errors.append(_build_error_record(
-                                job_id,
-                                run_id or "",
-                                config.project,
-                                target_cfg.url,
-                                1,
-                                result.error_type or ErrorType.http_error,
-                                result.http_status,
-                                target_cfg.fetcher.value,
-                                ActionTaken.fail,
-                                error_message=err_msg,
-                            ))
-
-                    return result
-            finally:
-                await _flush_errors(error_store, pending_errors)
-
-        # Process targets with delay_between staggering.
-        tasks: list[asyncio.Task] = []
-        for i, t in enumerate(targets):
-            if i > 0 and delay_between > 0:
-                await asyncio.sleep(delay_between)
-            tasks.append(asyncio.create_task(_process_target(t)))
-
-        for task in tasks:
-            tr = await task
-            all_results.append(tr)
-            all_errors.extend(tr.errors)
-
-        flat_data: list[dict[str, Any]] = []
-        for tr in all_results:
-            flat_data.extend(tr.data)
-
-        # Determine final status based on fail_strategy.
-        failed_count = sum(1 for r in all_results if r.status == "failed")
-        fail_strategy = config.execution.fail_strategy
-
-        if fail_strategy == FailStrategy.all_or_nothing:
-            if failed_count > 0:
-                final_status = JobStatus.failed
-                flat_data.clear()  # Discard all results.
-            else:
-                final_status = JobStatus.complete
-        elif fail_strategy == FailStrategy.continue_:
-            if flat_data:
-                final_status = JobStatus.complete
-            else:
-                final_status = JobStatus.failed
-        else:
-            # FailStrategy.partial (default / current behavior).
-            if failed_count == len(all_results) or not flat_data:
-                final_status = JobStatus.failed
-            elif failed_count > 0:
-                final_status = JobStatus.partial
-            else:
-                final_status = JobStatus.complete
-
-        # Format and save results if we have data.
-        save_meta = None
-        if flat_data:
-            latest_job = await job_store.get_job(job_id)
-            if _run_superseded(latest_job, run_id):
-                logger.info(
-                    "Skipping result save for superseded job_id=%s run_id=%s",
-                    job_id, run_id,
-                )
-                return
-            job_meta = {
-                "project": config.project,
-                "name": config.name,
-                "job_id": job_id,
-                "status": final_status.value,
-                "completed_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-                "errors": all_errors,
-            }
-            group_by = config.output.group_by
-
-            if group_by == GroupBy.merge:
-                merged: list[Any] = []
-                for tr in all_results:
-                    for item in tr.data:
-                        if isinstance(item, dict):
-                            item["_source"] = urlparse(
-                                tr.url
-                            ).netloc
-                        merged.append(item)
-                output_data = {**job_meta, "results": merged}
-            else:
-                grouped: dict[str, Any] = {}
-                for tr in all_results:
-                    if not tr.data:
-                        continue
-                    domain = urlparse(tr.url).netloc
-                    grouped[domain] = {
-                        "status": tr.status,
-                        "count": len(tr.data),
-                        "data": tr.data,
-                    }
-                output_data = {
-                    **job_meta, "results": grouped,
-                }
-            save_meta = await result_store.save_result(
-                job_id,
-                output_data,
-                run_id=run_id,
-                status=final_status.value,
-                record_count=len(flat_data),
-            )
-
-        # Finalize run row.
-        if run_id is not None:
-            async with get_db("errors.db") as db:
-                cursor = await db.execute(
-                    "SELECT COUNT(*) FROM errors "
-                    "WHERE run_id = ?",
-                    (run_id,),
-                )
-                error_count = (await cursor.fetchone())[0]
-
-            async with get_db("jobs.db") as db:
-                await db.execute(
-                    """UPDATE job_runs
-                       SET status = ?, completed_at = ?,
-                           record_count = ?, error_count = ?
-                       WHERE run_id = ?""",
-                    (
-                        final_status.value,
-                        datetime.now(timezone.utc).isoformat(),
-                        len(flat_data),
-                        error_count,
-                        run_id,
-                    ),
-                )
-                await db.commit()
-
-        # Webhook dispatch (fire-and-forget).
-        completed_at = datetime.now(timezone.utc)
-        latest_job = await job_store.get_job(job_id)
-        if _run_superseded(latest_job, run_id):
-            logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+        await _mark_run_started(context, job_id, run_id, trigger, config_yaml, job_store)
+        all_results = await _process_job_targets(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            circuit_breaker=circuit_breaker,
+            rate_limiter=rate_limiter,
+            error_store=error_store,
+        )
+        persisted = await _persist_job_results(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            all_results=all_results,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+        )
+        if persisted is None:
             return
 
-        if webhook_dispatcher is not None and config.webhook is not None and should_fire(config.webhook, final_status):
-            payload = build_webhook_payload(
-                job_id=job_id,
-                project=config.project,
-                name=config.name,
-                status=final_status,
-                run_id=save_meta.run_id if save_meta else None,
-                result_path=save_meta.file_path if save_meta else None,
-                result_count=save_meta.record_count if save_meta else 0,
-                error_count=len(all_errors),
-                started_at=started_at.isoformat(),
-                completed_at=completed_at.isoformat(),
-            )
-            asyncio.create_task(webhook_dispatcher.dispatch(config.webhook, payload))
-
-        # Update job status.
-        job = await job_store.get_job(job_id)
-        job = job.model_copy(update={
-            "status": final_status,
-            "updated_at": completed_at,
-            "current_run_id": run_id,
-        })
-        await job_store.update_job_status(job)
+        await _finalize_job_execution(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            persisted=persisted,
+            job_store=job_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
     except Exception:
         logger.exception("scrape_task crashed for job_id=%s", job_id)
+        await handle_crash(job_id, run_id, job_store)
+
+
+async def _load_job_execution_context(
+    job_id: str,
+    config_yaml: str,
+    run_id: str | None,
+    job_store: JobStore,
+) -> JobExecutionContext | None:
+    started_at = utc_now()
+    config = load_config(config_yaml)
+    job = await job_store.get_job(job_id)
+    settings = get_settings()
+    adaptive_dir, run_artifacts_dir = build_run_paths(
+        settings,
+        config.project,
+        job.name,
+        run_id,
+    )
+    if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
+        logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+        return None
+    return JobExecutionContext(
+        config=config,
+        job=job,
+        settings=settings,
+        started_at=started_at,
+        adaptive_dir=adaptive_dir,
+        run_artifacts_dir=run_artifacts_dir,
+    )
+
+
+async def _mark_run_started(
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    trigger: str,
+    config_yaml: str,
+    job_store: JobStore,
+) -> None:
+    await mark_job_running(job_store, context.job, context.started_at)
+    await create_run_record(
+        job_store,
+        run_id=run_id,
+        job_id=job_id,
+        trigger=trigger,
+        config_yaml=config_yaml,
+        started_at=context.started_at,
+    )
+
+
+async def _process_job_targets(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    circuit_breaker: CircuitBreaker,
+    rate_limiter: DomainRateLimiter,
+    error_store: ErrorStore,
+) -> list[TargetResult]:
+    return await _process_all_targets(
+        config=context.config,
+        job_id=job_id,
+        run_id=run_id,
+        adaptive_dir=context.adaptive_dir,
+        run_artifacts_dir=context.run_artifacts_dir,
+        settings=context.settings,
+        circuit_breaker=circuit_breaker,
+        rate_limiter=rate_limiter,
+        error_store=error_store,
+    )
+
+
+async def _persist_job_results(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    all_results: list[TargetResult],
+    job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
+) -> PersistedJobResult | None:
+    flat_data, all_errors = _collect_result_payload(all_results)
+    final_status = _determine_final_status(context.config, all_results, flat_data)
+    if final_status == JobStatus.failed and context.config.execution.fail_strategy == FailStrategy.all_or_nothing:
+        flat_data.clear()
+
+    latest_job = await job_store.get_job(job_id)
+    if _run_superseded(latest_job, run_id):
+        logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
+        return None
+
+    output_data = _format_output(context.config, all_results, flat_data, job_id, final_status, all_errors)
+    save_meta = await save_run_result(
+        job_id=job_id,
+        run_id=run_id,
+        result_store=result_store,
+        output_data=output_data,
+        final_status=final_status,
+        record_count=len(flat_data),
+    )
+    await finalize_run(run_id, final_status, len(flat_data), job_store, error_store)
+    return PersistedJobResult(
+        final_status=final_status,
+        flat_data=flat_data,
+        all_errors=all_errors,
+        save_meta=save_meta,
+    )
+
+
+async def _finalize_job_execution(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str | None,
+    persisted: PersistedJobResult,
+    job_store: JobStore,
+    webhook_dispatcher: WebhookDispatcher | None,
+) -> None:
+    completed_at = utc_now()
+    latest_job = await job_store.get_job(job_id)
+    if _run_superseded(latest_job, run_id):
+        logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+        return
+
+    await dispatch_webhook(
+        webhook_dispatcher=webhook_dispatcher,
+        config=context.config,
+        job_id=job_id,
+        final_status=persisted.final_status,
+        save_meta=persisted.save_meta,
+        all_errors=persisted.all_errors,
+        started_at=context.started_at,
+        completed_at=completed_at,
+    )
+    await update_job_completion(job_store, latest_job, persisted.final_status, completed_at, run_id)
+
+
+async def _process_all_targets(
+    *,
+    config: ScrapeConfig,
+    job_id: str,
+    run_id: str | None,
+    adaptive_dir: str,
+    run_artifacts_dir: str | None,
+    settings: Any,
+    circuit_breaker: CircuitBreaker,
+    rate_limiter: DomainRateLimiter,
+    error_store: ErrorStore,
+) -> list[TargetResult]:
+    """Dispatch all targets with concurrency, delay, and rate limiting."""
+    targets = config.resolved_targets()
+    sem = asyncio.Semaphore(config.execution.concurrency)
+    validator = ResultValidator(config.validation)
+
+    async def _process_one(target_cfg: TargetConfig) -> TargetResult:
+        pending_errors: list[ErrorRecord] = []
         try:
-            job = await job_store.get_job(job_id)
-            job = job.model_copy(update={
-                "status": JobStatus.failed,
-                "updated_at": datetime.now(timezone.utc),
-            })
-            await job_store.update_job_status(job)
-        except Exception:
-            logger.exception("Failed to mark job %s as failed", job_id)
-        if run_id is not None:
-            try:
-                async with get_db("jobs.db") as db:
-                    await db.execute(
-                        """UPDATE job_runs
-                           SET status = 'failed',
-                               completed_at = ?
-                           WHERE run_id = ?
-                             AND status = 'running'""",
-                        (
-                            datetime.now(
-                                timezone.utc
-                            ).isoformat(),
-                            run_id,
-                        ),
-                    )
-                    await db.commit()
-            except Exception:
-                logger.exception(
-                    "Failed to finalize run %s", run_id,
+            async with sem:
+                return await _fetch_and_validate_target(
+                    target_cfg=target_cfg,
+                    config=config,
+                    job_id=job_id,
+                    run_id=run_id,
+                    adaptive_dir=adaptive_dir,
+                    run_artifacts_dir=run_artifacts_dir,
+                    settings=settings,
+                    circuit_breaker=circuit_breaker,
+                    rate_limiter=rate_limiter,
+                    validator=validator,
+                    pending_errors=pending_errors,
                 )
+        finally:
+            await _flush_errors(error_store, pending_errors)
+
+    tasks: list[asyncio.Task[TargetResult]] = []
+    for i, target_cfg in enumerate(targets):
+        if i > 0 and config.execution.delay_between > 0:
+            await asyncio.sleep(config.execution.delay_between)
+        tasks.append(asyncio.create_task(_process_one(target_cfg)))
+
+    all_results: list[TargetResult] = []
+    for task in tasks:
+        all_results.append(await task)
+    return all_results
+
+
+async def _fetch_and_validate_target(
+    *,
+    target_cfg: TargetConfig,
+    config: ScrapeConfig,
+    job_id: str,
+    run_id: str | None,
+    adaptive_dir: str,
+    run_artifacts_dir: str | None,
+    settings: Any,
+    circuit_breaker: CircuitBreaker,
+    rate_limiter: DomainRateLimiter,
+    validator: ResultValidator,
+    pending_errors: list[ErrorRecord],
+) -> TargetResult:
+    """Fetch a single target and run validation. Returns the result."""
+    runtime = resolve_target_runtime_context(
+        target_cfg=target_cfg,
+        config=config,
+        settings=settings,
+        run_artifacts_dir=run_artifacts_dir,
+    )
+    circuit_open = await guard_target_execution(
+        runtime=runtime,
+        config=config,
+        target_cfg=target_cfg,
+        job_id=job_id,
+        run_id=run_id,
+        circuit_breaker=circuit_breaker,
+        rate_limiter=rate_limiter,
+        pending_errors=pending_errors,
+    )
+    if circuit_open is not None:
+        return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
+
+    log_target_fetch(target_cfg, runtime)
+    result = await scrape_target(
+        target_cfg,
+        runtime.adaptive,
+        config.retry,
+        adaptive_dir=adaptive_dir,
+        proxy_url=runtime.proxy_url,
+        artifacts_dir=runtime.artifacts_dir,
+    )
+
+    if result.status is not TargetStatus.success:
+        record_failed_target(
+            runtime=runtime,
+            result=result,
+            pending_errors=pending_errors,
+            config=config,
+            target_cfg=target_cfg,
+            job_id=job_id,
+            run_id=run_id,
+            circuit_breaker=circuit_breaker,
+        )
+        return result
+
+    circuit_breaker.record_success(runtime.domain)
+    return await apply_validation(
+        target_cfg=target_cfg,
+        domain=runtime.domain,
+        adaptive=runtime.adaptive,
+        result=result,
+        pending_errors=pending_errors,
+        config=config,
+        adaptive_dir=adaptive_dir,
+        run_artifacts_dir=run_artifacts_dir,
+        job_id=job_id,
+        run_id=run_id,
+        circuit_breaker=circuit_breaker,
+        validator=validator,
+        scrape=scrape_target,
+        proxy_url=runtime.proxy_url,
+    )
+
+
+def _collect_result_payload(all_results: list[TargetResult]) -> tuple[list[dict[str, Any]], list[str]]:
+    flat_data: list[dict[str, Any]] = []
+    all_errors: list[str] = []
+    for target_result in all_results:
+        flat_data.extend(target_result.data)
+        all_errors.extend(target_result.errors)
+    return flat_data, all_errors
+
+
+def _determine_final_status(
+    config: ScrapeConfig,
+    all_results: list[TargetResult],
+    flat_data: list[dict[str, Any]],
+) -> JobStatus:
+    """Determine the final job status based on results and fail_strategy."""
+    failed_count = sum(1 for result in all_results if result.status is TargetStatus.failed)
+    fail_strategy = config.execution.fail_strategy
+
+    if fail_strategy == FailStrategy.all_or_nothing:
+        if failed_count > 0:
+            return JobStatus.failed
+        return JobStatus.complete
+    if fail_strategy == FailStrategy.continue_:
+        return JobStatus.complete if flat_data else JobStatus.failed
+    if failed_count == len(all_results) or not flat_data:
+        return JobStatus.failed
+    if failed_count > 0:
+        return JobStatus.partial
+    return JobStatus.complete
+
+
+def _format_output(
+    config: ScrapeConfig,
+    all_results: list[TargetResult],
+    flat_data: list[dict[str, Any]],
+    job_id: str,
+    final_status: JobStatus,
+    all_errors: list[str],
+) -> dict[str, Any]:
+    """Build the output data dict for result storage."""
+    job_meta: dict[str, Any] = {
+        "project": config.project,
+        "name": config.name,
+        "job_id": job_id,
+        "status": final_status.value,
+        "completed_at": utc_now().isoformat(),
+        "errors": all_errors,
+        "targets": [
+            {
+                "url": result.url,
+                "status": result.status_value,
+                "count": len(result.data),
+                "pages_scraped": result.pages_scraped,
+                "error_type": result.error_type.value if result.error_type else None,
+                "error_detail": result.error_detail,
+                "errors": result.errors,
+                "debug": result.debug,
+            }
+            for result in all_results
+        ],
+    }
+
+    if config.output.group_by == GroupBy.merge:
+        merged: list[Any] = []
+        for result in all_results:
+            for item in result.data:
+                if isinstance(item, dict):
+                    item["_source"] = urlparse(result.url).netloc
+                merged.append(item)
+        return {**job_meta, "results": merged}
+
+    grouped: dict[str, Any] = {}
+    for result in all_results:
+        domain = urlparse(result.url).netloc
+        grouped[domain] = {
+            "status": result.status_value,
+            "count": len(result.data),
+            "data": result.data,
+            "debug": result.debug,
+            "error_type": result.error_type.value if result.error_type else None,
+            "error_detail": result.error_detail,
+        }
+    return {**job_meta, "results": grouped}
 
 
 def _run_superseded(job: Any, run_id: str | None) -> bool:
@@ -487,50 +469,20 @@ def _should_skip_delivery(
 ) -> bool:
     if _run_superseded(job, run_id):
         return True
-
     if job.status in {JobStatus.complete, JobStatus.partial, JobStatus.failed}:
         return run_id is None or job.current_run_id == run_id
-
     if job.status != JobStatus.running:
         return False
-
     if job.updated_at is None:
         return False
-
-    lease_age = (now - job.updated_at).total_seconds()
+    updated_at = cast(datetime, job.updated_at)
+    lease_age = (now - updated_at).total_seconds()
     return lease_age < running_lease_seconds
 
 
-def _build_error_record(
-    job_id: str,
-    run_id: str,
-    project: str,
-    url: str,
-    attempt: int,
-    error_type: ErrorType,
-    http_status: int | None,
-    fetcher_used: str,
-    action: ActionTaken,
-    error_message: str | None = None,
-) -> ErrorRecord:
-    """Build a structured error record for deferred persistence."""
-    return ErrorRecord(
-        job_id=job_id,
-        run_id=run_id,
-        project=project,
-        target_url=url,
-        attempt=attempt,
-        error_type=error_type,
-        http_status=http_status,
-        fetcher_used=fetcher_used,
-        error_message=error_message,
-        action_taken=action,
-    )
-
-
-async def _flush_errors(
-    error_store: ErrorStore, errors: list[ErrorRecord],
-) -> None:
+async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> None:
     if not errors:
         return
     await error_store.log_errors(errors)
+
+

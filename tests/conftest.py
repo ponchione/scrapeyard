@@ -12,42 +12,12 @@ def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_ADAPTIVE_DIR", str(tmp_path / "adaptive"))
 
     from scrapeyard.common.settings import get_settings
-    from scrapeyard.api.dependencies import (
-        get_circuit_breaker,
-        get_error_store,
-        get_job_store,
-        get_result_store,
-        get_scheduler,
-        get_webhook_dispatcher,
-        get_worker_pool,
-        reset_rate_limiter,
-    )
+    from scrapeyard.api.dependencies import reset_cached_dependencies
 
-    # Clear all cached singletons.
-    for cached_fn in [
-        get_settings,
-        get_job_store,
-        get_error_store,
-        get_result_store,
-        get_circuit_breaker,
-        get_webhook_dispatcher,
-        get_worker_pool,
-        get_scheduler,
-    ]:
-        cached_fn.cache_clear()
-    reset_rate_limiter()
+    get_settings.cache_clear()
+    reset_cached_dependencies()
 
     yield
 
-    for cached_fn in [
-        get_settings,
-        get_job_store,
-        get_error_store,
-        get_result_store,
-        get_circuit_breaker,
-        get_webhook_dispatcher,
-        get_worker_pool,
-        get_scheduler,
-    ]:
-        cached_fn.cache_clear()
-    reset_rate_limiter()
+    get_settings.cache_clear()
+    reset_cached_dependencies()

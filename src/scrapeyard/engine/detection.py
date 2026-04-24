@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
-import re
+import logging
 import math
-from typing import Any
+import re
+from typing import Any, cast
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
+
+logger = logging.getLogger(__name__)
 
 _NUMERIC_PRICE_RE = re.compile(
     r"^\s*(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
     r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?:\s*ea)?\s*$",
+    re.IGNORECASE,
+)
+
+_PRICE_RANGE_RE = re.compile(
+    r"^\s*(?:from\s+)?"
+    r"(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
+    r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?"
+    r"(?:\s*(?:-|to)\s*"
+    r"(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
+    r"(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)?"
+    r"(?:\s*ea)?\s*$",
     re.IGNORECASE,
 )
 
@@ -61,51 +75,20 @@ def detect_pricing_visibility(
         return ("unknown", None)
 
     item_text = _get_element_text(element)
+    if _matches_call_for_price(item_text, config.text_patterns):
+        return ("call_for_price", None)
 
-    # Step 1: "call" patterns -> call_for_price
-    for pattern in config.text_patterns:
-        if "call" in pattern.lower() and _text_contains(item_text, pattern):
-            return ("call_for_price", None)
-
-    # Step 2-3: all remaining patterns -> map (with text) or cart_only (without)
-    display_text: str | None = None
-    matched = False
-
-    # Text patterns (skip "call" patterns already handled)
-    for pattern in config.text_patterns:
-        if "call" in pattern.lower():
-            continue
-        if _text_contains(item_text, pattern):
-            matched = True
-            display_text = _extract_display_text(item_text, pattern)
-            break
-
-    # CSS selectors
-    if not matched:
-        for selector in config.css_selectors:
-            hits = _css_select(element, selector)
-            if hits:
-                matched = True
-                for hit in hits:
-                    hit_text = _get_element_text(hit).strip()
-                    if hit_text:
-                        display_text = hit_text
-                        break
-                break
-
-    # Price value patterns (never produce display text)
-    if not matched:
-        price_raw = item_data.get("price")
-        price_str = str(price_raw) if price_raw is not None else ""
-        for pattern in config.price_value_patterns:
-            if pattern == price_str:
-                matched = True
-                break
-
-    if matched:
+    text_matched, display_text = _match_map_text_patterns(item_text, config.text_patterns)
+    if text_matched:
         return ("map", display_text) if display_text else ("cart_only", None)
 
-    # Config exists but nothing matched
+    css_matched, display_text = _match_map_css_selectors(element, config.css_selectors)
+    if css_matched:
+        return ("map", display_text) if display_text else ("cart_only", None)
+
+    if _match_map_price_value(item_data.get("price"), config.price_value_patterns):
+        return ("cart_only", None)
+
     return ("missing", None)
 
 
@@ -151,10 +134,10 @@ def detect_stock_status(
     extracted_signal_text = _normalize_stock_signal_text(item_data.get("stock_signal"))
     if extracted_signal_text:
         for status in _STOCK_PRIORITY:
-            patterns: StockPatternConfig | None = getattr(config, status, None)
-            if patterns is None:
+            extracted_patterns: StockPatternConfig | None = getattr(config, status, None)
+            if extracted_patterns is None:
                 continue
-            if _stock_text_patterns_match(extracted_signal_text, patterns):
+            if _stock_text_patterns_match(extracted_signal_text, extracted_patterns):
                 return status
 
     item_text = _get_element_text(element)
@@ -197,17 +180,52 @@ def _stock_patterns_match(
 
 
 def _is_numeric_price(value: Any) -> bool:
-    """Return True if *value* looks like a numeric price."""
+    """Return True if *value* looks like an explicit numeric price or range."""
     if value is None:
         return False
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
         return math.isfinite(value)
-    s = str(value).strip()
+    s = _normalize_price_text(value)
     if not s:
         return False
-    return _NUMERIC_PRICE_RE.fullmatch(s) is not None
+    return _NUMERIC_PRICE_RE.fullmatch(s) is not None or _PRICE_RANGE_RE.fullmatch(s) is not None
+
+
+def _matches_call_for_price(item_text: str, patterns: list[str]) -> bool:
+    return any("call" in pattern.lower() and _text_contains(item_text, pattern) for pattern in patterns)
+
+
+def _match_map_text_patterns(item_text: str, patterns: list[str]) -> tuple[bool, str | None]:
+    for pattern in patterns:
+        if "call" in pattern.lower():
+            continue
+        if _text_contains(item_text, pattern):
+            return True, _extract_display_text(item_text, pattern)
+    return False, None
+
+
+def _match_map_css_selectors(element: Any, selectors: list[str]) -> tuple[bool, str | None]:
+    for selector in selectors:
+        hits = _css_select(element, selector)
+        if not hits:
+            continue
+        return True, _first_non_empty_element_text(hits)
+    return False, None
+
+
+def _match_map_price_value(price_raw: Any, patterns: list[str]) -> bool:
+    price_str = _normalize_price_text(price_raw)
+    return any(pattern == price_str for pattern in patterns)
+
+
+def _first_non_empty_element_text(elements: list[Any]) -> str | None:
+    for element in elements:
+        element_text = _get_element_text(element)
+        if element_text:
+            return element_text
+    return None
 
 
 def _text_contains(haystack: str, needle: str) -> bool:
@@ -228,25 +246,30 @@ def _get_element_text(element: Any) -> str:
     if element is None:
         return ""
     if isinstance(element, str):
-        return _normalize_text(element)
+        return _clean_element_text(element)
 
     get_all_text = getattr(element, "get_all_text", None)
     if callable(get_all_text):
-        text = _normalize_text(get_all_text())
+        text = _clean_element_text(get_all_text())
         if text:
             return text
 
-    return _normalize_text(getattr(element, "text", None))
+    return _clean_element_text(getattr(element, "text", None))
 
 
-def _normalize_text(value: Any) -> str:
-    """Normalize Scrapling text values into usable strings."""
+def _clean_element_text(value: Any) -> str:
+    """Clean Scrapling element text: strip whitespace, filter 'None' literals."""
     if not isinstance(value, str):
         return ""
     text = value.strip()
     if not text or text == "None":
         return ""
     return text
+
+
+def _normalize_price_text(value: Any) -> str:
+    """Normalize extracted price values into comparable text for detection."""
+    return _normalize_matchable_text(value)
 
 
 def _has_usable_stock_signal(value: Any) -> bool:
@@ -260,10 +283,14 @@ def _has_usable_stock_signal(value: Any) -> bool:
 
 def _normalize_stock_signal_text(value: Any) -> str:
     """Normalize raw extracted stock signal values into matchable text."""
+    return _normalize_matchable_text(value)
+
+
+def _normalize_matchable_text(value: Any) -> str:
     if isinstance(value, str):
-        return _normalize_text(value)
+        return _clean_element_text(value)
     if isinstance(value, (list, tuple)):
-        parts = [_normalize_text(item) for item in value if isinstance(item, str)]
+        parts = [_clean_element_text(item) for item in value if isinstance(item, str)]
         return " ".join(part for part in parts if part)
     return ""
 
@@ -274,6 +301,12 @@ def _css_select(element: Any, selector: str) -> list[Any]:
     if css_fn is None:
         return []
     try:
-        return css_fn(selector)
-    except Exception:
+        return cast(list[Any], css_fn(selector))
+    except Exception as exc:
+        logger.debug(
+            "Suppressing detection CSS selector failure for %s: %s",
+            selector,
+            exc,
+            exc_info=exc,
+        )
         return []

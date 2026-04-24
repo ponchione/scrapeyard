@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
-import asyncio
-from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import ValidationError
+from yaml import YAMLError
 
 from scrapeyard.api.dependencies import (
     get_error_store,
@@ -18,12 +17,31 @@ from scrapeyard.api.dependencies import (
     get_scheduler,
     get_worker_pool,
 )
-from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import ExecutionMode, FetcherType
-from scrapeyard.common.ids import generate_run_id
+from scrapeyard.api.query_parsing import parse_error_filters
+from scrapeyard.api.response_utils import (
+    apply_paginated_list_response,
+    bad_request_error,
+    conflict_error,
+    json_error,
+    json_response,
+    no_content_response,
+    not_found_error,
+    unprocessable_entity_error,
+    unsupported_media_type_error,
+)
+from scrapeyard.api.scrape_submission import submit_scrape_job
+from scrapeyard.api.serializers import (
+    serialize_error_record,
+    serialize_job_created,
+    serialize_job_detail,
+    serialize_job_summary,
+    serialize_results_payload,
+    serialize_scrape_queued,
+    serialize_scrape_result,
+)
 from scrapeyard.common.settings import get_settings
-from scrapeyard.models.job import ErrorFilters, ErrorType, Job, JobStatus
-from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
+from scrapeyard.config.loader import load_config
+from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
@@ -38,51 +56,41 @@ def _is_yaml_request(request: Request) -> bool:
     return media_type == "application/x-yaml"
 
 
-def _should_wait_for_completion(config: Any) -> bool:
-    """Determine if a scrape should wait on queued completion.
-
-    Heuristic: sync if single target AND no pagination AND fetcher is basic.
-    Overridable via execution.mode.
-    """
-    if config.execution.mode == ExecutionMode.sync:
-        return True
-    if config.execution.mode == ExecutionMode.async_:
-        return False
-    # auto mode
-    targets = config.resolved_targets()
-    if len(targets) != 1:
-        return False
-    target = targets[0]
-    if target.pagination is not None:
-        return False
-    if target.fetcher != FetcherType.basic:
-        return False
-    return True
-
-
-def _queued_response(job_id: str) -> Response:
-    return Response(
-        content=_json_encode({
-            "job_id": job_id,
-            "status": "queued",
-            "poll_url": f"/results/{job_id}",
-        }),
-        status_code=202,
-        media_type="application/json",
-    )
-
-
-async def _wait_for_queued_job(
-    queued_job: QueueJobHandle,
-    *,
-    timeout_seconds: int,
-    poll_delay_seconds: float,
-) -> bool:
+async def _read_valid_yaml_config(request: Request) -> tuple[str, Any] | Response:
+    if not _is_yaml_request(request):
+        return unsupported_media_type_error("Content-Type must be application/x-yaml")
     try:
-        await queued_job.result(timeout=timeout_seconds, poll_delay=poll_delay_seconds)
-    except asyncio.TimeoutError:
-        return False
-    return True
+        body = await request.body()
+        config_yaml = body.decode("utf-8")
+        config = load_config(config_yaml)
+    except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
+        return unprocessable_entity_error(f"Invalid config: {exc}")
+    return config_yaml, config
+
+
+def _resolve_admin_read_limit(limit: int | None) -> int:
+    settings = get_settings()
+    resolved_limit = limit or settings.admin_read_default_limit
+    if resolved_limit > settings.admin_read_max_limit:
+        raise ValueError(
+            f"Invalid 'limit': {resolved_limit}. "
+            f"Maximum is {settings.admin_read_max_limit}."
+        )
+    return resolved_limit
+
+
+async def _get_job_or_response(job_store: JobStore, job_id: str) -> Job | Response:
+    try:
+        return await job_store.get_job(job_id)
+    except KeyError:
+        return not_found_error("Job", job_id)
+
+
+def _queued_scrape_response(job_id: str, *, status: str, poll_url: str) -> Response:
+    return json_response(
+        202,
+        serialize_scrape_queued(job_id, status=status, poll_url=poll_url),
+    )
 
 
 @router.post("/scrape")
@@ -90,83 +98,43 @@ async def scrape(
     request: Request,
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
-    worker_pool: WorkerPool = Depends(get_worker_pool),
+    worker_pool=Depends(get_worker_pool),
 ) -> Response:
     """Submit an ad-hoc scrape request."""
-    if not _is_yaml_request(request):
-        return Response(
-            content=_json_encode({"error": "Content-Type must be application/x-yaml"}),
-            status_code=415,
-            media_type="application/json",
-        )
-
-    body = await request.body()
-    config_yaml = body.decode("utf-8")
-    try:
-        config = load_config(config_yaml)
-    except Exception as exc:
-        return Response(
-            content=_json_encode({"error": f"Invalid config: {exc}"}),
-            status_code=422,
-            media_type="application/json",
-        )
-
-    job = Job(
-        job_id=str(uuid.uuid4()),
-        project=config.project,
-        name=f"{config.name}-{uuid.uuid4().hex[:8]}",
-        config_yaml=config_yaml,
-        updated_at=datetime.now(timezone.utc),
-        current_run_id=generate_run_id(),
-    )
-    await job_store.save_job(job)
-
-    has_browser_target = any(
-        t.fetcher != FetcherType.basic for t in config.resolved_targets()
-    )
-    try:
-        queued_job = await worker_pool.enqueue(
-            job.job_id,
-            config_yaml,
-            config.execution.priority.value,
-            needs_browser=has_browser_target,
-            run_id=job.current_run_id,
-            trigger="adhoc",
-        )
-    except MemoryError:
-        logger.warning("Rejecting async scrape job %s due to pool memory pressure", job.job_id)
-        await job_store.delete_job(job.job_id)
-        return Response(
-            content=_json_encode({"error": "Server at capacity — try again later"}),
-            status_code=503,
-            media_type="application/json",
-        )
-
-    if not _should_wait_for_completion(config):
-        return _queued_response(job.job_id)
+    parsed = await _read_valid_yaml_config(request)
+    if isinstance(parsed, Response):
+        return parsed
+    config_yaml, config = parsed
 
     settings = get_settings()
-    completed = await _wait_for_queued_job(
-        queued_job,
-        timeout_seconds=settings.sync_timeout_seconds,
-        poll_delay_seconds=settings.sync_poll_delay_seconds,
-    )
-    if not completed:
-        return _queued_response(job.job_id)
-
     try:
-        payload = await result_store.get_result(job.job_id)
-    except KeyError:
-        payload = None
-    updated_job = await job_store.get_job(job.job_id)
-    return Response(
-        content=_json_encode({
-            "job_id": job.job_id,
-            "status": updated_job.status.value,
-            "results": payload.data if payload else None,
-        }),
-        status_code=200,
-        media_type="application/json",
+        submission = await submit_scrape_job(
+            config_yaml=config_yaml,
+            config=config,
+            job_store=job_store,
+            result_store=result_store,
+            worker_pool=worker_pool,
+            sync_timeout_seconds=settings.sync_timeout_seconds,
+            sync_poll_delay_seconds=settings.sync_poll_delay_seconds,
+        )
+    except MemoryError:
+        logger.warning("Rejecting async scrape due to pool memory pressure")
+        return json_error(503, "Server at capacity — try again later")
+
+    if not submission.completed:
+        return _queued_scrape_response(
+            submission.job_id,
+            status=submission.status,
+            poll_url=f"/results/{submission.job_id}",
+        )
+
+    return json_response(
+        200,
+        serialize_scrape_result(
+            submission.job_id,
+            status=submission.status,
+            results=submission.results,
+        ),
     )
 
 
@@ -175,25 +143,15 @@ async def create_job(
     request: Request,
     job_store: JobStore = Depends(get_job_store),
     scheduler: SchedulerService = Depends(get_scheduler),
-):
+) -> Any:
     """Create a scheduled job. Requires a schedule block in the config."""
-    body = await request.body()
-    config_yaml = body.decode("utf-8")
-    try:
-        config = load_config(config_yaml)
-    except Exception as exc:
-        return Response(
-            content=_json_encode({"error": f"Invalid config: {exc}"}),
-            status_code=422,
-            media_type="application/json",
-        )
+    parsed = await _read_valid_yaml_config(request)
+    if isinstance(parsed, Response):
+        return parsed
+    config_yaml, config = parsed
 
     if config.schedule is None:
-        return Response(
-            content=_json_encode({"error": "A 'schedule' block is required for POST /jobs"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return bad_request_error("A 'schedule' block is required for POST /jobs")
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -206,44 +164,30 @@ async def create_job(
     try:
         await job_store.save_job(job)
     except DuplicateJobError as exc:
-        return Response(
-            content=_json_encode({
-                "error": (
-                    f"Job name {exc.name!r} already exists in project {exc.project!r}"
-                )
-            }),
-            status_code=409,
-            media_type="application/json",
-        )
+        return conflict_error(f"Job name {exc.name!r} already exists in project {exc.project!r}")
+
     scheduler.register_job(job.job_id, config.schedule.cron, enabled=config.schedule.enabled)
-    return {
-        "job_id": job.job_id,
-        "project": config.project,
-        "name": config.name,
-        "schedule": config.schedule.cron,
-    }
+    return serialize_job_created(job)
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=None)
 async def list_jobs(
-    project: Optional[str] = Query(None),
+    response: Response,
+    project: str | None = Query(None),
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
     job_store: JobStore = Depends(get_job_store),
-) -> list[dict[str, Any]]:
+) -> Any:
     """List jobs, optionally filtered by project."""
-    rows = await job_store.list_jobs_with_stats(project)
+    try:
+        resolved_limit = _resolve_admin_read_limit(limit)
+    except ValueError as exc:
+        return bad_request_error(str(exc))
+
+    rows = await job_store.list_jobs_with_stats(project, limit=resolved_limit + 1, offset=offset)
+    rows = apply_paginated_list_response(response, rows=rows, limit=resolved_limit, offset=offset)
     return [
-        {
-            "job_id": job.job_id,
-            "project": job.project,
-            "name": job.name,
-            "status": job.status.value,
-            "created_at": job.created_at.isoformat(),
-            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
-            "schedule_cron": job.schedule_cron,
-            "schedule_enabled": job.schedule_enabled,
-            "run_count": run_count,
-            "last_run_at": last_run_at.isoformat() if last_run_at else None,
-        }
+        serialize_job_summary(job, run_count=run_count, last_run_at=last_run_at)
         for job, run_count, last_run_at in rows
     ]
 
@@ -253,48 +197,22 @@ async def get_job(
     job_id: str,
     job_store: JobStore = Depends(get_job_store),
     scheduler: SchedulerService = Depends(get_scheduler),
-):
+) -> Any:
     """Get a single job by ID."""
-    try:
-        job = await job_store.get_job(job_id)
-    except KeyError:
-        return Response(
-            content=_json_encode({"error": f"Job {job_id!r} not found"}),
-            status_code=404,
-            media_type="application/json",
-        )
+    job = await _get_job_or_response(job_store, job_id)
+    if isinstance(job, Response):
+        return job
 
     runs = await job_store.get_job_runs(job_id, limit=10)
     run_count, last_run_at = await job_store.get_job_run_stats(job_id)
     next_run_at = scheduler.get_next_run_time(job_id)
-
-    return {
-        "job_id": job.job_id,
-        "project": job.project,
-        "name": job.name,
-        "status": job.status.value,
-        "config_yaml": job.config_yaml,
-        "created_at": job.created_at.isoformat(),
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
-        "schedule_cron": job.schedule_cron,
-        "schedule_enabled": job.schedule_enabled,
-        "next_run_at": next_run_at.isoformat() if next_run_at else None,
-        "run_count": run_count,
-        "last_run_at": last_run_at.isoformat() if last_run_at else None,
-        "runs": [
-            {
-                "run_id": r.run_id,
-                "status": r.status.value,
-                "trigger": r.trigger,
-                "config_hash": r.config_hash,
-                "started_at": r.started_at.isoformat(),
-                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-                "record_count": r.record_count,
-                "error_count": r.error_count,
-            }
-            for r in runs
-        ],
-    }
+    return serialize_job_detail(
+        job,
+        runs=runs,
+        run_count=run_count,
+        last_run_at=last_run_at,
+        next_run_at=next_run_at,
+    )
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
@@ -303,123 +221,78 @@ async def delete_job(
     delete_results: bool = Query(False),
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
+    error_store: ErrorStore = Depends(get_error_store),
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Response:
     """Delete a job by ID."""
+    job = await _get_job_or_response(job_store, job_id)
+    if isinstance(job, Response):
+        return job
+
     scheduler.remove_job(job_id)
     if delete_results:
         await result_store.delete_results(job_id)
+    await error_store.delete_errors_for_job(job_id)
     await job_store.delete_job(job_id)
-    return Response(status_code=204)
+    return no_content_response()
 
 
 @router.get("/results/{job_id}", response_model=None)
 async def get_results(
     job_id: str,
     latest: bool = Query(True),
-    run_id: Optional[str] = Query(None),
+    run_id: str | None = Query(None),
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
-):
+) -> Any:
     """Get results for a job."""
-    # Check job exists.
-    try:
-        job = await job_store.get_job(job_id)
-    except KeyError:
-        return Response(
-            content=_json_encode({"error": f"Job {job_id!r} not found"}),
-            status_code=404,
-            media_type="application/json",
-        )
+    job = await _get_job_or_response(job_store, job_id)
+    if isinstance(job, Response):
+        return job
 
-    # If job is still running, return 202.
     if job.status in (JobStatus.queued, JobStatus.running):
-        return Response(
-            content=_json_encode({
-                "job_id": job_id,
-                "status": job.status.value,
-                "poll_url": f"/jobs/{job_id}",
-            }),
-            status_code=202,
-            media_type="application/json",
-        )
+        return _queued_scrape_response(job_id, status=job.status.value, poll_url=f"/jobs/{job_id}")
 
     if run_id is None and not latest:
-        return Response(
-            content=_json_encode({"error": "Provide run_id when latest=false"}),
-            status_code=400,
-            media_type="application/json",
-        )
+        return bad_request_error("Provide run_id when latest=false")
 
     try:
         payload = await result_store.get_result(job_id, run_id=run_id)
     except KeyError:
-        return Response(
-            content=_json_encode({"error": f"No results found for job {job_id!r}"}),
-            status_code=404,
-            media_type="application/json",
-        )
+        return json_error(404, f"No results found for job {job_id!r}")
 
-    return {
-        "job_id": job_id,
-        "run_id": payload.run_id,
-        "status": job.status.value,
-        "results": payload.data,
-    }
+    return serialize_results_payload(
+        job_id,
+        run_id=payload.run_id,
+        status=job.status.value,
+        results=payload.data,
+    )
 
 
-@router.get("/errors")
+@router.get("/errors", response_model=None)
 async def get_errors(
-    project: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    since: Optional[str] = Query(None),
-    error_type: Optional[str] = Query(None),
+    response: Response,
+    project: str | None = Query(None),
+    job_id: str | None = Query(None),
+    since: str | None = Query(None),
+    error_type: str | None = Query(None),
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
     error_store: ErrorStore = Depends(get_error_store),
-):
+) -> Any:
     """Query error records with optional filters."""
     try:
-        since_dt = datetime.fromisoformat(since) if since else None
-    except ValueError:
-        return Response(
-            content=_json_encode({"error": f"Invalid 'since' format: {since!r}"}),
-            status_code=400,
-            media_type="application/json",
-        )
-    try:
-        error_type_enum = ErrorType(error_type) if error_type else None
-    except ValueError:
-        return Response(
-            content=_json_encode({"error": f"Invalid 'error_type': {error_type!r}"}),
-            status_code=400,
-            media_type="application/json",
-        )
-
-    filters = ErrorFilters(
+        resolved_limit = _resolve_admin_read_limit(limit)
+    except ValueError as exc:
+        return bad_request_error(str(exc))
+    filters = parse_error_filters(
         project=project,
         job_id=job_id,
-        since=since_dt,
-        error_type=error_type_enum,
+        since=since,
+        error_type=error_type,
     )
-    errors = await error_store.query_errors(filters)
-    return [
-        {
-            "job_id": e.job_id,
-            "run_id": e.run_id,
-            "project": e.project,
-            "target_url": e.target_url,
-            "attempt": e.attempt,
-            "timestamp": e.timestamp.isoformat(),
-            "error_type": e.error_type.value,
-            "http_status": e.http_status,
-            "fetcher_used": e.fetcher_used,
-            "error_message": e.error_message,
-            "selectors_matched": e.selectors_matched,
-            "action_taken": e.action_taken.value,
-            "resolved": e.resolved,
-        }
-        for e in errors
-    ]
-
-
-def _json_encode(data: Any) -> bytes:
-    return json.dumps(data).encode("utf-8")
+    if isinstance(filters, Response):
+        return filters
+    errors = await error_store.query_errors(filters, limit=resolved_limit + 1, offset=offset)
+    errors = apply_paginated_list_response(response, rows=errors, limit=resolved_limit, offset=offset)
+    return [serialize_error_record(error) for error in errors]

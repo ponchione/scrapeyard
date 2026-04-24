@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,16 @@ def _mock_element(text: str = "", css_results: dict[str, list] | None = None):
 
     el.css.side_effect = _css_side_effect
     return el
+
+
+def _adaptor_element(html: str, selector: str):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The 'strip_cdata' option of HTMLParser\(\) has never done anything and will eventually be removed\.",
+            category=DeprecationWarning,
+        )
+        return Adaptor(html).css(selector)[0]
 
 
 class TestDetectPricingVisibilityExplicit:
@@ -69,6 +80,18 @@ class TestDetectPricingVisibilityExplicit:
 
     def test_per_unit_price_returns_explicit(self):
         item = {"price": "299.99 ea"}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_tokenized_price_array_returns_explicit(self):
+        item = {"price": ["$", "99.99"], "original_price": ["$", "259.99"]}
+        vis, text = detect_pricing_visibility(item, _mock_element(), None)
+        assert vis == "explicit"
+        assert text is None
+
+    def test_tokenized_price_range_returns_explicit(self):
+        item = {"price": ["From", "$", "99.99", "to", "$", "129.99"]}
         vis, text = detect_pricing_visibility(item, _mock_element(), None)
         assert vis == "explicit"
         assert text is None
@@ -201,7 +224,7 @@ class TestDetectPricingVisibilityMap:
 
     def test_text_pattern_uses_descendant_text_on_real_adaptor(self):
         html = '<div class="product"><span class="map-copy">Add to Cart to See Price</span></div>'
-        el = Adaptor(html).css(".product")[0]
+        el = _adaptor_element(html, ".product")
         config = MapDetectionConfig(text_patterns=["add to cart to see price"])
         item = {"price": None}
         vis, text = detect_pricing_visibility(item, el, config)
@@ -251,6 +274,14 @@ class TestDetectPricingVisibilityCartOnly:
     def test_empty_string_price_value_pattern(self):
         config = MapDetectionConfig(price_value_patterns=[""])
         item = {"price": ""}
+        el = _mock_element(text="")
+        vis, text = detect_pricing_visibility(item, el, config)
+        assert vis == "cart_only"
+        assert text is None
+
+    def test_tokenized_hidden_price_value_pattern_returns_cart_only(self):
+        config = MapDetectionConfig(price_value_patterns=["see price in cart"])
+        item = {"price": ["see", "price", "in", "cart"]}
         el = _mock_element(text="")
         vis, text = detect_pricing_visibility(item, el, config)
         assert vis == "cart_only"
@@ -354,6 +385,14 @@ class TestDetectStockStatus:
         el = _mock_element(text="")
         assert detect_stock_status(item, el, config) == "limited_stock"
 
+    def test_tuple_stock_signal_ignores_empty_parts_and_non_strings(self):
+        config = StockDetectionConfig(
+            limited_stock=StockPatternConfig(text_patterns=["low stock"]),
+        )
+        item = {"stock_signal": ("", "Low Stock", None, "None")}
+        el = _mock_element(text="")
+        assert detect_stock_status(item, el, config) == "limited_stock"
+
     def test_priority_out_of_stock_over_in_stock(self):
         """When both match, out_of_stock wins (higher priority)."""
         config = StockDetectionConfig(
@@ -388,7 +427,7 @@ class TestDetectStockStatus:
 
     def test_stock_detection_uses_descendant_text_on_real_adaptor(self):
         html = '<div class="availability"><span class="status">In Stock - Ships Free</span></div>'
-        el = Adaptor(html).css(".availability")[0]
+        el = _adaptor_element(html, ".availability")
         config = StockDetectionConfig(
             in_stock=StockPatternConfig(text_patterns=["in stock"]),
         )
@@ -510,7 +549,7 @@ class TestEnrichItemDetection:
 
     def test_css_display_text_uses_full_text_not_adaptor_none_sentinel(self):
         html = '<div class="map-message"><span>Add to Cart to See Price</span></div>'
-        el = Adaptor(html).css(".map-message")[0]
+        el = _adaptor_element(html, ".map-message")
         map_cfg = MapDetectionConfig(css_selectors=[".map-message"])
         item = {"name": "Widget", "price": None}
         vis, text = detect_pricing_visibility(item, el, map_cfg)

@@ -2,41 +2,66 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
+from scrapeyard.engine.browser_debug import (
+    browser_fetch_kwargs,
+    default_debug_blob,
+    fetch_basic_response,
+    fetch_browser_response,
+    populate_fetch_debug,
+)
 from scrapeyard.engine.detection import enrich_item_detection
+from scrapeyard.engine.fetch_classifier import (
+    classify_fetch_exception,
+    classify_rendered_outcome,
+)
+from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.selectors import extract_selectors, select_items
+from scrapeyard.engine.scrape_models import FetchError, FetchOutcome, TargetResult, TargetStatus
+from scrapeyard.engine.selectors import (
+    SelectorExecutionError,
+    count_selector_matches_strict,
+    extract_selectors_strict,
+    select_items_strict,
+)
 from scrapeyard.models.job import ErrorType
 
-logger = logging.getLogger(__name__)
 
-_BROWSER_TIMEOUT_MS = 60000
+@dataclass(frozen=True)
+class ScrapeContext:
+    fetcher_cls: Any
+    retry_handler: RetryHandler
+    retryable_status: set[int]
+    adaptive_dir: str
+
+
+@dataclass(frozen=True)
+class ScrapePageResult:
+    page: Any
+    debug: dict[str, Any]
+    page_data: list[dict[str, Any]]
 
 
 def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
     """Extract records and enrich with pricing visibility and stock status detection."""
     if target.item_selector is not None:
-        items = select_items(page, target.item_selector)
-        data = [extract_selectors(item, target.selectors) for item in items]
+        items = select_items_strict(page, target.item_selector)
+        data = [extract_selectors_strict(item, target.selectors) for item in items]
     else:
         items = [page]
-        data = [extract_selectors(page, target.selectors)]
+        data = [extract_selectors_strict(page, target.selectors)]
 
-    for item_data, element in zip(data, items):
-        enrich_item_detection(
-            item_data, element, target.map_detection, target.stock_detection,
-        )
-
+    for item_data, element in zip(data, items, strict=False):
+        enrich_item_detection(item_data, element, target.map_detection, target.stock_detection)
     return data
 
 
@@ -59,15 +84,9 @@ def _adaptive_fetch_kwargs(
     adaptive: bool,
     adaptive_dir: str,
 ) -> dict[str, Any]:
-    """Return parser kwargs for Scrapling adaptive matching.
-
-    Scrapling 0.2.x exposes adaptive parser configuration via ``custom_config``
-    across both basic and browser-backed fetchers. Browser fetchers do not
-    accept legacy kwargs such as ``auto_save``.
-    """
+    """Return parser kwargs for Scrapling adaptive matching."""
     if not adaptive:
         return {}
-
     return {
         "custom_config": {
             "auto_match": True,
@@ -77,20 +96,6 @@ def _adaptive_fetch_kwargs(
             },
         },
     }
-
-
-@dataclass
-class TargetResult:
-    """Result of scraping a single target URL."""
-
-    url: str
-    status: str = "failed"  # "success" or "failed"
-    data: list[dict[str, Any]] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    pages_scraped: int = 0
-    error_type: ErrorType | None = None
-    http_status: int | None = None
-    error_detail: str | None = None
 
 
 def _get_fetcher(fetcher_type: FetcherType) -> Any:
@@ -103,54 +108,22 @@ def _get_fetcher(fetcher_type: FetcherType) -> Any:
     return mapping[fetcher_type]
 
 
-class FetchError(Exception):
-    """Non-retryable HTTP error."""
-
-    def __init__(self, status: int) -> None:
-        self.status = status
-        super().__init__(f"HTTP {status}")
-
-
-def _classify_fetch_exception(exc: Exception, fetcher_type: FetcherType) -> tuple[ErrorType, int | None]:
-    """Map low-level fetch exceptions to structured Scrapeyard error types."""
-    if isinstance(exc, RetryableError):
-        return ErrorType.http_error, exc.status
-    if isinstance(exc, FetchError):
-        return ErrorType.http_error, exc.status
-    if isinstance(exc, asyncio.TimeoutError):
-        return ErrorType.timeout, None
-
-    detail = f"{type(exc).__name__}: {exc}".lower()
-    if fetcher_type != FetcherType.basic and any(
-        token in detail
-        for token in (
-            "playwright",
-            "browser",
-            "page.goto",
-            "target page",
-            "executable",
-            "chromium",
-            "webkit",
-            "firefox",
-        )
-    ):
-        return ErrorType.browser_error, None
-
-    if isinstance(exc, (ConnectionError, OSError)) or any(
-        token in detail
-        for token in (
-            "connection",
-            "dns",
-            "tls",
-            "ssl",
-            "certificate",
-            "network",
-            "socket",
-        )
-    ):
-        return ErrorType.network_error, None
-
-    return ErrorType.http_error, None
+def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
+    item_selector_count = None
+    selector_scope = page
+    if target.item_selector is not None:
+        items = select_items_strict(page, target.item_selector)
+        item_selector_count = len(items)
+        if items:
+            selector_scope = items[0]
+    selector_counts = {
+        name: count_selector_matches_strict(selector_scope, selector, field_name=name)
+        for name, selector in target.selectors.items()
+    }
+    return {
+        "item_selector_count": item_selector_count,
+        "selector_counts": selector_counts,
+    }
 
 
 async def _fetch_page(
@@ -162,54 +135,172 @@ async def _fetch_page(
     retryable_status: set[int],
     adaptive_dir: str,
     proxy_url: str | None = None,
-) -> Any:
-    """Fetch a single page using the appropriate Scrapling method.
-
-    Raises :class:`RetryableError` for retryable HTTP status codes,
-    :class:`FetchError` for other error statuses.
-    """
-    call_kwargs = _adaptive_fetch_kwargs(
-        target,
-        adaptive=adaptive,
-        adaptive_dir=adaptive_dir,
-    )
-
-    if proxy_url is not None:
-        call_kwargs["proxy"] = proxy_url
+    artifacts_dir: str | None = None,
+) -> FetchOutcome:
+    """Fetch a single page using the appropriate Scrapling method."""
+    call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
+    debug = default_debug_blob(fetcher_type, target, url)
 
     if fetcher_type == FetcherType.basic:
-        # Fetcher.get is synchronous — run in thread pool.
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: fetcher_cls.get(url, **call_kwargs),
-        )
+        if proxy_url is not None:
+            call_kwargs["proxy"] = proxy_url
+        response = await fetch_basic_response(fetcher_cls, url, call_kwargs)
     else:
-        # Browser-backed fetchers need more headroom than simple HTTP fetches,
-        # and dropping non-essential resources reduces load-event stalls on
-        # heavy retail pages.
-        browser = target.browser
-        call_kwargs.setdefault(
-            "timeout",
-            browser.timeout_ms if browser is not None else _BROWSER_TIMEOUT_MS,
+        call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
+        response, capture = await fetch_browser_response(
+            fetcher_cls,
+            url,
+            target,
+            fetcher_type,
+            call_kwargs,
+            artifacts_dir,
         )
-        call_kwargs.setdefault(
-            "disable_resources",
-            True if browser is None else browser.disable_resources,
-        )
-        call_kwargs.setdefault(
-            "network_idle",
-            False if browser is None else browser.network_idle,
-        )
-        # StealthyFetcher / PlayWrightFetcher have async_fetch.
-        response = await fetcher_cls.async_fetch(url, **call_kwargs)
+        debug.update(capture)
 
+    populate_fetch_debug(debug, response, url)
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)
-        raise FetchError(response.status)
+        raise FetchError(response.status, debug=debug)
+    return FetchOutcome(page=response, debug=debug)
 
-    return response
+
+async def _fetch_target_page(
+    retry_handler: RetryHandler,
+    fetcher_cls: Any,
+    url: str,
+    target: TargetConfig,
+    adaptive: bool,
+    retryable_status: set[int],
+    adaptive_dir: str,
+    proxy_url: str | None,
+    artifacts_dir: str | None,
+) -> FetchOutcome:
+    return await retry_handler.execute(
+        _fetch_page,
+        fetcher_cls,
+        url,
+        target,
+        target.fetcher,
+        adaptive,
+        retryable_status,
+        adaptive_dir,
+        proxy_url,
+        artifacts_dir,
+    )
+
+
+def _prepare_scrape_context(
+    target: TargetConfig,
+    retry: RetryConfig,
+    adaptive_dir: str | None,
+) -> ScrapeContext:
+    resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
+    Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
+    return ScrapeContext(
+        fetcher_cls=_get_fetcher(target.fetcher),
+        retry_handler=RetryHandler(retry),
+        retryable_status=set(retry.retryable_status),
+        adaptive_dir=resolved_adaptive_dir,
+    )
+
+
+async def _scrape_first_page(
+    *,
+    context: ScrapeContext,
+    target: TargetConfig,
+    result: TargetResult,
+    adaptive: bool,
+    proxy_url: str | None,
+    artifacts_dir: str | None,
+) -> ScrapePageResult:
+    outcome = await _fetch_target_page(
+        context.retry_handler,
+        context.fetcher_cls,
+        target.url,
+        target,
+        adaptive,
+        context.retryable_status,
+        context.adaptive_dir,
+        proxy_url,
+        artifacts_dir,
+    )
+    result.debug = outcome.debug
+    result.debug.update(_selector_debug(outcome.page, target))
+    page_data = _extract_page_data(outcome.page, target)
+    if adaptive:
+        log_adaptive_selector_gap(target, page_data)
+    result.data.extend(page_data)
+    result.pages_scraped = 1
+    return ScrapePageResult(page=outcome.page, debug=outcome.debug, page_data=page_data)
+
+
+async def _scrape_paginated_pages(
+    *,
+    page: Any,
+    target: TargetConfig,
+    result: TargetResult,
+    context: ScrapeContext,
+    adaptive: bool,
+    proxy_url: str | None,
+    artifacts_dir: str | None,
+) -> None:
+    await paginate_target(
+        page=page,
+        target=target,
+        result=result,
+        fetch_target_page=_fetch_target_page,
+        extract_page_data=_extract_page_data,
+        retry_handler=context.retry_handler,
+        fetcher_cls=context.fetcher_cls,
+        adaptive=adaptive,
+        retryable_status=context.retryable_status,
+        adaptive_dir=context.adaptive_dir,
+        proxy_url=proxy_url,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _finalize_target_success(result: TargetResult, target: TargetConfig) -> None:
+    rendered_classification = classify_rendered_outcome(
+        result.debug or {},
+        result.data,
+        has_item_selector=target.item_selector is not None,
+    )
+    if rendered_classification is not None and result.debug is not None:
+        result.debug["classification"] = rendered_classification.value
+    result.status = TargetStatus.success
+
+
+def _handle_selector_execution_failure(
+    result: TargetResult,
+    target: TargetConfig,
+    exc: SelectorExecutionError,
+) -> None:
+    detail = str(exc)
+    result.status = TargetStatus.failed
+    result.error_type = ErrorType.selector_engine_error
+    result.error_detail = detail
+    result.debug = result.debug or default_debug_blob(target.fetcher, target, target.url)
+    result.debug["classification"] = ErrorType.selector_engine_error.value
+    result.debug["selector_failure"] = exc.debug
+    result.errors.append(detail)
+
+
+def _handle_scrape_exception(
+    result: TargetResult,
+    target: TargetConfig,
+    exc: Exception,
+) -> None:
+    error_type, http_status, debug = classify_fetch_exception(exc, target.fetcher)
+    detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    result.status = TargetStatus.failed
+    result.error_type = error_type
+    result.http_status = http_status
+    result.error_detail = detail
+    result.debug = debug or default_debug_blob(target.fetcher, target, target.url)
+    result.debug.setdefault("classification", error_type.value)
+    result.errors.append(detail)
 
 
 async def scrape_target(
@@ -218,107 +309,36 @@ async def scrape_target(
     retry: RetryConfig,
     adaptive_dir: str | None = None,
     proxy_url: str | None = None,
+    artifacts_dir: str | None = None,
 ) -> TargetResult:
-    """Fetch a URL, apply selectors, and handle pagination.
-
-    Parameters
-    ----------
-    target:
-        Target configuration with URL, fetcher type, selectors, and optional pagination.
-    adaptive:
-        Whether to enable Scrapling adaptive matching.
-    retry:
-        Retry configuration passed to :class:`RetryHandler`.
-    """
+    """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
-
-    if adaptive_dir is None:
-        adaptive_dir = get_settings().adaptive_dir
-
-    # Ensure adaptive directory exists.
-    Path(adaptive_dir).mkdir(parents=True, exist_ok=True)
-
-    fetcher_cls = _get_fetcher(target.fetcher)
-    retry_handler = RetryHandler(retry)
-    retryable_status = set(retry.retryable_status)
+    context = _prepare_scrape_context(target, retry, adaptive_dir)
 
     try:
-        page = await retry_handler.execute(
-            _fetch_page, fetcher_cls, target.url, target, target.fetcher,
-            adaptive, retryable_status, adaptive_dir, proxy_url,
+        first_page = await _scrape_first_page(
+            context=context,
+            target=target,
+            result=result,
+            adaptive=adaptive,
+            proxy_url=proxy_url,
+            artifacts_dir=artifacts_dir,
         )
-        data = _extract_page_data(page, target)
-        if adaptive:
-            missing = []
-            if not data:
-                missing = list(target.selectors.keys())
-            else:
-                for key in target.selectors:
-                    values = [record.get(key) for record in data]
-                    if all(value is None or value == "" or value == [] for value in values):
-                        missing.append(key)
-            if missing:
-                logger.info(
-                    "Adaptive relocation check: url=%s missing_selectors=%s",
-                    target.url,
-                    ",".join(missing),
-                )
-        result.data.extend(data)
-        result.pages_scraped = 1
-
-        # Pagination — resolve each "next" href against the *current* page URL,
-        # not the original target URL, so relative links work across pages.
-        if target.pagination:
-            max_pages = target.pagination.max_pages
-            next_selector = target.pagination.next
-            current_url = target.url
-            for _ in range(max_pages - 1):
-                next_links = page.css(next_selector)
-                if not next_links:
-                    break
-                next_el = next_links[0]
-                next_url = _resolve_href(next_el, current_url)
-                if not next_url:
-                    break
-
-                page = await retry_handler.execute(
-                    _fetch_page, fetcher_cls, next_url, target, target.fetcher,
-                    adaptive, retryable_status, adaptive_dir, proxy_url,
-                )
-                current_url = next_url
-                data = _extract_page_data(page, target)
-                result.data.extend(data)
-                result.pages_scraped += 1
-
-        result.status = "success"
-
+        await _scrape_paginated_pages(
+            page=first_page.page,
+            target=target,
+            result=result,
+            context=context,
+            adaptive=adaptive,
+            proxy_url=proxy_url,
+            artifacts_dir=artifacts_dir,
+        )
+        _finalize_target_success(result, target)
+    except SelectorExecutionError as exc:
+        _handle_selector_execution_failure(result, target, exc)
     except Exception as exc:
-        error_type, http_status = _classify_fetch_exception(exc, target.fetcher)
-        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-        logger.exception(
-            "Scrape target failed: url=%s fetcher=%s classified_as=%s detail=%s",
-            target.url,
-            target.fetcher.value,
-            error_type.value,
-            detail,
-        )
-        result.status = "failed"
-        result.error_type = error_type
-        result.http_status = http_status
-        result.error_detail = detail
-        result.errors.append(detail)
+        _handle_scrape_exception(result, target, exc)
 
     return result
 
 
-def _resolve_href(element: Any, base_url: str) -> str | None:
-    """Return an absolute URL for a next-page element or None."""
-    href = element.attrib.get("href") if hasattr(element, "attrib") else None
-    if href is None:
-        try:
-            href = element.attributes.get("href")
-        except AttributeError:
-            return None
-    if not href:
-        return None
-    return urljoin(base_url, href)

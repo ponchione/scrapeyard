@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from scrapeyard.config.schema import ProxyConfig, TargetConfig
 from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 
 
 # --- Helpers ---
 
-def _target(**overrides) -> TargetConfig:
-    base = {"url": "https://example.com", "selectors": {"title": "h1"}}
+def _target(**overrides: Any) -> TargetConfig:
+    base: dict[str, Any] = {"url": "https://example.com", "selectors": {"title": "h1"}}
     base.update(overrides)
-    return TargetConfig(**base)
+    return TargetConfig.model_validate(base)
 
 
 def _proxy(url: str) -> ProxyConfig:

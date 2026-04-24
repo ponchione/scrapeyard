@@ -14,57 +14,37 @@ from scrapeyard.models.job import (
     ErrorRecord,
     ErrorType,
     Job,
-    JobStatus,
 )
 from scrapeyard.queue.worker import _run_superseded, scrape_task
 from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.error_store import SQLiteErrorStore
+from scrapeyard.storage.job_store import SQLiteJobStore
+from tests.unit.worker_helpers import make_job, make_config_mock, SIMPLE_YAML
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_job(
-    job_id: str = "job-1",
-    status: JobStatus = JobStatus.queued,
-    current_run_id: str | None = None,
-) -> Job:
-    return Job(
-        job_id=job_id,
-        project="test",
-        name="lifecycle-test",
-        config_yaml="",
-        status=status,
-        current_run_id=current_run_id,
-    )
 
-
-def _make_target(url: str = "http://example.com") -> MagicMock:
-    target = MagicMock(url=url, proxy=None)
-    target.fetcher.value = "basic"
-    return target
-
-
-_SIMPLE_YAML = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
-
-
-def _patch_config(cfg: MagicMock) -> MagicMock:
-    """Apply common config mock defaults."""
-    cfg.project = "test"
-    cfg.name = "lifecycle-test"
-    cfg.resolved_targets.return_value = [_make_target()]
-    cfg.execution.concurrency = 1
-    cfg.execution.delay_between = 0
-    cfg.execution.domain_rate_limit = 0
-    cfg.execution.fail_strategy = MagicMock(value="partial")
-    cfg.adaptive = False
-    cfg.schedule = None
-    cfg.retry = MagicMock()
-    cfg.validation = MagicMock(required_fields=[], min_results=0, on_empty="warn")
-    cfg.output.group_by = "target"
-    cfg.webhook = None
-    cfg.proxy = None
-    return cfg
+async def _insert_job_row(db_path: str, job: Job) -> None:
+    """Insert a job row into the real DB for tests using real SQLiteJobStore."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """INSERT INTO jobs (job_id, project, name, status,
+               config_yaml, created_at, updated_at, schedule_cron,
+               schedule_enabled, current_run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                job.job_id, job.project, job.name, job.status.value,
+                job.config_yaml,
+                job.created_at.isoformat() if job.created_at else None,
+                job.updated_at.isoformat() if job.updated_at else None,
+                job.schedule_cron, int(job.schedule_enabled),
+                job.current_run_id,
+            ),
+        )
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -74,20 +54,20 @@ def _patch_config(cfg: MagicMock) -> MagicMock:
 
 class TestRunSuperseded:
     def test_returns_false_when_run_id_is_none(self):
-        job = _make_job(current_run_id="run-1")
+        job = make_job(current_run_id="run-1")
         assert _run_superseded(job, None) is False
 
     def test_returns_false_when_ids_match(self):
-        job = _make_job(current_run_id="run-1")
+        job = make_job(current_run_id="run-1")
         assert _run_superseded(job, "run-1") is False
 
     def test_returns_true_when_ids_differ(self):
-        job = _make_job(current_run_id="run-1")
+        job = make_job(current_run_id="run-1")
         assert _run_superseded(job, "run-2") is True
 
     def test_returns_true_when_job_has_no_current_run(self):
         """job.current_run_id is None but run_id is set -> superseded."""
-        job = _make_job(current_run_id=None)
+        job = make_job(current_run_id=None)
         assert _run_superseded(job, "run-1") is True
 
 
@@ -103,10 +83,9 @@ class TestRunCreation:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job(current_run_id="run-abc")
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job(current_run_id="run-abc")
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -120,15 +99,15 @@ class TestRunCreation:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-abc",
                 trigger="scheduled",
                 job_store=job_store,
                 result_store=AsyncMock(),
-                error_store=AsyncMock(),
+                error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
@@ -148,7 +127,7 @@ class TestRunCreation:
         assert job_id == "job-1"
         assert status in ("running", "complete")  # May be finalized already.
         assert trigger == "scheduled"
-        expected_hash = hashlib.sha256(_SIMPLE_YAML.encode()).hexdigest()
+        expected_hash = hashlib.sha256(SIMPLE_YAML.encode()).hexdigest()
         assert config_hash == expected_hash
 
         reset_db()
@@ -162,10 +141,9 @@ class TestRunCreation:
         yaml_text = "project: test\nname: hash-check\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
         expected_hash = hashlib.sha256(yaml_text.encode()).hexdigest()
 
-        job = _make_job(current_run_id="run-hash")
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job(current_run_id="run-hash")
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -179,14 +157,14 @@ class TestRunCreation:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
                 "job-1", yaml_text,
                 run_id="run-hash",
                 job_store=job_store,
                 result_store=AsyncMock(),
-                error_store=AsyncMock(),
+                error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
@@ -209,7 +187,7 @@ class TestRunCreation:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job()
+        job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
@@ -226,10 +204,10 @@ class TestRunCreation:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id=None,
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -238,11 +216,8 @@ class TestRunCreation:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM job_runs")
-            count = (await cursor.fetchone())[0]
-
-        assert count == 0
+        # create_run should not have been called.
+        job_store.create_run.assert_not_called()
 
         reset_db()
 
@@ -259,10 +234,9 @@ class TestRunFinalization:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job(current_run_id="run-fin")
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job(current_run_id="run-fin")
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         success_result = TargetResult(
             url="http://example.com", status="success",
@@ -277,14 +251,14 @@ class TestRunFinalization:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-fin",
                 job_store=job_store,
                 result_store=AsyncMock(),
-                error_store=AsyncMock(),
+                error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
@@ -328,10 +302,9 @@ class TestRunFinalization:
                 )
             await db.commit()
 
-        job = _make_job(current_run_id="run-err")
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job(current_run_id="run-err")
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         # A success result so the job completes normally.
         success_result = TargetResult(
@@ -347,14 +320,14 @@ class TestRunFinalization:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-err",
                 job_store=job_store,
                 result_store=AsyncMock(),
-                error_store=AsyncMock(),
+                error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
@@ -377,10 +350,9 @@ class TestRunFinalization:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job(current_run_id="run-fail")
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job(current_run_id="run-fail")
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         fail_result = TargetResult(
             url="http://example.com", status="failed",
@@ -396,14 +368,14 @@ class TestRunFinalization:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-fail",
                 job_store=job_store,
                 result_store=AsyncMock(),
-                error_store=AsyncMock(),
+                error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
@@ -426,11 +398,11 @@ class TestRunFinalization:
 
     @pytest.mark.asyncio
     async def test_no_finalization_when_run_id_is_none(self, tmp_path):
-        """When run_id is None, no finalization UPDATE happens (no rows to update)."""
+        """When run_id is None, no finalization happens."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job()
+        job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
@@ -448,10 +420,10 @@ class TestRunFinalization:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id=None,
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -460,12 +432,8 @@ class TestRunFinalization:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        # No rows should exist at all.
-        async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM job_runs")
-            count = (await cursor.fetchone())[0]
-
-        assert count == 0
+        # finalize_run and count_errors_for_run should not have been called.
+        job_store.finalize_run.assert_not_called()
 
         reset_db()
 
@@ -493,10 +461,9 @@ class TestRunCrashHandling:
             )
             await db.commit()
 
-        job = _make_job()
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job()
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         # Make load_config raise so we hit the crash handler.
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
@@ -508,7 +475,7 @@ class TestRunCrashHandling:
             )
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-crash",
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -550,10 +517,9 @@ class TestRunCrashHandling:
             )
             await db.commit()
 
-        job = _make_job()
-        job_store = AsyncMock()
-        job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job = make_job()
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
@@ -564,7 +530,7 @@ class TestRunCrashHandling:
             )
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-no-overwrite",
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -593,7 +559,7 @@ class TestRunCrashHandling:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job()
+        job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
@@ -607,7 +573,7 @@ class TestRunCrashHandling:
             )
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id=None,
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -616,30 +582,24 @@ class TestRunCrashHandling:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        # No rows should exist in job_runs.
-        async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM job_runs")
-            count = (await cursor.fetchone())[0]
-
-        assert count == 0
+        # fail_run should not be called when run_id is None.
+        job_store.fail_run.assert_not_called()
 
         reset_db()
 
     @pytest.mark.asyncio
     async def test_crash_db_failure_does_not_reraise(self, tmp_path):
-        """If the crash-handler DB update itself fails, the error is logged, not raised."""
+        """If the crash-handler store calls fail, the error is logged, not raised."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
-        # Reset DB so get_db raises RuntimeError("Database not initialised").
-        reset_db()
 
-        job = _make_job()
+        job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
+        # Make fail_run raise to simulate DB failure.
+        job_store.fail_run.side_effect = RuntimeError("DB is dead")
 
-        # load_config raises to trigger the crash handler, then get_db will
-        # also fail because we reset_db. The task must not raise.
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(
@@ -650,7 +610,7 @@ class TestRunCrashHandling:
 
             # Should not raise.
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-db-fail",
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -672,7 +632,7 @@ class TestErrorLoggingWithRunId:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job(current_run_id="run-err-tag")
+        job = make_job(current_run_id="run-err-tag")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
@@ -699,10 +659,10 @@ class TestErrorLoggingWithRunId:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id="run-err-tag",
                 job_store=job_store,
                 result_store=AsyncMock(),
@@ -724,7 +684,7 @@ class TestErrorLoggingWithRunId:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = _make_job()
+        job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
@@ -751,10 +711,10 @@ class TestErrorLoggingWithRunId:
                 workers_running_lease_seconds=300,
                 proxy_url="",
             )
-            _patch_config(mock_load.return_value)
+            mock_load.return_value = make_config_mock()
 
             await scrape_task(
-                "job-1", _SIMPLE_YAML,
+                "job-1", SIMPLE_YAML,
                 run_id=None,
                 job_store=job_store,
                 result_store=AsyncMock(),

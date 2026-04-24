@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -12,15 +13,15 @@ from scrapeyard.models.job import JobRun, JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 
 
-def _make_job_run(**overrides) -> JobRun:
-    defaults = {
+def _make_job_run(**overrides: Any) -> JobRun:
+    defaults: dict[str, Any] = {
         "run_id": "20260321-100000-abcd1234",
         "job_id": "j-1",
         "trigger": "adhoc",
         "config_hash": "abc123def456",
     }
     defaults.update(overrides)
-    return JobRun(**defaults)
+    return JobRun.model_validate(defaults)
 
 
 # -- JobRun default field values --------------------------------------------------

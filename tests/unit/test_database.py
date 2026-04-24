@@ -59,14 +59,14 @@ async def test_get_db_before_init():
     # Reset module state to simulate no init.
     import scrapeyard.storage.database as mod
 
-    original = mod._db_dir
-    mod._db_dir = None
+    original = mod._default_manager._db_dir
+    mod._default_manager._db_dir = None
     try:
         with pytest.raises(RuntimeError, match="not initialised"):
             async with get_db("jobs.db"):
                 pass
     finally:
-        mod._db_dir = original
+        mod._default_manager._db_dir = original
 
 
 async def test_get_db_unknown_name(tmp_path):
