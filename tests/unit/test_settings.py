@@ -39,6 +39,14 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.sync_poll_delay_seconds == 0.5
 
+    def test_basic_fetch_timeout_seconds_default(self):
+        settings = ServiceSettings()
+        assert settings.basic_fetch_timeout_seconds == 30.0
+
+    def test_workers_redis_connect_timeout_seconds_default(self):
+        settings = ServiceSettings()
+        assert settings.workers_redis_connect_timeout_seconds == 10.0
+
     def test_scheduler_jitter_max_seconds_default(self):
         settings = ServiceSettings()
         assert settings.scheduler_jitter_max_seconds == 120
@@ -50,6 +58,14 @@ class TestServiceSettingsDefaults:
     def test_admin_read_max_limit_default(self):
         settings = ServiceSettings()
         assert settings.admin_read_max_limit == 500
+
+    def test_rate_limit_requests_default(self):
+        settings = ServiceSettings()
+        assert settings.rate_limit_requests == 600
+
+    def test_rate_limit_window_seconds_default(self):
+        settings = ServiceSettings()
+        assert settings.rate_limit_window_seconds == 60
 
     def test_storage_retention_days_default(self):
         settings = ServiceSettings()
@@ -112,10 +128,30 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
         assert settings.admin_read_max_limit == 250
 
+    def test_reads_rate_limit_requests(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_RATE_LIMIT_REQUESTS": "42"}):
+            settings = ServiceSettings()
+        assert settings.rate_limit_requests == 42
+
+    def test_reads_rate_limit_window_seconds(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS": "15"}):
+            settings = ServiceSettings()
+        assert settings.rate_limit_window_seconds == 15
+
     def test_reads_sync_poll_delay_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_SYNC_POLL_DELAY_SECONDS": "0.25"}):
             settings = ServiceSettings()
         assert settings.sync_poll_delay_seconds == 0.25
+
+    def test_reads_basic_fetch_timeout_seconds(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS": "12.5"}):
+            settings = ServiceSettings()
+        assert settings.basic_fetch_timeout_seconds == 12.5
+
+    def test_reads_workers_redis_connect_timeout_seconds(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS": "7.0"}):
+            settings = ServiceSettings()
+        assert settings.workers_redis_connect_timeout_seconds == 7.0
 
     def test_reads_circuit_breaker_cooldown_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS": "600"}):

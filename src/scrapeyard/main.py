@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 import asyncio
+import logging
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -14,16 +16,36 @@ from scrapeyard.api.dependencies import (
     get_worker_pool,
     init_rate_limiter,
 )
-from scrapeyard.api.middleware import APIKeyAuthMiddleware, RequestSizeLimitMiddleware
+from scrapeyard.api.middleware import (
+    APIKeyAuthMiddleware,
+    RateLimitMiddleware,
+    RequestSizeLimitMiddleware,
+)
 from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.time import utc_now
 from scrapeyard.runtime.health import HealthCache, probe_disk, probe_redis, probe_sqlite
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 
 
 _health = HealthCache(get_job_store)
+logger = logging.getLogger(__name__)
+
+
+async def _recover_stale_running_jobs() -> None:
+    """Fail stale running jobs/runs before workers and scheduler start."""
+    settings = get_settings()
+    recovered_at = utc_now()
+    cutoff = recovered_at - timedelta(seconds=settings.workers_running_lease_seconds * 2)
+    recovered_jobs = await get_job_store().recover_stale_running_jobs(cutoff, recovered_at)
+    if recovered_jobs:
+        logger.warning(
+            "Recovered %d stale running job(s) older than %ds",
+            recovered_jobs,
+            settings.workers_running_lease_seconds * 2,
+        )
 
 
 def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
@@ -61,6 +83,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_dir, settings.log_level)
     await init_db(settings.db_dir)
+    await _recover_stale_running_jobs()
     await _startup_runtime_services(app)
 
     yield
@@ -77,11 +100,19 @@ app = FastAPI(
 
 _settings_for_middleware = get_settings()
 # Order matters: last add_middleware() call becomes outermost. We want the
-# size-limit guard to run first so oversized payloads never reach the auth
-# check or the router.
+# size-limit guard to run first so oversized payloads never reach rate limiting,
+# auth, or the router. Rate limiting then protects auth/router parsing and queue
+# enqueue paths from bursts.
 app.add_middleware(
     APIKeyAuthMiddleware,
     keys=_settings_for_middleware.parsed_api_keys(),
+    exempt_paths={"/health"},
+)
+app.add_middleware(
+    RateLimitMiddleware,
+    requests=_settings_for_middleware.rate_limit_requests,
+    window_seconds=_settings_for_middleware.rate_limit_window_seconds,
+    api_keys=_settings_for_middleware.parsed_api_keys(),
     exempt_paths={"/health"},
 )
 app.add_middleware(

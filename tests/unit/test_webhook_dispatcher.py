@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +12,11 @@ import httpx
 import pytest
 
 from scrapeyard.config.schema import WebhookConfig
+from scrapeyard.storage.webhook_outbox import (
+    WebhookDelivery,
+    WebhookDeliveryCreate,
+    WebhookDeliveryStatus,
+)
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
@@ -28,6 +35,137 @@ def _ok_response(status_code: int = 200) -> httpx.Response:
 
 def _err_response(status_code: int) -> httpx.Response:
     return httpx.Response(status_code=status_code, request=httpx.Request("POST", "https://x"))
+
+
+def _payload(delivery_id: str = "delivery-1") -> dict[str, Any]:
+    return {
+        "delivery_id": delivery_id,
+        "event": "job.complete",
+        "job_id": "job-1",
+        "run_id": "run-1",
+    }
+
+
+class MemoryWebhookOutboxStore:
+    def __init__(self) -> None:
+        self.deliveries: dict[str, WebhookDelivery] = {}
+
+    async def enqueue_delivery(
+        self,
+        delivery: WebhookDeliveryCreate,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        created_at = now or datetime.now(timezone.utc)
+        self.deliveries[delivery.delivery_id] = WebhookDelivery(
+            delivery_id=delivery.delivery_id,
+            job_id=delivery.job_id,
+            run_id=delivery.run_id,
+            event=delivery.event,
+            url=delivery.url,
+            headers=delivery.headers,
+            timeout_seconds=delivery.timeout_seconds,
+            payload=delivery.payload,
+            status=WebhookDeliveryStatus.pending,
+            attempts=0,
+            next_attempt_at=delivery.next_attempt_at,
+            last_attempt_at=None,
+            delivered_at=None,
+            last_error=None,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    async def list_due_pending(
+        self,
+        now: datetime,
+        *,
+        limit: int | None = None,
+    ) -> list[WebhookDelivery]:
+        rows = [
+            delivery
+            for delivery in self.deliveries.values()
+            if delivery.status is WebhookDeliveryStatus.pending
+            and delivery.next_attempt_at <= now
+        ]
+        rows.sort(key=lambda delivery: delivery.next_attempt_at)
+        return rows if limit is None else rows[:limit]
+
+    async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
+        rows = [
+            delivery
+            for delivery in self.deliveries.values()
+            if delivery.status is WebhookDeliveryStatus.pending
+        ]
+        rows.sort(key=lambda delivery: delivery.next_attempt_at)
+        return rows if limit is None else rows[:limit]
+
+    async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None:
+        return self.deliveries.get(delivery_id)
+
+    async def mark_delivered(
+        self,
+        delivery_id: str,
+        *,
+        delivered_at: datetime,
+        attempts: int = 1,
+    ) -> None:
+        delivery = self.deliveries[delivery_id]
+        self.deliveries[delivery_id] = replace(
+            delivery,
+            status=WebhookDeliveryStatus.delivered,
+            attempts=delivery.attempts + attempts,
+            last_attempt_at=delivered_at,
+            delivered_at=delivered_at,
+            last_error=None,
+            updated_at=delivered_at,
+        )
+
+    async def mark_retryable_failure(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        next_attempt_at: datetime,
+        last_error: str,
+        attempts: int = 1,
+    ) -> None:
+        delivery = self.deliveries[delivery_id]
+        self.deliveries[delivery_id] = replace(
+            delivery,
+            status=WebhookDeliveryStatus.pending,
+            attempts=delivery.attempts + attempts,
+            last_attempt_at=attempted_at,
+            next_attempt_at=next_attempt_at,
+            last_error=last_error,
+            updated_at=attempted_at,
+        )
+
+    async def mark_permanent_failure(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        last_error: str,
+        attempts: int = 1,
+    ) -> None:
+        delivery = self.deliveries[delivery_id]
+        self.deliveries[delivery_id] = replace(
+            delivery,
+            status=WebhookDeliveryStatus.failed,
+            attempts=delivery.attempts + attempts,
+            last_attempt_at=attempted_at,
+            last_error=last_error,
+            updated_at=attempted_at,
+        )
+
+
+async def _wait_until(condition) -> None:
+    for _ in range(50):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition was not met")
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +323,108 @@ class TestSubmitAndShutdown:
         await dispatcher.submit(_webhook_config(), {})
         await asyncio.sleep(0.05)
         client.post.assert_awaited_once()
+
+
+class TestDurableOutboxDispatch:
+    @pytest.mark.asyncio
+    async def test_submit_persists_delivery_before_http_attempt_finishes(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        release_post = asyncio.Event()
+
+        async def _post(*_args, **_kwargs):
+            await release_post.wait()
+            return _ok_response(200)
+
+        client = AsyncMock()
+        client.post = AsyncMock(side_effect=_post)
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher.submit(_webhook_config(), _payload())
+
+        persisted = outbox.deliveries["delivery-1"]
+        assert persisted.status is WebhookDeliveryStatus.pending
+        assert persisted.payload["delivery_id"] == "delivery-1"
+        release_post.set()
+        await dispatcher.shutdown(timeout=1.0)
+        assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
+
+    @pytest.mark.asyncio
+    async def test_startup_replays_pending_delivery_from_outbox(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        now = datetime.now(timezone.utc)
+        await outbox.enqueue_delivery(
+            WebhookDeliveryCreate(
+                delivery_id="delivery-1",
+                job_id="job-1",
+                run_id="run-1",
+                event="job.complete",
+                url="https://hooks.example.com/scrapeyard",
+                headers={},
+                timeout_seconds=5.0,
+                payload=_payload(),
+                next_attempt_at=now - timedelta(seconds=1),
+            ),
+            now=now,
+        )
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=_ok_response(200))
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher.startup()
+        await dispatcher.shutdown(timeout=1.0)
+
+        client.post.assert_awaited_once()
+        assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
+
+    @pytest.mark.asyncio
+    async def test_retryable_failure_leaves_delivery_pending_with_next_attempt(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        client = AsyncMock()
+        client.post = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            backoff_base=60.0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher.submit(_webhook_config(), _payload())
+        await _wait_until(lambda: outbox.deliveries["delivery-1"].attempts == 1)
+
+        delivery = outbox.deliveries["delivery-1"]
+        assert delivery.status is WebhookDeliveryStatus.pending
+        assert delivery.last_error is not None
+        assert "timed out" in delivery.last_error
+        assert delivery.last_attempt_at is not None
+        assert delivery.next_attempt_at > delivery.last_attempt_at
+        await dispatcher.shutdown(timeout=0.01)
+
+    @pytest.mark.asyncio
+    async def test_nonretryable_4xx_marks_delivery_permanently_failed(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=_err_response(404))
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher.submit(_webhook_config(), _payload())
+        await dispatcher.shutdown(timeout=1.0)
+
+        delivery = outbox.deliveries["delivery-1"]
+        assert delivery.status is WebhookDeliveryStatus.failed
+        assert delivery.attempts == 1
+        assert delivery.last_error == "HTTP 404"
 
 
 class TestDeliveryId:

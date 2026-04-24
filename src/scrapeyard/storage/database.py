@@ -12,7 +12,12 @@ import aiosqlite
 
 # Mapping of database filename to its migration scripts (executed in order).
 _DB_MIGRATIONS: dict[str, list[str]] = {
-    "jobs.db": ["001_create_jobs.sql", "004_create_job_runs.sql", "005_add_indexes.sql"],
+    "jobs.db": [
+        "001_create_jobs.sql",
+        "004_create_job_runs.sql",
+        "005_add_indexes.sql",
+        "009_create_webhook_outbox.sql",
+    ],
     "errors.db": ["002_create_errors.sql", "007_add_errors_indexes.sql"],
     "results_meta.db": ["003_create_results_meta.sql", "006_add_results_meta_indexes.sql", "008_results_meta_unique_job_run.sql"],
 }

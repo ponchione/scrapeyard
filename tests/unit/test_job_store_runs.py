@@ -276,3 +276,85 @@ async def test_list_jobs_with_stats_respects_limit_and_offset(store):
     results = await store.list_jobs_with_stats(limit=2, offset=1)
 
     assert [job.job_id for job, _, _ in results] == ["j-2", "j-1"]
+
+
+# ---------------------------------------------------------------------------
+# recover_stale_running_jobs
+# ---------------------------------------------------------------------------
+
+
+async def test_recover_stale_running_jobs_fails_stale_run_and_matching_job(store):
+    cutoff = datetime(2026, 3, 10, 12, 0, 0)
+    recovered_at = datetime(2026, 3, 10, 12, 5, 0)
+    await store.save_job(
+        _make_job(
+            job_id="j-stale",
+            name="stale",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 10, 0, 0),
+            current_run_id="r-stale",
+        )
+    )
+    await store.save_job(
+        _make_job(
+            job_id="j-fresh",
+            name="fresh",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 12, 30, 0),
+            current_run_id="r-fresh",
+        )
+    )
+    await _insert_run(
+        "r-stale", "j-stale", "running", "scheduled", "aaa", "2026-03-10T10:00:00"
+    )
+    await _insert_run(
+        "r-fresh", "j-fresh", "running", "scheduled", "bbb", "2026-03-10T12:30:00"
+    )
+
+    recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
+
+    assert recovered == 1
+    stale_job = await store.get_job("j-stale")
+    fresh_job = await store.get_job("j-fresh")
+    assert stale_job.status == JobStatus.failed
+    assert stale_job.updated_at == recovered_at
+    assert stale_job.current_run_id == "r-stale"
+    assert fresh_job.status == JobStatus.running
+
+    stale_run = (await store.get_job_runs("j-stale"))[0]
+    fresh_run = (await store.get_job_runs("j-fresh"))[0]
+    assert stale_run.status == JobStatus.failed
+    assert stale_run.completed_at == recovered_at
+    assert fresh_run.status == JobStatus.running
+
+
+async def test_recover_stale_running_jobs_fails_running_job_without_matching_run(store):
+    cutoff = datetime(2026, 3, 10, 12, 0, 0)
+    recovered_at = datetime(2026, 3, 10, 12, 5, 0)
+    await store.save_job(
+        _make_job(
+            job_id="j-missing-run",
+            name="missing-run",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 10, 0, 0),
+            current_run_id="r-never-created",
+        )
+    )
+    await store.save_job(
+        _make_job(
+            job_id="j-recent-missing-run",
+            name="recent-missing-run",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 12, 30, 0),
+            current_run_id="r-not-stale-yet",
+        )
+    )
+
+    recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
+
+    assert recovered == 1
+    stale_job = await store.get_job("j-missing-run")
+    recent_job = await store.get_job("j-recent-missing-run")
+    assert stale_job.status == JobStatus.failed
+    assert stale_job.updated_at == recovered_at
+    assert recent_job.status == JobStatus.running

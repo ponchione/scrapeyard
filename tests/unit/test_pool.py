@@ -82,17 +82,28 @@ def test_properties_return_correct_values():
 
 
 @pytest.mark.asyncio
-async def test_start_initializes_redis_and_worker_once():
+async def test_start_initializes_redis_and_worker_once(monkeypatch):
     pool = _make_pool()
     fake_redis = MagicMock()
     fake_worker = MagicMock()
     fake_worker.async_run = AsyncMock()
+    wait_for_timeouts: list[float] = []
+
+    async def _wait_for(awaitable, *, timeout):
+        wait_for_timeouts.append(timeout)
+        return await awaitable
 
     def _create_task(coro, *_args, **_kwargs):
         close = getattr(coro, "close", None)
         if callable(close):
             close()
         return MagicMock()
+
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: SimpleNamespace(workers_redis_connect_timeout_seconds=7.0),
+    )
+    monkeypatch.setattr("scrapeyard.queue.pool.asyncio.wait_for", _wait_for)
 
     with (
         patch("scrapeyard.queue.pool.create_pool", new=AsyncMock(return_value=fake_redis)) as create_pool_mock,
@@ -105,7 +116,42 @@ async def test_start_initializes_redis_and_worker_once():
     create_pool_mock.assert_awaited_once()
     worker_cls.assert_called_once()
     create_task_mock.assert_called_once()
+    assert wait_for_timeouts == [7.0]
     assert pool.redis is fake_redis
+
+
+@pytest.mark.asyncio
+async def test_start_raises_clear_error_on_redis_connect_timeout(monkeypatch, caplog):
+    pool = _make_pool(queue_name="critical-queue")
+
+    async def _timeout(awaitable, *, timeout):
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: SimpleNamespace(workers_redis_connect_timeout_seconds=2.5),
+    )
+    monkeypatch.setattr("scrapeyard.queue.pool.asyncio.wait_for", _timeout)
+    caplog.set_level("ERROR", logger="scrapeyard.queue.pool")
+
+    with (
+        patch("scrapeyard.queue.pool.create_pool", new=AsyncMock(return_value=MagicMock())) as create_pool_mock,
+        patch("scrapeyard.queue.pool.Worker") as worker_cls,
+        patch("scrapeyard.queue.pool.asyncio.create_task") as create_task_mock,
+    ):
+        with pytest.raises(RuntimeError, match="Timed out connecting to Redis after 2.5s"):
+            await pool.start()
+
+    create_pool_mock.assert_called_once()
+    worker_cls.assert_not_called()
+    create_task_mock.assert_not_called()
+    assert "Timed out connecting to Redis queue critical-queue after 2.5s" in caplog.text
+    assert pool.redis is None
+    assert pool._worker is None
+    assert pool._started is False
 
 
 @pytest.mark.asyncio

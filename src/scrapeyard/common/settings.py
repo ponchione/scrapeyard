@@ -18,14 +18,19 @@ class ServiceSettings(BaseSettings):
     workers_memory_limit_mb: int = 4096
     sync_timeout_seconds: int = 15
     sync_poll_delay_seconds: float = 0.5
+    basic_fetch_timeout_seconds: float = 30.0
     workers_shutdown_grace_seconds: int = 30
     workers_running_lease_seconds: int = 300
+    workers_redis_connect_timeout_seconds: float = 10.0
 
     redis_dsn: str = "redis://redis:6379/0"
     queue_name: str = "scrapeyard"
 
     admin_read_default_limit: int = 100
     admin_read_max_limit: int = 500
+
+    rate_limit_requests: int = 600
+    rate_limit_window_seconds: int = 60
 
     scheduler_jitter_max_seconds: int = 120
 

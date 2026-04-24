@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any, cast, Protocol
 
@@ -16,6 +17,7 @@ from scrapeyard.queue.memory import get_process_rss_mb
 
 _ARQ_FUNCTION_NAME = "scrape_job"
 _KEEP_RESULT_SECONDS = 3600
+logger = logging.getLogger(__name__)
 _PRIORITY_OFFSETS_MS = {
     "high": -1000,
     "normal": 0,
@@ -79,10 +81,28 @@ class WorkerPool:
         if self._started:
             return
 
-        self._redis = await create_pool(
-            self._redis_settings,
-            default_queue_name=self._queue_name,
-        )
+        settings = get_settings()
+        timeout_seconds = settings.workers_redis_connect_timeout_seconds
+        try:
+            redis = await asyncio.wait_for(
+                create_pool(
+                    self._redis_settings,
+                    default_queue_name=self._queue_name,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            logger.error(
+                "Timed out connecting to Redis queue %s after %ss",
+                self._queue_name,
+                timeout_seconds,
+            )
+            raise RuntimeError(f"Timed out connecting to Redis after {timeout_seconds}s") from exc
+        except Exception:
+            logger.exception("Failed to connect to Redis queue %s", self._queue_name)
+            raise
+
+        self._redis = redis
         self._worker = Worker(
             functions=[func(cast(Any, self._run_job), name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
             redis_pool=self._redis,

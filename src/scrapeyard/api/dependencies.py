@@ -19,8 +19,9 @@ from scrapeyard.queue.worker import scrape_task
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
-from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore, WebhookOutboxStore
 from scrapeyard.storage.result_store import LocalResultStore
+from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
@@ -64,8 +65,13 @@ def get_circuit_breaker() -> CircuitBreaker:
 
 
 @lru_cache(maxsize=1)
+def get_webhook_outbox_store() -> WebhookOutboxStore:
+    return SQLiteWebhookOutboxStore()
+
+
+@lru_cache(maxsize=1)
 def get_webhook_dispatcher() -> HttpWebhookDispatcher:
-    return HttpWebhookDispatcher()
+    return HttpWebhookDispatcher(outbox_store=get_webhook_outbox_store())
 
 
 async def close_webhook_dispatcher(*, timeout: float | None = None) -> None:
@@ -135,6 +141,7 @@ def reset_cached_dependencies() -> None:
         get_error_store,
         get_result_store,
         get_circuit_breaker,
+        get_webhook_outbox_store,
         get_webhook_dispatcher,
         get_worker_pool,
         get_scheduler,

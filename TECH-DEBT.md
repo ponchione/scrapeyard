@@ -2,8 +2,8 @@
 
 Last updated: 2026-04-24
 
-**Status:** All BLOCKERs (#1–9) resolved. Launch-gate HIGH items #10 is partly
-addressed (webhook retry + drain); #11 and #18 remain open.
+**Status:** All BLOCKERs (#1–9) and launch-gate HIGH items #10, #11, and
+#18 are resolved. Runtime-safety items #15, #16, and #33 are resolved.
 
 Pre-launch audit for the EyeBox rollout. Findings verified by direct source
 reads; file:line references point to current `main`. Severity tiers:
@@ -187,7 +187,7 @@ services and make Scrapeyard depend on Redis healthy, not just started.
 probe fails. Disk free threshold is `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB`
 (default 100). Dockerfile has a `HEALTHCHECK` and `docker-compose.yml` has
 per-service healthchecks with `depends_on: redis: condition:
-service_healthy`. Redis-connect startup timeout (#33) still open.
+service_healthy`. Redis-connect startup timeout is covered by resolved #33.
 
 ### 7. ~~Result writes are not atomic — partial files on crash~~ (RESOLVED)
 `src/scrapeyard/storage/filesystem.py:19–25`
@@ -255,31 +255,46 @@ credentials into a secrets store) is left as a follow-up.
 
 ## HIGH — Will Cause Incidents Under Real Load
 
-### 10. Fire-and-forget webhook dispatch with no retry or durability
-`src/scrapeyard/queue/worker.py:434`,
-`src/scrapeyard/webhook/dispatcher.py:30–59`
+### 10. ~~Fire-and-forget webhook dispatch with no retry or durability~~ (RESOLVED)
+`src/scrapeyard/queue/run_lifecycle.py`,
+`src/scrapeyard/webhook/dispatcher.py`,
+`src/scrapeyard/storage/webhook_outbox.py`, `sql/009_create_webhook_outbox.sql`
 
-```python
-asyncio.create_task(webhook_dispatcher.dispatch(config.webhook, payload))
-```
+The original inline `asyncio.create_task(...)` call was already refactored into
+`run_lifecycle.dispatch_webhook(...)` calling `HttpWebhookDispatcher.submit(...)`,
+and the dispatcher had in-memory retry plus shutdown drain. The remaining
+launch-gate risk was durability: after result/job finalization, a process crash
+before successful HTTP delivery could permanently lose the EyeBox callback.
 
-The task is never awaited or tracked. `HttpWebhookDispatcher.dispatch`
-catches `httpx` errors and logs a warning; on a timeout, non-2xx response,
-or a shutdown mid-flight, the notification is silently lost with no retry
-and no way for the caller to replay. EyeBox will probably depend on these
-callbacks to know a scrape is done — we need at-least-once delivery or
-EyeBox needs to poll `/results/{id}`. Decide which, but right now it's
-neither.
+**Fix (2026-04-24):** Webhook submissions now persist a `webhook_deliveries`
+outbox row in `jobs.db` before `submit(...)` returns, using the payload
+`delivery_id` as the durable idempotency key. `HttpWebhookDispatcher.startup()`
+replays pending outbox rows; successful 2xx responses mark rows `delivered`,
+non-retryable 4xx responses mark rows permanently `failed`, and transient
+errors/timeouts/5xx/429 keep rows `pending` with attempts, last error, and
+`next_attempt_at` advanced by backoff. Pending/failed rows remain inspectable;
+at-least-once duplicate delivery after a crash remains acceptable because the
+receiver can deduplicate by `delivery_id`.
 
-### 11. No HTTP-layer rate limiting or request throttling
-`src/scrapeyard/api/routes.py` (whole file),
-`src/scrapeyard/main.py:78–85`
+### 11. ~~No HTTP-layer rate limiting or request throttling~~ (RESOLVED)
+`src/scrapeyard/api/middleware.py`, `src/scrapeyard/main.py`,
+`src/scrapeyard/common/settings.py`
 
 The domain rate limiter in `engine/rate_limiter.py` governs outbound
 scraping, not inbound API calls. Nothing stops a client from bursting
 `POST /scrape` at kilohertz, saturating Redis enqueues, Pydantic parses,
 and worker memory. With #1 unresolved this is a DoS. Even with auth, a
 runaway EyeBox caller will take us down.
+
+**Fix (2026-04-24):** `RateLimitMiddleware` in
+`src/scrapeyard/api/middleware.py` enforces an in-memory sliding-window
+request limit before auth/router execution but after the request-size guard. It is
+configured by `SCRAPEYARD_RATE_LIMIT_REQUESTS` (default 600) and
+`SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS` (default 60). Requests are keyed by a
+known `X-API-Key` when auth keys are configured; missing or invalid keys fall
+back to the immediate client IP so random header values cannot evade the
+limit. `/health` remains exempt, and throttled requests return 429 with
+`Retry-After`.
 
 ### 12. In-flight `asyncio.Task`s are awaited sequentially — partial loss on mid-job exception
 `src/scrapeyard/queue/worker.py:294–304`
@@ -328,7 +343,7 @@ contention (think: 20 scheduled jobs all pointed at the same vendor at the
 top of the hour after a scheduler jitter collision), this becomes a polling
 hot loop that pressures Redis and burns CPU before anyone makes progress.
 
-### 15. Basic `Fetcher.get` has no explicit timeout
+### 15. ~~Basic `Fetcher.get` has no explicit timeout~~ (RESOLVED)
 `src/scrapeyard/engine/scraper.py:180–186`
 
 ```python
@@ -346,8 +361,14 @@ Verify Scrapling's default; if it is not a sane finite value, set one
 explicitly (e.g., 30s) for basic, and verify the browser timeout path
 uses `BrowserConfig.timeout_ms` (it appears to, but should be tested).
 
-### 16. Pagination loop can run forever on an empty `next` href
-`src/scrapeyard/engine/scraper.py:275–291`
+**Fix (2026-04-24):** Scrapling's installed basic default was verified
+finite (`Fetcher.get(..., timeout=10)`), and Scrapeyard now passes an
+explicit `SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS` policy (default `30.0`)
+into basic fetch calls. Browser fetch timeout behavior remains driven by
+`BrowserConfig.timeout_ms` and is covered by `browser_fetch_kwargs` tests.
+
+### 16. ~~Pagination loop can run forever on an empty `next` href~~ (RESOLVED)
+`src/scrapeyard/engine/pagination.py`
 
 The loop breaks on `not next_links` and `not next_url`, but does not break
 when `next_url == current_url`. A site that renders a static "next" link
@@ -355,6 +376,11 @@ pointing at the current page produces a tight refetch loop up to
 `max_pages`, which defaults to 10 but is user-set. Add an explicit check
 that the resolved `next_url` is not equal to, nor a normalized variant of,
 `current_url`.
+
+**Fix (2026-04-24):** Pagination now tracks normalized seen URLs using a
+key that lowercases scheme/host, strips fragments, drops default ports, and
+preserves query strings. It stops before fetching self-links and also stops
+before appending data when a fetched page redirects back to a seen URL.
 
 ### 17. `Path("/proc/self/statm").read_text()` in async hot path
 `src/scrapeyard/queue/pool.py:63–74`
@@ -366,7 +392,7 @@ returns "memory fine" because of the `except ... return True`. A failed
 read should at least log; silently defaulting to "accept everything"
 defeats the whole memory-limit mechanism.
 
-### 18. Crash-recovery leaves jobs stuck `running` forever
+### 18. ~~Crash-recovery leaves jobs stuck `running` forever~~ (RESOLVED)
 `src/scrapeyard/queue/worker.py:62–64, 497–501`, `src/scrapeyard/main.py:30–76`
 
 Worker lease recovery relies on the 300s `workers_running_lease_seconds`
@@ -385,6 +411,14 @@ check inside `_should_skip_delivery`. But:
 Needed: on startup, fail any `job_runs` with `status='running'` older than
 a threshold, and reset the corresponding `jobs.status` if its
 `current_run_id` matches.
+
+**Fix (2026-04-24):** `SQLiteJobStore.recover_stale_running_jobs` now runs
+at FastAPI lifespan startup after DB initialization and before worker/
+scheduler startup. It marks stale `job_runs.status='running'` rows older
+than 2× `SCRAPEYARD_WORKERS_RUNNING_LEASE_SECONDS` as failed, updates
+matching `jobs.status='running'` rows when `current_run_id` matches, and
+also fails stale `running` jobs whose `current_run_id` has no active run
+row because the process crashed before `job_runs` insertion.
 
 ### 19. `extra_hosts: host.docker.internal` and a hard-coded `redis://redis:...` default
 `docker-compose.yml:15–16, 21`, `src/scrapeyard/common/settings.py:26`
@@ -503,12 +537,17 @@ Container uses 3.12 but tests/CI allow 3.10. Narrow the range to
 `SCRAPEYARD_LOG_LEVEL` setting. Without it we can neither crank verbosity
 for an incident nor quiet down noisy paths in production.
 
-### 33. No startup Redis-connect timeout
+### 33. ~~No startup Redis-connect timeout~~ (RESOLVED)
 `src/scrapeyard/queue/pool.py:85–88`. `await create_pool(...)` has no
 timeout. If Redis is unreachable at boot, the lifespan hangs and K8s will
 repeatedly start, fail its liveness probe (once added — see #6), and get
 reaped, producing a crash loop instead of a clear error. Wrap with
 `asyncio.wait_for` and log the failure.
+
+**Fix (2026-04-24):** `WorkerPool.start()` wraps Redis `create_pool` in
+`asyncio.wait_for` using `SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS`
+(default `10.0`) and logs timeout/connection failures clearly before worker
+construction or `_started` mutation.
 
 ### 34. `_start_time` and `_projects_cache` are module globals mutated from a lifespan
 `src/scrapeyard/main.py:24–26, 33–34, 87–136`. Low priority, but these
@@ -536,15 +575,15 @@ Without this, dependency pin bumps and behavior regressions ship silently.
 | 7 | Non-atomic result file writes | BLOCKER | storage/filesystem.py | ✅ resolved |
 | 8 | Container runs as root | BLOCKER | Dockerfile | ✅ already fixed |
 | 9 | Proxy creds served plain | BLOCKER | engine/url_guard.py, api/serializers.py | ✅ resolved |
-| 10 | Webhook fire-and-forget | HIGH | worker.py:434 |
-| 11 | No HTTP rate limiting | HIGH | routes.py (whole) |
+| 10 | Webhook fire-and-forget | HIGH | webhook/dispatcher.py, storage/webhook_outbox.py | ✅ resolved |
+| 11 | No HTTP rate limiting | HIGH | api/middleware.py, main.py | ✅ resolved |
 | 12 | Sequential `await task` loop | HIGH | worker.py:294–304 |
 | 13 | Circuit breaker in-memory + unlocked | HIGH | resilience.py:118–154 |
 | 14 | Rate limiter polling loop | HIGH | rate_limiter.py:48–74 |
-| 15 | No basic-fetcher timeout | HIGH | scraper.py:180–186 |
-| 16 | Pagination can refetch same URL | HIGH | scraper.py:275–291 |
+| 15 | No basic-fetcher timeout | HIGH | scraper.py:180–186 | ✅ resolved |
+| 16 | Pagination can refetch same URL | HIGH | pagination.py | ✅ resolved |
 | 17 | Sync `/proc` read in async hot path | HIGH | pool.py:63–74 |
-| 18 | Crashed runs stuck `running` | HIGH | worker.py + main.py lifespan |
+| 18 | Crashed runs stuck `running` | HIGH | worker.py + main.py lifespan | ✅ resolved |
 | 19 | Prod defaults pointed at compose-only values | HIGH | settings.py:26, compose:15 |
 | 20 | `importlib.resources` traversal to `sql/` | HIGH | database.py:66, Dockerfile:43 |
 | 21 | No metrics / tracing | MEDIUM | n/a |
@@ -559,7 +598,7 @@ Without this, dependency pin bumps and behavior regressions ship silently.
 | 30 | Loose dep caret pins | MEDIUM | pyproject.toml |
 | 31 | Python 3.10 allowed | MEDIUM | pyproject.toml:10 |
 | 32 | Log level not env-configurable | MEDIUM | logging.py:22 |
-| 33 | No Redis-connect startup timeout | MEDIUM | pool.py:85–88 |
+| 33 | No Redis-connect startup timeout | MEDIUM | pool.py:85–88 | ✅ resolved |
 | 34 | Module-global lifespan state | MEDIUM | main.py:24–26 |
 | 35 | No CI | MEDIUM | n/a |
 
@@ -570,9 +609,11 @@ first post-launch iteration.
 
 **Launch gate progress (2026-04-24):**
 - BLOCKERs 1–9: all resolved.
-- HIGH #10: partial — `HttpWebhookDispatcher` already has retry +
-  shutdown-drain; still fire-and-forget from `worker.py:434`. At-least-once
-  durability would need a persistent outbox.
-- HIGH #11: open — no HTTP rate limiting.
-- HIGH #18: open — crashed runs remain stuck in `running`; startup sweep
-  not implemented.
+- HIGH #10: resolved — `HttpWebhookDispatcher.submit(...)` durably writes a
+  `webhook_deliveries` outbox row before scheduling delivery; startup replays
+  pending rows, success marks delivered, retryable failures remain pending with
+  backoff, and permanent 4xx failures remain inspectable.
+- HIGH #11: resolved — in-memory inbound HTTP rate limiting now runs before
+  auth/router work, keyed by known API key or client IP.
+- HIGH #18: resolved — startup recovery now fails stale running runs/jobs
+  before worker/scheduler startup.

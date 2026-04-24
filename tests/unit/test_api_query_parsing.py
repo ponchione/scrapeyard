@@ -1,7 +1,7 @@
 from fastapi.responses import JSONResponse
 
 from scrapeyard.api.query_parsing import parse_error_filters
-from scrapeyard.models.job import ErrorType
+from scrapeyard.models.job import ErrorFilters, ErrorType
 
 
 def test_parse_error_filters_builds_filters() -> None:
@@ -12,7 +12,7 @@ def test_parse_error_filters_builds_filters() -> None:
         error_type="timeout",
     )
 
-    assert not isinstance(parsed, JSONResponse)
+    assert isinstance(parsed, ErrorFilters)
     assert parsed.project == "acme"
     assert parsed.job_id == "job-1"
     assert parsed.since is not None

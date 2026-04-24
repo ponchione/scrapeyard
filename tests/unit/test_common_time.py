@@ -5,4 +5,6 @@ def test_utc_now_returns_timezone_aware_datetime() -> None:
     value = utc_now()
 
     assert value.tzinfo is not None
-    assert value.utcoffset().total_seconds() == 0
+    offset = value.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0

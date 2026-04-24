@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -48,9 +49,9 @@ async def test_capture_browser_state_collects_bounded_console_and_request_failur
     page.content = AsyncMock(return_value="<html>ok</html>")
     page.on = MagicMock()
 
-    registered_handlers: dict[str, object] = {}
+    registered_handlers: dict[str, Callable[[object], None]] = {}
 
-    def register(event_name: str, handler: object) -> None:
+    def register(event_name: str, handler: Callable[[object], None]) -> None:
         registered_handlers[event_name] = handler
 
     page.on.side_effect = register

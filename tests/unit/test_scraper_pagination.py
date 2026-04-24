@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from scrapeyard.engine import pagination
 from scrapeyard.engine.pagination import resolve_href
 
 
@@ -36,3 +37,24 @@ def test_none_when_no_href() -> None:
 def test_relative_with_leading_slash() -> None:
     elem = _Element(href="/search")
     assert resolve_href(elem, "https://example.com/products/page") == "https://example.com/search"
+
+
+def test_pagination_url_key_ignores_fragments_and_normalizes_case() -> None:
+    assert pagination.pagination_url_key(
+        "HTTPS://Example.COM/products?page=1#reviews"
+    ) == pagination.pagination_url_key("https://example.com/products?page=1")
+
+
+def test_pagination_url_key_normalizes_default_ports() -> None:
+    assert pagination.pagination_url_key("https://example.com:443/a") == pagination.pagination_url_key(
+        "https://example.com/a"
+    )
+    assert pagination.pagination_url_key("http://example.com:80/a") == pagination.pagination_url_key(
+        "http://example.com/a"
+    )
+
+
+def test_pagination_url_key_preserves_query_strings() -> None:
+    assert pagination.pagination_url_key("https://example.com/products?page=1") != pagination.pagination_url_key(
+        "https://example.com/products?page=2"
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 import scrapeyard.main as main_module
+from scrapeyard.api.middleware import APIKeyAuthMiddleware, RateLimitMiddleware, RequestSizeLimitMiddleware
 
 
 @pytest.mark.asyncio
@@ -62,7 +64,10 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
         log_level="DEBUG",
         db_dir="/tmp/db",
         workers_shutdown_grace_seconds=7,
+        workers_running_lease_seconds=300,
     )
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    job_store = SimpleNamespace(recover_stale_running_jobs=AsyncMock(return_value=0))
     pool = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), redis=object())
     scheduler = SimpleNamespace(start=AsyncMock(), shutdown=MagicMock())
     webhook_dispatcher = SimpleNamespace(startup=AsyncMock())
@@ -80,6 +85,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
     cleanup_task = _CleanupTask()
 
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "utc_now", lambda: now)
+    monkeypatch.setattr(main_module, "get_job_store", lambda: job_store)
     monkeypatch.setattr(main_module, "setup_logging", MagicMock())
     monkeypatch.setattr(main_module, "init_db", AsyncMock())
     monkeypatch.setattr(
@@ -108,6 +115,10 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
 
     main_module.setup_logging.assert_called_once_with("/tmp/logs", "DEBUG")
     main_module.init_db.assert_awaited_once_with("/tmp/db")
+    job_store.recover_stale_running_jobs.assert_awaited_once_with(
+        now - timedelta(seconds=600),
+        now,
+    )
     webhook_dispatcher.startup.assert_awaited_once()
     pool.start.assert_awaited_once()
     main_module.init_rate_limiter.assert_called_once_with(redis=pool.redis)
@@ -149,3 +160,13 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     assert payload["status"] == "degraded"
     assert payload["workers"]["active_tasks"] == 2
     assert payload["projects"] == {"proj": {"status": "healthy"}}
+
+
+def test_app_middleware_stack_keeps_size_limit_outermost_then_rate_limit_then_auth():
+    middleware_classes = [middleware.cls for middleware in main_module.app.user_middleware]
+
+    assert middleware_classes[:3] == [
+        RequestSizeLimitMiddleware,
+        RateLimitMiddleware,
+        APIKeyAuthMiddleware,
+    ]

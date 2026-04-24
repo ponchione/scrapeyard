@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun
 from scrapeyard.storage.types import ResultPayload, SaveResultMeta
+from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookDeliveryCreate
 
 
 class JobStore(Protocol):
@@ -64,6 +65,14 @@ class JobStore(Protocol):
         """Mark a running run as failed (crash recovery)."""
         ...
 
+    async def recover_stale_running_jobs(
+        self,
+        cutoff: datetime,
+        recovered_at: datetime,
+    ) -> int:
+        """Mark stale running runs/jobs as failed and return recovered job count."""
+        ...
+
     async def list_scheduled_jobs(
         self,
     ) -> list[tuple[str, str, bool]]:
@@ -112,3 +121,52 @@ class ErrorStore(Protocol):
     async def count_errors_for_run(self, run_id: str) -> int: ...
 
     async def delete_errors_for_job(self, job_id: str) -> None: ...
+
+
+class WebhookOutboxStore(Protocol):
+    """Async interface for durable webhook delivery persistence."""
+
+    async def enqueue_delivery(
+        self,
+        delivery: WebhookDeliveryCreate,
+        *,
+        now: datetime | None = None,
+    ) -> None: ...
+
+    async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None: ...
+
+    async def list_due_pending(
+        self,
+        now: datetime,
+        *,
+        limit: int | None = None,
+    ) -> list[WebhookDelivery]: ...
+
+    async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]: ...
+
+    async def mark_delivered(
+        self,
+        delivery_id: str,
+        *,
+        delivered_at: datetime,
+        attempts: int = 1,
+    ) -> None: ...
+
+    async def mark_retryable_failure(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        next_attempt_at: datetime,
+        last_error: str,
+        attempts: int = 1,
+    ) -> None: ...
+
+    async def mark_permanent_failure(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        last_error: str,
+        attempts: int = 1,
+    ) -> None: ...

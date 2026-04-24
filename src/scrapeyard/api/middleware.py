@@ -2,13 +2,94 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
+import math
+import time
+from collections import deque
+from collections.abc import Callable
 from typing import Iterable
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitMiddleware:
+    """In-memory sliding-window HTTP request limiter.
+
+    Requests are counted globally per validated API key when a known key is
+    presented, otherwise per immediate client IP address. This intentionally
+    does not trust forwarding headers; deployments behind a proxy should make
+    the proxy enforce its own edge limits or pass authenticated API keys.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        requests: int,
+        window_seconds: float,
+        api_keys: set[str] | None = None,
+        exempt_paths: Iterable[str] = (),
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.app = app
+        self.request_limit = requests
+        self.window_seconds = window_seconds
+        self.api_keys = set(api_keys or ())
+        self.exempt_paths = set(exempt_paths)
+        self.clock = clock or time.monotonic
+        self._lock = asyncio.Lock()
+        self._requests_by_key: dict[str, deque[float]] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or self._disabled() or scope.get("path") in self.exempt_paths:
+            await self.app(scope, receive, send)
+            return
+
+        key = self._key_for_scope(scope)
+        retry_after = await self._record_or_reject(key, self.clock())
+        if retry_after is not None:
+            await _reject(
+                scope,
+                send,
+                429,
+                "Rate limit exceeded",
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            )
+            return
+
+        await self.app(scope, receive, send)
+
+    def _disabled(self) -> bool:
+        return self.request_limit <= 0 or self.window_seconds <= 0
+
+    def _key_for_scope(self, scope: Scope) -> str:
+        provided = _header_value(scope.get("headers", []), b"x-api-key")
+        if provided is not None:
+            api_key = provided.decode("latin-1")
+            if api_key in self.api_keys:
+                digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+                return f"api:{digest}"
+
+        client = scope.get("client")
+        host = client[0] if client else "unknown"
+        return f"ip:{host}"
+
+    async def _record_or_reject(self, key: str, now: float) -> float | None:
+        async with self._lock:
+            requests = self._requests_by_key.setdefault(key, deque())
+            cutoff = now - self.window_seconds
+            while requests and requests[0] <= cutoff:
+                requests.popleft()
+
+            if len(requests) >= self.request_limit:
+                return max(0.0, requests[0] + self.window_seconds - now)
+
+            requests.append(now)
+            return None
 
 
 class RequestSizeLimitMiddleware:
@@ -119,8 +200,15 @@ def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes 
     return None
 
 
-async def _reject(scope: Scope, send: Send, status_code: int, message: str) -> None:
-    response = JSONResponse(status_code=status_code, content={"error": message})
+async def _reject(
+    scope: Scope,
+    send: Send,
+    status_code: int,
+    message: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> None:
+    response = JSONResponse(status_code=status_code, content={"error": message}, headers=headers)
     await response(scope, _noop_receive, send)
 
 
