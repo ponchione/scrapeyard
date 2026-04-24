@@ -63,6 +63,88 @@ async def test_paginate_target_fetches_follow_on_pages_and_updates_result():
 
 
 @pytest.mark.asyncio
+async def test_paginate_target_stops_when_next_url_is_current_page():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/products?page=1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 3},
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    fetch_page = AsyncMock(return_value=FetchOutcome(page=_Page([]), debug={"final_url": f"{target.url}#top"}))
+    extract_page_data = MagicMock(return_value=[{"title": "duplicate"}])
+
+    await paginate_target(
+        page=_Page([_Element("#top")]),
+        target=target,
+        result=result,
+        fetch_target_page=fetch_page,
+        extract_page_data=extract_page_data,
+        retry_handler=MagicMock(spec=RetryConfig),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_not_awaited()
+    extract_page_data.assert_not_called()
+    assert result.pages_scraped == 1
+    assert result.data == [{"title": "first"}]
+
+
+@pytest.mark.asyncio
+async def test_paginate_target_stops_when_next_url_was_seen_after_redirect():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 3},
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    fetch_page = AsyncMock(return_value=FetchOutcome(page=_Page([]), debug={"final_url": target.url}))
+    extract_page_data = MagicMock(return_value=[{"title": "duplicate"}])
+
+    await paginate_target(
+        page=_Page([_Element("/page-2")]),
+        target=target,
+        result=result,
+        fetch_target_page=fetch_page,
+        extract_page_data=extract_page_data,
+        retry_handler=MagicMock(spec=RetryConfig),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_awaited_once()
+    extract_page_data.assert_not_called()
+    assert result.pages_scraped == 1
+    assert result.data == [{"title": "first"}]
+
+
+@pytest.mark.asyncio
 async def test_paginate_target_noops_without_pagination_config():
     target = TargetConfig.model_validate(
         {

@@ -31,6 +31,11 @@ async def test_init_db_creates_tables(tmp_path):
         cursor = await db.execute("PRAGMA table_info(jobs)")
         columns = {column[1] for column in await cursor.fetchall()}
         assert "schedule_enabled" in columns
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
 
     async with get_db("errors.db") as db:
         cursor = await db.execute(

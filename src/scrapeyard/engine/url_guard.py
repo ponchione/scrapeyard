@@ -98,7 +98,7 @@ def assert_public_url(
 
     seen: set[str] = set()
     for *_head, sockaddr in infos:
-        ip_str = sockaddr[0]
+        ip_str = str(sockaddr[0])
         if ip_str in seen:
             continue
         seen.add(ip_str)

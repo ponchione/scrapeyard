@@ -1,8 +1,45 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import missing_adaptive_selectors
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
+from scrapeyard.engine.scraper import _fetch_page
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    async def _fetch_basic_response(_fetcher_cls, url, call_kwargs):
+        captured_kwargs.update(call_kwargs)
+        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.get_settings",
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.basic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert captured_kwargs["timeout"] == 12.5
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

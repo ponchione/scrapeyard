@@ -277,6 +277,72 @@ class SQLiteJobStore:
             ),
         )
 
+    async def recover_stale_running_jobs(
+        self,
+        cutoff: datetime,
+        recovered_at: datetime,
+    ) -> int:
+        """Fail stale running runs and matching running jobs after a crash.
+
+        A process crash can leave either:
+        - a ``job_runs`` row stuck in ``running``; or
+        - a ``jobs`` row stuck in ``running`` before its run row was created.
+
+        This startup recovery pass marks stale run rows failed, then transitions
+        only matching/stale ``jobs`` rows to ``failed``. Jobs with a fresh active
+        run are left alone.
+        """
+        cutoff_text = fmt_dt(cutoff)
+        recovered_text = fmt_dt(recovered_at)
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT run_id
+                   FROM job_runs
+                   WHERE status = 'running'
+                     AND started_at <= ?""",
+                (cutoff_text,),
+            )
+            stale_run_ids = [row[0] for row in await cursor.fetchall()]
+
+            recovered_jobs = 0
+            if stale_run_ids:
+                placeholders = ",".join("?" for _ in stale_run_ids)
+                await db.execute(
+                    f"""UPDATE job_runs
+                       SET status = 'failed', completed_at = ?
+                       WHERE status = 'running'
+                         AND run_id IN ({placeholders})""",
+                    (recovered_text, *stale_run_ids),
+                )
+                cursor = await db.execute(
+                    f"""UPDATE jobs
+                       SET status = 'failed', updated_at = ?
+                       WHERE status = 'running'
+                         AND current_run_id IN ({placeholders})""",
+                    (recovered_text, *stale_run_ids),
+                )
+                recovered_jobs += max(cursor.rowcount, 0)
+
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = 'failed', updated_at = ?
+                   WHERE status = 'running'
+                     AND (updated_at IS NULL OR updated_at <= ?)
+                     AND (
+                         current_run_id IS NULL
+                         OR NOT EXISTS (
+                             SELECT 1
+                             FROM job_runs
+                             WHERE job_runs.run_id = jobs.current_run_id
+                               AND job_runs.status = 'running'
+                         )
+                     )""",
+                (recovered_text, cutoff_text),
+            )
+            recovered_jobs += max(cursor.rowcount, 0)
+            await db.commit()
+            return recovered_jobs
+
     async def list_scheduled_jobs(self) -> list[tuple[str, str, bool]]:
         """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
         async with get_db("jobs.db") as db:

@@ -42,7 +42,7 @@ class TargetResult:
 
     @property
     def status_value(self) -> str:
-        return self.status.value
+        return TargetStatus(self.status).value
 
 
 @dataclass

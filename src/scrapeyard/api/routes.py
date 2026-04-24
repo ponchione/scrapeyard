@@ -42,6 +42,7 @@ from scrapeyard.api.serializers import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
 from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
@@ -98,7 +99,7 @@ async def scrape(
     request: Request,
     job_store: JobStore = Depends(get_job_store),
     result_store: ResultStore = Depends(get_result_store),
-    worker_pool=Depends(get_worker_pool),
+    worker_pool: WorkerPool = Depends(get_worker_pool),
 ) -> Response:
     """Submit an ad-hoc scrape request."""
     parsed = await _read_valid_yaml_config(request)

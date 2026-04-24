@@ -32,13 +32,16 @@ def row_to_job(row: Sequence[object]) -> Job:
 
 
 def row_to_job_run(row: Sequence[object]) -> JobRun:
+    started_at = parse_dt(cast(str | None, row[5]))
+    if started_at is None:
+        raise ValueError("Job run row is missing started_at")
     return JobRun(
         run_id=cast(str, row[0]),
         job_id=cast(str, row[1]),
-        status=cast(str, row[2]),
+        status=JobStatus(cast(str, row[2])),
         trigger=cast(str, row[3]),
         config_hash=cast(str, row[4]),
-        started_at=parse_dt(cast(str | None, row[5])),
+        started_at=started_at,
         completed_at=parse_dt(cast(str | None, row[6])),
         record_count=cast(int | None, row[7]),
         error_count=cast(int, row[8]),

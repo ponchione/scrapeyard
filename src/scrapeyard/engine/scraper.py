@@ -142,6 +142,7 @@ async def _fetch_page(
     debug = default_debug_blob(fetcher_type, target, url)
 
     if fetcher_type == FetcherType.basic:
+        call_kwargs.setdefault("timeout", get_settings().basic_fetch_timeout_seconds)
         if proxy_url is not None:
             call_kwargs["proxy"] = proxy_url
         response = await fetch_basic_response(fetcher_cls, url, call_kwargs)
