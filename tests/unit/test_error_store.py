@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from datetime import datetime
 
 import pytest
@@ -17,8 +18,8 @@ async def store(tmp_path):
     return SQLiteErrorStore()
 
 
-def _make_error(**overrides) -> ErrorRecord:
-    defaults = {
+def _make_error(**overrides: Any) -> ErrorRecord:
+    defaults: dict[str, Any] = {
         "job_id": "j-1",
         "run_id": "run-1",
         "project": "acme",
@@ -33,7 +34,7 @@ def _make_error(**overrides) -> ErrorRecord:
         "action_taken": ActionTaken.retry,
     }
     defaults.update(overrides)
-    return ErrorRecord(**defaults)
+    return ErrorRecord.model_validate(defaults)
 
 
 async def test_log_and_query_all(store):
@@ -129,3 +130,28 @@ async def test_combined_filters(store):
 async def test_query_empty(store):
     results = await store.query_errors(ErrorFilters(project="nonexistent"))
     assert results == []
+
+
+async def test_query_errors_orders_newest_first(store):
+    await store.log_error(_make_error(job_id="j-1", timestamp=datetime(2026, 3, 1, 8, 0, 0)))
+    await store.log_error(_make_error(job_id="j-2", timestamp=datetime(2026, 3, 1, 10, 0, 0)))
+    await store.log_error(_make_error(job_id="j-3", timestamp=datetime(2026, 3, 1, 9, 0, 0)))
+
+    results = await store.query_errors(ErrorFilters())
+
+    assert [result.job_id for result in results] == ["j-2", "j-3", "j-1"]
+
+
+async def test_query_errors_respects_limit_and_offset(store):
+    for i in range(5):
+        await store.log_error(
+            _make_error(
+                job_id=f"j-{i}",
+                timestamp=datetime(2026, 3, 1, 8 + i, 0, 0),
+                error_message=f"err-{i}",
+            )
+        )
+
+    results = await store.query_errors(ErrorFilters(), limit=2, offset=1)
+
+    assert [result.job_id for result in results] == ["j-3", "j-2"]

@@ -1,10 +1,9 @@
-"""Unit tests for domain rate limiter implementations."""
+"""Unit tests for engine/rate_limiter.py — Local and Redis implementations."""
 
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,163 +13,124 @@ from scrapeyard.engine.rate_limiter import (
 )
 
 
-@pytest.mark.asyncio
-async def test_local_first_acquire_is_immediate():
-    """First call for a domain should not wait."""
-    limiter = LocalDomainRateLimiter()
-    start = time.monotonic()
-    await limiter.acquire("example.com", 5.0)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+# ---------------------------------------------------------------------------
+# LocalDomainRateLimiter
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_local_second_acquire_waits():
-    """Second call within the interval should wait."""
-    limiter = LocalDomainRateLimiter()
-    await limiter.acquire("example.com", 0.3)
-    start = time.monotonic()
-    await limiter.acquire("example.com", 0.3)
-    elapsed = time.monotonic() - start
-    assert elapsed >= 0.2  # allow small timing tolerance
+class TestLocalDomainRateLimiter:
+    @pytest.mark.asyncio
+    async def test_first_acquire_returns_immediately(self) -> None:
+        limiter = LocalDomainRateLimiter()
+        start = time.monotonic()
+        await limiter.acquire("example.com", 1.0)
+        assert time.monotonic() - start < 0.1
+
+    @pytest.mark.asyncio
+    async def test_second_acquire_waits(self) -> None:
+        limiter = LocalDomainRateLimiter()
+        await limiter.acquire("example.com", 0.2)
+        start = time.monotonic()
+        await limiter.acquire("example.com", 0.2)
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.15  # allow small tolerance
+
+    @pytest.mark.asyncio
+    async def test_different_domains_independent(self) -> None:
+        limiter = LocalDomainRateLimiter()
+        await limiter.acquire("a.com", 5.0)
+        start = time.monotonic()
+        await limiter.acquire("b.com", 5.0)
+        assert time.monotonic() - start < 0.1
 
 
-@pytest.mark.asyncio
-async def test_local_different_domains_independent():
-    """Different domains do not block each other."""
-    limiter = LocalDomainRateLimiter()
-    await limiter.acquire("a.com", 5.0)
-    start = time.monotonic()
-    await limiter.acquire("b.com", 5.0)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+# ---------------------------------------------------------------------------
+# RedisDomainRateLimiter
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_local_expired_interval_no_wait():
-    """After the interval has elapsed, no wait needed."""
-    limiter = LocalDomainRateLimiter()
-    await limiter.acquire("example.com", 0.1)
-    await asyncio.sleep(0.15)
-    start = time.monotonic()
-    await limiter.acquire("example.com", 0.1)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1
+class TestRedisDomainRateLimiter:
+    """Tests use a mock Redis — no real Redis needed."""
 
+    def _make_limiter(
+        self, evalsha_side_effect: list[list[int]] | None = None,
+    ) -> tuple[RedisDomainRateLimiter, AsyncMock]:
+        redis = AsyncMock()
+        redis.script_load = AsyncMock(return_value="fake-sha")
+        if evalsha_side_effect is not None:
+            redis.evalsha = AsyncMock(side_effect=evalsha_side_effect)
+        else:
+            # Default: always acquired immediately.
+            redis.evalsha = AsyncMock(return_value=[1, 0])
+        limiter = RedisDomainRateLimiter(redis)
+        return limiter, redis
 
-# --- RedisDomainRateLimiter (mock-Redis) ---
+    @pytest.mark.asyncio
+    async def test_acquire_immediate(self) -> None:
+        """Lua returns acquired=1 — should return immediately."""
+        limiter, redis = self._make_limiter()
+        await limiter.acquire("example.com", 2.0)
+        redis.script_load.assert_awaited_once()
+        redis.evalsha.assert_awaited_once()
+        # Verify correct key format.
+        call_args = redis.evalsha.call_args
+        assert call_args[0][0] == "fake-sha"  # sha
+        assert call_args[0][1] == 1  # numkeys
+        assert call_args[0][2] == "scrapeyard:rate:example.com"
 
+    @pytest.mark.asyncio
+    async def test_acquire_waits_then_succeeds(self) -> None:
+        """Lua returns wait-needed first, then acquired on retry."""
+        limiter, redis = self._make_limiter(
+            evalsha_side_effect=[
+                [0, 100],  # wait 100ms
+                [1, 0],    # acquired
+            ],
+        )
+        with patch("scrapeyard.engine.rate_limiter.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await limiter.acquire("example.com", 2.0)
+            mock_sleep.assert_awaited_once_with(0.1)  # 100ms / 1000
+        assert redis.evalsha.await_count == 2
 
-def _mock_redis():
-    """Return an AsyncMock that simulates Redis GET/SET semantics."""
-    store: dict[str, str] = {}
-    redis = AsyncMock()
+    @pytest.mark.asyncio
+    async def test_script_load_cached(self) -> None:
+        """script_load is called once even across multiple acquire() calls."""
+        limiter, redis = self._make_limiter()
+        await limiter.acquire("a.com", 1.0)
+        await limiter.acquire("b.com", 1.0)
+        redis.script_load.assert_awaited_once()
 
-    async def _get(key):
-        return store.get(key)
+    @pytest.mark.asyncio
+    async def test_ttl_minimum_is_2(self) -> None:
+        """TTL should be at least 2 regardless of min_interval."""
+        limiter, redis = self._make_limiter()
+        await limiter.acquire("example.com", 0.5)
+        call_args = redis.evalsha.call_args[0]
+        ttl_str = call_args[5]  # 6th positional arg
+        assert int(ttl_str) == 2
 
-    async def _set(key, value, *, ex=None, nx=False):
-        if nx and key in store:
-            return None  # NX fails if key exists
-        store[key] = value
-        return True
+    @pytest.mark.asyncio
+    async def test_ttl_scales_with_interval(self) -> None:
+        """TTL = int(min_interval) + 1 when that exceeds 2."""
+        limiter, redis = self._make_limiter()
+        await limiter.acquire("example.com", 5.0)
+        call_args = redis.evalsha.call_args[0]
+        ttl_str = call_args[5]
+        assert int(ttl_str) == 6  # int(5.0) + 1
 
-    redis.get = AsyncMock(side_effect=_get)
-    redis.set = AsyncMock(side_effect=_set)
-    redis._store = store  # expose for test manipulation
-    return redis
-
-
-@pytest.mark.asyncio
-async def test_redis_first_acquire_sets_key():
-    """First acquire for a domain should SET the key via NX and return immediately."""
-    redis = _mock_redis()
-    limiter = RedisDomainRateLimiter(redis)
-    start = time.monotonic()
-    await limiter.acquire("example.com", 3.0)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1
-    redis.set.assert_called_once()
-    call_kwargs = redis.set.call_args
-    assert call_kwargs.kwargs.get("nx") is True
-    assert call_kwargs.kwargs.get("ex") == 4  # int(3.0) + 1
-
-
-@pytest.mark.asyncio
-async def test_redis_second_acquire_waits_when_interval_not_elapsed():
-    """Second acquire should wait when the interval hasn't elapsed."""
-    redis = _mock_redis()
-    limiter = RedisDomainRateLimiter(redis)
-    await limiter.acquire("example.com", 0.3)
-
-    start = time.monotonic()
-    await limiter.acquire("example.com", 0.3)
-    elapsed = time.monotonic() - start
-    assert elapsed >= 0.2  # waited for interval
-
-
-@pytest.mark.asyncio
-async def test_redis_overwrite_path_when_interval_elapsed():
-    """When the interval has elapsed but key exists, should overwrite and return."""
-    redis = _mock_redis()
-    limiter = RedisDomainRateLimiter(redis)
-    # Pre-seed a key with an old timestamp.
-    redis._store["scrapeyard:rate:example.com"] = str(time.time() - 10.0)
-
-    start = time.monotonic()
-    await limiter.acquire("example.com", 3.0)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1  # no wait — interval already elapsed
-    # Should have called set without nx (overwrite path).
-    last_set_call = redis.set.call_args
-    assert last_set_call.kwargs.get("nx", False) is False
-
-
-@pytest.mark.asyncio
-async def test_redis_nx_race_retries():
-    """If another worker wins the NX race, limiter should retry and take the overwrite path."""
-    redis = AsyncMock()
-    get_count = 0
-
-    async def _get(key):
-        nonlocal get_count
-        get_count += 1
-        if get_count <= 1:
-            return None  # first GET: key absent
-        # second GET: another worker set it, but interval already elapsed
-        return str(time.time() - 10.0)
-
-    async def _set(key, value, *, ex=None, nx=False):
-        if nx and get_count <= 1:
-            return None  # NX fails — another worker won the race
-        return True  # overwrite succeeds on retry
-
-    redis.get = AsyncMock(side_effect=_get)
-    redis.set = AsyncMock(side_effect=_set)
-
-    limiter = RedisDomainRateLimiter(redis)
-    await limiter.acquire("example.com", 0.15)
-    # Should have called GET at least twice (retry after NX failure).
-    assert redis.get.call_count >= 2
-
-
-@pytest.mark.asyncio
-async def test_redis_different_domains_independent():
-    """Different domains should not interfere with each other."""
-    redis = _mock_redis()
-    limiter = RedisDomainRateLimiter(redis)
-    await limiter.acquire("a.com", 5.0)
-    start = time.monotonic()
-    await limiter.acquire("b.com", 5.0)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.1
-
-
-@pytest.mark.asyncio
-async def test_redis_ttl_minimum_is_two():
-    """TTL should be at least 2, even for very small intervals."""
-    redis = _mock_redis()
-    limiter = RedisDomainRateLimiter(redis)
-    await limiter.acquire("example.com", 0.1)
-    call_kwargs = redis.set.call_args
-    assert call_kwargs.kwargs.get("ex") == 2
+    @pytest.mark.asyncio
+    async def test_multiple_waits_before_acquire(self) -> None:
+        """Multiple wait cycles before final acquisition."""
+        limiter, redis = self._make_limiter(
+            evalsha_side_effect=[
+                [0, 200],  # wait 200ms
+                [0, 50],   # wait 50ms
+                [1, 0],    # acquired
+            ],
+        )
+        with patch("scrapeyard.engine.rate_limiter.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await limiter.acquire("example.com", 2.0)
+            assert mock_sleep.await_count == 2
+            mock_sleep.assert_any_await(0.2)
+            mock_sleep.assert_any_await(0.05)
+        assert redis.evalsha.await_count == 3

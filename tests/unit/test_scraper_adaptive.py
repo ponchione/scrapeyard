@@ -1,6 +1,6 @@
 """Test that Scrapling adaptive DB path is configured correctly."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -142,7 +142,7 @@ async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
-    """Stealthy fetcher should get a longer timeout and resource suppression."""
+    """Stealthy fetcher should get a longer timeout and only supported browser kwargs."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -164,6 +164,9 @@ async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
         assert call_kwargs["timeout"] == 60000
         assert call_kwargs["disable_resources"] is True
         assert call_kwargs["network_idle"] is False
+        assert "stealth" not in call_kwargs
+        assert "hide_canvas" not in call_kwargs
+        assert "useragent" not in call_kwargs
 
 
 @pytest.mark.asyncio
@@ -207,6 +210,8 @@ async def test_browser_override_changes_fetcher_kwargs(tmp_path):
             "timeout_ms": 90000,
             "disable_resources": False,
             "network_idle": True,
+            "wait_for_selector": ".product-card a",
+            "wait_ms": 1250,
         },
         selectors={"title": "h1"},
     )
@@ -220,3 +225,91 @@ async def test_browser_override_changes_fetcher_kwargs(tmp_path):
         assert call_kwargs["timeout"] == 90000
         assert call_kwargs["disable_resources"] is False
         assert call_kwargs["network_idle"] is True
+        assert call_kwargs["wait_selector"] == ".product-card a"
+        assert call_kwargs["wait"] == 1250
+
+
+@pytest.mark.asyncio
+async def test_browser_click_selector_runs_in_page_action(tmp_path):
+    """Browser config may perform a pre-extraction consent click before capture/extraction."""
+    adaptive_dir = tmp_path / "adaptive"
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.css.return_value = []
+
+    target = TargetConfig(
+        url="http://example.com",
+        fetcher=FetcherType.dynamic,
+        browser={
+            "click_selector": "button.accept-age-gate",
+            "click_timeout_ms": 3000,
+            "click_wait_ms": 750,
+            "wait_for_selector": ".product-card a",
+        },
+        selectors={"title": "h1"},
+    )
+    retry = RetryConfig()
+
+    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+        mock_fetcher.async_fetch.return_value = mock_response
+        await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
+
+        call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
+        assert call_kwargs["wait_selector"] == ".product-card a"
+
+        page_action = call_kwargs["page_action"]
+
+        page = MagicMock()
+        page.url = "http://example.com"
+        page.title = AsyncMock(return_value="Example")
+        page.content = AsyncMock(return_value="<html><body>Products</body></html>")
+        page.locator.return_value.click = AsyncMock(return_value=None)
+        page.wait_for_timeout = AsyncMock(return_value=None)
+
+        await page_action(page)
+
+        page.locator.assert_called_once_with("button.accept-age-gate")
+        page.locator.return_value.click.assert_awaited_once_with(timeout=3000)
+        page.wait_for_timeout.assert_awaited_once_with(750)
+
+
+@pytest.mark.asyncio
+async def test_browser_click_selector_fails_open_when_absent(tmp_path):
+    """Missing consent selectors should not abort browser fetches before extraction."""
+    adaptive_dir = tmp_path / "adaptive"
+
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.css.return_value = []
+
+    target = TargetConfig(
+        url="http://example.com",
+        fetcher=FetcherType.dynamic,
+        browser={
+            "click_selector": "button.accept-age-gate",
+            "click_timeout_ms": 3000,
+            "wait_for_selector": ".product-card a",
+        },
+        selectors={"title": "h1"},
+    )
+    retry = RetryConfig()
+
+    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+        mock_fetcher.async_fetch.return_value = mock_response
+        await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
+
+        page_action = mock_fetcher.async_fetch.call_args.kwargs["page_action"]
+
+        page = MagicMock()
+        page.url = "http://example.com"
+        page.title = AsyncMock(return_value="Example")
+        page.content = AsyncMock(return_value="<html><body>Products</body></html>")
+        page.locator.return_value.click = AsyncMock(side_effect=TimeoutError())
+        page.wait_for_timeout = AsyncMock(return_value=None)
+
+        result = await page_action(page)
+
+        assert result is page
+        page.locator.return_value.click.assert_awaited_once_with(timeout=3000)
+        page.wait_for_timeout.assert_not_awaited()

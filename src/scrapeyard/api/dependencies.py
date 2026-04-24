@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 
-from arq.connections import RedisSettings
+from arq.connections import ArqRedis, RedisSettings
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.rate_limiter import (
@@ -18,22 +19,31 @@ from scrapeyard.queue.worker import scrape_task
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
+@dataclass(frozen=True)
+class RuntimeServices:
+    result_store: ResultStore
+    webhook_dispatcher: HttpWebhookDispatcher
+    worker_pool: WorkerPool
+    scheduler: SchedulerService
+
+
 @lru_cache(maxsize=1)
-def get_job_store() -> SQLiteJobStore:
+def get_job_store() -> JobStore:
     return SQLiteJobStore()
 
 
 @lru_cache(maxsize=1)
-def get_error_store() -> SQLiteErrorStore:
+def get_error_store() -> ErrorStore:
     return SQLiteErrorStore()
 
 
 @lru_cache(maxsize=1)
-def get_result_store() -> LocalResultStore:
+def get_result_store() -> ResultStore:
     settings = get_settings()
     job_store = get_job_store()
 
@@ -58,39 +68,79 @@ def get_webhook_dispatcher() -> HttpWebhookDispatcher:
     return HttpWebhookDispatcher()
 
 
-# Rate limiter — set during lifespan startup, not @lru_cache, because
-# RedisDomainRateLimiter needs an async Redis connection that isn't
-# available at import time.
-_rate_limiter: DomainRateLimiter | None = None
+async def close_webhook_dispatcher(*, timeout: float | None = None) -> None:
+    """Close the cached webhook dispatcher if it has been instantiated."""
+    if get_webhook_dispatcher.cache_info().currsize == 0:
+        return
+    await get_webhook_dispatcher().shutdown(timeout=timeout)
 
 
-def init_rate_limiter(redis: object | None = None) -> DomainRateLimiter:
-    """Create and store the rate limiter singleton.
+class _RateLimiterHolder:
+    """Holds the rate limiter singleton.
 
-    Called from lifespan after Redis is available. When
-    domain_rate_limit_shared is True and a redis handle is provided,
-    returns RedisDomainRateLimiter; otherwise LocalDomainRateLimiter.
+    Not @lru_cache because RedisDomainRateLimiter needs an async Redis
+    connection that isn't available at import time.
     """
-    global _rate_limiter
-    settings = get_settings()
-    if settings.domain_rate_limit_shared and redis is not None:
-        _rate_limiter = RedisDomainRateLimiter(redis)
-    else:
-        _rate_limiter = LocalDomainRateLimiter()
-    return _rate_limiter
+
+    def __init__(self) -> None:
+        self._instance: DomainRateLimiter | None = None
+
+    def init(self, redis: ArqRedis | None = None) -> DomainRateLimiter:
+        """Create and store the rate limiter.
+
+        Called from lifespan after Redis is available. When
+        domain_rate_limit_shared is True and a redis handle is provided,
+        uses RedisDomainRateLimiter; otherwise LocalDomainRateLimiter.
+        """
+        settings = get_settings()
+        if settings.domain_rate_limit_shared and redis is not None:
+            self._instance = RedisDomainRateLimiter(redis)
+        else:
+            self._instance = LocalDomainRateLimiter()
+        return self._instance
+
+    def get(self) -> DomainRateLimiter:
+        """Return the rate limiter. Auto-initialises on first call if needed."""
+        if self._instance is None:
+            return self.init()
+        return self._instance
+
+    def reset(self) -> None:
+        """Clear the singleton (for test teardown)."""
+        self._instance = None
+
+
+_rate_limiter_holder = _RateLimiterHolder()
+
+
+def init_rate_limiter(redis: ArqRedis | None = None) -> DomainRateLimiter:
+    """Create and store the rate limiter singleton."""
+    return _rate_limiter_holder.init(redis)
 
 
 def get_rate_limiter() -> DomainRateLimiter:
     """Return the rate limiter singleton. Must call init_rate_limiter() first."""
-    if _rate_limiter is None:
-        return init_rate_limiter()
-    return _rate_limiter
+    return _rate_limiter_holder.get()
 
 
 def reset_rate_limiter() -> None:
     """Reset the rate limiter singleton (for test teardown)."""
-    global _rate_limiter
-    _rate_limiter = None
+    _rate_limiter_holder.reset()
+
+
+def reset_cached_dependencies() -> None:
+    """Clear cached dependency singletons and reset non-cached runtime holders."""
+    for cached_fn in (
+        get_job_store,
+        get_error_store,
+        get_result_store,
+        get_circuit_breaker,
+        get_webhook_dispatcher,
+        get_worker_pool,
+        get_scheduler,
+    ):
+        cached_fn.cache_clear()
+    reset_rate_limiter()
 
 
 @lru_cache(maxsize=1)
@@ -140,4 +190,14 @@ def get_scheduler() -> SchedulerService:
         worker_pool=get_worker_pool(),
         job_store=get_job_store(),
         jitter_max_seconds=settings.scheduler_jitter_max_seconds,
+    )
+
+
+def build_runtime_services() -> RuntimeServices:
+    """Materialize the cached runtime singletons used during app lifespan."""
+    return RuntimeServices(
+        result_store=get_result_store(),
+        webhook_dispatcher=get_webhook_dispatcher(),
+        worker_pool=get_worker_pool(),
+        scheduler=get_scheduler(),
     )

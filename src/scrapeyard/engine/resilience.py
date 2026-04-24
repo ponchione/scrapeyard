@@ -55,7 +55,8 @@ class RetryHandler:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
                     await asyncio.sleep(self._delay(attempt))
-        assert last_exc is not None, "RetryHandler exhausted attempts without catching an exception"
+        if last_exc is None:
+            raise RuntimeError("RetryHandler exhausted attempts without catching an exception")
         raise last_exc
 
 

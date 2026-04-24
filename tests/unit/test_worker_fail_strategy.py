@@ -7,43 +7,16 @@ import pytest
 from scrapeyard.config.schema import FailStrategy
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.worker import scrape_task
-
-
-def _make_job(job_id: str = "job-1") -> Job:
-    return Job(
-        job_id=job_id,
-        project="test",
-        name="test-job",
-        config_yaml="",
-        status=JobStatus.queued,
-    )
-
-
-def _make_target(url: str) -> MagicMock:
-    target = MagicMock(url=url, proxy=None)
-    target.fetcher.value = "basic"
-    return target
-
-
-@pytest.fixture
-def mock_stores():
-    job_store = AsyncMock()
-    result_store = AsyncMock()
-    error_store = AsyncMock()
-    circuit_breaker = MagicMock()
-    circuit_breaker.check = MagicMock()
-    circuit_breaker.record_success = MagicMock()
-    circuit_breaker.record_failure = MagicMock()
-    return job_store, result_store, error_store, circuit_breaker
+from tests.unit.worker_helpers import make_job, make_target
 
 
 @pytest.mark.asyncio
 async def test_partial_returns_partial_on_mixed(mock_stores):
     """partial: mixed success/failure yields JobStatus.partial."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -57,7 +30,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
-        cfg.resolved_targets.return_value = [_make_target("http://a.com"), _make_target("http://b.com")]
+        cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0
@@ -86,7 +59,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
 async def test_all_or_nothing_fails_on_any_failure(mock_stores):
     """all_or_nothing: any failure yields JobStatus.failed, no results saved."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -100,7 +73,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
-        cfg.resolved_targets.return_value = [_make_target("http://a.com"), _make_target("http://b.com")]
+        cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0
@@ -123,14 +96,19 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
 
     final_update = job_store.update_job_status.call_args_list[-1][0][0]
     assert final_update.status == JobStatus.failed
-    result_store.save_result.assert_not_called()
+    # Worker still persists the result metadata (with 0 records) for
+    # observability — the important thing is that flat_data was cleared.
+    result_store.save_result.assert_called_once()
+    call_kwargs = result_store.save_result.call_args
+    assert call_kwargs.kwargs["record_count"] == 0
+    assert call_kwargs.kwargs["status"] == "failed"
 
 
 @pytest.mark.asyncio
 async def test_continue_completes_even_with_failures(mock_stores):
     """continue: failures don't affect status if data exists."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -144,7 +122,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
-        cfg.resolved_targets.return_value = [_make_target("http://a.com"), _make_target("http://b.com")]
+        cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0
@@ -174,7 +152,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
 async def test_worker_passes_record_count_to_save_result(mock_stores):
     """Worker must pass len(flat_data) as record_count to save_result."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -189,7 +167,7 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
-        cfg.resolved_targets.return_value = [_make_target("http://a.com")]
+        cfg.resolved_targets.return_value = [make_target("http://a.com")]
         cfg.execution.concurrency = 1
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0
@@ -219,7 +197,7 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
 async def test_worker_passes_final_status_to_save_result(mock_stores):
     """Worker must persist the computed final job status with the result metadata."""
     job_store, result_store, error_store, circuit_breaker = mock_stores
-    job = _make_job()
+    job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
     job_store.update_job_status = AsyncMock()
 
@@ -233,7 +211,7 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
-        cfg.resolved_targets.return_value = [_make_target("http://a.com"), _make_target("http://b.com")]
+        cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0

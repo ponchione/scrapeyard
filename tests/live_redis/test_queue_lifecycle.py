@@ -49,7 +49,7 @@ async def _await_terminal_status(client, job_id: str) -> str:
         response = await client.get(f"/jobs/{job_id}")
         assert response.status_code == 200
         status = response.json()["status"]
-        if status in {"complete", "partial", "failed"}:
+        if isinstance(status, str) and status in {"complete", "partial", "failed"}:
             return status
         await asyncio.sleep(0.05)
     pytest.fail(f"Timed out waiting for terminal job status for {job_id}")

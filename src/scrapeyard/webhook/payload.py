@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.models.job import JobStatus
 
@@ -24,8 +26,13 @@ def build_webhook_payload(
     started_at: str,
     completed_at: str,
 ) -> dict:
-    """Construct the webhook POST body from job and run metadata."""
+    """Construct the webhook POST body from job and run metadata.
+
+    Each payload includes a unique ``delivery_id`` (UUID4) so receivers
+    can deduplicate retried deliveries.
+    """
     return {
+        "delivery_id": uuid.uuid4().hex,
         "event": f"job.{status.value}",
         "job_id": job_id,
         "project": project,

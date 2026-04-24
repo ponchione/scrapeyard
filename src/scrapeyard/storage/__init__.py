@@ -1,3 +1,3 @@
-from scrapeyard.storage.result_store import SaveResultMeta
+from scrapeyard.storage.types import SaveResultMeta
 
 __all__ = ["SaveResultMeta"]

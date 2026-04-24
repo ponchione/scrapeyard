@@ -17,10 +17,10 @@ def prepare_directory(path: str | Path) -> None:
 
 
 def write_json_file(path: str | Path, data: Any) -> None:
-    """Serialize *data* to JSON at *path*."""
+    """Serialize *data* to compact JSON at *path*."""
     target = Path(path)
     target.write_text(
-        json.dumps(data, default=str, indent=2),
+        json.dumps(data, default=str, separators=(",", ":")),
         encoding="utf-8",
     )
 

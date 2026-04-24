@@ -14,6 +14,8 @@ services:
       - redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    security_opt:
+      - seccomp:unconfined
     volumes:
       - scrapeyard-data:/data
     environment:

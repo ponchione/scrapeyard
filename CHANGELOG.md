@@ -11,6 +11,26 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ---
 
+## 0.5.1 — 2026-04-09
+
+**Debt-register cleanup and internal maintainability pass.**
+
+### Added
+- Shared UTC time helper in `src/scrapeyard/common/time.py`.
+- Platform-aware queue memory helper in `src/scrapeyard/queue/memory.py`.
+- Small API/storage helper modules for query parsing, response shaping, row mapping, and query construction.
+
+### Changed
+- Split worker, scraper, runtime, and storage hot spots into smaller helper modules while keeping public API behavior stable.
+- `TECH-DEBT.md` is now fully resolved with no active slices.
+- Documentation now reflects JSON-only result artifacts and the completed debt-slice cleanup.
+
+### Fixed
+- Selector-engine failures now surface as structured failures instead of silently collapsing into empty business results.
+- Queue memory admission checks now make Linux-specific `/proc/self/statm` handling explicit and contained.
+
+---
+
 ## 0.5.0 — 2026-03-21
 
 **Run model, webhook dispatch, and API contract stabilization.**

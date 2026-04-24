@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,10 +11,10 @@ from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine.scraper import scrape_target
 
 
-def _target(**overrides) -> TargetConfig:
-    base = {"url": "https://example.com", "selectors": {"title": "h1"}}
+def _target(**overrides: Any) -> TargetConfig:
+    base: dict[str, Any] = {"url": "https://example.com", "selectors": {"title": "h1"}}
     base.update(overrides)
-    return TargetConfig(**base)
+    return TargetConfig.model_validate(base)
 
 
 @pytest.mark.asyncio
@@ -83,12 +84,14 @@ async def test_proxy_passed_to_pagination_fetches(tmp_path):
         call_count += 1
         resp = MagicMock()
         resp.status = 200
-        resp.css = MagicMock(side_effect=lambda sel: (
-            # Return a "next" link on page 1, nothing on page 2.
-            [MagicMock(**{"attrib": {"href": "https://example.com/page2"}})]
-            if sel == "a.next-page" and call_count == 1
-            else [MagicMock(text="Title")]
-        ))
+        def _css(sel: str):
+            if sel == "a.next-page":
+                if call_count == 1:
+                    return [MagicMock(**{"attrib": {"href": "https://example.com/page2"}})]
+                return []
+            return [MagicMock(text="Title")]
+
+        resp.css = MagicMock(side_effect=_css)
         return resp
 
     with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
