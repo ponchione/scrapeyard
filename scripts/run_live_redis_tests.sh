@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+export SCRAPEYARD_API_KEYS="${SCRAPEYARD_API_KEYS:-live-redis-test-key}"
+
 COMPOSE_ARGS=(-p scrapeyard-live-redis-tests -f docker-compose.yml -f docker-compose.test.yml)
 
 cleanup() {

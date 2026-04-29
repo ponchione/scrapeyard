@@ -1,16 +1,18 @@
 """Tests for scrape_task crash recovery and duplicate-delivery guards."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from scrapeyard.config.schema import FailStrategy
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.run_lifecycle import finalize_run
 from scrapeyard.queue.worker import scrape_task
-from tests.unit.worker_helpers import make_job
+from tests.unit.worker_helpers import SIMPLE_YAML, make_config_mock, make_job, make_target
 
 
 @pytest.mark.asyncio
@@ -258,6 +260,210 @@ async def test_scrape_task_batches_multiple_target_errors():
     logged_errors = error_store.log_errors.call_args[0][0]
     assert len(logged_errors) == 2
     assert [record.error_message for record in logged_errors] == ["timeout", "proxy refused"]
+
+
+@pytest.mark.asyncio
+async def test_scrape_task_converts_unexpected_target_exception_to_partial_result():
+    job = make_job(job_id="test-job-1", name="crash-test")
+    job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.update_job_status = AsyncMock()
+
+    result_store = AsyncMock()
+    error_store = AsyncMock()
+    circuit_breaker = MagicMock()
+
+    bad_target = make_target("http://bad.example")
+    good_target = make_target("http://good.example")
+    cfg = make_config_mock(
+        targets=[bad_target, good_target],
+        fail_strategy=FailStrategy.partial,
+    )
+    cfg.name = "crash-test"
+    cfg.execution.concurrency = 2
+
+    async def scrape_side_effect(target_cfg, *_args, **_kwargs):
+        if target_cfg.url == "http://bad.example":
+            raise RuntimeError("browser closed")
+        return TargetResult(
+            url=target_cfg.url,
+            status="success",
+            data=[{"title": "ok"}],
+            pages_scraped=1,
+        )
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(side_effect=scrape_side_effect),
+        ),
+        patch("scrapeyard.queue.worker.load_config", return_value=cfg),
+        patch("scrapeyard.queue.worker.get_settings") as mock_settings,
+    ):
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            storage_results_dir="/tmp/results",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+
+        await scrape_task(
+            job.job_id,
+            SIMPLE_YAML,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    result_store.save_result.assert_awaited_once()
+    output_data = result_store.save_result.call_args.args[1]
+
+    assert output_data["status"] == JobStatus.partial.value
+    assert output_data["results"]["good.example"]["status"] == "success"
+    assert output_data["results"]["good.example"]["data"] == [{"title": "ok"}]
+    assert output_data["results"]["bad.example"]["status"] == "failed"
+    assert output_data["results"]["bad.example"]["data"] == []
+    assert output_data["results"]["bad.example"]["error_type"] is not None
+    assert output_data["results"]["bad.example"]["error_detail"] == "RuntimeError: browser closed"
+
+    bad_target_summary = next(
+        target for target in output_data["targets"]
+        if target["url"] == "http://bad.example"
+    )
+    assert bad_target_summary["status"] == "failed"
+    assert bad_target_summary["error_type"] is not None
+    assert bad_target_summary["errors"] == ["RuntimeError: browser closed"]
+
+    final_update = job_store.update_job_status.call_args_list[-1][0][0]
+    assert final_update.status == JobStatus.partial
+
+    error_store.log_errors.assert_awaited_once()
+    logged_errors = error_store.log_errors.call_args.args[0]
+    assert len(logged_errors) == 1
+    assert logged_errors[0].target_url == "http://bad.example"
+    assert logged_errors[0].error_type is not None
+    assert logged_errors[0].error_message == "RuntimeError: browser closed"
+
+    circuit_breaker.record_failure.assert_called_with("bad.example")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
+    job = make_job(job_id="test-job-1", name="crash-test")
+    job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.update_job_status = AsyncMock()
+
+    result_store = AsyncMock()
+    error_store = AsyncMock()
+    circuit_breaker = MagicMock()
+
+    bad_target = make_target("http://bad.example")
+    good_target = make_target("http://good.example")
+    cfg = make_config_mock(
+        targets=[bad_target, good_target],
+        fail_strategy=FailStrategy.all_or_nothing,
+    )
+    cfg.name = "crash-test"
+    cfg.execution.concurrency = 2
+
+    async def scrape_side_effect(target_cfg, *_args, **_kwargs):
+        if target_cfg.url == "http://bad.example":
+            raise RuntimeError("browser closed")
+        return TargetResult(
+            url=target_cfg.url,
+            status="success",
+            data=[{"title": "ok"}],
+            pages_scraped=1,
+        )
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(side_effect=scrape_side_effect),
+        ),
+        patch("scrapeyard.queue.worker.load_config", return_value=cfg),
+        patch("scrapeyard.queue.worker.get_settings") as mock_settings,
+    ):
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            storage_results_dir="/tmp/results",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+
+        await scrape_task(
+            job.job_id,
+            SIMPLE_YAML,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    result_store.save_result.assert_awaited_once()
+    output_data = result_store.save_result.call_args.args[1]
+
+    assert output_data["status"] == JobStatus.failed.value
+    assert output_data["results"]["good.example"]["status"] == "success"
+    assert output_data["results"]["bad.example"]["status"] == "failed"
+
+    # Existing all_or_nothing behavior clears the flat persisted record count
+    # after any target failure, even though grouped diagnostics still show the
+    # per-target result details.
+    assert result_store.save_result.call_args.kwargs["record_count"] == 0
+
+    final_update = job_store.update_job_status.call_args_list[-1][0][0]
+    assert final_update.status == JobStatus.failed
+
+
+@pytest.mark.asyncio
+async def test_target_task_cancellation_still_propagates():
+    job = make_job(job_id="test-job-1", name="crash-test")
+    job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.update_job_status = AsyncMock()
+
+    result_store = AsyncMock()
+    error_store = AsyncMock()
+
+    cancelled_target = make_target("http://cancelled.example")
+    cfg = make_config_mock(targets=[cancelled_target])
+    cfg.name = "crash-test"
+
+    async def scrape_side_effect(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(side_effect=scrape_side_effect),
+        ),
+        patch("scrapeyard.queue.worker.load_config", return_value=cfg),
+        patch("scrapeyard.queue.worker.get_settings") as mock_settings,
+    ):
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            storage_results_dir="/tmp/results",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await scrape_task(
+                job.job_id,
+                SIMPLE_YAML,
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
+            )
+
+    result_store.save_result.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

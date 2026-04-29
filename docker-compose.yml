@@ -14,7 +14,7 @@ services:
   scrapeyard:
     build: .
     ports:
-      - "8420:8420"
+      - "127.0.0.1:8420:8420"
     depends_on:
       redis:
         condition: service_healthy
@@ -29,7 +29,7 @@ services:
       start_period: 30s
       retries: 3
     environment:
-      SCRAPEYARD_API_KEYS: "733924d9ad0e76e470dddb2556845b2e4abee3d81f0084a9ff975411d02c922f"
+      SCRAPEYARD_API_KEYS: "${SCRAPEYARD_API_KEYS:?set SCRAPEYARD_API_KEYS before running docker compose}"
       # Queue
       SCRAPEYARD_REDIS_DSN: "redis://redis:6379/0"
       SCRAPEYARD_QUEUE_NAME: "scrapeyard"
