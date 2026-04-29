@@ -279,14 +279,20 @@ class TestBackoffDelay:
 class TestSubmitAndShutdown:
     @pytest.mark.asyncio
     async def test_submit_creates_tracked_task(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
         client = AsyncMock()
         client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
         cfg = _webhook_config()
-        await dispatcher.submit(cfg, {})
+        await dispatcher.submit(cfg, _payload())
         # Let the task run.
         await asyncio.sleep(0.05)
         assert dispatcher.pending_tasks == 0
+        assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
 
     @pytest.mark.asyncio
     async def test_submit_rejected_during_shutdown(self) -> None:
@@ -300,12 +306,17 @@ class TestSubmitAndShutdown:
 
     @pytest.mark.asyncio
     async def test_startup_re_enables_submit(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
         client = AsyncMock()
         client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
         await dispatcher.shutdown(timeout=1.0)
         await dispatcher.startup()
-        await dispatcher.submit(_webhook_config(), {})
+        await dispatcher.submit(_webhook_config(), _payload())
         await asyncio.sleep(0.05)
         client.post.assert_awaited_once()
 

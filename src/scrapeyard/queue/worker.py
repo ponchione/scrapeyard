@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from scrapeyard.common.settings import get_settings
+from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, GroupBy, ScrapeConfig, TargetConfig
@@ -17,7 +17,8 @@ from scrapeyard.engine.fetch_classifier import classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
-from scrapeyard.models.job import ErrorRecord, JobStatus
+from scrapeyard.models.job import ErrorRecord, Job, JobStatus
+from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.run_lifecycle import (
     build_run_paths,
     create_run_record,
@@ -37,6 +38,7 @@ from scrapeyard.queue.target_execution import (
 )
 from scrapeyard.queue.validation_policy import apply_validation
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+from scrapeyard.storage.types import SaveResultMeta
 from scrapeyard.webhook.dispatcher import WebhookDispatcher
 
 logger = logging.getLogger(__name__)
@@ -45,8 +47,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class JobExecutionContext:
     config: ScrapeConfig
-    job: Any
-    settings: Any
+    job: Job
+    settings: ServiceSettings
     started_at: datetime
     adaptive_dir: str
     run_artifacts_dir: str | None
@@ -57,7 +59,29 @@ class PersistedJobResult:
     final_status: JobStatus
     flat_data: list[dict[str, Any]]
     all_errors: list[str]
-    save_meta: Any
+    save_meta: SaveResultMeta
+
+
+@dataclass(frozen=True)
+class TargetProcessingContext:
+    config: ScrapeConfig
+    job_id: str
+    run_id: str | None
+    settings: ServiceSettings
+    adaptive_dir: str
+    run_artifacts_dir: str | None
+    circuit_breaker: CircuitBreaker
+    rate_limiter: DomainRateLimiter
+    validator: ResultValidator
+
+    def recorder(self, pending_errors: list[ErrorRecord]) -> TargetErrorRecorder:
+        return TargetErrorRecorder(
+            job_id=self.job_id,
+            run_id=self.run_id,
+            project=self.config.project,
+            pending_errors=pending_errors,
+            circuit_breaker=self.circuit_breaker,
+        )
 
 
 async def scrape_task(
@@ -240,7 +264,17 @@ async def _process_all_targets(
     config = context.config
     targets = list(config.resolved_targets())
     sem = asyncio.Semaphore(config.execution.concurrency)
-    validator = ResultValidator(config.validation)
+    target_context = TargetProcessingContext(
+        config=config,
+        job_id=job_id,
+        run_id=run_id,
+        settings=context.settings,
+        adaptive_dir=context.adaptive_dir,
+        run_artifacts_dir=context.run_artifacts_dir,
+        circuit_breaker=circuit_breaker,
+        rate_limiter=rate_limiter,
+        validator=ResultValidator(config.validation),
+    )
 
     async def _process_one(target_cfg: TargetConfig) -> TargetResult:
         pending_errors: list[ErrorRecord] = []
@@ -248,15 +282,7 @@ async def _process_all_targets(
             async with sem:
                 return await _fetch_and_validate_target(
                     target_cfg=target_cfg,
-                    config=config,
-                    job_id=job_id,
-                    run_id=run_id,
-                    adaptive_dir=context.adaptive_dir,
-                    run_artifacts_dir=context.run_artifacts_dir,
-                    settings=context.settings,
-                    circuit_breaker=circuit_breaker,
-                    rate_limiter=rate_limiter,
-                    validator=validator,
+                    context=target_context,
                     pending_errors=pending_errors,
                 )
         finally:
@@ -292,33 +318,24 @@ async def _process_all_targets(
 async def _fetch_and_validate_target(
     *,
     target_cfg: TargetConfig,
-    config: ScrapeConfig,
-    job_id: str,
-    run_id: str | None,
-    adaptive_dir: str,
-    run_artifacts_dir: str | None,
-    settings: Any,
-    circuit_breaker: CircuitBreaker,
-    rate_limiter: DomainRateLimiter,
-    validator: ResultValidator,
+    context: TargetProcessingContext,
     pending_errors: list[ErrorRecord],
 ) -> TargetResult:
     """Fetch a single target and run validation. Returns the result."""
+    recorder = context.recorder(pending_errors)
     runtime = resolve_target_runtime_context(
         target_cfg=target_cfg,
-        config=config,
-        settings=settings,
-        run_artifacts_dir=run_artifacts_dir,
+        config=context.config,
+        settings=context.settings,
+        run_artifacts_dir=context.run_artifacts_dir,
     )
     circuit_open = await guard_target_execution(
         runtime=runtime,
-        config=config,
+        config=context.config,
         target_cfg=target_cfg,
-        job_id=job_id,
-        run_id=run_id,
-        circuit_breaker=circuit_breaker,
-        rate_limiter=rate_limiter,
-        pending_errors=pending_errors,
+        circuit_breaker=context.circuit_breaker,
+        rate_limiter=context.rate_limiter,
+        recorder=recorder,
     )
     if circuit_open is not None:
         return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
@@ -328,50 +345,39 @@ async def _fetch_and_validate_target(
         result = await scrape_target(
             target_cfg,
             runtime.adaptive,
-            config.retry,
-            adaptive_dir=adaptive_dir,
+            context.config.retry,
+            adaptive_dir=context.adaptive_dir,
             proxy_url=runtime.proxy_url,
             artifacts_dir=runtime.artifacts_dir,
         )
-        if result.status is not TargetStatus.success:
+        if not result.is_success:
             record_failed_target(
                 runtime=runtime,
                 result=result,
-                pending_errors=pending_errors,
-                config=config,
                 target_cfg=target_cfg,
-                job_id=job_id,
-                run_id=run_id,
-                circuit_breaker=circuit_breaker,
+                recorder=recorder,
             )
             return result
 
-        circuit_breaker.record_success(runtime.domain)
+        recorder.record_success(runtime.domain)
         return await apply_validation(
             target_cfg=target_cfg,
             domain=runtime.domain,
             adaptive=runtime.adaptive,
             result=result,
-            pending_errors=pending_errors,
-            config=config,
-            adaptive_dir=adaptive_dir,
-            run_artifacts_dir=run_artifacts_dir,
-            job_id=job_id,
-            run_id=run_id,
-            circuit_breaker=circuit_breaker,
-            validator=validator,
+            config=context.config,
+            adaptive_dir=context.adaptive_dir,
+            run_artifacts_dir=context.run_artifacts_dir,
+            recorder=recorder,
+            validator=context.validator,
             scrape=scrape_target,
             proxy_url=runtime.proxy_url,
         )
     except Exception as exc:
         return _target_exception_result(
             runtime=runtime,
-            config=config,
             target_cfg=target_cfg,
-            job_id=job_id,
-            run_id=run_id,
-            circuit_breaker=circuit_breaker,
-            pending_errors=pending_errors,
+            recorder=recorder,
             exc=exc,
         )
 
@@ -383,20 +389,16 @@ def _exception_detail(exc: Exception) -> str:
 def _target_exception_result(
     *,
     runtime: TargetRuntimeContext,
-    config: ScrapeConfig,
     target_cfg: TargetConfig,
-    job_id: str,
-    run_id: str | None,
-    circuit_breaker: CircuitBreaker,
-    pending_errors: list[ErrorRecord],
+    recorder: TargetErrorRecorder,
     exc: Exception,
 ) -> TargetResult:
     error_type, http_status, debug = classify_fetch_exception(exc, target_cfg.fetcher)
     detail = _exception_detail(exc)
     logger.exception(
         "Target processing crashed for job_id=%s run_id=%s url=%s",
-        job_id,
-        run_id,
+        recorder.job_id,
+        recorder.run_id,
         target_cfg.url,
     )
     result = TargetResult(
@@ -413,12 +415,8 @@ def _target_exception_result(
     record_failed_target(
         runtime=runtime,
         result=result,
-        pending_errors=pending_errors,
-        config=config,
         target_cfg=target_cfg,
-        job_id=job_id,
-        run_id=run_id,
-        circuit_breaker=circuit_breaker,
+        recorder=recorder,
     )
     return result
 
@@ -438,7 +436,7 @@ def _determine_final_status(
     flat_data: list[dict[str, Any]],
 ) -> JobStatus:
     """Determine the final job status based on results and fail_strategy."""
-    failed_count = sum(1 for result in all_results if result.status is TargetStatus.failed)
+    failed_count = sum(1 for result in all_results if result.is_failed)
     fail_strategy = config.execution.fail_strategy
 
     if fail_strategy == FailStrategy.all_or_nothing:
@@ -535,4 +533,3 @@ async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> N
     if not errors:
         return
     await error_store.log_errors(errors)
-

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -20,14 +21,9 @@ from scrapeyard.api.dependencies import (
 from scrapeyard.api.query_parsing import parse_error_filters
 from scrapeyard.api.response_utils import (
     apply_paginated_list_response,
-    bad_request_error,
-    conflict_error,
-    json_error,
     json_response,
     no_content_response,
-    not_found_error,
-    unprocessable_entity_error,
-    unsupported_media_type_error,
+    raise_json_error,
 )
 from scrapeyard.api.scrape_submission import submit_scrape_job
 from scrapeyard.api.serializers import (
@@ -41,6 +37,7 @@ from scrapeyard.api.serializers import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
+from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.scheduler.cron import SchedulerService
@@ -51,40 +48,47 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ParsedYamlConfig:
+    config_yaml: str
+    config: ScrapeConfig
+
+
 def _is_yaml_request(request: Request) -> bool:
     content_type = request.headers.get("content-type", "")
     media_type = content_type.split(";", 1)[0].strip().lower()
     return media_type == "application/x-yaml"
 
 
-async def _read_valid_yaml_config(request: Request) -> tuple[str, Any] | Response:
+async def _read_valid_yaml_config(request: Request) -> ParsedYamlConfig:
     if not _is_yaml_request(request):
-        return unsupported_media_type_error("Content-Type must be application/x-yaml")
+        raise_json_error(415, "Content-Type must be application/x-yaml")
     try:
         body = await request.body()
         config_yaml = body.decode("utf-8")
         config = load_config(config_yaml)
     except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
-        return unprocessable_entity_error(f"Invalid config: {exc}")
-    return config_yaml, config
+        raise_json_error(422, f"Invalid config: {exc}")
+    return ParsedYamlConfig(config_yaml, config)
 
 
 def _resolve_admin_read_limit(limit: int | None) -> int:
     settings = get_settings()
     resolved_limit = limit or settings.admin_read_default_limit
     if resolved_limit > settings.admin_read_max_limit:
-        raise ValueError(
+        raise_json_error(
+            400,
             f"Invalid 'limit': {resolved_limit}. "
-            f"Maximum is {settings.admin_read_max_limit}."
+            f"Maximum is {settings.admin_read_max_limit}.",
         )
     return resolved_limit
 
 
-async def _get_job_or_response(job_store: JobStore, job_id: str) -> Job | Response:
+async def _get_job_or_404(job_store: JobStore, job_id: str) -> Job:
     try:
         return await job_store.get_job(job_id)
     except KeyError:
-        return not_found_error("Job", job_id)
+        raise_json_error(404, f"Job {job_id!r} not found")
 
 
 def _queued_scrape_response(job_id: str, *, status: str, poll_url: str) -> Response:
@@ -103,9 +107,8 @@ async def scrape(
 ) -> Response:
     """Submit an ad-hoc scrape request."""
     parsed = await _read_valid_yaml_config(request)
-    if isinstance(parsed, Response):
-        return parsed
-    config_yaml, config = parsed
+    config_yaml = parsed.config_yaml
+    config = parsed.config
 
     settings = get_settings()
     try:
@@ -120,7 +123,7 @@ async def scrape(
         )
     except MemoryError:
         logger.warning("Rejecting async scrape due to pool memory pressure")
-        return json_error(503, "Server at capacity — try again later")
+        raise_json_error(503, "Server at capacity — try again later")
 
     if not submission.completed:
         return _queued_scrape_response(
@@ -147,12 +150,11 @@ async def create_job(
 ) -> Any:
     """Create a scheduled job. Requires a schedule block in the config."""
     parsed = await _read_valid_yaml_config(request)
-    if isinstance(parsed, Response):
-        return parsed
-    config_yaml, config = parsed
+    config_yaml = parsed.config_yaml
+    config = parsed.config
 
     if config.schedule is None:
-        return bad_request_error("A 'schedule' block is required for POST /jobs")
+        raise_json_error(400, "A 'schedule' block is required for POST /jobs")
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -165,7 +167,7 @@ async def create_job(
     try:
         await job_store.save_job(job)
     except DuplicateJobError as exc:
-        return conflict_error(f"Job name {exc.name!r} already exists in project {exc.project!r}")
+        raise_json_error(409, f"Job name {exc.name!r} already exists in project {exc.project!r}")
 
     scheduler.register_job(job.job_id, config.schedule.cron, enabled=config.schedule.enabled)
     return serialize_job_created(job)
@@ -180,10 +182,7 @@ async def list_jobs(
     job_store: JobStore = Depends(get_job_store),
 ) -> Any:
     """List jobs, optionally filtered by project."""
-    try:
-        resolved_limit = _resolve_admin_read_limit(limit)
-    except ValueError as exc:
-        return bad_request_error(str(exc))
+    resolved_limit = _resolve_admin_read_limit(limit)
 
     rows = await job_store.list_jobs_with_stats(project, limit=resolved_limit + 1, offset=offset)
     rows = apply_paginated_list_response(response, rows=rows, limit=resolved_limit, offset=offset)
@@ -200,9 +199,7 @@ async def get_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Any:
     """Get a single job by ID."""
-    job = await _get_job_or_response(job_store, job_id)
-    if isinstance(job, Response):
-        return job
+    job = await _get_job_or_404(job_store, job_id)
 
     runs = await job_store.get_job_runs(job_id, limit=10)
     run_count, last_run_at = await job_store.get_job_run_stats(job_id)
@@ -226,9 +223,7 @@ async def delete_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Response:
     """Delete a job by ID."""
-    job = await _get_job_or_response(job_store, job_id)
-    if isinstance(job, Response):
-        return job
+    await _get_job_or_404(job_store, job_id)
 
     scheduler.remove_job(job_id)
     if delete_results:
@@ -247,20 +242,18 @@ async def get_results(
     result_store: ResultStore = Depends(get_result_store),
 ) -> Any:
     """Get results for a job."""
-    job = await _get_job_or_response(job_store, job_id)
-    if isinstance(job, Response):
-        return job
+    job = await _get_job_or_404(job_store, job_id)
 
     if job.status in (JobStatus.queued, JobStatus.running):
         return _queued_scrape_response(job_id, status=job.status.value, poll_url=f"/jobs/{job_id}")
 
     if run_id is None and not latest:
-        return bad_request_error("Provide run_id when latest=false")
+        raise_json_error(400, "Provide run_id when latest=false")
 
     try:
         payload = await result_store.get_result(job_id, run_id=run_id)
     except KeyError:
-        return json_error(404, f"No results found for job {job_id!r}")
+        raise_json_error(404, f"No results found for job {job_id!r}")
 
     return serialize_results_payload(
         job_id,
@@ -282,18 +275,13 @@ async def get_errors(
     error_store: ErrorStore = Depends(get_error_store),
 ) -> Any:
     """Query error records with optional filters."""
-    try:
-        resolved_limit = _resolve_admin_read_limit(limit)
-    except ValueError as exc:
-        return bad_request_error(str(exc))
+    resolved_limit = _resolve_admin_read_limit(limit)
     filters = parse_error_filters(
         project=project,
         job_id=job_id,
         since=since,
         error_type=error_type,
     )
-    if isinstance(filters, Response):
-        return filters
     errors = await error_store.query_errors(filters, limit=resolved_limit + 1, offset=offset)
     errors = apply_paginated_list_response(response, rows=errors, limit=resolved_limit, offset=offset)
     return [serialize_error_record(error) for error in errors]

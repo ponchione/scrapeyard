@@ -23,7 +23,7 @@ from scrapeyard.storage.job_rows import (
     row_to_project_summary,
     row_to_schedule_state,
 )
-from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS
+from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS, select_columns
 
 
 class DuplicateJobError(Exception):
@@ -151,7 +151,7 @@ class SQLiteJobStore:
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                f"SELECT {JOB_COLUMNS} FROM jobs WHERE job_id=?",
+                f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs WHERE job_id=?",
                 (job_id,),
             )
             row = await cursor.fetchone()
@@ -163,12 +163,12 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db:
             if project is not None:
                 cursor = await db.execute(
-                    f"SELECT {JOB_COLUMNS} FROM jobs WHERE project=?",
+                    f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs WHERE project=?",
                     (project,),
                 )
             else:
                 cursor = await db.execute(
-                    f"SELECT {JOB_COLUMNS} FROM jobs"
+                    f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs"
                 )
             rows = await cursor.fetchall()
         return [row_to_job(row) for row in rows]
@@ -177,7 +177,7 @@ class SQLiteJobStore:
         """Return the last N runs for a job, newest first."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                f"SELECT {JOB_RUN_COLUMNS} FROM job_runs WHERE job_id = ? "
+                f"SELECT {select_columns(JOB_RUN_COLUMNS)} FROM job_runs WHERE job_id = ? "
                 "ORDER BY started_at DESC LIMIT ?",
                 (job_id, limit),
             )
@@ -189,14 +189,14 @@ class SQLiteJobStore:
         """Return (run_count, last_run_at) derived from job_runs."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT COUNT(*), MAX(started_at) "
+                "SELECT COUNT(*) AS run_count, MAX(started_at) AS last_run_at "
                 "FROM job_runs WHERE job_id = ?",
                 (job_id,),
             )
             row = await cursor.fetchone()
-            count = row[0] if row else 0
+            count = row["run_count"] if row else 0
             last = (
-                datetime.fromisoformat(row[1]) if row and row[1] else None
+                datetime.fromisoformat(row["last_run_at"]) if row and row["last_run_at"] else None
             )
             return count, last
 
@@ -302,7 +302,7 @@ class SQLiteJobStore:
                      AND started_at <= ?""",
                 (cutoff_text,),
             )
-            stale_run_ids = [row[0] for row in await cursor.fetchall()]
+            stale_run_ids = [row["run_id"] for row in await cursor.fetchall()]
 
             recovered_jobs = 0
             if stale_run_ids:

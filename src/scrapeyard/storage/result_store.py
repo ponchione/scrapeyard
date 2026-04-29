@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -48,12 +48,12 @@ class LocalResultStore:
     async def _delete_by_ids(
         self,
         db: Any,
-        rows: Sequence[Sequence[Any]],
+        rows: Sequence[Mapping[str, Any]],
     ) -> int:
         if not rows:
             return 0
 
-        ids = [row[0] for row in rows]
+        ids = [row["id"] for row in rows]
         placeholders = ",".join("?" for _ in ids)
         await db.execute(
             f"DELETE FROM results_meta WHERE id IN ({placeholders})",
@@ -65,7 +65,7 @@ class LocalResultStore:
         # missing files.
         await asyncio.to_thread(
             remove_directories,
-            [file_path for _, file_path in rows],
+            [row["file_path"] for row in rows],
         )
         return len(rows)
 
@@ -127,7 +127,8 @@ class LocalResultStore:
                 + (f" run {run_id!r}" if run_id else "")
             )
 
-        result_run_id, file_path = row
+        result_run_id = row["run_id"]
+        file_path = row["file_path"]
 
         path = Path(file_path) / "results.json"
         data = await asyncio.to_thread(read_json_file, path)

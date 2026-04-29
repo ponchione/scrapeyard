@@ -86,7 +86,7 @@ async def test_save_result_persists_explicit_status(store):
         )
         row = await cursor.fetchone()
 
-    assert row == ("partial",)
+    assert row["status"] == "partial"
 
 
 async def test_save_result_reuses_explicit_run_id(store):

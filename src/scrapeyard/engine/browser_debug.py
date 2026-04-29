@@ -12,7 +12,7 @@ from typing import Any
 
 from scrapling import PlayWrightFetcher, StealthyFetcher
 
-from scrapeyard.config.schema import BrowserConfig, FetcherType, TargetConfig
+from scrapeyard.config.schema import BROWSER_FETCH_KWARGS, BrowserConfig, FetcherType, TargetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,37 +20,6 @@ _HTML_EXCERPT_CHARS = 2000
 _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
-_BROWSER_FETCH_KWARGS = {
-    "timeout_ms": "timeout",
-    "disable_resources": "disable_resources",
-    "network_idle": "network_idle",
-    "stealth": "stealth",
-    "hide_canvas": "hide_canvas",
-    "real_chrome": "real_chrome",
-    "nstbrowser_mode": "nstbrowser_mode",
-    "useragent": "useragent",
-    "extra_headers": "extra_headers",
-    "cdp_url": "cdp_url",
-    "humanize": "humanize",
-    "os_randomize": "os_randomize",
-    "geoip": "geoip",
-    "disable_ads": "disable_ads",
-    "additional_arguments": "additional_arguments",
-    "wait_for_selector": "wait_selector",
-    "wait_ms": "wait",
-}
-_ALWAYS_SEND_BROWSER_FIELDS = {
-    "timeout_ms",
-    "disable_resources",
-    "network_idle",
-    "stealth",
-    "hide_canvas",
-    "real_chrome",
-    "nstbrowser_mode",
-}
-_SEND_WHEN_NOT_NONE_BROWSER_FIELDS = {"humanize", "wait_ms"}
-
-
 def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit: int) -> None:
     items.append(entry)
     if len(items) > limit:
@@ -151,14 +120,10 @@ def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, pro
     browser = target_browser_config(target)
     browser_values = browser.model_dump()
     kwargs: dict[str, Any] = {}
-    for field_name, kwarg_name in _BROWSER_FETCH_KWARGS.items():
-        value = browser_values[field_name]
-        if (
-            field_name in _ALWAYS_SEND_BROWSER_FIELDS
-            or (field_name in _SEND_WHEN_NOT_NONE_BROWSER_FIELDS and value is not None)
-            or value
-        ):
-            kwargs[kwarg_name] = value
+    for mapping in BROWSER_FETCH_KWARGS:
+        value = browser_values[mapping.field_name]
+        if mapping.should_send(value):
+            kwargs[mapping.kwarg_name] = value
     if proxy_url is not None:
         kwargs["proxy"] = proxy_url
 

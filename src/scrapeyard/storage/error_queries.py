@@ -7,9 +7,20 @@ from scrapeyard.models.job import ErrorFilters
 
 
 ERROR_SELECT_COLUMNS = (
-    "id, job_id, run_id, project, target_url, attempt, "
-    "timestamp, error_type, http_status, fetcher_used, "
-    "error_message, selectors_matched, action_taken, resolved"
+    "id",
+    "job_id",
+    "run_id",
+    "project",
+    "target_url",
+    "attempt",
+    "timestamp",
+    "error_type",
+    "http_status",
+    "fetcher_used",
+    "error_message",
+    "selectors_matched",
+    "action_taken",
+    "resolved",
 )
 
 
@@ -34,7 +45,7 @@ def build_query_errors_query(
         clauses.append("error_type = ?")
         params.append(filters.error_type.value)
 
-    sql = f"SELECT {ERROR_SELECT_COLUMNS} FROM errors"
+    sql = f"SELECT {', '.join(ERROR_SELECT_COLUMNS)} FROM errors"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY timestamp DESC, id DESC"

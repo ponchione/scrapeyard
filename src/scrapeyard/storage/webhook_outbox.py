@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -61,11 +61,24 @@ class WebhookDelivery:
     updated_at: datetime
 
 
-WEBHOOK_DELIVERY_COLUMNS = """
-    delivery_id, job_id, run_id, event, url, headers_json,
-    timeout_seconds, payload_json, status, attempts, next_attempt_at,
-    last_attempt_at, delivered_at, last_error, created_at, updated_at
-"""
+WEBHOOK_DELIVERY_COLUMNS = (
+    "delivery_id",
+    "job_id",
+    "run_id",
+    "event",
+    "url",
+    "headers_json",
+    "timeout_seconds",
+    "payload_json",
+    "status",
+    "attempts",
+    "next_attempt_at",
+    "last_attempt_at",
+    "delivered_at",
+    "last_error",
+    "created_at",
+    "updated_at",
+)
 
 
 def _dumps_json(value: dict[str, Any] | dict[str, str]) -> str:
@@ -91,26 +104,26 @@ def _require_dt(value: str | None, column: str) -> datetime:
     return parsed
 
 
-def row_to_webhook_delivery(row: Sequence[Any]) -> WebhookDelivery:
+def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
     """Decode a SQLite row into a webhook delivery model."""
 
     return WebhookDelivery(
-        delivery_id=str(row[0]),
-        job_id=str(row[1]),
-        run_id=None if row[2] is None else str(row[2]),
-        event=str(row[3]),
-        url=str(row[4]),
-        headers=_loads_headers(str(row[5])),
-        timeout_seconds=float(row[6]),
-        payload=_loads_dict(str(row[7])),
-        status=WebhookDeliveryStatus(str(row[8])),
-        attempts=int(row[9]),
-        next_attempt_at=_require_dt(cast(str | None, row[10]), "next_attempt_at"),
-        last_attempt_at=parse_dt(cast(str | None, row[11])),
-        delivered_at=parse_dt(cast(str | None, row[12])),
-        last_error=None if row[13] is None else str(row[13]),
-        created_at=_require_dt(cast(str | None, row[14]), "created_at"),
-        updated_at=_require_dt(cast(str | None, row[15]), "updated_at"),
+        delivery_id=str(row["delivery_id"]),
+        job_id=str(row["job_id"]),
+        run_id=None if row["run_id"] is None else str(row["run_id"]),
+        event=str(row["event"]),
+        url=str(row["url"]),
+        headers=_loads_headers(str(row["headers_json"])),
+        timeout_seconds=float(row["timeout_seconds"]),
+        payload=_loads_dict(str(row["payload_json"])),
+        status=WebhookDeliveryStatus(str(row["status"])),
+        attempts=int(row["attempts"]),
+        next_attempt_at=_require_dt(cast(str | None, row["next_attempt_at"]), "next_attempt_at"),
+        last_attempt_at=parse_dt(cast(str | None, row["last_attempt_at"])),
+        delivered_at=parse_dt(cast(str | None, row["delivered_at"])),
+        last_error=None if row["last_error"] is None else str(row["last_error"]),
+        created_at=_require_dt(cast(str | None, row["created_at"]), "created_at"),
+        updated_at=_require_dt(cast(str | None, row["updated_at"]), "updated_at"),
     )
 
 
@@ -154,7 +167,8 @@ class SQLiteWebhookOutboxStore:
 
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                f"SELECT {WEBHOOK_DELIVERY_COLUMNS} FROM webhook_deliveries WHERE delivery_id = ?",
+                f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} "
+                "FROM webhook_deliveries WHERE delivery_id = ?",
                 (delivery_id,),
             )
             row = await cursor.fetchone()
@@ -164,7 +178,7 @@ class SQLiteWebhookOutboxStore:
         """List all pending deliveries ordered by next attempt time."""
 
         sql = (
-            f"SELECT {WEBHOOK_DELIVERY_COLUMNS} FROM webhook_deliveries "
+            f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} FROM webhook_deliveries "
             "WHERE status = 'pending' "
             "ORDER BY next_attempt_at ASC, created_at ASC"
         )

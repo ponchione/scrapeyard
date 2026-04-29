@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
 
@@ -81,3 +84,85 @@ def build_target_result_error_records(
         )
         for message in messages
     ]
+
+
+@dataclass(frozen=True)
+class TargetErrorRecorder:
+    """Collect target-scoped errors and keep circuit-breaker updates together."""
+
+    job_id: str
+    run_id: str | None
+    project: str
+    pending_errors: list[ErrorRecord]
+    circuit_breaker: CircuitBreaker
+
+    def record_circuit_break(self, target_url: str) -> None:
+        self.pending_errors.append(
+            build_error_record(
+                self.job_id,
+                self.run_id or "",
+                self.project,
+                target_url,
+                0,
+                ErrorType.network_error,
+                None,
+                "circuit_breaker",
+                ActionTaken.circuit_break,
+            )
+        )
+
+    def record_success(self, domain: str) -> None:
+        self.circuit_breaker.record_success(domain)
+
+    def record_target_failure(
+        self,
+        *,
+        domain: str,
+        target_url: str,
+        fetcher_used: str,
+        result: TargetResult,
+        attempt: int = 1,
+        action: ActionTaken = ActionTaken.fail,
+        default_error_type: ErrorType = ErrorType.http_error,
+        combine_errors: bool = False,
+    ) -> None:
+        self.circuit_breaker.record_failure(domain)
+        self.pending_errors.extend(
+            build_target_result_error_records(
+                job_id=self.job_id,
+                run_id=self.run_id,
+                project=self.project,
+                target_url=target_url,
+                attempt=attempt,
+                fetcher_used=fetcher_used,
+                action=action,
+                result=result,
+                default_error_type=default_error_type,
+                combine_errors=combine_errors,
+            )
+        )
+
+    def record_validation_failure(
+        self,
+        *,
+        target_url: str,
+        fetcher_used: str,
+        attempt: int,
+        result: TargetResult,
+        action: ActionTaken,
+        message: str,
+    ) -> None:
+        self.pending_errors.append(
+            build_error_record(
+                self.job_id,
+                self.run_id or "",
+                self.project,
+                target_url,
+                attempt,
+                validation_error_type(result),
+                None,
+                fetcher_used,
+                action,
+                error_message=message,
+            )
+        )

@@ -38,38 +38,38 @@ def _make_pool(**overrides: Any) -> WorkerPool:
     return WorkerPool(**defaults)
 
 
-def test_can_accept_returns_true_when_limit_disabled():
+def test_check_memory_returns_true_when_limit_disabled():
     pool = _make_pool(memory_limit_mb=0)
-    assert pool.can_accept() is True
+    assert pool._check_memory() is True
 
 
-def test_can_accept_returns_true_when_limit_negative():
+def test_check_memory_returns_true_when_limit_negative():
     pool = _make_pool(memory_limit_mb=-1)
-    assert pool.can_accept() is True
+    assert pool._check_memory() is True
 
 
-def test_can_accept_returns_true_on_oserror():
+def test_check_memory_returns_true_on_oserror():
     pool = _make_pool(memory_limit_mb=512)
     with patch("scrapeyard.queue.memory.Path.read_text", side_effect=OSError("no proc")):
-        assert pool.can_accept() is True
+        assert pool._check_memory() is True
 
 
-def test_can_accept_returns_false_when_over_limit():
+def test_check_memory_returns_false_when_over_limit():
     pool = _make_pool(memory_limit_mb=100)
     with (
         patch("scrapeyard.queue.memory.Path.read_text", return_value="50000 30000 1000 500 0 2000 0"),
         patch("scrapeyard.queue.memory.os.sysconf", return_value=4096),
     ):
-        assert pool.can_accept() is False
+        assert pool._check_memory() is False
 
 
-def test_can_accept_returns_true_when_under_limit():
+def test_check_memory_returns_true_when_under_limit():
     pool = _make_pool(memory_limit_mb=500)
     with (
         patch("scrapeyard.queue.memory.Path.read_text", return_value="50000 10000 1000 500 0 2000 0"),
         patch("scrapeyard.queue.memory.os.sysconf", return_value=4096),
     ):
-        assert pool.can_accept() is True
+        assert pool._check_memory() is True
 
 
 def test_properties_return_correct_values():
@@ -245,7 +245,7 @@ async def test_stop_cancels_pending_tasks_after_timeout(monkeypatch):
 @pytest.mark.asyncio
 async def test_enqueue_raises_memory_error_when_pool_cannot_accept():
     pool = _make_pool(memory_limit_mb=1)
-    with patch.object(pool, "can_accept", return_value=False):
+    with patch.object(pool, "_check_memory", return_value=False):
         with pytest.raises(MemoryError, match="memory exceeds"):
             await pool.enqueue("job-1", "config: yaml")
 
@@ -261,7 +261,7 @@ async def test_enqueue_starts_pool_and_enqueues_job():
         pool._redis = fake_redis
 
     with (
-        patch.object(pool, "can_accept", return_value=True),
+        patch.object(pool, "_check_memory", return_value=True),
         patch.object(pool, "start", _fake_start),
     ):
         result = await pool.enqueue("job-1", "config: yaml", priority="high", run_id="run-1")
@@ -277,7 +277,7 @@ async def test_enqueue_returns_job_handle_when_enqueue_returns_none():
     pool._started = True
     pool._redis = fake_redis
 
-    with patch.object(pool, "can_accept", return_value=True):
+    with patch.object(pool, "_check_memory", return_value=True):
         result = await pool.enqueue("job-1", "config: yaml", run_id="run-1")
 
     assert result is not None
@@ -290,7 +290,7 @@ async def test_enqueue_requires_run_id_when_job_lookup_fallback_needed():
     pool._started = True
     pool._redis = MagicMock(enqueue_job=AsyncMock(return_value=None))
 
-    with patch.object(pool, "can_accept", return_value=True):
+    with patch.object(pool, "_check_memory", return_value=True):
         with pytest.raises(RuntimeError, match="no run_id"):
             await pool.enqueue("job-1", "config: yaml")
 

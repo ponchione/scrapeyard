@@ -391,7 +391,7 @@ before appending data when a fetched page redirects back to a seen URL.
 ### 17. `Path("/proc/self/statm").read_text()` in async hot path
 `src/scrapeyard/queue/pool.py:63–74`
 
-Called from `can_accept()` and `enqueue()`. Sync file I/O blocks the event
+Called from `_check_memory()` through `enqueue()`. Sync file I/O blocks the event
 loop. `/proc` is fast in practice but the pattern is wrong, and on
 non-Linux (macOS dev, anyone running with psutil disabled) this silently
 returns "memory fine" because of the `except ... return True`. A failed
@@ -517,7 +517,7 @@ minimal message. (Less of a risk once auth is added, but still noisy.)
 Nothing checks free space on `/data` before accepting a job or writing a
 result. `result_store.save_result` will raise `OSError: ENOSPC`, the outer
 try/except marks the job failed, and the loop keeps accepting work. Add a
-`shutil.disk_usage` check to `WorkerPool.can_accept()` and to `/health`.
+`shutil.disk_usage` check to `WorkerPool._check_memory()` and to `/health`.
 
 ### 29. Default `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=4096` without a container memory limit
 `docker-compose.yml` (no `deploy.resources.limits`). The Python-level soft

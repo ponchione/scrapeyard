@@ -32,20 +32,20 @@ def test_build_list_jobs_with_stats_query_supports_offset_without_limit() -> Non
 
 def test_row_to_job_with_stats_maps_run_count_and_timestamp() -> None:
     job, run_count, last_run_at = row_to_job_with_stats(
-        (
-            "j-1",
-            "acme",
-            "prices",
-            "queued",
-            "target: https://example.com",
-            "2026-03-01T08:00:00",
-            "2026-03-02T09:00:00",
-            "*/5 * * * *",
-            1,
-            "run-123",
-            7,
-            "2026-03-03T10:00:00",
-        )
+        {
+            "job_id": "j-1",
+            "project": "acme",
+            "name": "prices",
+            "status": "queued",
+            "config_yaml": "target: https://example.com",
+            "created_at": "2026-03-01T08:00:00",
+            "updated_at": "2026-03-02T09:00:00",
+            "schedule_cron": "*/5 * * * *",
+            "schedule_enabled": 1,
+            "current_run_id": "run-123",
+            "run_count": 7,
+            "last_run_at": "2026-03-03T10:00:00",
+        }
     )
 
     assert job.job_id == "j-1"
@@ -54,11 +54,19 @@ def test_row_to_job_with_stats_maps_run_count_and_timestamp() -> None:
 
 
 def test_row_to_project_summary_maps_count_tuple() -> None:
-    assert row_to_project_summary(("acme", "running", 4)) == ("acme", "running", 4)
+    assert row_to_project_summary({"project": "acme", "status": "running", "count": 4}) == (
+        "acme",
+        "running",
+        4,
+    )
 
 
 def test_row_to_schedule_state_coerces_boolean_flag() -> None:
-    assert row_to_schedule_state(("job-1", "0 * * * *", 0)) == (
+    assert row_to_schedule_state({
+        "job_id": "job-1",
+        "schedule_cron": "0 * * * *",
+        "schedule_enabled": 0,
+    }) == (
         "job-1",
         "0 * * * *",
         False,

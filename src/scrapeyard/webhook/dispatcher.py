@@ -55,6 +55,11 @@ class WebhookDispatchResult:
 class WebhookDispatcher(Protocol):
     """Async interface for dispatching webhook notifications."""
 
+    async def send_once(
+        self,
+        config: WebhookConfig | WebhookRequestConfig,
+        payload: dict[str, Any],
+    ) -> WebhookDispatchResult: ...
     async def dispatch(
         self,
         config: WebhookConfig | WebhookRequestConfig,
@@ -116,60 +121,76 @@ class HttpWebhookDispatcher:
         """5xx and 429 are retryable; 4xx (except 429) are permanent."""
         return status_code >= 500 or status_code == 429
 
-    async def dispatch(
+    async def send_once(
         self,
         config: WebhookConfig | WebhookRequestConfig,
         payload: dict[str, Any],
     ) -> WebhookDispatchResult:
         url = str(config.url)
+        start = time.monotonic()
+        try:
+            client = await self._get_client()
+            response = await client.post(
+                url,
+                json=payload,
+                headers=config.headers,
+                timeout=config.timeout,
+            )
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            if response.is_success:
+                logger.info("Webhook dispatched to %s — %d in %.0fms", url, response.status_code, elapsed_ms)
+                return WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
+
+            last_error = f"HTTP {response.status_code}"
+            if not self._is_retryable_status(response.status_code):
+                logger.warning(
+                    "Webhook to %s returned %d in %.0fms — not retryable",
+                    url, response.status_code, elapsed_ms,
+                )
+                return WebhookDispatchResult(
+                    WebhookDispatchStatus.permanent_failed,
+                    1,
+                    last_error,
+                )
+
+            logger.warning("Webhook to %s returned %d in %.0fms", url, response.status_code, elapsed_ms)
+            return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
+
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            last_error = str(exc) or exc.__class__.__name__
+            logger.warning("Webhook to %s failed after %.0fms: %s", url, elapsed_ms, exc)
+            return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
+
+    async def dispatch(
+        self,
+        config: WebhookConfig | WebhookRequestConfig,
+        payload: dict[str, Any],
+    ) -> WebhookDispatchResult:
+        """Immediately dispatch a webhook with in-memory retries.
+
+        Production submissions use submit() and the durable outbox. This method
+        remains useful for direct tests and diagnostics that do not need
+        persistence.
+        """
+        url = str(config.url)
         logger.debug("Webhook payload for %s: %s", url, payload)
 
         last_error: str | None = None
         for attempt in range(1 + self._max_retries):
-            start = time.monotonic()
             attempts_so_far = attempt + 1
-            try:
-                client = await self._get_client()
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers=config.headers,
-                    timeout=config.timeout,
-                )
-                elapsed_ms = (time.monotonic() - start) * 1000
-
-                if response.is_success:
-                    logger.info(
-                        "Webhook dispatched to %s — %d in %.0fms (attempt %d)",
-                        url, response.status_code, elapsed_ms, attempts_so_far,
-                    )
-                    return WebhookDispatchResult(WebhookDispatchStatus.delivered, attempts_so_far)
-
-                last_error = f"HTTP {response.status_code}"
-                if not self._is_retryable_status(response.status_code):
-                    logger.warning(
-                        "Webhook to %s returned %d in %.0fms — not retryable",
-                        url, response.status_code, elapsed_ms,
-                    )
-                    return WebhookDispatchResult(
-                        WebhookDispatchStatus.permanent_failed,
-                        attempts_so_far,
-                        last_error,
-                    )
-
-                logger.warning(
-                    "Webhook to %s returned %d in %.0fms (attempt %d/%d)",
-                    url, response.status_code, elapsed_ms,
-                    attempts_so_far, 1 + self._max_retries,
+            result = await self.send_once(config, payload)
+            if result.status is WebhookDispatchStatus.delivered:
+                return WebhookDispatchResult(WebhookDispatchStatus.delivered, attempts_so_far)
+            if result.status is WebhookDispatchStatus.permanent_failed:
+                return WebhookDispatchResult(
+                    WebhookDispatchStatus.permanent_failed,
+                    attempts_so_far,
+                    result.last_error,
                 )
 
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
-                elapsed_ms = (time.monotonic() - start) * 1000
-                last_error = str(exc) or exc.__class__.__name__
-                logger.warning(
-                    "Webhook to %s failed after %.0fms: %s (attempt %d/%d)",
-                    url, elapsed_ms, exc, attempts_so_far, 1 + self._max_retries,
-                )
+            last_error = result.last_error
 
             if attempt < self._max_retries:
                 delay = self._backoff_delay(attempt)
@@ -200,13 +221,7 @@ class HttpWebhookDispatcher:
             return
 
         if self._outbox_store is None:
-            self._track_task(
-                asyncio.create_task(
-                    self._run_dispatch(config, payload),
-                    name=f"scrapeyard-webhook:{url}",
-                )
-            )
-            return
+            raise RuntimeError("HttpWebhookDispatcher.submit() requires an outbox_store")
 
         now = utc_now()
         delivery = self._build_delivery(config, payload, now)
@@ -296,16 +311,6 @@ class HttpWebhookDispatcher:
             next_attempt_at=now,
         )
 
-    async def _run_dispatch(self, config: WebhookConfig, payload: dict[str, Any]) -> None:
-        url = str(config.url)
-        try:
-            await self.dispatch(config, payload)
-        except asyncio.CancelledError:
-            logger.info("Webhook to %s cancelled during shutdown", url)
-            raise
-        except Exception:
-            logger.exception("Unexpected webhook dispatch failure to %s", url)
-
     async def _run_persisted_delivery(self, delivery: WebhookDelivery) -> None:
         if self._outbox_store is None:
             return
@@ -319,7 +324,7 @@ class HttpWebhookDispatcher:
                 timeout=current.timeout_seconds,
             )
             try:
-                result = await self.dispatch(request_config, current.payload)
+                result = await self.send_once(request_config, current.payload)
             except asyncio.CancelledError:
                 logger.info("Webhook to %s cancelled during shutdown", current.url)
                 raise
