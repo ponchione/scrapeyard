@@ -180,6 +180,6 @@ def classify_fetch_exception(
         return ErrorType.proxy_rejected, None, debug
     if fetcher_type != FetcherType.basic and token_match(detail, _BROWSER_ERROR_MARKERS):
         return ErrorType.browser_error, None, debug
-    if isinstance(exc, (ConnectionError, OSError)) or token_match(detail, _NETWORK_ERROR_MARKERS):
+    if isinstance(exc, ConnectionError | OSError) or token_match(detail, _NETWORK_ERROR_MARKERS):
         return ErrorType.network_error, None, debug
     return ErrorType.http_error, None, debug

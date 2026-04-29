@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
-from scrapeyard.queue.error_records import build_error_record, validation_error_type
+from scrapeyard.queue.error_records import (
+    build_error_record,
+    build_target_result_error_records,
+    validation_error_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,21 +162,20 @@ async def _retry_after_validation_failure(
     if retry_result.status is not TargetStatus.success:
         logger.info("Recording failure for domain %s after validation retry", domain)
         circuit_breaker.record_failure(domain)
-        for _ in retry_result.errors:
-            pending_errors.append(
-                build_error_record(
-                    job_id,
-                    run_id or "",
-                    config.project,
-                    target_cfg.url,
-                    2,
-                    retry_result.error_type or ErrorType.http_error,
-                    retry_result.http_status,
-                    target_cfg.fetcher.value,
-                    ActionTaken.fail,
-                    error_message=retry_result.error_detail or "; ".join(retry_result.errors),
-                )
+        pending_errors.extend(
+            build_target_result_error_records(
+                job_id=job_id,
+                run_id=run_id,
+                project=config.project,
+                target_url=target_cfg.url,
+                attempt=2,
+                fetcher_used=target_cfg.fetcher.value,
+                action=ActionTaken.fail,
+                result=retry_result,
+                default_error_type=ErrorType.http_error,
+                combine_errors=True,
             )
+        )
         return retry_result
 
     circuit_breaker.record_success(domain)

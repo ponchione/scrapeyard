@@ -14,7 +14,7 @@ from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
-from scrapeyard.queue.error_records import build_error_record
+from scrapeyard.queue.error_records import build_error_record, build_target_result_error_records
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +109,15 @@ def record_failed_target(
         result.error_detail or "; ".join(result.errors) or "unknown error",
     )
     circuit_breaker.record_failure(runtime.domain)
-    for err_msg in result.errors or [result.error_detail or "unknown scrape failure"]:
-        pending_errors.append(build_error_record(
-            job_id, run_id or "", config.project, target_cfg.url,
-            1, result.error_type or ErrorType.http_error,
-            result.http_status, target_cfg.fetcher.value,
-            ActionTaken.fail, error_message=err_msg,
-        ))
+    pending_errors.extend(
+        build_target_result_error_records(
+            job_id=job_id,
+            run_id=run_id,
+            project=config.project,
+            target_url=target_cfg.url,
+            attempt=1,
+            fetcher_used=target_cfg.fetcher.value,
+            action=ActionTaken.fail,
+            result=result,
+        )
+    )

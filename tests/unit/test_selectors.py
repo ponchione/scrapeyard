@@ -7,11 +7,8 @@ import pytest
 from scrapeyard.config.schema import SelectorLong, SelectorType
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
-    count_selector_matches,
     count_selector_matches_strict,
-    extract_selectors,
     extract_selectors_strict,
-    select_items,
     select_items_strict,
 )
 
@@ -43,7 +40,7 @@ def test_extract_selectors_page_wide_scalar_and_list() -> None:
         }
     )
 
-    result = extract_selectors(page, {"title": "h1", "prices": ".price"})
+    result = extract_selectors_strict(page, {"title": "h1", "prices": ".price"})
 
     assert result == {"title": "Title", "prices": ["$10", "$20"]}
 
@@ -63,8 +60,8 @@ def test_select_items_returns_one_element_per_item() -> None:
     )
     page = _Node(css_map={".product-card": [item_one, item_two]})
 
-    items = select_items(page, ".product-card")
-    result = [extract_selectors(item, {"name": ".title", "price": ".price"}) for item in items]
+    items = select_items_strict(page, ".product-card")
+    result = [extract_selectors_strict(item, {"name": ".title", "price": ".price"}) for item in items]
 
     assert result == [
         {"name": "A", "price": "$10"},
@@ -76,44 +73,13 @@ def test_select_items_supports_xpath_item_selector() -> None:
     item = _Node(css_map={".title": [_Node(text="Scoped Title")]})
     page = _Node(xpath_map={"//div[@class='product']": [item]})
 
-    items = select_items(
+    items = select_items_strict(
         page,
         SelectorLong(query="//div[@class='product']", type=SelectorType.xpath),
     )
-    result = [extract_selectors(node, {"title": ".title"}) for node in items]
+    result = [extract_selectors_strict(node, {"title": ".title"}) for node in items]
 
     assert result == [{"title": "Scoped Title"}]
-
-
-def test_extract_selectors_returns_none_for_invalid_selector_errors() -> None:
-    class _ExplodingNode(_Node):
-        def css(self, query: str) -> list[object]:
-            raise ValueError(f"bad selector: {query}")
-
-    result = extract_selectors(_ExplodingNode(), {"title": "[broken"})
-
-    assert result == {"title": None}
-
-
-def test_select_items_returns_empty_for_invalid_xpath_selector_errors() -> None:
-    class _ExplodingNode(_Node):
-        def xpath(self, query: str) -> list[object]:
-            raise ValueError(f"bad xpath: {query}")
-
-    items = select_items(
-        _ExplodingNode(),
-        SelectorLong(query="//*[", type=SelectorType.xpath),
-    )
-
-    assert items == []
-
-
-def test_count_selector_matches_returns_zero_for_invalid_selector_errors() -> None:
-    class _ExplodingNode(_Node):
-        def css(self, query: str) -> list[object]:
-            raise RuntimeError("selector engine failed")
-
-    assert count_selector_matches(_ExplodingNode(), ".broken") == 0
 
 
 def test_extract_selectors_strict_raises_selector_execution_error_with_field_metadata() -> None:

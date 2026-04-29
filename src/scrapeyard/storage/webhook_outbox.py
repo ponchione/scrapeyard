@@ -13,6 +13,8 @@ from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import get_db
 
+_UNSET = object()
+
 
 class WebhookDeliveryStatus(str, Enum):
     """Persistent webhook delivery states."""
@@ -158,28 +160,6 @@ class SQLiteWebhookOutboxStore:
             row = await cursor.fetchone()
         return None if row is None else row_to_webhook_delivery(row)
 
-    async def list_due_pending(
-        self,
-        now: datetime,
-        *,
-        limit: int | None = None,
-    ) -> list[WebhookDelivery]:
-        """List pending deliveries due at or before *now*."""
-
-        sql = (
-            f"SELECT {WEBHOOK_DELIVERY_COLUMNS} FROM webhook_deliveries "
-            "WHERE status = 'pending' AND next_attempt_at <= ? "
-            "ORDER BY next_attempt_at ASC, created_at ASC"
-        )
-        params: tuple[object, ...] = (fmt_dt(now),)
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (*params, limit)
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
-        return [row_to_webhook_delivery(row) for row in rows]
-
     async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
         """List all pending deliveries ordered by next attempt time."""
 
@@ -206,22 +186,13 @@ class SQLiteWebhookOutboxStore:
     ) -> None:
         """Mark a delivery successful after one or more attempts."""
 
-        await self._execute_status_update(
-            """UPDATE webhook_deliveries
-               SET status = 'delivered',
-                   attempts = attempts + ?,
-                   last_attempt_at = ?,
-                   delivered_at = ?,
-                   last_error = NULL,
-                   updated_at = ?
-               WHERE delivery_id = ?""",
-            (
-                attempts,
-                fmt_dt(delivered_at),
-                fmt_dt(delivered_at),
-                fmt_dt(delivered_at),
-                delivery_id,
-            ),
+        await self._update_delivery_status(
+            delivery_id,
+            status=WebhookDeliveryStatus.delivered,
+            attempted_at=delivered_at,
+            attempts=attempts,
+            delivered_at=delivered_at,
+            last_error=None,
         )
 
     async def mark_retryable_failure(
@@ -235,23 +206,13 @@ class SQLiteWebhookOutboxStore:
     ) -> None:
         """Record a transient failure and keep the delivery pending."""
 
-        await self._execute_status_update(
-            """UPDATE webhook_deliveries
-               SET status = 'pending',
-                   attempts = attempts + ?,
-                   last_attempt_at = ?,
-                   next_attempt_at = ?,
-                   last_error = ?,
-                   updated_at = ?
-               WHERE delivery_id = ?""",
-            (
-                attempts,
-                fmt_dt(attempted_at),
-                fmt_dt(next_attempt_at),
-                last_error,
-                fmt_dt(attempted_at),
-                delivery_id,
-            ),
+        await self._update_delivery_status(
+            delivery_id,
+            status=WebhookDeliveryStatus.pending,
+            attempted_at=attempted_at,
+            attempts=attempts,
+            next_attempt_at=next_attempt_at,
+            last_error=last_error,
         )
 
     async def mark_permanent_failure(
@@ -264,24 +225,53 @@ class SQLiteWebhookOutboxStore:
     ) -> None:
         """Mark a delivery permanently failed and leave it inspectable."""
 
-        await self._execute_status_update(
-            """UPDATE webhook_deliveries
-               SET status = 'failed',
-                   attempts = attempts + ?,
-                   last_attempt_at = ?,
-                   last_error = ?,
-                   updated_at = ?
-               WHERE delivery_id = ?""",
-            (
-                attempts,
-                fmt_dt(attempted_at),
-                last_error,
-                fmt_dt(attempted_at),
-                delivery_id,
-            ),
+        await self._update_delivery_status(
+            delivery_id,
+            status=WebhookDeliveryStatus.failed,
+            attempted_at=attempted_at,
+            attempts=attempts,
+            last_error=last_error,
         )
 
-    async def _execute_status_update(self, sql: str, params: Sequence[object]) -> None:
+    async def _update_delivery_status(
+        self,
+        delivery_id: str,
+        *,
+        status: WebhookDeliveryStatus,
+        attempted_at: datetime,
+        attempts: int,
+        next_attempt_at: datetime | object = _UNSET,
+        delivered_at: datetime | object = _UNSET,
+        last_error: str | None | object = _UNSET,
+    ) -> None:
+        assignments = [
+            "status = ?",
+            "attempts = attempts + ?",
+            "last_attempt_at = ?",
+            "updated_at = ?",
+        ]
+        params: list[object] = [
+            status.value,
+            attempts,
+            fmt_dt(attempted_at),
+            fmt_dt(attempted_at),
+        ]
+        if next_attempt_at is not _UNSET:
+            assignments.append("next_attempt_at = ?")
+            params.append(fmt_dt(cast(datetime, next_attempt_at)))
+        if delivered_at is not _UNSET:
+            assignments.append("delivered_at = ?")
+            params.append(fmt_dt(cast(datetime, delivered_at)))
+        if last_error is not _UNSET:
+            assignments.append("last_error = ?")
+            params.append(cast(str | None, last_error))
+
+        await self._execute_update(
+            f"UPDATE webhook_deliveries SET {', '.join(assignments)} WHERE delivery_id = ?",
+            (*params, delivery_id),
+        )
+
+    async def _execute_update(self, sql: str, params: Sequence[object]) -> None:
         async with get_db("jobs.db") as db:
             await db.execute(sql, params)
             await db.commit()

@@ -1,7 +1,7 @@
 """FastAPI application entry point."""
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 
 from fastapi import FastAPI
@@ -65,10 +65,8 @@ async def _startup_runtime_services(app: FastAPI) -> None:
 
 async def _shutdown_runtime_services(app: FastAPI, *, shutdown_grace_seconds: int) -> None:
     app.state.cleanup_task.cancel()
-    try:
+    with suppress(asyncio.CancelledError):
         await app.state.cleanup_task
-    except asyncio.CancelledError:
-        pass
     app.state.scheduler.shutdown()
     await app.state.worker_pool.stop()
     await close_webhook_dispatcher(timeout=shutdown_grace_seconds)
