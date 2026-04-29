@@ -3,7 +3,7 @@
 Last updated: 2026-04-24
 
 **Status:** All BLOCKERs (#1–9) and launch-gate HIGH items #10, #11, and
-#18 are resolved. Runtime-safety items #15, #16, and #33 are resolved.
+#18 are resolved. Runtime-safety items #12, #15, #16, and #33 are resolved.
 
 Pre-launch audit for the EyeBox rollout. Findings verified by direct source
 reads; file:line references point to current `main`. Severity tiers:
@@ -296,7 +296,7 @@ back to the immediate client IP so random header values cannot evade the
 limit. `/health` remains exempt, and throttled requests return 429 with
 `Retry-After`.
 
-### 12. In-flight `asyncio.Task`s are awaited sequentially — partial loss on mid-job exception
+### 12. ~~In-flight `asyncio.Task`s are awaited sequentially — partial loss on mid-job exception~~ (RESOLVED)
 `src/scrapeyard/queue/worker.py:294–304`
 
 ```python
@@ -310,17 +310,23 @@ for task in tasks:
     all_results.append(tr)
 ```
 
-`_process_target` has a `try/finally` but no catch. Any exception raised by
-`scrape_target` that is not a `RetryableError` (e.g., Playwright
-`BrowserClosed`, out-of-memory, unexpected Scrapling error) propagates out
-of the first `await task`. Because this is a sequential loop and not
-`asyncio.gather(..., return_exceptions=True)`, all later tasks are left
-unawaited; their completed results are discarded and their error rows may
-not flush. The outer `except Exception` at worker.py:444 then marks the
-entire job failed instead of `partial`, regardless of `fail_strategy`.
+`_process_target` had a `try/finally` but no catch. Any exception raised by
+`scrape_target` that was not a `RetryableError` (e.g., Playwright
+`BrowserClosed`, out-of-memory, unexpected Scrapling error) propagated out
+of the first `await task`. Because this was a sequential loop and not
+`asyncio.gather(..., return_exceptions=True)`, all later tasks could be left
+unawaited; their completed results were discarded and their error rows might
+not flush. The outer `except Exception` then marked the entire job failed
+instead of `partial`, regardless of `fail_strategy`.
 
-Needed: `await asyncio.gather(*tasks, return_exceptions=True)` and
-per-result handling of exceptions vs `TargetResult`.
+**Fix (2026-04-24):** `_process_all_targets` now drains target tasks with
+`asyncio.gather(..., return_exceptions=True)` instead of sequential awaits.
+Unexpected per-target fetch/validation exceptions are converted into failed
+`TargetResult`s with structured `ErrorRecord`s, so other completed target
+results are preserved and existing `fail_strategy` handling determines the
+final job status. Infrastructure failures that escape target processing are
+still raised after all target tasks have been drained, and cancellation is not
+converted into a normal failed target.
 
 ### 13. Circuit breaker state is in-memory only and not lock-protected
 `src/scrapeyard/engine/resilience.py:118–154`
@@ -577,7 +583,7 @@ Without this, dependency pin bumps and behavior regressions ship silently.
 | 9 | Proxy creds served plain | BLOCKER | engine/url_guard.py, api/serializers.py | ✅ resolved |
 | 10 | Webhook fire-and-forget | HIGH | webhook/dispatcher.py, storage/webhook_outbox.py | ✅ resolved |
 | 11 | No HTTP rate limiting | HIGH | api/middleware.py, main.py | ✅ resolved |
-| 12 | Sequential `await task` loop | HIGH | worker.py:294–304 |
+| 12 | Sequential `await task` loop | HIGH | worker.py | ✅ resolved |
 | 13 | Circuit breaker in-memory + unlocked | HIGH | resilience.py:118–154 |
 | 14 | Rate limiter polling loop | HIGH | rate_limiter.py:48–74 |
 | 15 | No basic-fetcher timeout | HIGH | scraper.py:180–186 | ✅ resolved |

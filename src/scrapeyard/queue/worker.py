@@ -13,6 +13,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, GroupBy, ScrapeConfig, TargetConfig
+from scrapeyard.engine.fetch_classifier import classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
@@ -28,6 +29,7 @@ from scrapeyard.queue.run_lifecycle import (
     update_job_completion,
 )
 from scrapeyard.queue.target_execution import (
+    TargetRuntimeContext,
     guard_target_execution,
     log_target_fetch,
     record_failed_target,
@@ -260,7 +262,7 @@ async def _process_all_targets(
     error_store: ErrorStore,
 ) -> list[TargetResult]:
     """Dispatch all targets with concurrency, delay, and rate limiting."""
-    targets = config.resolved_targets()
+    targets = list(config.resolved_targets())
     sem = asyncio.Semaphore(config.execution.concurrency)
     validator = ResultValidator(config.validation)
 
@@ -290,9 +292,24 @@ async def _process_all_targets(
             await asyncio.sleep(config.execution.delay_between)
         tasks.append(asyncio.create_task(_process_one(target_cfg)))
 
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
     all_results: list[TargetResult] = []
-    for task in tasks:
-        all_results.append(await task)
+    task_errors: list[Exception] = []
+    for outcome in outcomes:
+        if isinstance(outcome, TargetResult):
+            all_results.append(outcome)
+        elif isinstance(outcome, asyncio.CancelledError):
+            raise outcome
+        elif isinstance(outcome, Exception):
+            task_errors.append(outcome)
+        elif isinstance(outcome, BaseException):
+            raise outcome
+        else:
+            task_errors.append(TypeError(f"Unexpected target task result: {type(outcome).__name__}"))
+
+    if task_errors:
+        raise task_errors[0]
     return all_results
 
 
@@ -331,14 +348,26 @@ async def _fetch_and_validate_target(
         return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
 
     log_target_fetch(target_cfg, runtime)
-    result = await scrape_target(
-        target_cfg,
-        runtime.adaptive,
-        config.retry,
-        adaptive_dir=adaptive_dir,
-        proxy_url=runtime.proxy_url,
-        artifacts_dir=runtime.artifacts_dir,
-    )
+    try:
+        result = await scrape_target(
+            target_cfg,
+            runtime.adaptive,
+            config.retry,
+            adaptive_dir=adaptive_dir,
+            proxy_url=runtime.proxy_url,
+            artifacts_dir=runtime.artifacts_dir,
+        )
+    except Exception as exc:
+        return _target_exception_result(
+            runtime=runtime,
+            config=config,
+            target_cfg=target_cfg,
+            job_id=job_id,
+            run_id=run_id,
+            circuit_breaker=circuit_breaker,
+            pending_errors=pending_errors,
+            exc=exc,
+        )
 
     if result.status is not TargetStatus.success:
         record_failed_target(
@@ -354,22 +383,81 @@ async def _fetch_and_validate_target(
         return result
 
     circuit_breaker.record_success(runtime.domain)
-    return await apply_validation(
-        target_cfg=target_cfg,
-        domain=runtime.domain,
-        adaptive=runtime.adaptive,
+    try:
+        return await apply_validation(
+            target_cfg=target_cfg,
+            domain=runtime.domain,
+            adaptive=runtime.adaptive,
+            result=result,
+            pending_errors=pending_errors,
+            config=config,
+            adaptive_dir=adaptive_dir,
+            run_artifacts_dir=run_artifacts_dir,
+            job_id=job_id,
+            run_id=run_id,
+            circuit_breaker=circuit_breaker,
+            validator=validator,
+            scrape=scrape_target,
+            proxy_url=runtime.proxy_url,
+        )
+    except Exception as exc:
+        return _target_exception_result(
+            runtime=runtime,
+            config=config,
+            target_cfg=target_cfg,
+            job_id=job_id,
+            run_id=run_id,
+            circuit_breaker=circuit_breaker,
+            pending_errors=pending_errors,
+            exc=exc,
+        )
+
+
+def _exception_detail(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
+def _target_exception_result(
+    *,
+    runtime: TargetRuntimeContext,
+    config: ScrapeConfig,
+    target_cfg: TargetConfig,
+    job_id: str,
+    run_id: str | None,
+    circuit_breaker: CircuitBreaker,
+    pending_errors: list[ErrorRecord],
+    exc: Exception,
+) -> TargetResult:
+    error_type, http_status, debug = classify_fetch_exception(exc, target_cfg.fetcher)
+    detail = _exception_detail(exc)
+    logger.exception(
+        "Target processing crashed for job_id=%s run_id=%s url=%s",
+        job_id,
+        run_id,
+        target_cfg.url,
+    )
+    result = TargetResult(
+        url=target_cfg.url,
+        status=TargetStatus.failed,
+        data=[],
+        errors=[detail],
+        pages_scraped=0,
+        error_type=error_type,
+        http_status=http_status,
+        error_detail=detail,
+        debug=debug,
+    )
+    record_failed_target(
+        runtime=runtime,
         result=result,
         pending_errors=pending_errors,
         config=config,
-        adaptive_dir=adaptive_dir,
-        run_artifacts_dir=run_artifacts_dir,
+        target_cfg=target_cfg,
         job_id=job_id,
         run_id=run_id,
         circuit_breaker=circuit_breaker,
-        validator=validator,
-        scrape=scrape_target,
-        proxy_url=runtime.proxy_url,
     )
+    return result
 
 
 def _collect_result_payload(all_results: list[TargetResult]) -> tuple[list[dict[str, Any]], list[str]]:

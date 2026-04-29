@@ -18,10 +18,10 @@ It is designed for small-to-medium scraping workflows where you want:
 - multi-target jobs with per-job concurrency and rate limits
 - `basic`, `stealthy`, and `dynamic` fetcher support via Scrapling
 - per-target browser tuning and `adaptive_domain` overrides
-- selector transforms such as `trim`, `uppercase`, `prepend(...)`, and `regex(...)`
+- selector transforms such as `trim`, `lowercase`, `uppercase`, `prepend(...)`, `append(...)`, `replace(...)`, and `regex(...)`
 - pagination support
 - JSON result artifacts exposed through the API and persisted per run
-- webhook notifications on job completion (fire-and-forget)
+- webhook notifications on job completion with durable outbox retry
 - SQLite-backed job, error, and result metadata stores
 - filesystem-backed result artifacts
 - per-domain circuit breaker and retry handling
@@ -48,7 +48,7 @@ Request flow:
 6. The worker executes targets, applies retries, rate limiting, validation, and formatting.
 7. Results are written to disk and indexed in `results_meta.db`.
 8. Errors are written to `errors.db`.
-9. If a `webhook` is configured, a JSON payload is POSTed to the webhook URL (fire-and-forget).
+9. If a `webhook` is configured, a JSON payload is persisted to the webhook outbox and delivered in the background.
 
 ## Repository Layout
 
@@ -85,9 +85,9 @@ available.
 
 Testing references:
 
-- Strategy: [docs/TESTING-STRATEGY.md](/home/gernsback/source/scrapeyard/docs/TESTING-STRATEGY.md)
-- Remaining automation backlog: [docs/TESTING-BACKLOG.md](/home/gernsback/source/scrapeyard/docs/TESTING-BACKLOG.md)
-- Brownells manual fixtures: [docs/test-configs/brownells-optics-smoke.yaml](/home/gernsback/source/scrapeyard/docs/test-configs/brownells-optics-smoke.yaml) and [docs/test-configs/brownells-optics-validation.yaml](/home/gernsback/source/scrapeyard/docs/test-configs/brownells-optics-validation.yaml)
+- Strategy: [docs/TESTING-STRATEGY.md](docs/TESTING-STRATEGY.md)
+- Remaining automation backlog: [docs/TESTING-BACKLOG.md](docs/TESTING-BACKLOG.md)
+- Brownells manual fixtures: [docs/test-configs/brownells-optics-smoke.yaml](docs/test-configs/brownells-optics-smoke.yaml) and [docs/test-configs/brownells-optics-validation.yaml](docs/test-configs/brownells-optics-validation.yaml)
 
 ## Requirements
 
@@ -106,9 +106,14 @@ poetry install
 Make sure Redis is running locally, or point `SCRAPEYARD_REDIS_DSN` at an
 existing Redis instance before starting the API.
 
+For deployment-like local testing, set at least one API key. Leaving
+`SCRAPEYARD_API_KEYS` empty disables authentication for non-health endpoints
+and logs a warning on first request.
+
 Start the API:
 
 ```bash
+export SCRAPEYARD_API_KEYS="$(openssl rand -hex 32)"
 poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
 ```
 
@@ -123,9 +128,10 @@ curl -s http://127.0.0.1:8420/health
 
 ## Run with Docker
 
-Build and start:
+Set an API key, then build and start:
 
 ```bash
+export SCRAPEYARD_API_KEYS="$(openssl rand -hex 32)"
 docker compose build
 docker compose up -d
 ```
@@ -151,7 +157,9 @@ docker compose down
 
 The default compose setup starts both Redis and Scrapeyard. It mounts a named
 volume at `/data` for databases, results, adaptive matching state, and logs,
-and a second named volume for Redis append-only durability. The Docker image
+and a second named volume for Redis append-only durability. Compose requires
+`SCRAPEYARD_API_KEYS` from the shell or a local `.env` file; `.env.example`
+shows the expected variable shape. The Docker image
 installs all browser runtimes that Scrapeyard advertises and then runs the app
 as a non-root user so Chromium sandboxing can work for `browser.stealth: true`:
 
@@ -205,12 +213,29 @@ Revisit these deferred features only if proxy-backed validation still fails or
 shows a clear need for session persistence beyond the current request-scoped
 browser model.
 
+## Deployment Readiness
+
+Before exposing Scrapeyard beyond a trusted local workstation:
+
+- Set `SCRAPEYARD_API_KEYS` to one or more high-entropy values and send
+  `X-API-Key` on every non-health request.
+- Keep port `8420` on a private network or behind a TLS-terminating reverse
+  proxy; the app itself does not terminate TLS.
+- Use persistent storage for `/data` and Redis append-only data, then monitor
+  `/health` for Redis, SQLite, and disk-space failures.
+- Treat the current service as single-instance. The queue is Redis-backed, but
+  the embedded worker pool, SQLite stores, and local result artifacts are not a
+  horizontally scaled deployment model.
+- Keep secrets in environment variables or your orchestrator's secret store.
+  Do not commit `.env` files.
+
 ## Environment Variables
 
 All service settings use the `SCRAPEYARD_` prefix.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `SCRAPEYARD_API_KEYS` | empty | Comma-separated allow-list for `X-API-Key`; empty disables auth except for a startup warning |
 | `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection used by `arq` |
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Redis queue name |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs in the worker pool |
@@ -222,6 +247,10 @@ All service settings use the `SCRAPEYARD_` prefix.
 | `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` | `30` | Grace period for worker drain on shutdown |
 | `SCRAPEYARD_WORKERS_RUNNING_LEASE_SECONDS` | `300` | Lease used to recover stale running jobs |
 | `SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS` | `10.0` | Startup timeout in seconds for connecting the worker pool to Redis |
+| `SCRAPEYARD_ADMIN_READ_DEFAULT_LIMIT` | `100` | Default page size for admin list endpoints |
+| `SCRAPEYARD_ADMIN_READ_MAX_LIMIT` | `500` | Maximum allowed page size for admin list endpoints |
+| `SCRAPEYARD_RATE_LIMIT_REQUESTS` | `600` | HTTP request limit per key/IP per window; `0` disables rate limiting |
+| `SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS` | `60` | HTTP rate-limit sliding window in seconds |
 | `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS` | `120` | Random jitter applied to scheduled jobs |
 | `SCRAPEYARD_STORAGE_RETENTION_DAYS` | `30` | Age-based result retention |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Root directory for result artifacts |
@@ -229,12 +258,20 @@ All service settings use the `SCRAPEYARD_` prefix.
 | `SCRAPEYARD_DB_DIR` | `/data/db` | Directory containing SQLite databases |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive storage directory |
 | `SCRAPEYARD_LOG_DIR` | `/data/logs` | Service log directory |
+| `SCRAPEYARD_LOG_LEVEL` | `INFO` | Logging threshold (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
+| `SCRAPEYARD_BROWSER_DEBUG_ENABLED` | `false` | Enable bounded browser debug artifact capture |
+| `SCRAPEYARD_BROWSER_DEBUG_ARTIFACTS_DIR` | `/data/browser-debug` | Root directory for browser debug artifacts |
 | `SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES` | `3` | Failures before a domain breaker opens |
 | `SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Breaker cooldown before retrying a domain |
+| `SCRAPEYARD_PROXY_URL` | empty | Service-level proxy URL; target/job proxy config can override it, and `direct` bypasses it |
+| `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED` | `true` | Coordinate per-domain rate limits across jobs through Redis |
+| `SCRAPEYARD_MAX_REQUEST_BYTES` | `262144` | Max HTTP request body size in bytes |
+| `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB` | `100` | Minimum free disk space for `/health` to report healthy |
 
 Example:
 
 ```bash
+SCRAPEYARD_API_KEYS="$(openssl rand -hex 32)" \
 SCRAPEYARD_DB_DIR=/tmp/scrapeyard/db \
 SCRAPEYARD_STORAGE_RESULTS_DIR=/tmp/scrapeyard/results \
 SCRAPEYARD_ADAPTIVE_DIR=/tmp/scrapeyard/adaptive \
@@ -246,7 +283,7 @@ poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
 
 Exactly one of `target` or `targets` is required.
 
-A reusable starter config is available at [`template.yaml`](/home/gernsback/source/scrapeyard/template.yaml).
+A reusable starter config is available at [`template.yaml`](template.yaml).
 
 ### Minimal ad hoc config
 
@@ -375,12 +412,13 @@ target:
 | `target` | object | Single-target config |
 | `targets` | list | Multi-target config |
 | `adaptive` | bool | Overrides adaptive mode; otherwise defaults by job type |
+| `proxy` | object | Optional job-level proxy; target-level proxy can override it |
 | `retry` | object | Retry policy |
 | `validation` | object | Result validation behavior |
 | `execution` | object | Concurrency, rate limit, priority, and mode |
 | `schedule` | object | Required for `POST /jobs` |
 | `webhook` | object | Optional completion notifications |
-| `output` | object | Format and grouping |
+| `output` | object | JSON result grouping |
 
 ### Target fields
 
@@ -393,6 +431,9 @@ target:
 | `item_selector` | selector | Optional repeated-item container selector; field selectors run relative to each matched item |
 | `selectors` | map | Field name to selector |
 | `pagination` | object | Optional pagination config |
+| `proxy` | object | Optional target-level proxy; use `url: direct` to bypass a job/service proxy |
+| `map_detection` | object | Optional pricing visibility detection patterns |
+| `stock_detection` | object | Optional stock status detection patterns |
 
 Selectors can be short-form strings:
 
@@ -458,13 +499,11 @@ Values:
 
 ```yaml
 output:
-  format: json
   group_by: target
 ```
 
 Values:
 
-- `format`: `json`, `markdown`, `html`, `json+markdown`
 - `group_by`: `target`, `merge`
 
 ### Webhook settings
@@ -487,8 +526,9 @@ webhook:
 
 Webhooks fire from the worker path for any job that reaches a configured
 terminal state, including ad hoc scrapes submitted in sync-wait mode.
-Dispatch is fire-and-forget: failures are logged at WARNING but do not affect
-job status.
+Delivery is durably inserted into `webhook_outbox` before the worker returns.
+Transient failures are retried with backoff and pending deliveries replay on
+startup. Webhook failures do not change the scrape job status.
 
 If Scrapeyard is running in Docker and your consumer is running on the host,
 use `http://host.docker.internal:<port>/...` rather than `localhost` in the
@@ -521,6 +561,8 @@ key off `payload.name`, not infer identity from `result_path`.
 ## API
 
 For `POST /scrape` and `POST /jobs`, send `Content-Type: application/x-yaml`.
+When `SCRAPEYARD_API_KEYS` is set, every endpoint except `/health` also
+requires `X-API-Key`.
 
 ### `POST /scrape`
 
@@ -529,6 +571,7 @@ Submit an ad hoc scrape job.
 ```bash
 curl -s -X POST http://127.0.0.1:8420/scrape \
   -H 'Content-Type: application/x-yaml' \
+  -H "X-API-Key: $SCRAPEYARD_API_KEYS" \
   --data-binary @config.yaml
 ```
 
@@ -597,6 +640,7 @@ Create a scheduled scrape job. The submitted YAML must include a `schedule` bloc
 ```bash
 curl -s -X POST http://127.0.0.1:8420/jobs \
   -H 'Content-Type: application/x-yaml' \
+  -H "X-API-Key: $SCRAPEYARD_API_KEYS" \
   --data-binary @scheduled.yaml
 ```
 
@@ -724,6 +768,21 @@ Compatibility note:
 - Scrapeyard filters the `browser:` block against the selected fetcher's supported `async_fetch()` signature before dispatching, so a shared browser config cannot accidentally break `stealthy` runs with `TypeError: unexpected keyword argument 'stealth'`
 - If a browser option appears to be ignored on `fetcher: stealthy`, check the upstream `StealthyFetcher.async_fetch()` signature first before assuming the YAML wiring is broken
 
+### Proxy settings
+
+Proxy precedence is target-level `target.proxy`, then top-level `proxy`, then
+the service-level `SCRAPEYARD_PROXY_URL`. Set a proxy `url` to `direct` to
+bypass a broader proxy setting for that target or job.
+
+```yaml
+proxy:
+  url: http://user:pass@gate.example.com:7777
+
+target:
+  proxy:
+    url: direct
+```
+
 ### Failure handling
 
 `execution.fail_strategy` controls the final job status:
@@ -783,7 +842,10 @@ Job records remain in `jobs.db` unless explicitly deleted.
 
 ## Common Errors
 
+- `401 Missing or invalid API key`: set `SCRAPEYARD_API_KEYS` on the service and send the matching `X-API-Key` header
+- `413 Request body too large`: reduce the submitted YAML size or raise `SCRAPEYARD_MAX_REQUEST_BYTES`
 - `415 Content-Type must be application/x-yaml`: add `-H 'Content-Type: application/x-yaml'`
+- `429 Rate limit exceeded`: slow the caller down or tune `SCRAPEYARD_RATE_LIMIT_REQUESTS` and `SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS`
 - `404 No results found`: the job may still be running or may have failed before saving artifacts; check `GET /jobs/{job_id}` and `GET /errors`
 - `503 Service unavailable`: the worker pool rejected the job because the service is at capacity or above its memory limit
 - `browser_error` with missing Playwright executable: rebuild the Docker image so the bundled Playwright and rebrowser browser runtimes are installed, then rerun the in-container dry-run checks in the Docker section
@@ -818,8 +880,9 @@ poetry run ruff check src tests
 
 - Delivery semantics are at-least-once, so idempotent downstream handling is still the right assumption
 - The worker pool is local to a single service process, even though queue state is durable in Redis
-- `POST /jobs` does not currently enforce YAML content type
-- No authentication or authorization layer is present
+- API authentication is a shared API-key allow-list only; there is no per-project authorization or RBAC
+- `/health` is intentionally unauthenticated for container health checks
+- The local compose file publishes `8420` on localhost for development; production deployments should put Scrapeyard behind an internal network boundary or TLS-terminating proxy
 - Result retrieval returns the latest run unless you already know a historical `run_id`
 
 ## License
