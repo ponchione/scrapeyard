@@ -76,21 +76,6 @@ class MemoryWebhookOutboxStore:
             updated_at=created_at,
         )
 
-    async def list_due_pending(
-        self,
-        now: datetime,
-        *,
-        limit: int | None = None,
-    ) -> list[WebhookDelivery]:
-        rows = [
-            delivery
-            for delivery in self.deliveries.values()
-            if delivery.status is WebhookDeliveryStatus.pending
-            and delivery.next_attempt_at <= now
-        ]
-        rows.sort(key=lambda delivery: delivery.next_attempt_at)
-        return rows if limit is None else rows[:limit]
-
     async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
         rows = [
             delivery

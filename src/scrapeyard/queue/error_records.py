@@ -44,3 +44,40 @@ def build_error_record(
         error_message=error_message,
         action_taken=action,
     )
+
+
+def build_target_result_error_records(
+    *,
+    job_id: str,
+    run_id: str | None,
+    project: str,
+    target_url: str,
+    attempt: int,
+    fetcher_used: str,
+    action: ActionTaken,
+    result: TargetResult,
+    default_error_type: ErrorType = ErrorType.http_error,
+    combine_errors: bool = False,
+) -> list[ErrorRecord]:
+    """Build one or more error records from a failed target result."""
+    if combine_errors and result.errors:
+        combined = result.error_detail or "; ".join(result.errors)
+        messages = [combined for _ in result.errors]
+    else:
+        messages = result.errors or [result.error_detail or "unknown scrape failure"]
+
+    return [
+        build_error_record(
+            job_id,
+            run_id or "",
+            project,
+            target_url,
+            attempt,
+            result.error_type or default_error_type,
+            result.http_status,
+            fetcher_used,
+            action,
+            error_message=message,
+        )
+        for message in messages
+    ]

@@ -319,7 +319,7 @@ class RetryConfig(BaseModel):
     )
     backoff_max: int = Field(default=30, description="Maximum backoff delay in seconds")
     retryable_status: list[int] = Field(
-        default=[429, 500, 502, 503, 504],
+        default_factory=lambda: [429, 500, 502, 503, 504],
         description="HTTP status codes that trigger a retry",
     )
 
@@ -369,7 +369,7 @@ class WebhookConfig(BaseModel):
 
     url: HttpUrl = Field(..., description="URL to POST webhook payload to")
     on: list[WebhookStatus] = Field(
-        default=[WebhookStatus.complete, WebhookStatus.partial],
+        default_factory=lambda: [WebhookStatus.complete, WebhookStatus.partial],
         description="Job statuses that trigger the webhook",
     )
     headers: dict[str, str] = Field(
@@ -419,17 +419,19 @@ class ScrapeConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="after")
-    def _check_target_mutual_exclusivity(self) -> ScrapeConfig:
+    def _normalize_targets(self) -> ScrapeConfig:
         has_target = self.target is not None
         has_targets = self.targets is not None
         if has_target and has_targets:
             raise ValueError("Specify either 'target' or 'targets', not both")
         if not has_target and not has_targets:
             raise ValueError("One of 'target' or 'targets' must be provided")
+        if self.targets is None and self.target is not None:
+            self.targets = [self.target]
         return self
 
     def resolved_targets(self) -> list[TargetConfig]:
         """Return the list of targets regardless of Tier 1 or Tier 2 config."""
-        if self.target is not None:
-            return [self.target]
-        return self.targets  # type: ignore[return-value]
+        if self.targets is None:
+            raise RuntimeError("ScrapeConfig targets were not normalized")
+        return self.targets

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any, cast, Protocol
 
@@ -147,10 +148,8 @@ class WorkerPool:
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
         if self._runner_task is not None:
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._runner_task
-            except asyncio.CancelledError:
-                pass
 
         await self._worker.close()
 

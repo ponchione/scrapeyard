@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, cast
 
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
 from scrapeyard.config.transforms import apply_transforms, parse_transform
-
-logger = logging.getLogger(__name__)
 
 
 class SelectorExecutionError(Exception):
@@ -47,41 +44,9 @@ class SelectorExecutionError(Exception):
         }
 
 
-def select_items(page: Any, item_selector: SelectorValue) -> list[Any]:
-    """Return raw DOM elements matched by *item_selector*.
-
-    Used by the detection pipeline to access elements alongside extracted data.
-    """
-    return _select_items_impl(page, item_selector, suppress_failures=True)
-
-
-def count_selector_matches(scope: Any, selector: SelectorValue) -> int:
-    """Return the number of raw matches for *selector* within *scope*."""
-    return _count_selector_matches_impl(scope, selector, suppress_failures=True)
-
-
-def extract_selectors(page: Any, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
-    """Apply named selectors to a Scrapling page response.
-
-    Parameters
-    ----------
-    page:
-        A Scrapling response/Adaptor object supporting ``.css()`` and ``.xpath()``.
-    selectors:
-        Mapping of field names to selector definitions (short-form string or
-        :class:`SelectorLong`).
-
-    Returns
-    -------
-    dict[str, Any]
-        Mapping of field names to extracted values. Each value is a string
-        (first match) or a list of strings (multiple matches).
-    """
-    return _extract_selectors_impl(page, selectors, suppress_failures=True)
-
-
 def select_items_strict(page: Any, item_selector: SelectorValue) -> list[Any]:
-    return _select_items_impl(page, item_selector, suppress_failures=False)
+    query, sel_type, _ = _unpack_selector(item_selector)
+    return _select_elements(page, query, sel_type, operation="select_items")
 
 
 def count_selector_matches_strict(
@@ -90,37 +55,22 @@ def count_selector_matches_strict(
     *,
     field_name: str | None = None,
 ) -> int:
-    return _count_selector_matches_impl(
-        scope,
-        selector,
-        suppress_failures=False,
-        field_name=field_name,
+    query, sel_type, _ = _unpack_selector(selector)
+    return len(
+        _select_elements(
+            scope,
+            query,
+            sel_type,
+            operation="count_selector_matches",
+            field_name=field_name,
+        )
     )
 
 
 def extract_selectors_strict(page: Any, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
-    return _extract_selectors_impl(page, selectors, suppress_failures=False)
-
-
-def _extract_selectors_impl(
-    page: Any,
-    selectors: dict[str, SelectorValue],
-    *,
-    suppress_failures: bool,
-) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name, selector in selectors.items():
-        try:
-            result[name] = _extract_selector_value(page, selector, field_name=name)
-        except SelectorExecutionError as exc:
-            if not suppress_failures:
-                raise
-            _log_suppressed_selector_failure(
-                "Suppressing selector failure while extracting field '%s': %s",
-                exc,
-                name,
-            )
-            result[name] = None
+        result[name] = _extract_selector_value(page, selector, field_name=name)
     return result
 
 
@@ -140,48 +90,6 @@ def _extract_selector_value(page: Any, selector: SelectorValue, *, field_name: s
     return _collapse_selector_values(transformed_texts)
 
 
-def _select_items_impl(page: Any, item_selector: SelectorValue, *, suppress_failures: bool) -> list[Any]:
-    query, sel_type, _ = _unpack_selector(item_selector)
-    try:
-        return _select_elements(page, query, sel_type, operation="select_items")
-    except SelectorExecutionError as exc:
-        if not suppress_failures:
-            raise
-        _log_suppressed_selector_failure(
-            "Suppressing selector failure while selecting items: %s",
-            exc,
-        )
-        return []
-
-
-def _count_selector_matches_impl(
-    scope: Any,
-    selector: SelectorValue,
-    *,
-    suppress_failures: bool,
-    field_name: str | None = None,
-) -> int:
-    query, sel_type, _ = _unpack_selector(selector)
-    try:
-        return len(
-            _select_elements(
-                scope,
-                query,
-                sel_type,
-                operation="count_selector_matches",
-                field_name=field_name,
-            )
-        )
-    except SelectorExecutionError as exc:
-        if not suppress_failures:
-            raise
-        _log_suppressed_selector_failure(
-            "Suppressing selector failure while counting selector matches: %s",
-            exc,
-        )
-        return 0
-
-
 def _apply_selector_transforms(texts: list[str], transform_str: str | None) -> list[str]:
     if not transform_str:
         return texts
@@ -195,10 +103,6 @@ def _collapse_selector_values(texts: list[str]) -> Any:
     if len(texts) == 1:
         return texts[0]
     return texts
-
-
-def _log_suppressed_selector_failure(message: str, exc: SelectorExecutionError, *args: Any) -> None:
-    logger.debug(message, *args, exc, exc_info=exc.original_exception)
 
 
 def _unpack_selector(selector: SelectorValue) -> tuple[str, SelectorType, str | None]:

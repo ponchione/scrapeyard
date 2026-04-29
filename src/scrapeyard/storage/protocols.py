@@ -135,13 +135,6 @@ class WebhookOutboxStore(Protocol):
 
     async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None: ...
 
-    async def list_due_pending(
-        self,
-        now: datetime,
-        *,
-        limit: int | None = None,
-    ) -> list[WebhookDelivery]: ...
-
     async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]: ...
 
     async def mark_delivered(

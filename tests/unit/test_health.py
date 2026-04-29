@@ -90,7 +90,7 @@ async def test_health_response_shape(monkeypatch):
     data = response.json()
     assert "status" in data
     assert "uptime_seconds" in data
-    assert isinstance(data["uptime_seconds"], (int, float))
+    assert isinstance(data["uptime_seconds"], int | float)
     assert "workers" in data
     workers = data["workers"]
     assert "max_concurrent" in workers

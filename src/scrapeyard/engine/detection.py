@@ -154,10 +154,7 @@ def detect_stock_status(
 
 def _stock_text_patterns_match(item_text: str, patterns: StockPatternConfig) -> bool:
     """Return True if any text pattern in *patterns* matches *item_text*."""
-    for tp in patterns.text_patterns:
-        if _text_contains(item_text, tp):
-            return True
-    return False
+    return any(_text_contains(item_text, tp) for tp in patterns.text_patterns)
 
 
 def _stock_patterns_match(
@@ -168,10 +165,7 @@ def _stock_patterns_match(
     """Return True if any text pattern or CSS selector in *patterns* matches."""
     if _stock_text_patterns_match(item_text, patterns):
         return True
-    for selector in patterns.css_selectors:
-        if _css_select(element, selector):
-            return True
-    return False
+    return any(_css_select(element, selector) for selector in patterns.css_selectors)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +179,7 @@ def _is_numeric_price(value: Any) -> bool:
         return False
     if isinstance(value, bool):
         return False
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return math.isfinite(value)
     s = _normalize_price_text(value)
     if not s:
@@ -276,7 +270,7 @@ def _has_usable_stock_signal(value: Any) -> bool:
     """Return True when *value* contains non-empty raw selector output."""
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return any(isinstance(item, str) and item.strip() for item in value)
     return False
 
@@ -289,7 +283,7 @@ def _normalize_stock_signal_text(value: Any) -> str:
 def _normalize_matchable_text(value: Any) -> str:
     if isinstance(value, str):
         return _clean_element_text(value)
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         parts = [_clean_element_text(item) for item in value if isinstance(item, str)]
         return " ".join(part for part in parts if part)
     return ""

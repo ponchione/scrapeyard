@@ -59,7 +59,7 @@ class WebhookDispatcher(Protocol):
         self,
         config: WebhookConfig | WebhookRequestConfig,
         payload: dict[str, Any],
-    ) -> WebhookDispatchResult | None: ...
+    ) -> WebhookDispatchResult: ...
     async def submit(self, config: WebhookConfig, payload: dict[str, Any]) -> None: ...
     async def shutdown(self, timeout: float | None = None) -> None: ...
 
@@ -200,11 +200,12 @@ class HttpWebhookDispatcher:
             return
 
         if self._outbox_store is None:
-            task = asyncio.create_task(
-                self._run_dispatch(config, payload),
-                name=f"scrapeyard-webhook:{url}",
+            self._track_task(
+                asyncio.create_task(
+                    self._run_dispatch(config, payload),
+                    name=f"scrapeyard-webhook:{url}",
+                )
             )
-            self._track_task(task)
             return
 
         now = utc_now()
@@ -248,9 +249,17 @@ class HttpWebhookDispatcher:
                 self._client = self._client_factory()
             return self._client
 
-    def _track_task(self, task: asyncio.Task[None]) -> None:
+    def _track_task(self, task: asyncio.Task[None], *, delivery_id: str | None = None) -> None:
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        if delivery_id is not None:
+            self._delivery_tasks[delivery_id] = task
+
+        def _discard(completed: asyncio.Task[None]) -> None:
+            self._tasks.discard(completed)
+            if delivery_id is not None and self._delivery_tasks.get(delivery_id) is completed:
+                self._delivery_tasks.pop(delivery_id, None)
+
+        task.add_done_callback(_discard)
 
     def _schedule_persisted_delivery(self, delivery: WebhookDelivery) -> None:
         if not self._accepting_tasks:
@@ -263,15 +272,7 @@ class HttpWebhookDispatcher:
             self._run_persisted_delivery(delivery),
             name=f"scrapeyard-webhook:{delivery.url}",
         )
-        self._tasks.add(task)
-        self._delivery_tasks[delivery.delivery_id] = task
-
-        def _discard(completed: asyncio.Task[None]) -> None:
-            self._tasks.discard(completed)
-            if self._delivery_tasks.get(delivery.delivery_id) is completed:
-                self._delivery_tasks.pop(delivery.delivery_id, None)
-
-        task.add_done_callback(_discard)
+        self._track_task(task, delivery_id=delivery.delivery_id)
 
     def _build_delivery(
         self,

@@ -20,6 +20,35 @@ _HTML_EXCERPT_CHARS = 2000
 _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
+_BROWSER_FETCH_KWARGS = {
+    "timeout_ms": "timeout",
+    "disable_resources": "disable_resources",
+    "network_idle": "network_idle",
+    "stealth": "stealth",
+    "hide_canvas": "hide_canvas",
+    "real_chrome": "real_chrome",
+    "nstbrowser_mode": "nstbrowser_mode",
+    "useragent": "useragent",
+    "extra_headers": "extra_headers",
+    "cdp_url": "cdp_url",
+    "humanize": "humanize",
+    "os_randomize": "os_randomize",
+    "geoip": "geoip",
+    "disable_ads": "disable_ads",
+    "additional_arguments": "additional_arguments",
+    "wait_for_selector": "wait_selector",
+    "wait_ms": "wait",
+}
+_ALWAYS_SEND_BROWSER_FIELDS = {
+    "timeout_ms",
+    "disable_resources",
+    "network_idle",
+    "stealth",
+    "hide_canvas",
+    "real_chrome",
+    "nstbrowser_mode",
+}
+_SEND_WHEN_NOT_NONE_BROWSER_FIELDS = {"humanize", "wait_ms"}
 
 
 def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit: int) -> None:
@@ -98,28 +127,7 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "screenshot_path": None,
         "console_messages": [],
         "request_failures": [],
-        "browser_settings": {
-            "timeout_ms": browser.timeout_ms,
-            "disable_resources": browser.disable_resources,
-            "network_idle": browser.network_idle,
-            "stealth": browser.stealth,
-            "hide_canvas": browser.hide_canvas,
-            "real_chrome": browser.real_chrome,
-            "cdp_url": browser.cdp_url,
-            "nstbrowser_mode": browser.nstbrowser_mode,
-            "humanize": browser.humanize,
-            "os_randomize": browser.os_randomize,
-            "geoip": browser.geoip,
-            "disable_ads": browser.disable_ads,
-            "additional_arguments": browser.additional_arguments,
-            "useragent": browser.useragent,
-            "extra_headers": browser.extra_headers,
-            "click_selector": browser.click_selector,
-            "click_timeout_ms": browser.click_timeout_ms,
-            "click_wait_ms": browser.click_wait_ms,
-            "wait_for_selector": browser.wait_for_selector,
-            "wait_ms": browser.wait_ms,
-        },
+        "browser_settings": browser.model_dump(),
     }
 
 
@@ -141,37 +149,18 @@ def _supported_fetcher_kwargs(fetcher_type: FetcherType) -> set[str]:
 def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, proxy_url: str | None) -> dict[str, Any]:
     """Build browser-specific fetch kwargs from target config, filtered to the fetcher signature."""
     browser = target_browser_config(target)
-    kwargs: dict[str, Any] = {
-        "timeout": browser.timeout_ms,
-        "disable_resources": browser.disable_resources,
-        "network_idle": browser.network_idle,
-        "stealth": browser.stealth,
-        "hide_canvas": browser.hide_canvas,
-        "real_chrome": browser.real_chrome,
-        "nstbrowser_mode": browser.nstbrowser_mode,
-    }
+    browser_values = browser.model_dump()
+    kwargs: dict[str, Any] = {}
+    for field_name, kwarg_name in _BROWSER_FETCH_KWARGS.items():
+        value = browser_values[field_name]
+        if (
+            field_name in _ALWAYS_SEND_BROWSER_FIELDS
+            or (field_name in _SEND_WHEN_NOT_NONE_BROWSER_FIELDS and value is not None)
+            or value
+        ):
+            kwargs[kwarg_name] = value
     if proxy_url is not None:
         kwargs["proxy"] = proxy_url
-    if browser.useragent:
-        kwargs["useragent"] = browser.useragent
-    if browser.extra_headers:
-        kwargs["extra_headers"] = browser.extra_headers
-    if browser.cdp_url:
-        kwargs["cdp_url"] = browser.cdp_url
-    if browser.humanize is not None:
-        kwargs["humanize"] = browser.humanize
-    if browser.os_randomize:
-        kwargs["os_randomize"] = browser.os_randomize
-    if browser.geoip:
-        kwargs["geoip"] = browser.geoip
-    if browser.disable_ads:
-        kwargs["disable_ads"] = browser.disable_ads
-    if browser.additional_arguments:
-        kwargs["additional_arguments"] = browser.additional_arguments
-    if browser.wait_for_selector:
-        kwargs["wait_selector"] = browser.wait_for_selector
-    if browser.wait_ms is not None:
-        kwargs["wait"] = browser.wait_ms
 
     supported_kwargs = _supported_fetcher_kwargs(fetcher_type)
     return {key: value for key, value in kwargs.items() if key in supported_kwargs}

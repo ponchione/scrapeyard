@@ -39,7 +39,7 @@ def _delivery(
     )
 
 
-async def test_enqueue_delivery_and_list_due_pending(tmp_path):
+async def test_enqueue_delivery_and_list_pending(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
     store = SQLiteWebhookOutboxStore()
@@ -48,17 +48,17 @@ async def test_enqueue_delivery_and_list_due_pending(tmp_path):
     await store.enqueue_delivery(_delivery("due", next_attempt_at=now - timedelta(seconds=1)), now=now)
     await store.enqueue_delivery(_delivery("future", next_attempt_at=now + timedelta(minutes=5)), now=now)
 
-    due = await store.list_due_pending(now)
+    pending = await store.list_pending()
 
-    assert [delivery.delivery_id for delivery in due] == ["due"]
-    assert due[0].status is WebhookDeliveryStatus.pending
-    assert due[0].job_id == "job-1"
-    assert due[0].run_id == "run-1"
-    assert due[0].event == "job.complete"
-    assert due[0].url == "https://hooks.example.com/scrapeyard"
-    assert due[0].headers == {"X-Test": "yes"}
-    assert due[0].timeout_seconds == 7.0
-    assert due[0].payload["delivery_id"] == "due"
+    assert [delivery.delivery_id for delivery in pending] == ["due", "future"]
+    assert pending[0].status is WebhookDeliveryStatus.pending
+    assert pending[0].job_id == "job-1"
+    assert pending[0].run_id == "run-1"
+    assert pending[0].event == "job.complete"
+    assert pending[0].url == "https://hooks.example.com/scrapeyard"
+    assert pending[0].headers == {"X-Test": "yes"}
+    assert pending[0].timeout_seconds == 7.0
+    assert pending[0].payload["delivery_id"] == "due"
     await close_db()
 
 
@@ -126,7 +126,7 @@ async def test_mark_permanent_failure_is_inspectable_and_not_due(tmp_path):
     assert delivery.status is WebhookDeliveryStatus.failed
     assert delivery.attempts == 1
     assert delivery.last_error == "HTTP 404"
-    assert await store.list_due_pending(now + timedelta(hours=1)) == []
+    assert await store.list_pending() == []
     await close_db()
 
 

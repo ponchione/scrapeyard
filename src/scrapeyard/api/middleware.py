@@ -8,8 +8,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Callable
-from typing import Iterable
+from collections.abc import Callable, Iterable
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send

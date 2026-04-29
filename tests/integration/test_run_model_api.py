@@ -25,6 +25,15 @@ target:
 """
 
 
+async def _fake_success_scrape_target(*_args, **_kwargs):
+    return TargetResult(
+        url="https://example.com",
+        status="success",
+        data=[{"title": "Hello"}],
+        pages_scraped=1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_job_with_no_runs_returns_empty_runs(client):
     """A freshly created scheduled job should have no runs and null timestamps."""
@@ -59,15 +68,7 @@ target:
 
 @pytest.mark.asyncio
 async def test_completed_scrape_appears_in_job_runs(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -99,15 +100,7 @@ async def test_completed_scrape_appears_in_job_runs(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_count_and_last_run_at_reflect_completed_run(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -130,15 +123,7 @@ async def test_run_count_and_last_run_at_reflect_completed_run(client, monkeypat
 
 @pytest.mark.asyncio
 async def test_next_run_at_is_none_for_adhoc_jobs(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -160,15 +145,7 @@ async def test_next_run_at_is_none_for_adhoc_jobs(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_results_include_run_id(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -195,15 +172,7 @@ async def test_results_include_run_id(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_results_can_be_requested_by_explicit_run_id(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -234,15 +203,7 @@ async def test_get_nonexistent_job_returns_404(client):
 
 @pytest.mark.asyncio
 async def test_results_latest_false_without_run_id_returns_400(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",
@@ -265,15 +226,7 @@ async def test_results_latest_false_without_run_id_returns_400(client, monkeypat
 
 @pytest.mark.asyncio
 async def test_delete_job_with_delete_results(client, monkeypatch):
-    async def _fake_scrape_target(*_args, **_kwargs):
-        return TargetResult(
-            url="https://example.com",
-            status="success",
-            data=[{"title": "Hello"}],
-            pages_scraped=1,
-        )
-
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
 
     response = await client.post(
         "/scrape",

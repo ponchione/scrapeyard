@@ -80,7 +80,7 @@ async def scrape_task(
             return
 
         await _mark_run_started(context, job_id, run_id, trigger, config_yaml, job_store)
-        all_results = await _process_job_targets(
+        all_results = await _process_all_targets(
             context=context,
             job_id=job_id,
             run_id=run_id,
@@ -161,28 +161,6 @@ async def _mark_run_started(
     )
 
 
-async def _process_job_targets(
-    *,
-    context: JobExecutionContext,
-    job_id: str,
-    run_id: str | None,
-    circuit_breaker: CircuitBreaker,
-    rate_limiter: DomainRateLimiter,
-    error_store: ErrorStore,
-) -> list[TargetResult]:
-    return await _process_all_targets(
-        config=context.config,
-        job_id=job_id,
-        run_id=run_id,
-        adaptive_dir=context.adaptive_dir,
-        run_artifacts_dir=context.run_artifacts_dir,
-        settings=context.settings,
-        circuit_breaker=circuit_breaker,
-        rate_limiter=rate_limiter,
-        error_store=error_store,
-    )
-
-
 async def _persist_job_results(
     *,
     context: JobExecutionContext,
@@ -251,17 +229,15 @@ async def _finalize_job_execution(
 
 async def _process_all_targets(
     *,
-    config: ScrapeConfig,
+    context: JobExecutionContext,
     job_id: str,
     run_id: str | None,
-    adaptive_dir: str,
-    run_artifacts_dir: str | None,
-    settings: Any,
     circuit_breaker: CircuitBreaker,
     rate_limiter: DomainRateLimiter,
     error_store: ErrorStore,
 ) -> list[TargetResult]:
     """Dispatch all targets with concurrency, delay, and rate limiting."""
+    config = context.config
     targets = list(config.resolved_targets())
     sem = asyncio.Semaphore(config.execution.concurrency)
     validator = ResultValidator(config.validation)
@@ -275,9 +251,9 @@ async def _process_all_targets(
                     config=config,
                     job_id=job_id,
                     run_id=run_id,
-                    adaptive_dir=adaptive_dir,
-                    run_artifacts_dir=run_artifacts_dir,
-                    settings=settings,
+                    adaptive_dir=context.adaptive_dir,
+                    run_artifacts_dir=context.run_artifacts_dir,
+                    settings=context.settings,
                     circuit_breaker=circuit_breaker,
                     rate_limiter=rate_limiter,
                     validator=validator,
@@ -357,33 +333,20 @@ async def _fetch_and_validate_target(
             proxy_url=runtime.proxy_url,
             artifacts_dir=runtime.artifacts_dir,
         )
-    except Exception as exc:
-        return _target_exception_result(
-            runtime=runtime,
-            config=config,
-            target_cfg=target_cfg,
-            job_id=job_id,
-            run_id=run_id,
-            circuit_breaker=circuit_breaker,
-            pending_errors=pending_errors,
-            exc=exc,
-        )
+        if result.status is not TargetStatus.success:
+            record_failed_target(
+                runtime=runtime,
+                result=result,
+                pending_errors=pending_errors,
+                config=config,
+                target_cfg=target_cfg,
+                job_id=job_id,
+                run_id=run_id,
+                circuit_breaker=circuit_breaker,
+            )
+            return result
 
-    if result.status is not TargetStatus.success:
-        record_failed_target(
-            runtime=runtime,
-            result=result,
-            pending_errors=pending_errors,
-            config=config,
-            target_cfg=target_cfg,
-            job_id=job_id,
-            run_id=run_id,
-            circuit_breaker=circuit_breaker,
-        )
-        return result
-
-    circuit_breaker.record_success(runtime.domain)
-    try:
+        circuit_breaker.record_success(runtime.domain)
         return await apply_validation(
             target_cfg=target_cfg,
             domain=runtime.domain,
@@ -572,5 +535,4 @@ async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> N
     if not errors:
         return
     await error_store.log_errors(errors)
-
 

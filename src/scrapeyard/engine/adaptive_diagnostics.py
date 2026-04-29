@@ -37,6 +37,6 @@ def has_extracted_value(value: Any) -> bool:
         return False
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, list | tuple | set):
         return any(has_extracted_value(item) for item in value)
     return True

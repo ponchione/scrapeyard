@@ -53,7 +53,7 @@ class TestScrapeConfigValidation:
     def test_valid_tier1_single_target(self):
         config = ScrapeConfig(**_tier1_config())
         assert config.target is not None
-        assert config.targets is None
+        assert config.targets == [config.target]
 
     def test_valid_tier2_multiple_targets(self):
         config = ScrapeConfig(**_tier2_config())
@@ -79,6 +79,7 @@ class TestResolvedTargets:
         result = config.resolved_targets()
         assert len(result) == 1
         assert isinstance(result[0], TargetConfig)
+        assert result is config.targets
 
     def test_tier2_returns_targets_list(self):
         config = ScrapeConfig(**_tier2_config())

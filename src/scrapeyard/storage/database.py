@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import importlib.resources
 from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import aiosqlite
 
@@ -46,15 +46,11 @@ class DatabaseManager:
         self._db_dir: Path | None = None
         self._connections: dict[str, aiosqlite.Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._lock_owners: dict[str, asyncio.Task[object] | None] = {}
-        self._lock_depths: dict[str, int] = {}
 
     def reset(self) -> None:
         """Clear state, signalling teardown."""
         self._db_dir = None
         self._locks.clear()
-        self._lock_owners.clear()
-        self._lock_depths.clear()
 
     async def _close_cached_connections(self) -> None:
         connections = list(self._connections.values())
@@ -109,26 +105,8 @@ class DatabaseManager:
         if db_name not in _DB_MIGRATIONS:
             raise ValueError(f"Unknown database: {db_name!r}")
 
-        lock = self._locks.setdefault(db_name, asyncio.Lock())
-        owner = asyncio.current_task()
-        acquired_here = self._lock_owners.get(db_name) is not owner
-        if acquired_here:
-            await lock.acquire()
-            self._lock_owners[db_name] = owner
-            self._lock_depths[db_name] = 0
-
-        self._lock_depths[db_name] = self._lock_depths.get(db_name, 0) + 1
-        try:
+        async with self._locks.setdefault(db_name, asyncio.Lock()):
             yield await self._get_cached_connection(db_name)
-        finally:
-            depth = self._lock_depths[db_name] - 1
-            if depth == 0:
-                self._lock_depths.pop(db_name, None)
-                self._lock_owners.pop(db_name, None)
-                if acquired_here:
-                    lock.release()
-            else:
-                self._lock_depths[db_name] = depth
 
 
 _default_manager = DatabaseManager()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import datetime
 
 from apscheduler.jobstores.base import JobLookupError
@@ -58,10 +59,8 @@ class SchedulerService:
         trigger.jitter = self._jitter_max
 
         # Remove existing job with same id if present.
-        try:
+        with suppress(JobLookupError):
             self._scheduler.remove_job(job_id)
-        except JobLookupError:
-            pass
 
         self._scheduler.add_job(
             self._trigger_job,
@@ -76,10 +75,8 @@ class SchedulerService:
 
     def remove_job(self, job_id: str) -> None:
         """Remove a scheduled job. Silent if the job doesn't exist."""
-        try:
+        with suppress(JobLookupError):
             self._scheduler.remove_job(job_id)
-        except JobLookupError:
-            pass
 
     async def start(self) -> None:
         """Start the scheduler and re-register all enabled scheduled jobs from the store."""
