@@ -89,6 +89,7 @@ class DatabaseManager:
             if self._db_dir is None:
                 raise RuntimeError("Database not initialised — call init_db() first")
             connection = await aiosqlite.connect(self._db_dir / db_name)
+            connection.row_factory = aiosqlite.Row
             await _apply_connection_pragmas(connection)
             self._connections[db_name] = connection
         return connection

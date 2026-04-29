@@ -7,12 +7,11 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
-from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
+from scrapeyard.engine.resilience import ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
-from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
+from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import (
-    build_error_record,
-    build_target_result_error_records,
+    TargetErrorRecorder,
     validation_error_type,
 )
 
@@ -27,20 +26,17 @@ async def apply_validation(
     domain: str,
     adaptive: bool,
     result: TargetResult,
-    pending_errors: list[ErrorRecord],
     config: ScrapeConfig,
     adaptive_dir: str,
     run_artifacts_dir: str | None,
-    job_id: str,
-    run_id: str | None,
-    circuit_breaker: CircuitBreaker,
+    recorder: TargetErrorRecorder,
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None = None,
     attempt: int = 1,
 ) -> TargetResult:
     """Validate a successful result; retry once on validation failure."""
-    if result.status is not TargetStatus.success:
+    if not result.is_success:
         return result
 
     validation = validator.validate(result.data)
@@ -48,10 +44,7 @@ async def apply_validation(
         return result
 
     _record_validation_failure(
-        pending_errors=pending_errors,
-        job_id=job_id,
-        run_id=run_id,
-        config=config,
+        recorder=recorder,
         target_cfg=target_cfg,
         attempt=attempt,
         result=result,
@@ -71,13 +64,10 @@ async def apply_validation(
         target_cfg=target_cfg,
         domain=domain,
         adaptive=adaptive,
-        pending_errors=pending_errors,
         config=config,
         adaptive_dir=adaptive_dir,
         run_artifacts_dir=run_artifacts_dir,
-        job_id=job_id,
-        run_id=run_id,
-        circuit_breaker=circuit_breaker,
+        recorder=recorder,
         validator=validator,
         scrape=scrape,
         proxy_url=proxy_url,
@@ -86,29 +76,20 @@ async def apply_validation(
 
 def _record_validation_failure(
     *,
-    pending_errors: list[ErrorRecord],
-    job_id: str,
-    run_id: str | None,
-    config: ScrapeConfig,
+    recorder: TargetErrorRecorder,
     target_cfg: TargetConfig,
     attempt: int,
     result: TargetResult,
     action: ActionTaken,
     message: str,
 ) -> None:
-    pending_errors.append(
-        build_error_record(
-            job_id,
-            run_id or "",
-            config.project,
-            target_cfg.url,
-            attempt,
-            validation_error_type(result),
-            None,
-            target_cfg.fetcher.value,
-            action,
-            error_message=message,
-        )
+    recorder.record_validation_failure(
+        target_url=target_cfg.url,
+        fetcher_used=target_cfg.fetcher.value,
+        attempt=attempt,
+        result=result,
+        action=action,
+        message=message,
     )
 
 
@@ -140,13 +121,10 @@ async def _retry_after_validation_failure(
     target_cfg: TargetConfig,
     domain: str,
     adaptive: bool,
-    pending_errors: list[ErrorRecord],
     config: ScrapeConfig,
     adaptive_dir: str,
     run_artifacts_dir: str | None,
-    job_id: str,
-    run_id: str | None,
-    circuit_breaker: CircuitBreaker,
+    recorder: TargetErrorRecorder,
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None,
@@ -159,35 +137,27 @@ async def _retry_after_validation_failure(
         proxy_url=proxy_url,
         artifacts_dir=_build_retry_artifacts_dir(run_artifacts_dir, domain),
     )
-    if retry_result.status is not TargetStatus.success:
+    if not retry_result.is_success:
         logger.info("Recording failure for domain %s after validation retry", domain)
-        circuit_breaker.record_failure(domain)
-        pending_errors.extend(
-            build_target_result_error_records(
-                job_id=job_id,
-                run_id=run_id,
-                project=config.project,
-                target_url=target_cfg.url,
-                attempt=2,
-                fetcher_used=target_cfg.fetcher.value,
-                action=ActionTaken.fail,
-                result=retry_result,
-                default_error_type=ErrorType.http_error,
-                combine_errors=True,
-            )
+        recorder.record_target_failure(
+            domain=domain,
+            target_url=target_cfg.url,
+            attempt=2,
+            fetcher_used=target_cfg.fetcher.value,
+            action=ActionTaken.fail,
+            result=retry_result,
+            default_error_type=ErrorType.http_error,
+            combine_errors=True,
         )
         return retry_result
 
-    circuit_breaker.record_success(domain)
+    recorder.record_success(domain)
     retry_validation = validator.validate(retry_result.data)
     if retry_validation.passed:
         return retry_result
 
     _record_validation_failure(
-        pending_errors=pending_errors,
-        job_id=job_id,
-        run_id=run_id,
-        config=config,
+        recorder=recorder,
         target_cfg=target_cfg,
         attempt=2,
         result=retry_result,

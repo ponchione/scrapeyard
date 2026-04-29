@@ -13,8 +13,8 @@ from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
-from scrapeyard.queue.error_records import build_error_record, build_target_result_error_records
+from scrapeyard.models.job import ActionTaken, ErrorType
+from scrapeyard.queue.error_records import TargetErrorRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +51,15 @@ async def guard_target_execution(
     runtime: TargetRuntimeContext,
     config: ScrapeConfig,
     target_cfg: TargetConfig,
-    job_id: str,
-    run_id: str | None,
     circuit_breaker: CircuitBreaker,
     rate_limiter: DomainRateLimiter,
-    pending_errors: list[ErrorRecord],
+    recorder: TargetErrorRecorder,
 ) -> CircuitOpenError | None:
     try:
         circuit_breaker.check(runtime.domain)
     except CircuitOpenError as exc:
         logger.info("Circuit breaker open for %s", runtime.domain)
-        pending_errors.append(build_error_record(
-            job_id, run_id or "", config.project, target_cfg.url,
-            0, ErrorType.network_error, None, "circuit_breaker",
-            ActionTaken.circuit_break,
-        ))
+        recorder.record_circuit_break(target_cfg.url)
         return exc
 
     await rate_limiter.acquire(runtime.domain, config.execution.domain_rate_limit)
@@ -94,12 +88,8 @@ def record_failed_target(
     *,
     runtime: TargetRuntimeContext,
     result: TargetResult,
-    pending_errors: list[ErrorRecord],
-    config: ScrapeConfig,
     target_cfg: TargetConfig,
-    job_id: str,
-    run_id: str | None,
-    circuit_breaker: CircuitBreaker,
+    recorder: TargetErrorRecorder,
 ) -> None:
     logger.warning(
         "Recording failure for domain %s type=%s status=%s detail=%s",
@@ -108,16 +98,10 @@ def record_failed_target(
         result.http_status,
         result.error_detail or "; ".join(result.errors) or "unknown error",
     )
-    circuit_breaker.record_failure(runtime.domain)
-    pending_errors.extend(
-        build_target_result_error_records(
-            job_id=job_id,
-            run_id=run_id,
-            project=config.project,
-            target_url=target_cfg.url,
-            attempt=1,
-            fetcher_used=target_cfg.fetcher.value,
-            action=ActionTaken.fail,
-            result=result,
-        )
+    recorder.record_target_failure(
+        domain=runtime.domain,
+        target_url=target_cfg.url,
+        fetcher_used=target_cfg.fetcher.value,
+        action=ActionTaken.fail,
+        result=result,
     )

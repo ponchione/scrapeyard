@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scrapeyard.storage.job_sql import JOB_COLUMNS
+from scrapeyard.storage.job_sql import JOB_COLUMNS, select_columns
 
 
 def build_list_jobs_with_stats_query(
@@ -10,7 +10,7 @@ def build_list_jobs_with_stats_query(
     limit: int | None,
     offset: int,
 ) -> tuple[str, list[object]]:
-    job_cols = ", ".join(f"j.{column.strip()}" for column in JOB_COLUMNS.split(","))
+    job_cols = select_columns(JOB_COLUMNS, table_alias="j")
     sql = (
         "WITH job_stats AS ("
         "    SELECT job_id, COUNT(run_id) AS run_count, "
@@ -42,7 +42,7 @@ def build_list_jobs_with_stats_query(
 
 
 PROJECT_SUMMARY_QUERY = (
-    "SELECT project, status, COUNT(*) FROM jobs GROUP BY project, status"
+    "SELECT project, status, COUNT(*) AS count FROM jobs GROUP BY project, status"
 )
 
 SCHEDULED_JOBS_QUERY = (

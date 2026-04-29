@@ -7,7 +7,13 @@ import math
 import re
 from typing import Any, cast
 
-from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
+from scrapeyard.config.schema import (
+    MapDetectionConfig,
+    PricingVisibility,
+    StockDetectionConfig,
+    StockPatternConfig,
+    StockStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +56,7 @@ def detect_pricing_visibility(
     item_data: dict[str, Any],
     element: Any,
     config: MapDetectionConfig | None,
-) -> tuple[str, str | None]:
+) -> tuple[PricingVisibility, str | None]:
     """Classify a listing's pricing visibility.
 
     Parameters
@@ -69,27 +75,35 @@ def detect_pricing_visibility(
         ``display_price_text`` is non-null only when ``pricing_visibility == 'map'``.
     """
     if _is_numeric_price(item_data.get("price")):
-        return ("explicit", None)
+        return (PricingVisibility.explicit, None)
 
     if config is None:
-        return ("unknown", None)
+        return (PricingVisibility.unknown, None)
 
     item_text = _get_element_text(element)
     if _matches_call_for_price(item_text, config.text_patterns):
-        return ("call_for_price", None)
+        return (PricingVisibility.call_for_price, None)
 
     text_matched, display_text = _match_map_text_patterns(item_text, config.text_patterns)
     if text_matched:
-        return ("map", display_text) if display_text else ("cart_only", None)
+        return (
+            (PricingVisibility.map, display_text)
+            if display_text
+            else (PricingVisibility.cart_only, None)
+        )
 
     css_matched, display_text = _match_map_css_selectors(element, config.css_selectors)
     if css_matched:
-        return ("map", display_text) if display_text else ("cart_only", None)
+        return (
+            (PricingVisibility.map, display_text)
+            if display_text
+            else (PricingVisibility.cart_only, None)
+        )
 
     if _match_map_price_value(item_data.get("price"), config.price_value_patterns):
-        return ("cart_only", None)
+        return (PricingVisibility.cart_only, None)
 
-    return ("missing", None)
+    return (PricingVisibility.missing, None)
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +112,11 @@ def detect_pricing_visibility(
 
 # Priority order for stock status detection — most restrictive first.
 _STOCK_PRIORITY = [
-    "out_of_stock",
-    "backorder",
-    "preorder",
-    "limited_stock",
-    "in_stock",
+    StockStatus.out_of_stock,
+    StockStatus.backorder,
+    StockStatus.preorder,
+    StockStatus.limited_stock,
+    StockStatus.in_stock,
 ]
 
 
@@ -110,7 +124,7 @@ def detect_stock_status(
     item_data: dict[str, Any],
     element: Any,
     config: StockDetectionConfig | None,
-) -> str:
+) -> StockStatus:
     """Classify a listing's stock status.
 
     Parameters
@@ -129,12 +143,12 @@ def detect_stock_status(
         One of the six canonical ``stock_status`` values.
     """
     if config is None:
-        return "unknown"
+        return StockStatus.unknown
 
     extracted_signal_text = _normalize_stock_signal_text(item_data.get("stock_signal"))
     if extracted_signal_text:
         for status in _STOCK_PRIORITY:
-            extracted_patterns: StockPatternConfig | None = getattr(config, status, None)
+            extracted_patterns: StockPatternConfig | None = getattr(config, status.value, None)
             if extracted_patterns is None:
                 continue
             if _stock_text_patterns_match(extracted_signal_text, extracted_patterns):
@@ -143,13 +157,13 @@ def detect_stock_status(
     item_text = _get_element_text(element)
 
     for status in _STOCK_PRIORITY:
-        patterns: StockPatternConfig | None = getattr(config, status, None)
+        patterns: StockPatternConfig | None = getattr(config, status.value, None)
         if patterns is None:
             continue
         if _stock_patterns_match(item_text, element, patterns):
             return status
 
-    return "unknown"
+    return StockStatus.unknown
 
 
 def _stock_text_patterns_match(item_text: str, patterns: StockPatternConfig) -> bool:

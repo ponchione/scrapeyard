@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from scrapeyard import __version__
@@ -119,6 +119,16 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": message},
+        headers=exc.headers,
+    )
 
 
 @app.get("/health")

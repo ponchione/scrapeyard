@@ -2,40 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
-from fastapi import Response
+from fastapi import HTTPException, Response
 from fastapi.responses import JSONResponse
 
 _Row = TypeVar("_Row")
 
 
-def json_error(status_code: int, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"error": message})
-
-
-def bad_request_error(message: str) -> JSONResponse:
-    return json_error(400, message)
-
-
-def conflict_error(message: str) -> JSONResponse:
-    return json_error(409, message)
-
-
-def not_found_error(resource: str, identifier: str) -> JSONResponse:
-    return json_error(404, f"{resource} {identifier!r} not found")
-
-
-def unsupported_media_type_error(message: str) -> JSONResponse:
-    return json_error(415, message)
-
-
-def unprocessable_entity_error(message: str) -> JSONResponse:
-    return json_error(422, message)
-
-
 def json_response(status_code: int, content: Any) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=content)
+
+
+def raise_json_error(status_code: int, message: str) -> NoReturn:
+    raise HTTPException(status_code=status_code, detail=message)
 
 
 def apply_paginated_list_response(

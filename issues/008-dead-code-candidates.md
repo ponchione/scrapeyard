@@ -1,15 +1,17 @@
-# Issue 008: Dead-Code And Cleanup Candidates
+# Issue 008: ~~Dead-Code And Cleanup Candidates~~ (RESOLVED)
 
 Severity: Low
 
+Status: Resolved
+
 ## Summary
 
-A small amount of code appears unused in production paths. This is not a direct performance problem, but it adds maintenance noise before deployment.
+A small amount of code appeared unused in production paths. This was not a direct performance problem, but it added maintenance noise before deployment.
 
 ## Evidence
 
-- `src/scrapeyard/queue/pool.py:76` exposes `can_accept()`, but current callers appear to use `_check_memory()` indirectly through `enqueue(...)` instead.
-- `src/scrapeyard/engine/selectors.py:20` defines `extract_item_selectors()`, and the current references appear to be test-only.
+- `src/scrapeyard/queue/pool.py` exposed `can_accept()`, but callers use memory admission through `enqueue(...)`.
+- `src/scrapeyard/engine/selectors.py` defined `extract_item_selectors()`, and the references were test-only.
 
 ## Why It Matters
 
@@ -18,10 +20,13 @@ A small amount of code appears unused in production paths. This is not a direct 
 
 ## Recommendation
 
-- Confirm whether these helpers are part of intended public API surface.
-- Remove or deprecate them if they are not needed.
-- Keep the codebase lean before deployment to reduce future audit cost.
+- Removed the unused helpers from the production surface.
+- Kept focused selector and worker-pool tests on the remaining supported helpers.
 
 ## Deployment Risk
 
 Low. This is cleanup, not a blocker.
+
+## Resolution
+
+Resolved by removing the `WorkerPool.can_accept()` wrapper and keeping `enqueue(...)` on the direct memory check path. The stale selector helper is no longer present in the codebase.

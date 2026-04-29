@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
@@ -266,6 +267,43 @@ class BrowserConfig(BaseModel):
         default=None,
         description="Optional extra browser wait in milliseconds after page load/selector wait",
     )
+
+
+@dataclass(frozen=True)
+class BrowserFetchKwarg:
+    """Mapping from BrowserConfig field to upstream Scrapling fetch kwarg."""
+
+    field_name: str
+    kwarg_name: str
+    send_when: str = "truthy"
+
+    def should_send(self, value: object) -> bool:
+        if self.send_when == "always":
+            return True
+        if self.send_when == "not_none":
+            return value is not None
+        return bool(value)
+
+
+BROWSER_FETCH_KWARGS: tuple[BrowserFetchKwarg, ...] = (
+    BrowserFetchKwarg("timeout_ms", "timeout", "always"),
+    BrowserFetchKwarg("disable_resources", "disable_resources", "always"),
+    BrowserFetchKwarg("network_idle", "network_idle", "always"),
+    BrowserFetchKwarg("stealth", "stealth", "always"),
+    BrowserFetchKwarg("hide_canvas", "hide_canvas", "always"),
+    BrowserFetchKwarg("real_chrome", "real_chrome", "always"),
+    BrowserFetchKwarg("nstbrowser_mode", "nstbrowser_mode", "always"),
+    BrowserFetchKwarg("useragent", "useragent"),
+    BrowserFetchKwarg("extra_headers", "extra_headers"),
+    BrowserFetchKwarg("cdp_url", "cdp_url"),
+    BrowserFetchKwarg("humanize", "humanize", "not_none"),
+    BrowserFetchKwarg("os_randomize", "os_randomize"),
+    BrowserFetchKwarg("geoip", "geoip"),
+    BrowserFetchKwarg("disable_ads", "disable_ads"),
+    BrowserFetchKwarg("additional_arguments", "additional_arguments"),
+    BrowserFetchKwarg("wait_for_selector", "wait_selector"),
+    BrowserFetchKwarg("wait_ms", "wait", "not_none"),
+)
 
 
 class TargetConfig(BaseModel):

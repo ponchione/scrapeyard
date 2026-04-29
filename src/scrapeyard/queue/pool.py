@@ -73,10 +73,6 @@ class WorkerPool:
             return True
         return rss_mb < self._memory_limit_mb
 
-    def can_accept(self) -> bool:
-        """Return True if the service can accept new work."""
-        return self._check_memory()
-
     async def start(self) -> None:
         """Start the Redis connection and embedded arq worker."""
         if self._started:
@@ -169,7 +165,7 @@ class WorkerPool:
         trigger: str = "adhoc",
     ) -> QueueJobHandle:
         """Enqueue a scrape job and return a handle for awaiting completion."""
-        if not self.can_accept():
+        if not self._check_memory():
             raise MemoryError(
                 f"Process memory exceeds {self._memory_limit_mb}MB limit — rejecting task"
             )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping
 from typing import cast
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
@@ -12,28 +12,25 @@ from scrapeyard.storage.database import get_db
 from scrapeyard.storage.error_queries import build_query_errors_query
 
 
-def _row_to_error(row: Sequence[object]) -> ErrorRecord:
-    # Columns: id, job_id, run_id, project, target_url, attempt, timestamp,
-    #          error_type, http_status, fetcher_used, error_message,
-    #          selectors_matched, action_taken, resolved
-    selectors = cast(str | None, row[11])
-    timestamp = parse_dt(cast(str | None, row[6]))
+def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
+    selectors = cast(str | None, row["selectors_matched"])
+    timestamp = parse_dt(cast(str | None, row["timestamp"]))
     if timestamp is None:
         raise ValueError("Error row is missing timestamp")
     return ErrorRecord(
-        job_id=cast(str, row[1]),
-        run_id=cast(str, row[2]),
-        project=cast(str, row[3]),
-        target_url=cast(str, row[4]),
-        attempt=cast(int, row[5]),
+        job_id=cast(str, row["job_id"]),
+        run_id=cast(str, row["run_id"]),
+        project=cast(str, row["project"]),
+        target_url=cast(str, row["target_url"]),
+        attempt=cast(int, row["attempt"]),
         timestamp=timestamp,
-        error_type=ErrorType(cast(str, row[7])),
-        http_status=cast(int | None, row[8]),
-        fetcher_used=cast(str, row[9]),
-        error_message=cast(str | None, row[10]),
+        error_type=ErrorType(cast(str, row["error_type"])),
+        http_status=cast(int | None, row["http_status"]),
+        fetcher_used=cast(str, row["fetcher_used"]),
+        error_message=cast(str | None, row["error_message"]),
         selectors_matched=(json.loads(selectors) if selectors is not None else None),
-        action_taken=ActionTaken(cast(str, row[12])),
-        resolved=bool(row[13]),
+        action_taken=ActionTaken(cast(str, row["action_taken"])),
+        resolved=bool(row["resolved"]),
     )
 
 
@@ -95,11 +92,11 @@ class SQLiteErrorStore:
         """Return the number of error records for a given run_id."""
         async with get_db("errors.db") as db:
             cursor = await db.execute(
-                "SELECT COUNT(*) FROM errors WHERE run_id = ?",
+                "SELECT COUNT(*) AS error_count FROM errors WHERE run_id = ?",
                 (run_id,),
             )
             row = await cursor.fetchone()
-            return row[0] if row else 0
+            return row["error_count"] if row else 0
 
     async def delete_errors_for_job(self, job_id: str) -> None:
         """Delete all error records for a job."""

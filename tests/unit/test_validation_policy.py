@@ -7,8 +7,19 @@ import pytest
 from scrapeyard.config.schema import OnEmptyAction
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ActionTaken, ErrorType
+from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.validation_policy import apply_validation
 from tests.unit.worker_helpers import make_target
+
+
+def _recorder(pending_errors, circuit_breaker=None) -> TargetErrorRecorder:
+    return TargetErrorRecorder(
+        job_id="job-1",
+        run_id="run-1",
+        project="test",
+        pending_errors=pending_errors,
+        circuit_breaker=circuit_breaker or MagicMock(),
+    )
 
 
 @pytest.mark.asyncio
@@ -28,13 +39,10 @@ async def test_apply_validation_warn_appends_warning_and_returns_original_result
         domain="example.com",
         adaptive=False,
         result=result,
-        pending_errors=pending_errors,
         config=MagicMock(project="test", retry=MagicMock()),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir="/tmp/artifacts",
-        job_id="job-1",
-        run_id="run-1",
-        circuit_breaker=MagicMock(),
+        recorder=_recorder(pending_errors),
         validator=validator,
         scrape=AsyncMock(),
     )
@@ -65,13 +73,10 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
         domain="example.com",
         adaptive=True,
         result=first,
-        pending_errors=pending_errors,
         config=MagicMock(project="test", retry=MagicMock()),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir="/tmp/artifacts",
-        job_id="job-1",
-        run_id="run-1",
-        circuit_breaker=circuit_breaker,
+        recorder=_recorder(pending_errors, circuit_breaker),
         validator=validator,
         scrape=scrape,
         proxy_url="http://proxy.internal:8080",

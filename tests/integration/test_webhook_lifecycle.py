@@ -60,14 +60,14 @@ async def test_webhook_received_after_async_job(client, monkeypatch):
 
     dispatched_payloads: list[dict] = []
 
-    # Patch the singleton dispatcher's dispatch method to capture payloads.
+    # Patch the singleton dispatcher's one-attempt sender to capture payloads.
     from scrapeyard.api.dependencies import get_webhook_dispatcher
     dispatcher = get_webhook_dispatcher()
 
     async def _capture_dispatch(config, payload):
         dispatched_payloads.append(payload)
 
-    monkeypatch.setattr(dispatcher, "dispatch", _capture_dispatch)
+    monkeypatch.setattr(dispatcher, "send_once", _capture_dispatch)
 
     response = await client.post(
         "/scrape",
@@ -113,7 +113,7 @@ async def test_webhook_failure_does_not_affect_job(client, monkeypatch):
     async def _failing_dispatch(config, payload):
         raise Exception("webhook boom")
 
-    monkeypatch.setattr(dispatcher, "dispatch", _failing_dispatch)
+    monkeypatch.setattr(dispatcher, "send_once", _failing_dispatch)
 
     response = await client.post(
         "/scrape",
@@ -156,7 +156,7 @@ async def test_no_webhook_block_completes_normally(client, monkeypatch):
     async def _tracking_dispatch(config, payload):
         dispatch_calls.append(payload)
 
-    monkeypatch.setattr(dispatcher, "dispatch", _tracking_dispatch)
+    monkeypatch.setattr(dispatcher, "send_once", _tracking_dispatch)
 
     response = await client.post(
         "/scrape",

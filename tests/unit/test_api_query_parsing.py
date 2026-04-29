@@ -1,4 +1,5 @@
-from fastapi.responses import JSONResponse
+import pytest
+from fastapi import HTTPException
 
 from scrapeyard.api.query_parsing import parse_error_filters
 from scrapeyard.models.job import ErrorFilters, ErrorType
@@ -20,14 +21,14 @@ def test_parse_error_filters_builds_filters() -> None:
 
 
 def test_parse_error_filters_returns_error_for_invalid_since() -> None:
-    parsed = parse_error_filters(project=None, job_id=None, since="nope", error_type=None)
+    with pytest.raises(HTTPException) as exc_info:
+        parse_error_filters(project=None, job_id=None, since="nope", error_type=None)
 
-    assert isinstance(parsed, JSONResponse)
-    assert parsed.status_code == 400
+    assert exc_info.value.status_code == 400
 
 
 def test_parse_error_filters_returns_error_for_invalid_error_type() -> None:
-    parsed = parse_error_filters(project=None, job_id=None, since=None, error_type="bogus")
+    with pytest.raises(HTTPException) as exc_info:
+        parse_error_filters(project=None, job_id=None, since=None, error_type="bogus")
 
-    assert isinstance(parsed, JSONResponse)
-    assert parsed.status_code == 400
+    assert exc_info.value.status_code == 400
