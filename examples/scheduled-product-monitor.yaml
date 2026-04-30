@@ -1,0 +1,75 @@
+project: demo
+name: scheduled-product-monitor
+adaptive: true
+
+schedule:
+  cron: "0 * * * *"
+  enabled: true
+
+webhook:
+  url: https://example.com/webhooks/scrapeyard
+  "on": [complete, partial, failed]
+
+execution:
+  concurrency: 1
+  delay_between: 2
+  domain_rate_limit: 2
+  mode: async
+  priority: normal
+  fail_strategy: partial
+
+retry:
+  max_attempts: 3
+  backoff: exponential
+  backoff_max: 30
+  retryable_status: [429, 500, 502, 503, 504]
+
+validation:
+  required_fields: [name, price, url]
+  min_results: 1
+  on_empty: retry
+
+output:
+  group_by: merge
+
+target:
+  url: https://example.com/catalog
+  fetcher: dynamic
+  adaptive_domain: example.com
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+  item_selector: ".product-card"
+  selectors:
+    name: ".product-card-title::text"
+    price: ".product-card-price::text"
+    url:
+      query: "a.product-card-link::attr(href)"
+      transform: 'prepend("https://example.com")'
+    stock_signal: ".product-card-availability::text"
+  map_detection:
+    text_patterns:
+      - "add to cart for price"
+      - "see price in cart"
+      - "call for price"
+    css_selectors:
+      - ".map-price-message"
+      - "[data-map-restricted]"
+    price_value_patterns:
+      - "<hidden-price>"
+  stock_detection:
+    in_stock:
+      text_patterns: ["in stock", "available"]
+      css_selectors: [".availability-in-stock"]
+    out_of_stock:
+      text_patterns: ["out of stock", "sold out", "unavailable"]
+    limited_stock:
+      text_patterns: ["only", "few left", "low stock"]
+    backorder:
+      text_patterns: ["backorder", "backordered"]
+    preorder:
+      text_patterns: ["preorder", "pre-order"]
+  pagination:
+    next: "a.next-page"
+    max_pages: 3

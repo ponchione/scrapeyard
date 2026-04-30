@@ -252,23 +252,20 @@ targets:
 
         assert raw["output"] == {"group_by": "target"}
 
-    def test_eyebox_smoke_yaml_loads_and_matches_current_shape(self):
-        config_path = (
-            Path(__file__).resolve().parents[2]
-            / "docs/test-configs/brownells-optics-smoke.yaml"
-        )
+    def test_dynamic_product_grid_example_loads_and_matches_current_shape(self):
+        config_path = Path(__file__).resolve().parents[2] / "examples/dynamic-product-grid.yaml"
         raw = yaml.safe_load(config_path.read_text())
         config = load_config(config_path.read_text())
 
-        assert raw["project"] == "eyebox"
-        assert raw["name"] == "brownells-optics"
+        assert raw["project"] == "demo"
+        assert raw["name"] == "dynamic-product-grid"
         assert raw["adaptive"] is False
         assert raw["webhook"]["on"] == ["complete", "partial"]
         assert raw["output"] == {"group_by": "merge"}
         assert config.webhook is not None
         assert [status.value for status in config.webhook.on] == ["complete", "partial"]
         assert config.execution.fail_strategy.value == "partial"
-        assert config.execution.delay_between == 3
+        assert config.execution.delay_between == 2
         assert config.execution.domain_rate_limit == 2
         assert config.target is not None
         assert config.target.fetcher.value == "dynamic"
@@ -277,19 +274,19 @@ targets:
         assert raw["target"]["map_detection"]["text_patterns"]
         assert raw["target"]["stock_detection"]["in_stock"]["text_patterns"]
         assert config.target.pagination is not None
-        assert config.target.pagination.max_pages == 3
+        assert config.target.pagination.max_pages == 2
 
-    def test_eyebox_validation_yaml_keeps_detection_contract_in_parity(self):
+    def test_scheduled_product_monitor_example_keeps_detection_contract_in_parity(self):
         config_path = (
-            Path(__file__).resolve().parents[2]
-            / "docs/test-configs/brownells-optics-validation.yaml"
+            Path(__file__).resolve().parents[2] / "examples/scheduled-product-monitor.yaml"
         )
         raw = yaml.safe_load(config_path.read_text())
         config = load_config(config_path.read_text())
 
-        assert raw["project"] == "eyebox"
-        assert raw["name"] == "brownells-optics-validation"
+        assert raw["project"] == "demo"
+        assert raw["name"] == "scheduled-product-monitor"
         assert raw["adaptive"] is True
+        assert raw["schedule"] == {"cron": "0 * * * *", "enabled": True}
         assert "stock_signal" in raw["target"]["selectors"]
         assert "stock_status" not in raw["target"]["selectors"]
         assert raw["target"]["map_detection"]["text_patterns"]
