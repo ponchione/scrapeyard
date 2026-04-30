@@ -1,6 +1,10 @@
 __pycache__
 *.pyc
 *.pyo
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 .git
 .gitignore
 tests/
@@ -13,3 +17,7 @@ dist/
 docs/
 work-orders/
 .claude/
+.hermes/
+handoffs/
+issues/
+project.yaml

@@ -1,0 +1,14 @@
+project: demo
+name: basic-scrape
+
+execution:
+  mode: sync
+
+target:
+  url: https://example.com
+  fetcher: basic
+  selectors:
+    title: h1
+
+output:
+  group_by: target

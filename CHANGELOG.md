@@ -22,7 +22,7 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ### Changed
 - Split worker, scraper, runtime, and storage hot spots into smaller helper modules while keeping public API behavior stable.
-- `TECH-DEBT.md` is now fully resolved with no active slices.
+- Internal maintainability backlog fully resolved with no active slices.
 - Documentation now reflects JSON-only result artifacts and the completed debt-slice cleanup.
 
 ### Fixed
