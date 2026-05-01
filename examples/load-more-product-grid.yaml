@@ -1,0 +1,52 @@
+project: demo
+name: load-more-product-grid
+adaptive: false
+
+execution:
+  mode: async
+  concurrency: 1
+  delay_between: 0
+  domain_rate_limit: 2
+  fail_strategy: partial
+
+retry:
+  max_attempts: 3
+  backoff: exponential
+  backoff_max: 30
+
+validation:
+  required_fields: [name, url]
+  min_results: 1
+  on_empty: retry
+
+target:
+  url: https://example.com/catalog
+  fetcher: dynamic
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+    actions:
+      - type: wait_for_selector
+        selector: ".product-card"
+        timeout_ms: 15000
+      - type: repeat_click
+        selector: "button.load-more"
+        max_times: 8
+        wait_for_selector: ".product-card"
+        wait_ms: 750
+        optional: true
+  item_selector: ".product-card"
+  selectors:
+    name:
+      query: ".product-card-title::text"
+      transform: "trim|collapse_whitespace"
+    price:
+      query: ".product-card-price::text"
+      transform: 'trim|strip_prefix("$")'
+    url:
+      query: "a.product-card-link::attr(href)"
+      transform: 'prepend("https://example.com")'
+
+output:
+  group_by: merge

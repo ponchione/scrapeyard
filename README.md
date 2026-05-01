@@ -16,7 +16,8 @@ job state over HTTP.
 - One queued execution path for all scrapes
 - Multi-target jobs with concurrency and rate-limit controls
 - Scrapling `basic`, `stealthy`, and `dynamic` fetchers
-- Item-scoped extraction, pagination, selector transforms, and validation rules
+- Item-scoped extraction, typed pagination, selector transforms, and validation rules
+- Browser actions for consent clicks, waits, scrolling, and load-more buttons
 - JSON result artifacts stored on disk and indexed in SQLite
 - Job, run, error, result, and health APIs
 - Durable webhook outbox with retry
@@ -153,6 +154,8 @@ More examples:
 
 - [examples/basic-scrape.yaml](examples/basic-scrape.yaml)
 - [examples/dynamic-product-grid.yaml](examples/dynamic-product-grid.yaml)
+- [examples/dynamic-consent-scroll.yaml](examples/dynamic-consent-scroll.yaml)
+- [examples/load-more-product-grid.yaml](examples/load-more-product-grid.yaml)
 - [examples/scheduled-product-monitor.yaml](examples/scheduled-product-monitor.yaml)
 - [template.yaml](template.yaml)
 
@@ -169,10 +172,67 @@ Common target fields:
 | `selectors` | Output fields mapped to CSS or XPath selectors |
 | `item_selector` | Optional repeated-item container selector |
 | `pagination` | Optional next-page selector and page limit |
-| `browser` | Optional browser runtime controls for dynamic fetches |
+| `browser` | Optional browser runtime controls and pre-extraction actions for dynamic fetches |
 | `proxy` | Optional per-target proxy override |
 | `map_detection` | Optional pricing visibility detection rules |
 | `stock_detection` | Optional stock status detection rules |
+
+Selector transforms can be chained with `|`. Supported string transforms are
+`trim`, `collapse_whitespace`, `lowercase`, `uppercase`, `prepend`, `append`,
+`replace`, `remove`, `strip_prefix`, `strip_suffix`, `regex`, `extract`, and
+`default`.
+
+Example transform chain:
+
+```yaml
+selectors:
+  title:
+    query: ".product-title::text"
+    transform: "trim|collapse_whitespace"
+  price:
+    query: ".price::text"
+    transform: 'trim|strip_prefix("$")|remove(",")'
+```
+
+Pagination accepts the same short-form CSS selector style as selectors, or a
+long-form selector when XPath is needed:
+
+```yaml
+pagination:
+  next:
+    query: "//a[contains(., 'Next')]"
+    type: xpath
+  max_pages: 5
+```
+
+Browser-backed targets may define an ordered `browser.actions` list with
+`click`, `wait_for_selector`, `wait_ms`, `scroll`, and `repeat_click` actions.
+Use hard limits such as `times` or `max_times` on repeating actions.
+
+Example browser actions:
+
+```yaml
+browser:
+  actions:
+    - type: click
+      selector: "#accept-cookies"
+      optional: true
+      timeout_ms: 3000
+      wait_ms: 500
+    - type: wait_for_selector
+      selector: ".product-card"
+      timeout_ms: 15000
+    - type: scroll
+      times: 3
+      pixels: 1000
+      wait_ms: 500
+    - type: repeat_click
+      selector: "button.load-more"
+      max_times: 8
+      wait_for_selector: ".product-card"
+      wait_ms: 750
+      optional: true
+```
 
 Common job fields:
 

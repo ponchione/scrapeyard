@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
-from scrapeyard.engine.browser_debug import capture_browser_state, default_debug_blob
+from scrapeyard.engine.browser_debug import (
+    capture_browser_state,
+    default_debug_blob,
+    run_browser_actions,
+)
 
 
 class FakeConsoleMessage:
@@ -103,3 +107,85 @@ def test_default_debug_blob_includes_empty_observability_collections() -> None:
 
     assert debug["console_messages"] == []
     assert debug["request_failures"] == []
+
+
+@pytest.mark.asyncio
+async def test_capture_browser_state_runs_configured_browser_actions() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={
+            "actions": [
+                {"type": "click", "selector": "#accept", "timeout_ms": 1000, "wait_ms": 50},
+                {
+                    "type": "wait_for_selector",
+                    "selector": ".product-card",
+                    "timeout_ms": 2000,
+                },
+                {"type": "scroll", "times": 2, "pixels": 800, "wait_ms": 10},
+                {
+                    "type": "repeat_click",
+                    "selector": "button.load-more",
+                    "max_times": 2,
+                    "wait_for_selector": ".product-card",
+                    "wait_ms": 25,
+                    "optional": True,
+                },
+            ]
+        },
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+
+    page = MagicMock()
+    page.url = "https://example.com/final"
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.locator.return_value.click = AsyncMock(return_value=None)
+    page.wait_for_selector = AsyncMock(return_value=None)
+    page.wait_for_timeout = AsyncMock(return_value=None)
+    page.mouse.wheel = AsyncMock(return_value=None)
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=None,
+        capture=capture,
+    )
+
+    assert page.locator.call_args_list[0].args == ("#accept",)
+    assert page.locator.call_args_list[1].args == ("button.load-more",)
+    assert page.locator.call_args_list[2].args == ("button.load-more",)
+    assert page.locator.return_value.click.await_count == 3
+    assert page.wait_for_selector.await_count == 3
+    assert page.wait_for_selector.await_args_list[0].args == (".product-card",)
+    assert page.mouse.wheel.await_count == 2
+    assert page.wait_for_timeout.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_optional_repeat_click_stops_without_raising_when_button_disappears() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={
+            "actions": [
+                {
+                    "type": "repeat_click",
+                    "selector": "button.load-more",
+                    "max_times": 3,
+                    "optional": True,
+                }
+            ]
+        },
+    )
+    page = MagicMock()
+    page.locator.return_value.click = AsyncMock(side_effect=TimeoutError())
+
+    assert target.browser is not None
+    await run_browser_actions(page, target.browser.actions)
+
+    page.locator.assert_called_once_with("button.load-more")
+    page.locator.return_value.click.assert_awaited_once()

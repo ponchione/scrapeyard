@@ -2,6 +2,8 @@
 
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import (
+    BrowserActionConfig,
+    BrowserActionType,
     MapDetectionConfig,
     PricingVisibility,
     ScrapeConfig,
@@ -15,6 +17,8 @@ from scrapeyard.config.schema import (
 from scrapeyard.config.transforms import apply_transforms, parse_transform
 
 __all__ = [
+    "BrowserActionConfig",
+    "BrowserActionType",
     "MapDetectionConfig",
     "PricingVisibility",
     "ScrapeConfig",

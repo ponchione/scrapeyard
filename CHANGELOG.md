@@ -11,6 +11,23 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ---
 
+## Unreleased
+
+### Added
+- Selector transform helpers for common cleanup chains:
+  `collapse_whitespace`, `remove`, `strip_prefix`, `strip_suffix`, `extract`,
+  and `default`.
+- Long-form `pagination.next` selectors, including XPath support.
+- Browser action configs for dynamic/stealthy targets: `click`,
+  `wait_for_selector`, `wait_ms`, `scroll`, and bounded `repeat_click`.
+- Example configs for consent-banner scrolling and load-more product grids.
+
+### Changed
+- Template and README now document browser actions, typed pagination, and
+  practical transform chains.
+
+---
+
 ## 0.5.1 — 2026-04-09
 
 **Debt-register cleanup and internal maintainability pass.**

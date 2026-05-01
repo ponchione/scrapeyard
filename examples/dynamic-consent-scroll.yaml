@@ -1,0 +1,49 @@
+project: demo
+name: dynamic-consent-scroll
+adaptive: false
+
+execution:
+  mode: async
+  concurrency: 1
+  delay_between: 0
+  domain_rate_limit: 2
+
+validation:
+  required_fields: [name, url]
+  min_results: 1
+  on_empty: warn
+
+target:
+  url: https://example.com/catalog
+  fetcher: dynamic
+  browser:
+    timeout_ms: 90000
+    disable_resources: true
+    network_idle: false
+    actions:
+      - type: click
+        selector: "#accept-cookies"
+        optional: true
+        timeout_ms: 3000
+        wait_ms: 500
+      - type: wait_for_selector
+        selector: ".product-card"
+        timeout_ms: 15000
+      - type: scroll
+        times: 3
+        pixels: 1000
+        wait_ms: 500
+  item_selector: ".product-card"
+  selectors:
+    name:
+      query: ".product-card-title::text"
+      transform: "trim|collapse_whitespace"
+    url:
+      query: "a.product-card-link::attr(href)"
+      transform: 'prepend("https://example.com")'
+    price:
+      query: ".product-card-price::text"
+      transform: 'trim|remove("$")'
+
+output:
+  group_by: merge

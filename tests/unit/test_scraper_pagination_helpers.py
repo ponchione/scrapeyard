@@ -17,12 +17,21 @@ class _Element:
 
 
 class _Page:
-    def __init__(self, next_links: list[_Element] | None = None) -> None:
+    def __init__(
+        self,
+        next_links: list[_Element] | None = None,
+        xpath_links: list[_Element] | None = None,
+    ) -> None:
         self._next_links = next_links or []
+        self._xpath_links = xpath_links or []
 
     def css(self, selector: str):
         assert selector == "a.next"
         return self._next_links
+
+    def xpath(self, selector: str):
+        assert selector == "//a[contains(., 'Next')]"
+        return self._xpath_links
 
 
 @pytest.mark.asyncio
@@ -173,3 +182,47 @@ async def test_paginate_target_noops_without_pagination_config():
 
     fetch_page.assert_not_called()
     assert result.pages_scraped == 1
+
+
+@pytest.mark.asyncio
+async def test_paginate_target_supports_xpath_next_selector():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {
+                "next": {"query": "//a[contains(., 'Next')]", "type": "xpath"},
+                "max_pages": 2,
+            },
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    fetch_page = AsyncMock(
+        return_value=FetchOutcome(page=_Page(), debug={"final_url": "https://example.com/page-2"})
+    )
+
+    await paginate_target(
+        page=_Page(xpath_links=[_Element("/page-2")]),
+        target=target,
+        result=result,
+        fetch_target_page=fetch_page,
+        extract_page_data=MagicMock(return_value=[{"title": "second"}]),
+        retry_handler=MagicMock(spec=RetryConfig),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_awaited_once()
+    assert fetch_page.await_args.args[2] == "https://example.com/page-2"
+    assert result.pages_scraped == 2

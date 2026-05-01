@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 from collections.abc import Callable
 
@@ -11,11 +12,7 @@ _FUNC_RE = re.compile(r'^(\w+)\((.+)\)$')
 
 def _parse_args(raw_args: str) -> list[str]:
     """Parse comma-separated, optionally quoted arguments."""
-    args: list[str] = []
-    for part in raw_args.split(","):
-        part = part.strip().strip('"').strip("'")
-        args.append(part)
-    return args
+    return [part.strip() for part in next(csv.reader([raw_args], skipinitialspace=True))]
 
 
 def parse_transform(raw: str) -> Callable[[str], str]:
@@ -38,6 +35,8 @@ def parse_transform(raw: str) -> Callable[[str], str]:
 
     if name == "trim":
         return str.strip
+    elif name == "collapse_whitespace":
+        return lambda s: re.sub(r"\s+", " ", s).strip()
     elif name == "lowercase":
         return str.lower
     elif name == "uppercase":
@@ -57,6 +56,48 @@ def parse_transform(raw: str) -> Callable[[str], str]:
             raise ValueError(f"replace requires old and new, got '{raw}'")
         old, new = args[0], args[1]
         return lambda s, o=old, n=new: s.replace(o, n)  # type: ignore[misc]
+    elif name == "remove":
+        if not args:
+            raise ValueError(f"remove requires a value, got '{raw}'")
+        needle = args[0]
+        return lambda s, n=needle: s.replace(n, "")  # type: ignore[misc]
+    elif name == "strip_prefix":
+        if not args:
+            raise ValueError(f"strip_prefix requires a value, got '{raw}'")
+        prefix = args[0]
+
+        def _strip_prefix(value: str, p: str = prefix) -> str:
+            return value.removeprefix(p)
+
+        return _strip_prefix
+    elif name == "strip_suffix":
+        if not args:
+            raise ValueError(f"strip_suffix requires a value, got '{raw}'")
+        suffix = args[0]
+
+        def _strip_suffix(value: str, sf: str = suffix) -> str:
+            return value.removesuffix(sf)
+
+        return _strip_suffix
+    elif name == "extract":
+        if not args:
+            raise ValueError(f"extract requires a pattern, got '{raw}'")
+        compiled = re.compile(args[0])
+
+        def _extract(value: str, c: re.Pattern[str] = compiled) -> str:
+            match = c.search(value)
+            if match is None:
+                return ""
+            if match.groups():
+                return match.group(1)
+            return match.group(0)
+
+        return _extract
+    elif name == "default":
+        if not args:
+            raise ValueError(f"default requires a value, got '{raw}'")
+        fallback = args[0]
+        return lambda s, fb=fallback: s if s.strip() else fb  # type: ignore[misc]
     elif name == "regex":
         if len(args) < 2:
             raise ValueError(f"regex requires pattern and replacement, got '{raw}'")

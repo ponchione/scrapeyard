@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import TargetResult
+from scrapeyard.engine.selectors import select_elements_strict
 
 FetchTargetPageCallable = Callable[..., Awaitable[Any]]
 ExtractPageDataCallable = Callable[[Any, TargetConfig], list[dict[str, Any]]]
@@ -73,7 +74,11 @@ async def paginate_target(
     seen_urls = {pagination_url_key(current_url)}
     next_selector = target.pagination.next
     for _ in range(target.pagination.max_pages - 1):
-        next_links = page.css(next_selector)
+        next_links = select_elements_strict(
+            page,
+            next_selector,
+            operation="select_pagination_next",
+        )
         if not next_links:
             break
         next_url = resolve_href(next_links[0], current_url)
