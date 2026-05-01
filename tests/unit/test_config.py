@@ -9,6 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 from scrapeyard.config import (
+    BrowserActionType,
     MapDetectionConfig,  # noqa: F401
     ScrapeConfig,
     StockDetectionConfig,  # noqa: F401
@@ -122,6 +123,48 @@ class TestResolvedTargets:
         assert config.target.browser.wait_for_selector == ".product-card a"
         assert config.target.browser.wait_ms == 1500
 
+    def test_target_with_browser_actions_parses(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    browser={
+                        "actions": [
+                            {"type": "click", "selector": "#accept", "optional": True},
+                            {
+                                "type": "scroll",
+                                "times": 2,
+                                "pixels": 900,
+                                "wait_ms": 250,
+                            },
+                            {
+                                "type": "repeat_click",
+                                "selector": "button.load-more",
+                                "max_times": 3,
+                                "wait_for_selector": ".product-card",
+                                "optional": True,
+                            },
+                        ]
+                    },
+                )
+            )
+        )
+
+        assert config.target is not None
+        assert config.target.browser is not None
+        assert len(config.target.browser.actions) == 3
+        assert config.target.browser.actions[0].type == BrowserActionType.click
+        assert config.target.browser.actions[1].type == BrowserActionType.scroll
+        assert config.target.browser.actions[1].times == 2
+        assert config.target.browser.actions[2].max_times == 3
+
+    def test_browser_action_missing_required_selector_raises(self):
+        with pytest.raises(ValidationError, match="requires 'selector'"):
+            ScrapeConfig(
+                **_tier1_config(
+                    target=_target_dict(browser={"actions": [{"type": "click"}]})
+                )
+            )
+
 
 # --- Transform Parser ---
 
@@ -136,6 +179,10 @@ class TestParseTransform:
     def test_lowercase(self):
         fn = parse_transform("lowercase")
         assert fn("HELLO") == "hello"
+
+    def test_collapse_whitespace(self):
+        fn = parse_transform("collapse_whitespace")
+        assert fn("  hello \n\t world  ") == "hello world"
 
     def test_uppercase(self):
         fn = parse_transform("uppercase")
@@ -153,9 +200,34 @@ class TestParseTransform:
         fn = parse_transform("replace:old:new")
         assert fn("old value old") == "new value new"
 
+    def test_replace_func_syntax_preserves_quoted_commas(self):
+        fn = parse_transform('replace("old,value", "new")')
+        assert fn("old,value here") == "new here"
+
     def test_regex(self):
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"
+
+    def test_remove(self):
+        fn = parse_transform("remove:$")
+        assert fn("$12.99") == "12.99"
+
+    def test_strip_prefix(self):
+        fn = parse_transform("strip_prefix:SKU-")
+        assert fn("SKU-123") == "123"
+
+    def test_strip_suffix(self):
+        fn = parse_transform("strip_suffix: USD")
+        assert fn("12.99 USD") == "12.99"
+
+    def test_extract_returns_first_capture_group(self):
+        fn = parse_transform(r"extract:(\d+\.\d+)")
+        assert fn("price: 12.99 USD") == "12.99"
+
+    def test_default_replaces_blank_values(self):
+        fn = parse_transform("default:unknown")
+        assert fn("   ") == "unknown"
+        assert fn("present") == "present"
 
     def test_join_raises_not_supported(self):
         with pytest.raises(ValueError, match="list-level operation"):
@@ -275,6 +347,27 @@ targets:
         assert raw["target"]["stock_detection"]["in_stock"]["text_patterns"]
         assert config.target.pagination is not None
         assert config.target.pagination.max_pages == 2
+
+    def test_dynamic_consent_scroll_example_loads_browser_actions(self):
+        config_path = Path(__file__).resolve().parents[2] / "examples/dynamic-consent-scroll.yaml"
+        config = load_config(config_path.read_text())
+
+        assert config.target is not None
+        assert config.target.browser is not None
+        assert [action.type.value for action in config.target.browser.actions] == [
+            "click",
+            "wait_for_selector",
+            "scroll",
+        ]
+
+    def test_load_more_product_grid_example_loads_repeat_click_action(self):
+        config_path = Path(__file__).resolve().parents[2] / "examples/load-more-product-grid.yaml"
+        config = load_config(config_path.read_text())
+
+        assert config.target is not None
+        assert config.target.browser is not None
+        assert config.target.browser.actions[1].type.value == "repeat_click"
+        assert config.target.browser.actions[1].max_times == 8
 
     def test_scheduled_product_monitor_example_keeps_detection_contract_in_parity(self):
         config_path = (

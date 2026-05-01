@@ -15,11 +15,25 @@ target:
     timeout_ms: 90000
     disable_resources: true
     network_idle: false
+    # Optional ordered browser actions before extraction.
+    # actions:
+    #   - type: click
+    #     selector: "#accept-cookies"
+    #     optional: true
+    #   - type: scroll
+    #     times: 3
+    #     wait_ms: 500
+    #   - type: repeat_click
+    #     selector: "button.load-more"
+    #     max_times: 5
+    #     wait_for_selector: ".catalog-item"
+    #     wait_ms: 500
+    #     optional: true
   item_selector: ".catalog-item"
   selectors:
     title:
       query: ".item-title::text"
-      transform: trim
+      transform: "trim|collapse_whitespace"
     price:
       query: ".item-price::text"
       transform: trim
@@ -51,7 +65,9 @@ target:
   #   out_of_stock:
   #     text_patterns: ["out of stock", "sold out"]
   pagination:
-    next: ".pagination-next"
+    next:
+      query: ".pagination-next"
+      type: css
     max_pages: 5
 
 # Optional override. If omitted, adaptive defaults to false for on-demand jobs

@@ -92,6 +92,7 @@ def test_default_debug_blob_uses_browser_config_defaults_when_missing():
         "click_wait_ms": None,
         "wait_for_selector": None,
         "wait_ms": None,
+        "actions": [],
     }
 
 

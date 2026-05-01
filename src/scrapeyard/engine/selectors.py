@@ -45,8 +45,24 @@ class SelectorExecutionError(Exception):
 
 
 def select_items_strict(page: Any, item_selector: SelectorValue) -> list[Any]:
-    query, sel_type, _ = _unpack_selector(item_selector)
-    return _select_elements(page, query, sel_type, operation="select_items")
+    return select_elements_strict(page, item_selector, operation="select_items")
+
+
+def select_elements_strict(
+    scope: Any,
+    selector: SelectorValue,
+    *,
+    operation: str,
+    field_name: str | None = None,
+) -> list[Any]:
+    query, sel_type, _ = _unpack_selector(selector)
+    return _select_elements(
+        scope,
+        query,
+        sel_type,
+        operation=operation,
+        field_name=field_name,
+    )
 
 
 def count_selector_matches_strict(

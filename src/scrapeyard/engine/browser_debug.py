@@ -12,7 +12,14 @@ from typing import Any
 
 from scrapling import PlayWrightFetcher, StealthyFetcher
 
-from scrapeyard.config.schema import BROWSER_FETCH_KWARGS, BrowserConfig, FetcherType, TargetConfig
+from scrapeyard.config.schema import (
+    BROWSER_FETCH_KWARGS,
+    BrowserActionConfig,
+    BrowserActionType,
+    BrowserConfig,
+    FetcherType,
+    TargetConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +103,7 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "screenshot_path": None,
         "console_messages": [],
         "request_failures": [],
-        "browser_settings": browser.model_dump(),
+        "browser_settings": browser.model_dump(mode="json"),
     }
 
 
@@ -118,7 +125,7 @@ def _supported_fetcher_kwargs(fetcher_type: FetcherType) -> set[str]:
 def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, proxy_url: str | None) -> dict[str, Any]:
     """Build browser-specific fetch kwargs from target config, filtered to the fetcher signature."""
     browser = target_browser_config(target)
-    browser_values = browser.model_dump()
+    browser_values = browser.model_dump(mode="json")
     kwargs: dict[str, Any] = {}
     for mapping in BROWSER_FETCH_KWARGS:
         value = browser_values[mapping.field_name]
@@ -129,6 +136,92 @@ def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, pro
 
     supported_kwargs = _supported_fetcher_kwargs(fetcher_type)
     return {key: value for key, value in kwargs.items() if key in supported_kwargs}
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _click_selector(page: Any, selector: str, timeout_ms: int | None) -> None:
+    locator = page.locator(selector)
+    kwargs = {} if timeout_ms is None else {"timeout": timeout_ms}
+    await _maybe_await(locator.click(**kwargs))
+
+
+async def _wait_for_selector(page: Any, selector: str, timeout_ms: int | None) -> None:
+    kwargs = {} if timeout_ms is None else {"timeout": timeout_ms}
+    wait_for_selector = getattr(page, "wait_for_selector", None)
+    if callable(wait_for_selector):
+        await _maybe_await(wait_for_selector(selector, **kwargs))
+        return
+    locator = page.locator(selector)
+    await _maybe_await(locator.wait_for(**kwargs))
+
+
+async def _wait_for_timeout(page: Any, wait_ms: int) -> None:
+    await _maybe_await(page.wait_for_timeout(wait_ms))
+
+
+async def _scroll_once(page: Any, pixels: int) -> None:
+    mouse = getattr(page, "mouse", None)
+    wheel = getattr(mouse, "wheel", None)
+    if callable(wheel):
+        await _maybe_await(wheel(0, pixels))
+        return
+    evaluate = getattr(page, "evaluate", None)
+    if callable(evaluate):
+        await _maybe_await(evaluate("(distance) => window.scrollBy(0, distance)", pixels))
+        return
+    raise AttributeError("Page does not support mouse wheel or evaluate scrolling")
+
+
+async def _run_post_action_waits(page: Any, action: BrowserActionConfig) -> None:
+    if action.wait_for_selector:
+        await _wait_for_selector(page, action.wait_for_selector, action.timeout_ms)
+    if action.wait_ms is not None:
+        await _wait_for_timeout(page, action.wait_ms)
+
+
+async def _run_browser_action(page: Any, action: BrowserActionConfig) -> None:
+    if action.type == BrowserActionType.click:
+        await _click_selector(page, action.selector or "", action.timeout_ms)
+        await _run_post_action_waits(page, action)
+        return
+    if action.type == BrowserActionType.wait_for_selector:
+        await _wait_for_selector(page, action.selector or "", action.timeout_ms)
+        await _run_post_action_waits(page, action)
+        return
+    if action.type == BrowserActionType.wait_ms:
+        await _wait_for_timeout(page, action.wait_ms or 0)
+        return
+    if action.type == BrowserActionType.scroll:
+        for _ in range(action.times):
+            await _scroll_once(page, action.pixels)
+            if action.wait_ms is not None:
+                await _wait_for_timeout(page, action.wait_ms)
+        return
+    if action.type == BrowserActionType.repeat_click:
+        for _ in range(action.max_times):
+            await _click_selector(page, action.selector or "", action.timeout_ms)
+            await _run_post_action_waits(page, action)
+
+
+async def run_browser_actions(page: Any, actions: list[BrowserActionConfig]) -> None:
+    """Execute configured browser actions in order."""
+    for action in actions:
+        try:
+            await _run_browser_action(page, action)
+        except Exception as exc:
+            if not action.optional:
+                raise
+            logger.info(
+                "Optional browser action did not complete: %s (%s: %s)",
+                action.type.value,
+                type(exc).__name__,
+                exc,
+            )
 
 
 def coerce_to_text(value: Any) -> str:
@@ -188,6 +281,8 @@ async def capture_browser_state(
                 type(exc).__name__,
                 exc,
             )
+    if browser is not None and browser.actions:
+        await run_browser_actions(page, browser.actions)
     capture["final_url"] = getattr(page, "url", None)
     try:
         capture["page_title"] = await page.title()

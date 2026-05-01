@@ -22,6 +22,16 @@ class FetcherType(str, Enum):
     dynamic = "dynamic"
 
 
+class BrowserActionType(str, Enum):
+    """Supported browser page actions before extraction."""
+
+    click = "click"
+    wait_for_selector = "wait_for_selector"
+    wait_ms = "wait_ms"
+    scroll = "scroll"
+    repeat_click = "repeat_click"
+
+
 class SelectorType(str, Enum):
     """Supported selector query types."""
 
@@ -183,8 +193,60 @@ class ProxyConfig(BaseModel):
 class PaginationConfig(BaseModel):
     """Pagination rules for a target."""
 
-    next: str = Field(..., description="CSS/XPath selector for the next-page element")
+    next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
     max_pages: int = Field(default=10, description="Maximum pages to scrape")
+
+
+class BrowserActionConfig(BaseModel):
+    """One browser action to run after page load and before extraction."""
+
+    type: BrowserActionType
+    selector: str | None = Field(default=None, description="CSS selector used by click/wait actions")
+    optional: bool = Field(
+        default=False,
+        description="Continue when this action cannot be completed",
+    )
+    timeout_ms: int | None = Field(
+        default=None,
+        description="Optional timeout in milliseconds for selector-based actions",
+    )
+    wait_ms: int | None = Field(
+        default=None,
+        description="Optional wait in milliseconds after this action",
+    )
+    times: int = Field(default=1, description="Number of scroll iterations")
+    pixels: int = Field(default=1200, description="Vertical pixels per scroll action")
+    max_times: int = Field(default=1, description="Maximum repeat_click attempts")
+    wait_for_selector: str | None = Field(
+        default=None,
+        description="Optional CSS selector to wait for after each repeat_click",
+    )
+
+    @field_validator("times", "max_times")
+    @classmethod
+    def _must_be_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be at least 1")
+        return value
+
+    @field_validator("pixels")
+    @classmethod
+    def _pixels_must_be_nonzero(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("pixels must be non-zero")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_action_requirements(self) -> BrowserActionConfig:
+        if self.type in {
+            BrowserActionType.click,
+            BrowserActionType.wait_for_selector,
+            BrowserActionType.repeat_click,
+        } and not self.selector:
+            raise ValueError(f"{self.type.value} action requires 'selector'")
+        if self.type == BrowserActionType.wait_ms and self.wait_ms is None:
+            raise ValueError("wait_ms action requires 'wait_ms'")
+        return self
 
 
 class BrowserConfig(BaseModel):
@@ -266,6 +328,10 @@ class BrowserConfig(BaseModel):
     wait_ms: int | None = Field(
         default=None,
         description="Optional extra browser wait in milliseconds after page load/selector wait",
+    )
+    actions: list[BrowserActionConfig] = Field(
+        default_factory=list,
+        description="Ordered browser actions to run after page load and before extraction",
     )
 
 

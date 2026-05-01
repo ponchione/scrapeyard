@@ -3,7 +3,7 @@
 import pytest
 
 from scrapeyard.config.transforms import parse_transform
-from scrapeyard.config.schema import PaginationConfig
+from scrapeyard.config.schema import PaginationConfig, SelectorLong, SelectorType
 
 
 def test_parse_transform_join_func_syntax_raises():
@@ -28,3 +28,12 @@ def test_pagination_max_pages_default():
     """Default max_pages should be 10."""
     cfg = PaginationConfig(next=".next-page")
     assert cfg.max_pages == 10
+
+
+def test_pagination_next_accepts_long_form_xpath_selector():
+    """Pagination next selector can be long-form CSS/XPath config."""
+    cfg = PaginationConfig(next={"query": "//a[contains(., 'Next')]", "type": "xpath"})
+
+    assert isinstance(cfg.next, SelectorLong)
+    assert cfg.next.query == "//a[contains(., 'Next')]"
+    assert cfg.next.type == SelectorType.xpath
