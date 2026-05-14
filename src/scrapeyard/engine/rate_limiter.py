@@ -27,17 +27,19 @@ class LocalDomainRateLimiter:
 
     def __init__(self) -> None:
         self._last_request: dict[str, float] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def acquire(self, domain: str, min_interval: float) -> None:
-        now = time.monotonic()
-        last = self._last_request.get(domain, 0.0)
-        wait = min_interval - (now - last)
-        if wait > 0:
-            logger.debug(
-                "Domain rate limit: waiting %.1fs for %s (local)", wait, domain,
-            )
-            await asyncio.sleep(wait)
-        self._last_request[domain] = time.monotonic()
+        async with self._locks.setdefault(domain, asyncio.Lock()):
+            now = time.monotonic()
+            last = self._last_request.get(domain, 0.0)
+            wait = min_interval - (now - last)
+            if wait > 0:
+                logger.debug(
+                    "Domain rate limit: waiting %.1fs for %s (local)", wait, domain,
+                )
+                await asyncio.sleep(wait)
+            self._last_request[domain] = time.monotonic()
 
 
 class RedisDomainRateLimiter:
