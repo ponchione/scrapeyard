@@ -3,6 +3,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -48,6 +49,15 @@ async def _recover_stale_running_jobs() -> None:
         )
 
 
+def _ensure_runtime_directories() -> None:
+    settings = get_settings()
+    paths = [settings.storage_results_dir, settings.adaptive_dir]
+    if settings.browser_debug_enabled:
+        paths.append(settings.browser_debug_artifacts_dir)
+    for path in paths:
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+
 def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
     app.state.worker_pool = services.worker_pool
     app.state.scheduler = services.scheduler
@@ -81,6 +91,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_dir, settings.log_level)
     await init_db(settings.db_dir)
+    _ensure_runtime_directories()
     await _recover_stale_running_jobs()
     await _startup_runtime_services(app)
 

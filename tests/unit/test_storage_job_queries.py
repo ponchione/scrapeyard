@@ -23,6 +23,13 @@ def test_build_list_jobs_with_stats_query_filters_and_paginates() -> None:
     assert params == ["acme", 5, 10]
 
 
+def test_build_list_jobs_with_stats_query_filters_empty_project() -> None:
+    sql, params = build_list_jobs_with_stats_query(project="", limit=5, offset=0)
+
+    assert "WHERE j.project = ?" in sql
+    assert params == ["", 5, 0]
+
+
 def test_build_list_jobs_with_stats_query_supports_offset_without_limit() -> None:
     sql, params = build_list_jobs_with_stats_query(project=None, limit=None, offset=3)
 

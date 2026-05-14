@@ -57,12 +57,16 @@ async def test_health_cache_returns_empty_summary_when_store_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
+async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(
         log_dir="/tmp/logs",
         log_level="DEBUG",
         db_dir="/tmp/db",
+        storage_results_dir=str(tmp_path / "results"),
+        adaptive_dir=str(tmp_path / "adaptive"),
+        browser_debug_enabled=False,
+        browser_debug_artifacts_dir=str(tmp_path / "browser-debug"),
         workers_shutdown_grace_seconds=7,
         workers_running_lease_seconds=300,
     )
@@ -112,6 +116,9 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch):
         assert app.state.worker_pool is pool
         assert app.state.scheduler is scheduler
         assert app.state.cleanup_task is cleanup_task
+        assert (tmp_path / "results").is_dir()
+        assert (tmp_path / "adaptive").is_dir()
+        assert not (tmp_path / "browser-debug").exists()
 
     main_module.setup_logging.assert_called_once_with("/tmp/logs", "DEBUG")
     main_module.init_db.assert_awaited_once_with("/tmp/db")
