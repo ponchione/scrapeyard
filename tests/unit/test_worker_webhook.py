@@ -9,6 +9,7 @@ import pytest
 from scrapeyard.config.schema import WebhookConfig, WebhookStatus
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.worker import scrape_task
 from tests.unit.worker_helpers import make_job, make_config_mock
 
@@ -195,3 +196,38 @@ async def test_webhook_fires_with_save_meta_on_failed_results(mock_stores):
     assert payload["result_path"] == "/tmp/results/fail"
     assert payload["result_count"] == 0
     assert payload["event"] == "job.failed"
+
+
+@pytest.mark.asyncio
+async def test_webhook_submit_failure_does_not_fail_successful_job(mock_stores):
+    job_store, result_store, error_store, circuit_breaker = mock_stores
+    job = make_job()
+    job_store.get_job = AsyncMock(return_value=job)
+    job_store.update_job_status = AsyncMock()
+    result_store.save_result.return_value = MagicMock(
+        run_id="run-1", file_path="/tmp/results/run-1", record_count=1,
+    )
+
+    webhook_dispatcher = AsyncMock()
+    webhook_dispatcher.submit.side_effect = RuntimeError("outbox down")
+    webhook_config = WebhookConfig(url="https://hooks.example.com/callback")
+    success_result = TargetResult(
+        url="http://a.com", status="success", data=[{"title": "A"}]
+    )
+
+    with patch("scrapeyard.queue.worker.load_config") as mock_load, \
+         patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_load.return_value = make_config_mock(webhook=webhook_config)
+        mock_scrape.return_value = success_result
+
+        await scrape_task(
+            "job-1", "yaml",
+            job_store=job_store, result_store=result_store,
+            error_store=error_store, circuit_breaker=circuit_breaker,
+            rate_limiter=LocalDomainRateLimiter(),
+            webhook_dispatcher=webhook_dispatcher,
+        )
+
+    assert job_store.update_job_status.await_args_list[-1].args[0].status == JobStatus.complete

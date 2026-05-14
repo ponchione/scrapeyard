@@ -145,7 +145,14 @@ async def dispatch_webhook(
         started_at=started_at.isoformat(),
         completed_at=completed_at.isoformat(),
     )
-    await webhook_dispatcher.submit(config.webhook, payload)
+    try:
+        await webhook_dispatcher.submit(config.webhook, payload)
+    except Exception:
+        logger.exception(
+            "Failed to submit webhook for job %s with status %s",
+            job_id,
+            final_status.value,
+        )
 
 
 async def handle_crash(
@@ -156,8 +163,15 @@ async def handle_crash(
     """Best-effort crash recovery: mark job and run as failed."""
     try:
         job = await job_store.get_job(job_id)
-        failed_job = build_failed_job(job, failed_at=utc_now())
-        await job_store.update_job_status(failed_job)
+        if run_id is not None and job.current_run_id != run_id:
+            logger.info(
+                "Skipping failed job status for superseded job_id=%s run_id=%s",
+                job_id,
+                run_id,
+            )
+        else:
+            failed_job = build_failed_job(job, failed_at=utc_now())
+            await job_store.update_job_status(failed_job)
     except Exception:
         logger.exception("Failed to mark job %s as failed", job_id)
 

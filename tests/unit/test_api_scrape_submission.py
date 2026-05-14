@@ -21,16 +21,23 @@ class _QueuedJob:
             raise asyncio.TimeoutError
 
 
-def _config(mode: ExecutionMode, fetcher: FetcherType = FetcherType.basic, with_pagination: bool = False):
+def _config(
+    mode: ExecutionMode,
+    fetcher: FetcherType = FetcherType.basic,
+    with_pagination: bool = False,
+    *,
+    name: str = "route-cleanup",
+):
     target = MagicMock(fetcher=fetcher, pagination=MagicMock() if with_pagination else None)
     execution = MagicMock(mode=mode, priority=MagicMock(value="normal"))
     execution.fail_strategy = FailStrategy.partial
-    return MagicMock(
+    config = MagicMock(
         project="integ",
-        name="route-cleanup",
         execution=execution,
         resolved_targets=MagicMock(return_value=[target]),
     )
+    config.name = name
+    return config
 
 
 @pytest.mark.asyncio
@@ -131,3 +138,26 @@ async def test_submit_scrape_job_removes_job_when_enqueue_fails():
 
     saved_job = job_store.save_job.call_args.args[0]
     job_store.delete_job.assert_awaited_once_with(saved_job.job_id)
+
+
+@pytest.mark.asyncio
+async def test_submit_scrape_job_keeps_generated_name_within_path_limit():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    worker_pool.enqueue.return_value = _QueuedJob()
+
+    await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.async_, name="x" * 255),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=5,
+        sync_poll_delay_seconds=0.1,
+    )
+
+    saved_job = job_store.save_job.call_args.args[0]
+    assert len(saved_job.name.encode("utf-8")) <= 255
+    assert saved_job.name.startswith("x" * 246)
+    assert saved_job.name[246] == "-"
