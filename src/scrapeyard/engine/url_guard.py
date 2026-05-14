@@ -65,9 +65,35 @@ _SENSITIVE_KEY_PARTS = (
     "session",
 )
 
+_IPV4_EMBEDDING_PREFIXES = (
+    ipaddress.IPv6Network("64:ff9b::/96"),
+    ipaddress.IPv6Network("64:ff9b:1::/48"),
+)
+
+
+def _embedded_ipv4_addresses(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    addresses: list[ipaddress.IPv4Address] = []
+    if ip.ipv4_mapped is not None:
+        addresses.append(ip.ipv4_mapped)
+    if ip.sixtofour is not None:
+        addresses.append(ip.sixtofour)
+    if ip.teredo is not None:
+        addresses.extend(ip.teredo)
+    for prefix in _IPV4_EMBEDDING_PREFIXES:
+        if ip in prefix:
+            addresses.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return addresses
+
 
 def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return not ip.is_global or ip.is_multicast
+    if not ip.is_global or ip.is_multicast:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        return any(
+            not embedded.is_global or embedded.is_multicast
+            for embedded in _embedded_ipv4_addresses(ip)
+        )
+    return False
 
 
 def _hostname_is_blocked(host: str) -> bool:

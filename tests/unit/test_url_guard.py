@@ -22,6 +22,22 @@ def test_assert_public_url_allows_global_literal_address_without_dns() -> None:
     assert_public_url("http://8.8.8.8/resource", resolve_dns=False)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[64:ff9b::a9fe:a9fe]/resource",
+        "http://[64:ff9b:1::c0a8:1]/resource",
+    ],
+)
+def test_assert_public_url_rejects_nat64_private_ipv4_literals(url: str) -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url(url, resolve_dns=False)
+
+
+def test_assert_public_url_allows_nat64_global_ipv4_literal_without_dns() -> None:
+    assert_public_url("http://[64:ff9b::808:808]/resource", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_invalid_port() -> None:
     with pytest.raises(UnsafeURLError, match="port"):
         assert_public_url("https://example.com:99999/resource", resolve_dns=False)
