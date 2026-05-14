@@ -347,6 +347,36 @@ targets:
         with pytest.raises(ValidationError, match="not both"):
             load_config(yaml_str)
 
+    def test_rejects_yaml_aliases(self):
+        yaml_str = """
+project: demo
+name: alias-job
+selectors: &common_selectors
+  title: h1
+target:
+  url: https://example.com
+  selectors: *common_selectors
+"""
+        with pytest.raises(yaml.YAMLError, match="aliases"):
+            load_config(yaml_str)
+
+    def test_rejects_duplicate_yaml_keys(self):
+        yaml_str = """
+project: demo
+project: other
+name: duplicate-key-job
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+        with pytest.raises(yaml.YAMLError, match="Duplicate YAML key"):
+            load_config(yaml_str)
+
+    def test_rejects_non_mapping_yaml_root(self):
+        with pytest.raises(ValueError, match="root must be a mapping"):
+            load_config("- just\n- a\n- list")
+
     def test_root_template_yaml_loads(self):
         template_path = Path(__file__).resolve().parents[2] / "template.yaml"
         config = load_config(template_path.read_text())

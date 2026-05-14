@@ -258,7 +258,7 @@ async def get_results(
     return serialize_results_payload(
         job_id,
         run_id=payload.run_id,
-        status=job.status.value,
+        status=payload.status,
         results=payload.data,
     )
 

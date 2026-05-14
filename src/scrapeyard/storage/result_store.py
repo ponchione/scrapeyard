@@ -149,11 +149,12 @@ class LocalResultStore:
             )
 
         result_run_id = row["run_id"]
+        status = row["status"]
         file_path = row["file_path"]
 
         path = self._checked_result_dir(str(file_path)) / "results.json"
         data = await asyncio.to_thread(read_json_file, path)
-        return ResultPayload(run_id=result_run_id, data=data)
+        return ResultPayload(run_id=result_run_id, data=data, status=status)
 
     async def delete_results(self, job_id: str) -> None:
         """Delete all results for a job from disk and metadata DB."""

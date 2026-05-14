@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import yaml
-
+from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.config.schema import ScrapeConfig
 
 
 def load_config(yaml_str: str) -> ScrapeConfig:
     """Parse a YAML string into a validated ScrapeConfig."""
-    data = yaml.safe_load(yaml_str)
+    data = load_yaml_mapping(yaml_str)
     return ScrapeConfig(**data)

@@ -12,6 +12,7 @@ class ResultPayload:
 
     run_id: str
     data: Any
+    status: str = "complete"
 
 
 @dataclass(frozen=True, slots=True)
