@@ -33,17 +33,24 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
 # URLs embedded in free-form text that we scrub before returning stored config
 # YAML, logs, or result metadata to clients.
 _URL_IN_TEXT_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"']+", re.IGNORECASE)
+_URL_AUTHORITY_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)([^/?#]*)(.*)$", re.IGNORECASE)
 
 _REDACTED_VALUE = "<redacted>"
 _SENSITIVE_EXACT_KEYS = frozenset(
     {
+        "accesskey",
         "authorization",
-        "proxyauthorization",
-        "xapikey",
         "apikey",
-        "api_key",
+        "awsaccesskeyid",
         "cookie",
+        "key",
+        "proxyauthorization",
+        "sig",
+        "signature",
         "setcookie",
+        "xapikey",
+        "xamzsignature",
+        "xgoogsignature",
     }
 )
 _SENSITIVE_KEY_PARTS = (
@@ -198,10 +205,33 @@ def _redact_query(query: str) -> str:
     return "&".join(redacted_pairs)
 
 
+def _strip_userinfo_fallback(url: str) -> str:
+    match = _URL_AUTHORITY_RE.match(url)
+    if match is None:
+        return url
+    prefix, authority, rest = match.groups()
+    if "@" not in authority:
+        return url
+    return f"{prefix}{authority.rsplit('@', 1)[1]}{rest}"
+
+
+def _redact_malformed_url(url: str) -> str:
+    """Best-effort redaction for strings that urlparse cannot parse."""
+    redacted = _strip_userinfo_fallback(url)
+    head, separator, tail = redacted.partition("?")
+    if not separator:
+        return redacted
+    query, fragment_separator, fragment = tail.partition("#")
+    return f"{head}?{_redact_query(query)}{fragment_separator}{fragment}"
+
+
 def redact_userinfo_in_url(url: str) -> str:
     """Return *url* with userinfo and sensitive query values removed."""
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return _redact_malformed_url(url)
     redacted_query = _redact_query(parsed.query)
     if not parsed.username and not parsed.password and redacted_query == parsed.query:
         return url
