@@ -54,6 +54,7 @@ class ServiceSettings(BaseSettings):
     api_keys: str = ""
     max_request_bytes: int = Field(default=262144, ge=0)
     health_disk_free_min_mb: int = Field(default=100, ge=0)
+    health_include_projects: bool = False
 
     model_config = {"env_prefix": "SCRAPEYARD_"}
 

@@ -165,7 +165,7 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     payload = json.loads(response.body.decode())
     assert payload["status"] == "degraded"
     assert payload["workers"]["active_tasks"] == 2
-    assert payload["projects"] == {"proj": {"status": "healthy"}}
+    assert payload["projects"] == {}
 
 
 def test_app_middleware_stack_keeps_size_limit_outermost_then_rate_limit_then_auth():

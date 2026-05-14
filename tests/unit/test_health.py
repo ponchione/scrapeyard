@@ -1,11 +1,13 @@
 """Test the /health endpoint."""
 
 import logging
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import scrapeyard.main as main_module
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.main import app
 from scrapeyard.runtime.health import ProbeResult
@@ -102,3 +104,40 @@ async def test_health_response_shape(monkeypatch):
     assert "dependencies" in data
     for key in ("redis", "sqlite", "disk"):
         assert key in data["dependencies"]
+
+
+@pytest.mark.asyncio
+async def test_health_omits_project_summary_by_default(monkeypatch):
+    _all_probes_ok(monkeypatch)
+    project_summary = AsyncMock(side_effect=AssertionError("project summary should not load"))
+    monkeypatch.setattr(main_module._health, "project_summary", project_summary)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health")
+
+    assert response.json()["projects"] == {}
+    project_summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_health_includes_project_summary_when_enabled(monkeypatch):
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            health_include_projects=True,
+            storage_results_dir="/tmp",
+            health_disk_free_min_mb=0,
+        ),
+    )
+    project_summary = AsyncMock(return_value={"private-project": {"job_count": 1}})
+    monkeypatch.setattr(main_module._health, "project_summary", project_summary)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health")
+
+    assert response.json()["projects"] == {"private-project": {"job_count": 1}}
+    project_summary.assert_awaited_once()
