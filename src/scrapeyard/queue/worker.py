@@ -374,6 +374,7 @@ async def _fetch_and_validate_target(
             adaptive_dir=context.adaptive_dir,
             run_artifacts_dir=context.run_artifacts_dir,
             recorder=recorder,
+            rate_limiter=context.rate_limiter,
             validator=context.validator,
             scrape=scrape_target,
             proxy_url=runtime.proxy_url,

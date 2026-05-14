@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
+from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.engine.url_guard import redact_userinfo_in_url
@@ -32,6 +33,7 @@ async def apply_validation(
     adaptive_dir: str,
     run_artifacts_dir: str | None,
     recorder: TargetErrorRecorder,
+    rate_limiter: DomainRateLimiter,
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None = None,
@@ -74,6 +76,7 @@ async def apply_validation(
         adaptive_dir=adaptive_dir,
         run_artifacts_dir=run_artifacts_dir,
         recorder=recorder,
+        rate_limiter=rate_limiter,
         validator=validator,
         scrape=scrape,
         proxy_url=proxy_url,
@@ -131,10 +134,12 @@ async def _retry_after_validation_failure(
     adaptive_dir: str,
     run_artifacts_dir: str | None,
     recorder: TargetErrorRecorder,
+    rate_limiter: DomainRateLimiter,
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None,
 ) -> TargetResult:
+    await rate_limiter.acquire(domain, config.execution.domain_rate_limit)
     retry_result = await scrape(
         target_cfg,
         adaptive,

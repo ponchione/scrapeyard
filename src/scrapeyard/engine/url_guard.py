@@ -13,6 +13,8 @@ from urllib.parse import parse_qsl, quote_plus, urlparse, urlunparse
 import yaml
 from yaml import YAMLError
 
+from scrapeyard.common.yaml import ScrapeyardSafeLoader
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +74,15 @@ def _hostname_is_blocked(host: str) -> bool:
     return host.lower().rstrip(".") in _DISALLOWED_HOSTS
 
 
+def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
+    """Parse IPv4 forms accepted by socket/http stacks but not ipaddress."""
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
+
+
 def assert_public_url(
     url: str,
     *,
@@ -105,6 +116,8 @@ def assert_public_url(
     host = parsed.hostname
     if not host or not host.strip("."):
         raise UnsafeURLError("URL has no hostname")
+    if "%" in host:
+        raise UnsafeURLError("URL hostname must not contain percent escapes")
     try:
         _ = parsed.port
     except ValueError as exc:
@@ -120,6 +133,12 @@ def assert_public_url(
     if literal is not None:
         if _ip_is_blocked(literal):
             raise UnsafeURLError(f"URL points at non-public IP {literal}")
+        return
+
+    legacy_ipv4 = _legacy_ipv4_address(host)
+    if legacy_ipv4 is not None:
+        if _ip_is_blocked(legacy_ipv4):
+            raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
         return
 
     if not resolve_dns:
@@ -186,7 +205,7 @@ def redact_sensitive_config_text(text: str) -> str:
     """Redact userinfo and common secret keys from stored YAML config text."""
     redacted_text = redact_userinfo_in_text(text)
     try:
-        data = yaml.safe_load(redacted_text)
+        data = yaml.load(redacted_text, Loader=ScrapeyardSafeLoader)
     except YAMLError:
         return redacted_text
     if not isinstance(data, dict | list):

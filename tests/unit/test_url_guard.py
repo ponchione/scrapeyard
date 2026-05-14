@@ -47,6 +47,21 @@ def test_assert_public_url_rejects_raw_whitespace() -> None:
         assert_public_url("http://127.0.0.1\t@example.com/resource", resolve_dns=False)
 
 
+def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
+    with pytest.raises(UnsafeURLError, match="percent escapes"):
+        assert_public_url("http://%31%32%37.0.0.1/resource", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_legacy_ipv4_loopback_without_dns() -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url("http://2130706433/resource", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_legacy_ipv4_private_octal_without_dns() -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url("http://0300.0250.0001.0001/resource", resolve_dns=False)
+
+
 def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
     text = "proxy: http://token@gate.example.com:7777"
 
@@ -148,3 +163,12 @@ target:
     assert "target-secret" not in redacted
     assert "user:pass" not in redacted
     assert redacted.count("<redacted>") == 3
+
+
+def test_redact_sensitive_config_text_rejects_yaml_alias_expansion() -> None:
+    config_yaml = "proxy: http://user:pass@example.com\ncopy: &copy [1]\nref: *copy\n"
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "user:pass" not in redacted
+    assert "*copy" in redacted

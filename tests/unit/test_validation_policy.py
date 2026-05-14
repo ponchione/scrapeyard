@@ -22,6 +22,12 @@ def _recorder(pending_errors, circuit_breaker=None) -> TargetErrorRecorder:
     )
 
 
+def _config(domain_rate_limit: int = 0) -> MagicMock:
+    config = MagicMock(project="test", retry=MagicMock())
+    config.execution.domain_rate_limit = domain_rate_limit
+    return config
+
+
 @pytest.mark.asyncio
 async def test_apply_validation_warn_appends_warning_and_returns_original_result():
     target = make_target("https://example.com")
@@ -33,22 +39,25 @@ async def test_apply_validation_warn_appends_warning_and_returns_original_result
         message="no rows found",
     )
     pending_errors = []
+    rate_limiter = AsyncMock()
 
     validated = await apply_validation(
         target_cfg=target,
         domain="example.com",
         adaptive=False,
         result=result,
-        config=MagicMock(project="test", retry=MagicMock()),
+        config=_config(),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir="/tmp/artifacts",
         recorder=_recorder(pending_errors),
+        rate_limiter=rate_limiter,
         validator=validator,
         scrape=AsyncMock(),
     )
 
     assert validated is result
     assert result.errors == ["no rows found"]
+    rate_limiter.acquire.assert_not_awaited()
     assert len(pending_errors) == 1
     assert pending_errors[0].action_taken == ActionTaken.warn
     assert pending_errors[0].error_type == ErrorType.content_empty
@@ -67,16 +76,18 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
     scrape = AsyncMock(return_value=retried)
     pending_errors = []
     circuit_breaker = MagicMock()
+    rate_limiter = AsyncMock()
 
     validated = await apply_validation(
         target_cfg=target,
         domain="example.com",
         adaptive=True,
         result=first,
-        config=MagicMock(project="test", retry=MagicMock()),
+        config=_config(domain_rate_limit=4),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir="/tmp/artifacts",
         recorder=_recorder(pending_errors, circuit_breaker),
+        rate_limiter=rate_limiter,
         validator=validator,
         scrape=scrape,
         proxy_url="http://proxy.internal:8080",
@@ -85,6 +96,7 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
     assert validated.status == "failed"
     assert validated.error_type == ErrorType.selector_miss
     assert validated.errors == ["still empty"]
+    rate_limiter.acquire.assert_awaited_once_with("example.com", 4)
     assert scrape.await_count == 1
     circuit_breaker.record_success.assert_called_once_with("example.com")
     assert [record.action_taken for record in pending_errors] == [ActionTaken.retry, ActionTaken.fail]
