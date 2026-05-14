@@ -7,6 +7,19 @@ from datetime import datetime
 from scrapeyard.models.job import Job, JobStatus
 
 
+def run_lease_is_active(
+    updated_at: datetime | None,
+    *,
+    lease_seconds: int,
+    now: datetime,
+) -> bool:
+    """Return True when a queued/running job timestamp is still leased."""
+    if updated_at is None:
+        return False
+    comparable_now = now.replace(tzinfo=None) if updated_at.tzinfo is None else now
+    return (comparable_now - updated_at).total_seconds() < lease_seconds
+
+
 def build_running_job(job: Job, *, started_at: datetime) -> Job:
     """Return a copy of *job* transitioned to running."""
     return job.model_copy(update={

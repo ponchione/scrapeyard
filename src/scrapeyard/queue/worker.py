@@ -24,6 +24,7 @@ from scrapeyard.engine.url_guard import (
 )
 from scrapeyard.models.job import ErrorRecord, Job, JobStatus
 from scrapeyard.queue.error_records import TargetErrorRecorder
+from scrapeyard.queue.job_state import run_lease_is_active
 from scrapeyard.queue.run_lifecycle import (
     build_run_paths,
     create_run_record,
@@ -549,11 +550,11 @@ def _should_skip_delivery(
         return run_id is None or job.current_run_id == run_id
     if job.status != JobStatus.running:
         return False
-    if job.updated_at is None:
-        return False
-    updated_at = cast(datetime, job.updated_at)
-    lease_age = (now - updated_at).total_seconds()
-    return lease_age < running_lease_seconds
+    return run_lease_is_active(
+        cast(datetime | None, job.updated_at),
+        lease_seconds=running_lease_seconds,
+        now=now,
+    )
 
 
 async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> None:

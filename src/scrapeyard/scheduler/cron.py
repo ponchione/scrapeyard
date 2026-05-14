@@ -17,6 +17,7 @@ from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.models.job import JobStatus
 
+from scrapeyard.queue.job_state import run_lease_is_active
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.storage.protocols import JobStore
 
@@ -112,6 +113,7 @@ class SchedulerService:
         if self._job_has_active_run(job):
             return
 
+        await self._fail_stale_running_run(job)
         config = await asyncio.to_thread(load_config, job.config_yaml)
         priority = config.execution.priority.value
         needs_browser = any(t.fetcher != FetcherType.basic for t in config.resolved_targets())
@@ -139,23 +141,31 @@ class SchedulerService:
             })
             await self._job_store.update_job_status(failed_job)
 
+    async def _fail_stale_running_run(self, job: object) -> None:
+        if getattr(job, "status", None) != JobStatus.running:
+            return
+        run_id = getattr(job, "current_run_id", None)
+        if run_id is None:
+            return
+        try:
+            await self._job_store.fail_run(run_id)
+        except Exception:
+            logger.exception("Failed to mark stale scheduled run %s as failed", run_id)
+
     def get_next_run_time(self, job_id: str) -> datetime | None:
         """Return the next scheduled fire time, or None if not scheduled."""
         aps_job = self._scheduler.get_job(job_id)
         return aps_job.next_run_time if aps_job else None
 
     def _job_has_active_run(self, job: object) -> bool:
-        if getattr(job, "status", None) == JobStatus.running:
-            return True
-        if getattr(job, "status", None) != JobStatus.queued:
+        status = getattr(job, "status", None)
+        if status not in {JobStatus.queued, JobStatus.running}:
             return False
-        if getattr(job, "current_run_id", None) is None:
+        if status == JobStatus.queued and getattr(job, "current_run_id", None) is None:
             return False
 
-        updated_at = getattr(job, "updated_at", None)
-        if updated_at is None:
-            return True
-        now = utc_now()
-        if updated_at.tzinfo is None:
-            now = now.replace(tzinfo=None)
-        return (now - updated_at).total_seconds() < self._queued_run_lease_seconds
+        return run_lease_is_active(
+            getattr(job, "updated_at", None),
+            lease_seconds=self._queued_run_lease_seconds,
+            now=utc_now(),
+        )

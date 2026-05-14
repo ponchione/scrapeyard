@@ -67,6 +67,8 @@ async def test_trigger_job_skips_if_already_running():
     job_store = AsyncMock()
     mock_job = MagicMock()
     mock_job.status = JobStatus.running
+    mock_job.current_run_id = "run-active"
+    mock_job.updated_at = utc_now()
     job_store.get_job.return_value = mock_job
 
     pool = MagicMock()
@@ -76,6 +78,27 @@ async def test_trigger_job_skips_if_already_running():
     await svc._trigger_job("job-1")
 
     pool.enqueue.assert_not_called()
+
+
+async def test_trigger_job_requeues_stale_running_run():
+    job_store = AsyncMock()
+    mock_job = MagicMock()
+    mock_job.status = JobStatus.running
+    mock_job.current_run_id = "run-stale"
+    mock_job.updated_at = utc_now() - timedelta(seconds=301)
+    mock_job.job_id = "job-1"
+    mock_job.config_yaml = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
+    mock_job.model_copy.return_value = mock_job
+    job_store.get_job.return_value = mock_job
+
+    pool = MagicMock()
+    pool.enqueue = AsyncMock()
+
+    svc = _make_service(worker_pool=pool, job_store=job_store, queued_run_lease_seconds=300)
+    await svc._trigger_job("job-1")
+
+    job_store.fail_run.assert_awaited_once_with("run-stale")
+    pool.enqueue.assert_called_once()
 
 
 async def test_trigger_job_skips_if_run_already_queued():
