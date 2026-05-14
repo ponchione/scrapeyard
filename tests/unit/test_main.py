@@ -66,7 +66,6 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         storage_results_dir=str(tmp_path / "results"),
         adaptive_dir=str(tmp_path / "adaptive"),
         browser_debug_enabled=False,
-        browser_debug_artifacts_dir=str(tmp_path / "browser-debug"),
         workers_shutdown_grace_seconds=7,
         workers_running_lease_seconds=300,
     )

@@ -44,7 +44,6 @@ class ServiceSettings(BaseSettings):
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False
-    browser_debug_artifacts_dir: str = "/data/browser-debug"
 
     circuit_breaker_max_failures: int = Field(default=3, ge=1)
     circuit_breaker_cooldown_seconds: int = Field(default=300, ge=0)

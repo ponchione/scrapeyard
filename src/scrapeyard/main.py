@@ -51,10 +51,7 @@ async def _recover_stale_running_jobs() -> None:
 
 def _ensure_runtime_directories() -> None:
     settings = get_settings()
-    paths = [settings.storage_results_dir, settings.adaptive_dir]
-    if settings.browser_debug_enabled:
-        paths.append(settings.browser_debug_artifacts_dir)
-    for path in paths:
+    for path in (settings.storage_results_dir, settings.adaptive_dir):
         Path(path).mkdir(parents=True, exist_ok=True)
 
 

@@ -7,6 +7,9 @@ coverage.xml
 htmlcov/
 .git
 .gitignore
+.env
+.env.*
+!.env.example
 tests/
 .ruff_cache
 .pytest_cache
