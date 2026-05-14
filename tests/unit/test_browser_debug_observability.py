@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.browser_debug import (
+    BrowserPageActionError,
     capture_browser_state,
     default_debug_blob,
+    fetch_browser_response,
     run_browser_actions,
 )
+from scrapeyard.engine.url_guard import UnsafeURLError
 
 
 class FakeConsoleMessage:
@@ -212,3 +216,62 @@ async def test_optional_repeat_click_stops_without_raising_when_button_disappear
 
     page.locator.assert_called_once_with("button.load-more")
     page.locator.return_value.click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_raises_required_action_failures_swallowed_by_fetcher() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"actions": [{"type": "click", "selector": "#accept"}]},
+    )
+    page = MagicMock()
+    page.locator.return_value.click = AsyncMock(side_effect=RuntimeError("button missing"))
+
+    class SwallowingFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            try:
+                await kwargs["page_action"](page)
+            except Exception:
+                pass
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    with pytest.raises(BrowserPageActionError, match="button missing") as exc_info:
+        await fetch_browser_response(
+            SwallowingFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+        )
+
+    assert exc_info.value.debug["page_action_error"]["exception_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_capture_browser_state_rejects_non_public_final_url_before_content_capture() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = "http://127.0.0.1/private"
+    page.title = AsyncMock(return_value="Private")
+    page.content = AsyncMock(return_value="<html>private</html>")
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        await capture_browser_state(
+            page,
+            browser=target.browser,
+            fetcher_type=FetcherType.dynamic,
+            artifacts_dir=None,
+            capture=capture,
+        )
+
+    page.title.assert_not_awaited()
+    page.content.assert_not_awaited()
