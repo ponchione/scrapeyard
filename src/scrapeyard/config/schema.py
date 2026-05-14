@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from scrapeyard.common.paths import safe_path_part
-from scrapeyard.engine.proxy import normalize_proxy_url
+from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 
@@ -195,7 +195,7 @@ class ProxyConfig(BaseModel):
     @field_validator("url")
     @classmethod
     def _validate_proxy_url(cls, value: str) -> str:
-        return normalize_proxy_url(value)
+        return normalize_public_proxy_url(value)
 
 
 class PaginationConfig(BaseModel):

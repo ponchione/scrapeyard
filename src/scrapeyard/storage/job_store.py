@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import cast
 
 import aiosqlite
 
@@ -157,7 +158,7 @@ class SQLiteJobStore:
             row = await cursor.fetchone()
         if row is None:
             raise KeyError(f"Job not found: {job_id!r}")
-        return row_to_job(row)
+        return row_to_job(cast(Mapping[str, object], row))
 
     async def list_jobs(self, project: str | None = None) -> list[Job]:
         async with get_db("jobs.db") as db:
@@ -170,7 +171,7 @@ class SQLiteJobStore:
                 cursor = await db.execute(
                     f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs"
                 )
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_job(row) for row in rows]
 
     async def get_job_runs(self, job_id: str, limit: int = 10) -> list[JobRun]:
@@ -181,7 +182,8 @@ class SQLiteJobStore:
                 "ORDER BY started_at DESC LIMIT ?",
                 (job_id, limit),
             )
-            return [row_to_job_run(row) for row in await cursor.fetchall()]
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
+            return [row_to_job_run(row) for row in rows]
 
     async def get_job_run_stats(
         self, job_id: str,
@@ -210,14 +212,14 @@ class SQLiteJobStore:
         sql, params = build_list_jobs_with_stats_query(project, limit, offset)
         async with get_db("jobs.db") as db:
             cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_job_with_stats(row) for row in rows]
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]:
         """Return grouped job counts by project and status."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(PROJECT_SUMMARY_QUERY)
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_project_summary(row) for row in rows]
 
     async def create_run(
@@ -347,7 +349,7 @@ class SQLiteJobStore:
         """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(SCHEDULED_JOBS_QUERY)
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_schedule_state(row) for row in rows]
 
     async def delete_job(self, job_id: str) -> None:

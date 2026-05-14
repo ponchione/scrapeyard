@@ -16,7 +16,12 @@ import httpx
 
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_userinfo_in_url
+from scrapeyard.engine.url_guard import (
+    UnsafeURLError,
+    assert_public_url,
+    redact_userinfo_in_text,
+    redact_userinfo_in_url,
+)
 from scrapeyard.storage.protocols import WebhookOutboxStore
 from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookDeliveryCreate, WebhookDeliveryStatus
 
@@ -176,8 +181,8 @@ class HttpWebhookDispatcher:
             return WebhookDispatchResult(WebhookDispatchStatus.permanent_failed, 1, last_error)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
-            last_error = str(exc) or exc.__class__.__name__
-            logger.warning("Webhook to %s failed after %.0fms: %s", log_url, elapsed_ms, exc)
+            last_error = redact_userinfo_in_text(str(exc)) or exc.__class__.__name__
+            logger.warning("Webhook to %s failed after %.0fms: %s", log_url, elapsed_ms, last_error)
             return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
 
     async def dispatch(
@@ -352,17 +357,17 @@ class HttpWebhookDispatcher:
                 )
                 raise
             except Exception as exc:
-                logger.exception(
-                    "Unexpected webhook dispatch failure to %s",
+                last_error = redact_userinfo_in_text(str(exc)) or exc.__class__.__name__
+                logger.error(
+                    "Unexpected webhook dispatch failure to %s: %s",
                     redact_userinfo_in_url(current.url),
+                    last_error,
                 )
                 result = WebhookDispatchResult(
                     WebhookDispatchStatus.retryable_failed,
                     1,
-                    str(exc) or exc.__class__.__name__,
+                    last_error,
                 )
-            if result is None:
-                result = WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
 
             attempted_at = utc_now()
             if result.status is WebhookDispatchStatus.delivered:

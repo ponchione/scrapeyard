@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import safe_join
@@ -160,7 +160,7 @@ class LocalResultStore:
         """Delete all results for a job from disk and metadata DB."""
         async with get_db("results_meta.db") as db:
             cursor = await db.execute(JOB_RESULTS_DELETE_QUERY, (job_id,))
-            rows = list(await cursor.fetchall())
+            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
             await self._delete_by_ids(db, rows)
 
     async def delete_expired(self, retention_days: int) -> int:
@@ -168,7 +168,7 @@ class LocalResultStore:
         cutoff = (utc_now() - timedelta(days=retention_days)).isoformat()
         async with get_db("results_meta.db") as db:
             cursor = await db.execute(EXPIRED_RESULTS_QUERY, (cutoff,))
-            rows = list(await cursor.fetchall())
+            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
             return await self._delete_by_ids(db, rows)
 
     async def prune_excess_per_job(self, max_results_per_job: int) -> int:
@@ -178,5 +178,5 @@ class LocalResultStore:
                 EXCESS_RESULTS_PER_JOB_QUERY,
                 (max_results_per_job,),
             )
-            rows = list(await cursor.fetchall())
+            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
             return await self._delete_by_ids(db, rows)

@@ -13,7 +13,7 @@ from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.engine.url_guard import redact_userinfo_in_url, url_host_label
+from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url, url_host_label
 from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
 
@@ -99,7 +99,7 @@ def record_failed_target(
         runtime.domain,
         result.error_type.value if result.error_type else ErrorType.http_error.value,
         result.http_status,
-        result.error_detail or "; ".join(result.errors) or "unknown error",
+        redact_userinfo_in_text(result.error_detail or "; ".join(result.errors) or "unknown error"),
     )
     recorder.record_target_failure(
         domain=runtime.domain,

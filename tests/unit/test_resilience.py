@@ -118,6 +118,16 @@ class TestResultValidator:
         result = v.validate([{"title": ""}])
         assert result.passed is False
 
+    def test_fails_required_field_with_empty_collection(self):
+        v = ResultValidator(ValidationConfig(required_fields=["title"]))
+        result = v.validate([{"title": ["", "  ", None]}])
+        assert result.passed is False
+
+    def test_passes_required_field_with_non_empty_collection_item(self):
+        v = ResultValidator(ValidationConfig(required_fields=["title"]))
+        result = v.validate([{"title": ["", "hello"]}])
+        assert result.passed is True
+
     def test_required_price_allows_map_visibility_when_missing(self):
         v = ResultValidator(ValidationConfig(required_fields=["price"]))
         result = v.validate([{"title": "hello", "price": None, "pricing_visibility": "map"}])

@@ -137,8 +137,8 @@ async def scrape_task(
             job_store=job_store,
             webhook_dispatcher=webhook_dispatcher,
         )
-    except Exception:
-        logger.exception("scrape_task crashed for job_id=%s", job_id)
+    except Exception as exc:
+        logger.error("scrape_task crashed for job_id=%s: %s", job_id, _exception_detail(exc))
         await handle_crash(job_id, run_id, job_store)
 
 
@@ -388,7 +388,8 @@ async def _fetch_and_validate_target(
 
 
 def _exception_detail(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return redact_userinfo_in_text(detail)
 
 
 def _target_exception_result(
@@ -400,11 +401,12 @@ def _target_exception_result(
 ) -> TargetResult:
     error_type, http_status, debug = classify_fetch_exception(exc, target_cfg.fetcher)
     detail = _exception_detail(exc)
-    logger.exception(
-        "Target processing crashed for job_id=%s run_id=%s url=%s",
+    logger.warning(
+        "Target processing failed for job_id=%s run_id=%s url=%s: %s",
         recorder.job_id,
         recorder.run_id,
         redact_userinfo_in_url(target_cfg.url),
+        detail,
     )
     result = TargetResult(
         url=target_cfg.url,
