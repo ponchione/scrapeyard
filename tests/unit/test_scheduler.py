@@ -130,6 +130,31 @@ async def test_trigger_job_enqueues_queued_job():
     job_store.update_job_status.assert_called_once()
 
 
+async def test_trigger_job_marks_failed_when_enqueue_fails():
+    job_store = AsyncMock()
+    queued_job = MagicMock()
+    failed_job = MagicMock()
+    mock_job = MagicMock()
+    mock_job.status = JobStatus.queued
+    mock_job.job_id = "job-1"
+    mock_job.config_yaml = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
+    mock_job.model_copy.return_value = queued_job
+    queued_job.model_copy.return_value = failed_job
+    job_store.get_job.return_value = mock_job
+
+    pool = MagicMock()
+    pool.enqueue = AsyncMock(side_effect=MemoryError("over limit"))
+
+    svc = _make_service(worker_pool=pool, job_store=job_store)
+    await svc._trigger_job("job-1")
+
+    pool.enqueue.assert_called_once()
+    assert job_store.update_job_status.await_args_list[0].args == (queued_job,)
+    assert job_store.update_job_status.await_args_list[1].args == (failed_job,)
+    queued_job.model_copy.assert_called_once()
+    assert queued_job.model_copy.call_args.kwargs["update"]["status"] == JobStatus.failed
+
+
 async def test_register_job_disabled_pauses():
     """register_job with enabled=False should pause the job."""
     svc = _make_service()
