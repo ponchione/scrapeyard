@@ -23,6 +23,8 @@ def normalize_proxy_url(value: str) -> str:
         raise ValueError("Proxy URL must not contain backslashes")
     if any(char.isspace() for char in proxy_url):
         raise ValueError("Proxy URL must not contain whitespace")
+    if any(ord(char) < 32 or ord(char) == 127 for char in proxy_url):
+        raise ValueError("Proxy URL must not contain control characters")
 
     parsed = urlparse(proxy_url)
     scheme = parsed.scheme.lower()

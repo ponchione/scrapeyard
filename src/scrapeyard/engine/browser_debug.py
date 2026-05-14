@@ -328,8 +328,7 @@ async def capture_browser_state(
 
 
 async def fetch_basic_response(fetcher_cls: Any, url: str, call_kwargs: dict[str, Any]) -> Any:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: fetcher_cls.get(url, **call_kwargs))
+    return await asyncio.to_thread(fetcher_cls.get, url, **call_kwargs)
 
 
 async def fetch_browser_response(

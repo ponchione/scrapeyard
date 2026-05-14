@@ -130,6 +130,8 @@ def assert_public_url(
         raise UnsafeURLError("URL must not contain backslashes")
     if any(char.isspace() for char in url):
         raise UnsafeURLError("URL must not contain whitespace")
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise UnsafeURLError("URL must not contain control characters")
 
     try:
         parsed = urlparse(url)
@@ -250,6 +252,17 @@ def _redact_query(query: str) -> str:
     return "&".join(redacted_pairs)
 
 
+def _redact_fragment(fragment: str) -> str:
+    if not fragment:
+        return fragment
+    head, separator, query = fragment.partition("?")
+    if separator:
+        return f"{head}{separator}{_redact_query(query)}"
+    if "=" in fragment:
+        return _redact_query(fragment)
+    return fragment
+
+
 def _strip_userinfo_fallback(url: str) -> str:
     match = _URL_AUTHORITY_RE.match(url)
     if match is None:
@@ -263,11 +276,11 @@ def _strip_userinfo_fallback(url: str) -> str:
 def _redact_malformed_url(url: str) -> str:
     """Best-effort redaction for strings that urlparse cannot parse."""
     redacted = _strip_userinfo_fallback(url)
-    head, separator, tail = redacted.partition("?")
-    if not separator:
-        return redacted
-    query, fragment_separator, fragment = tail.partition("#")
-    return f"{head}?{_redact_query(query)}{fragment_separator}{fragment}"
+    before_fragment, fragment_separator, fragment = redacted.partition("#")
+    head, query_separator, query = before_fragment.partition("?")
+    if query_separator:
+        before_fragment = f"{head}?{_redact_query(query)}"
+    return f"{before_fragment}{fragment_separator}{_redact_fragment(fragment)}"
 
 
 def redact_userinfo_in_url(url: str) -> str:
@@ -278,7 +291,13 @@ def redact_userinfo_in_url(url: str) -> str:
     except ValueError:
         return _redact_malformed_url(url)
     redacted_query = _redact_query(parsed.query)
-    if not parsed.username and not parsed.password and redacted_query == parsed.query:
+    redacted_fragment = _redact_fragment(parsed.fragment)
+    if (
+        not parsed.username
+        and not parsed.password
+        and redacted_query == parsed.query
+        and redacted_fragment == parsed.fragment
+    ):
         return url
     netloc = parsed.netloc
     if parsed.username or parsed.password:
@@ -292,7 +311,11 @@ def redact_userinfo_in_url(url: str) -> str:
             port = None
         if port:
             netloc = f"{host}:{port}"
-    return urlunparse(parsed._replace(netloc=netloc, query=redacted_query))
+    return urlunparse(parsed._replace(
+        netloc=netloc,
+        query=redacted_query,
+        fragment=redacted_fragment,
+    ))
 
 
 def url_host_label(url: str) -> str:

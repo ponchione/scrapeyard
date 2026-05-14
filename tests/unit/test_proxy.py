@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from scrapeyard.config.schema import ProxyConfig, TargetConfig
-from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
+from scrapeyard.engine.proxy import normalize_proxy_url, redact_proxy_url, resolve_proxy
 
 
 # --- Helpers ---
@@ -68,6 +70,11 @@ class TestResolveProxy:
         assert resolve_proxy(
             _target(), _proxy("http://job:9090"), ""
         ) == "http://job:9090"
+
+
+def test_normalize_proxy_url_rejects_control_characters():
+    with pytest.raises(ValueError, match="control characters"):
+        normalize_proxy_url("http://proxy.example:8080/\x00")
 
 
 # --- redact_proxy_url ---

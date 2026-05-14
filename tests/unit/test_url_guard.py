@@ -63,6 +63,11 @@ def test_assert_public_url_rejects_raw_whitespace() -> None:
         assert_public_url("http://127.0.0.1\t@example.com/resource", resolve_dns=False)
 
 
+def test_assert_public_url_rejects_raw_control_characters() -> None:
+    with pytest.raises(UnsafeURLError, match="control characters"):
+        assert_public_url("https://example.com/path\x00secret", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
     with pytest.raises(UnsafeURLError, match="percent escapes"):
         assert_public_url("http://%31%32%37.0.0.1/resource", resolve_dns=False)
@@ -116,6 +121,18 @@ def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
     assert redact_userinfo_in_url(
         "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
     ) == "https://example.com/path?api_key=<redacted>&page=2&session_id=<redacted>"
+
+
+def test_redact_userinfo_in_url_masks_sensitive_fragment_values() -> None:
+    assert redact_userinfo_in_url(
+        "https://example.com/callback#access_token=secret&state=ok"
+    ) == "https://example.com/callback#access_token=<redacted>&state=ok"
+
+
+def test_redact_userinfo_in_url_masks_fragment_query_values() -> None:
+    assert redact_userinfo_in_url(
+        "https://example.com/app#/callback?session_id=abc&page=2"
+    ) == "https://example.com/app#/callback?session_id=<redacted>&page=2"
 
 
 def test_redact_userinfo_in_url_masks_signed_url_query_values() -> None:
