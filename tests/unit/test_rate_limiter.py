@@ -56,6 +56,23 @@ class TestLocalDomainRateLimiter:
         assert time.monotonic() - start < 0.1
 
     @pytest.mark.asyncio
+    async def test_stale_domain_state_is_pruned(self, monkeypatch) -> None:
+        limiter = LocalDomainRateLimiter(retention_seconds=0.5)
+        current_time = 10.0
+
+        def fake_monotonic() -> float:
+            return current_time
+
+        monkeypatch.setattr(rate_limiter_module.time, "monotonic", fake_monotonic)
+
+        await limiter.acquire("old.example", 0.1)
+        current_time = 11.0
+        await limiter.acquire("new.example", 0.1)
+
+        assert limiter._last_request == {"new.example": 11.0}
+        assert list(limiter._locks) == ["new.example"]
+
+    @pytest.mark.asyncio
     async def test_concurrent_acquires_for_same_domain_do_not_overlap_waits(self, monkeypatch) -> None:
         limiter = LocalDomainRateLimiter()
         current_time = 100.0

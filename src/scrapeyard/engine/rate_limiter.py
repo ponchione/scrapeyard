@@ -12,6 +12,7 @@ from arq.connections import ArqRedis
 from redis.exceptions import NoScriptError
 
 logger = logging.getLogger(__name__)
+_DEFAULT_LOCAL_RETENTION_SECONDS = 3600.0
 
 
 class DomainRateLimiter(Protocol):
@@ -26,13 +27,16 @@ class DomainRateLimiter(Protocol):
 class LocalDomainRateLimiter:
     """Per-invocation rate limiter (existing behavior, for testing/fallback)."""
 
-    def __init__(self) -> None:
+    def __init__(self, retention_seconds: float = _DEFAULT_LOCAL_RETENTION_SECONDS) -> None:
         self._last_request: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._last_prune_at = 0.0
+        self._retention_seconds = retention_seconds
 
     async def acquire(self, domain: str, min_interval: float) -> None:
         if min_interval <= 0:
             return
+        self._prune_stale_domains(time.monotonic())
         async with self._locks.setdefault(domain, asyncio.Lock()):
             now = time.monotonic()
             last = self._last_request.get(domain, 0.0)
@@ -43,6 +47,17 @@ class LocalDomainRateLimiter:
                 )
                 await asyncio.sleep(wait)
             self._last_request[domain] = time.monotonic()
+
+    def _prune_stale_domains(self, now: float) -> None:
+        if now < self._last_prune_at + self._retention_seconds:
+            return
+        self._last_prune_at = now
+        cutoff = now - self._retention_seconds
+        for domain, last_request in list(self._last_request.items()):
+            lock = self._locks.get(domain)
+            if last_request <= cutoff and (lock is None or not lock.locked()):
+                self._last_request.pop(domain, None)
+                self._locks.pop(domain, None)
 
 
 class RedisDomainRateLimiter:
