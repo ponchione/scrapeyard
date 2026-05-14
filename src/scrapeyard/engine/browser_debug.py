@@ -62,7 +62,7 @@ def _safe_text_attr(value: Any, attr: str) -> str | None:
             raw = raw()
         except Exception:
             return None
-    text = truncate_text(coerce_to_text(raw), _EVENT_TEXT_CHARS)
+    text = truncate_text(redact_userinfo_in_text(coerce_to_text(raw)), _EVENT_TEXT_CHARS)
     return text or None
 
 
