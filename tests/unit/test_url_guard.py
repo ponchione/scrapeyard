@@ -78,6 +78,16 @@ def test_assert_public_url_rejects_legacy_ipv4_loopback_without_dns() -> None:
         assert_public_url("http://2130706433/resource", resolve_dns=False)
 
 
+def test_assert_public_url_rejects_trailing_dot_ipv4_loopback_without_dns() -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url("http://127.0.0.1./resource", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_trailing_dot_legacy_ipv4_without_dns() -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url("http://2130706433./resource", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_legacy_ipv4_private_octal_without_dns() -> None:
     with pytest.raises(UnsafeURLError, match="non-public"):
         assert_public_url("http://0300.0250.0001.0001/resource", resolve_dns=False)

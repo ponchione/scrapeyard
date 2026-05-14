@@ -10,6 +10,21 @@ import pytest
 from scrapeyard.storage.database import close_db, get_db, init_db
 
 
+def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
+    """Top-level wheel data installs next to the package, not two levels above it."""
+    import scrapeyard.storage.database as mod
+
+    package_dir = tmp_path / "site-packages" / "scrapeyard"
+    sql_dir = tmp_path / "site-packages" / "sql"
+    package_dir.mkdir(parents=True)
+    sql_dir.mkdir()
+    (sql_dir / "001_create_jobs.sql").write_text("-- migration", encoding="utf-8")
+
+    monkeypatch.setattr(mod.importlib.resources, "files", lambda _package: package_dir)
+
+    assert mod._resolve_sql_dir() == sql_dir
+
+
 async def test_init_db_creates_databases(tmp_path):
     """init_db should create all three .db files."""
     db_dir = tmp_path / "db"
