@@ -15,7 +15,7 @@ def build_result_lookup_query(
         )
     return (
         "SELECT run_id, status, file_path FROM results_meta"
-        " WHERE job_id=? ORDER BY created_at DESC LIMIT 1",
+        " WHERE job_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
         (job_id,),
     )
 
@@ -33,7 +33,7 @@ SELECT id, file_path FROM (
     SELECT id, file_path,
            ROW_NUMBER() OVER (
                PARTITION BY job_id
-               ORDER BY created_at DESC
+               ORDER BY created_at DESC, id DESC
            ) AS rn
     FROM results_meta
 ) WHERE rn > ?

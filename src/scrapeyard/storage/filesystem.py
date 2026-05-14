@@ -10,12 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
-def prepare_directory(path: str | Path) -> None:
-    """Recreate *path* as an empty directory."""
-    target = Path(path)
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+def ensure_directory(path: str | Path) -> None:
+    """Create *path* if needed without deleting existing contents."""
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def write_json_file(path: str | Path, data: Any) -> None:

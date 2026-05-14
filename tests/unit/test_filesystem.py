@@ -5,31 +5,32 @@ from datetime import datetime
 import pytest
 
 from scrapeyard.storage.filesystem import (
-    prepare_directory,
+    ensure_directory,
     read_json_file,
     remove_directories,
     write_json_file,
 )
 
 
-def test_prepare_directory_creates_empty_dir(tmp_path):
+def test_ensure_directory_creates_dir(tmp_path):
     target = tmp_path / "new_dir"
-    prepare_directory(target)
+    ensure_directory(target)
     assert target.is_dir()
     assert list(target.iterdir()) == []
 
 
-def test_prepare_directory_clears_existing_contents(tmp_path):
+def test_ensure_directory_preserves_existing_contents(tmp_path):
     target = tmp_path / "existing"
     target.mkdir()
     (target / "old_file.txt").write_text("stale")
     (target / "subdir").mkdir()
     (target / "subdir" / "nested.txt").write_text("nested")
 
-    prepare_directory(target)
+    ensure_directory(target)
 
     assert target.is_dir()
-    assert list(target.iterdir()) == []
+    assert (target / "old_file.txt").read_text() == "stale"
+    assert (target / "subdir" / "nested.txt").read_text() == "nested"
 
 
 def test_write_and_read_json_round_trip(tmp_path):
