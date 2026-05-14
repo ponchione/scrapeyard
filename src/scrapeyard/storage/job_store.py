@@ -327,6 +327,27 @@ class SQLiteJobStore:
 
             cursor = await db.execute(
                 """UPDATE jobs
+                   SET status = (
+                           SELECT job_runs.status
+                           FROM job_runs
+                           WHERE job_runs.run_id = jobs.current_run_id
+                       ),
+                       updated_at = ?
+                   WHERE status = 'running'
+                     AND (updated_at IS NULL OR updated_at <= ?)
+                     AND current_run_id IS NOT NULL
+                     AND EXISTS (
+                         SELECT 1
+                         FROM job_runs
+                         WHERE job_runs.run_id = jobs.current_run_id
+                           AND job_runs.status IN ('complete', 'partial', 'failed')
+                     )""",
+                (recovered_text, cutoff_text),
+            )
+            recovered_jobs += max(cursor.rowcount, 0)
+
+            cursor = await db.execute(
+                """UPDATE jobs
                    SET status = 'failed', updated_at = ?
                    WHERE status = 'running'
                      AND (updated_at IS NULL OR updated_at <= ?)

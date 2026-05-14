@@ -112,3 +112,12 @@ def test_remove_directories_ignores_missing(tmp_path):
     # Should not raise
     remove_directories([missing])
     assert not missing.exists()
+
+
+def test_remove_directories_skips_non_directories(tmp_path):
+    file_path = tmp_path / "not-a-dir"
+    file_path.write_text("keep", encoding="utf-8")
+
+    remove_directories([file_path, tmp_path / "missing"])
+
+    assert file_path.read_text(encoding="utf-8") == "keep"
