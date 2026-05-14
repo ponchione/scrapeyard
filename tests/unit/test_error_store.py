@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
 from datetime import datetime
+from typing import Any
 
 import pytest
 
 from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
-from scrapeyard.storage.database import init_db
+from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
 
 
@@ -62,6 +62,38 @@ async def test_log_error_null_optionals(store):
     assert len(results) == 1
     assert results[0].http_status is None
     assert results[0].error_message is None
+    assert results[0].selectors_matched is None
+
+
+async def test_query_errors_ignores_malformed_selectors_matched_json(store):
+    async with get_db("errors.db") as db:
+        await db.execute(
+            """INSERT INTO errors
+               (job_id, run_id, project, target_url, attempt,
+                timestamp, error_type, http_status, fetcher_used,
+                error_message, selectors_matched, action_taken, resolved)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "j-1",
+                "run-1",
+                "acme",
+                "https://example.com",
+                1,
+                "2026-03-01T12:00:00",
+                ErrorType.http_error.value,
+                503,
+                "httpx",
+                "HTTP 503",
+                "{bad json",
+                ActionTaken.retry.value,
+                0,
+            ),
+        )
+        await db.commit()
+
+    results = await store.query_errors(ErrorFilters())
+
+    assert len(results) == 1
     assert results[0].selectors_matched is None
 
 
