@@ -115,20 +115,22 @@ def test_serialize_error_record_formats_enum_and_datetime_fields():
         job_id="job-1",
         run_id="run-1",
         project="integ",
-        target_url="https://example.com",
+        target_url="https://user:pass@example.com",
         attempt=2,
         timestamp=datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc),
         error_type=ErrorType.http_error,
         http_status=500,
         fetcher_used="basic",
-        error_message="boom",
+        error_message="boom at https://user:pass@example.com/private",
         selectors_matched={"title": 0},
         action_taken=ActionTaken.retry,
     )
 
     payload = serialize_error_record(error)
 
+    assert payload["target_url"] == "https://example.com"
     assert payload["timestamp"] == error.timestamp.isoformat()
     assert payload["error_type"] == "http_error"
+    assert payload["error_message"] == "boom at https://example.com/private"
     assert payload["action_taken"] == "retry"
     assert payload["selectors_matched"] == {"title": 0}

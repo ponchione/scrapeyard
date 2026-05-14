@@ -1,5 +1,6 @@
 """Test result retention cleanup."""
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
@@ -100,7 +101,7 @@ async def test_delete_expired_offloads_directory_removal(store):
     assert deleted == 1
     assert mock_to_thread.await_args == call(
         result_store_module.remove_directories,
-        [meta.file_path],
+        [Path(meta.file_path)],
     )
 
 
@@ -172,5 +173,35 @@ async def test_prune_excess_per_job_offloads_directory_removal(store):
     assert deleted == 1
     assert mock_to_thread.await_args == call(
         result_store_module.remove_directories,
-        [oldest.file_path],
+        [Path(oldest.file_path)],
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_skips_unsafe_metadata_path(store, tmp_path):
+    from scrapeyard.storage.database import get_db
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            """INSERT INTO results_meta
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "job-unsafe",
+                "test-project",
+                "run-unsafe",
+                "complete",
+                1,
+                str(outside),
+                old_date,
+            ),
+        )
+        await db.commit()
+
+    deleted = await store.delete_expired(30)
+
+    assert deleted == 1
+    assert outside.exists()

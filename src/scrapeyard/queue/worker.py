@@ -7,7 +7,6 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import urlparse
 
 from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
@@ -17,6 +16,12 @@ from scrapeyard.engine.fetch_classifier import classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
+from scrapeyard.engine.url_guard import (
+    redact_sensitive_mapping,
+    redact_userinfo_in_text,
+    redact_userinfo_in_url,
+    url_host_label,
+)
 from scrapeyard.models.job import ErrorRecord, Job, JobStatus
 from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.run_lifecycle import (
@@ -399,7 +404,7 @@ def _target_exception_result(
         "Target processing crashed for job_id=%s run_id=%s url=%s",
         recorder.job_id,
         recorder.run_id,
-        target_cfg.url,
+        redact_userinfo_in_url(target_cfg.url),
     )
     result = TargetResult(
         url=target_cfg.url,
@@ -461,23 +466,28 @@ def _format_output(
     all_errors: list[str],
 ) -> dict[str, Any]:
     """Build the output data dict for result storage."""
+    redacted_errors = [redact_userinfo_in_text(error) for error in all_errors]
     job_meta: dict[str, Any] = {
         "project": config.project,
         "name": config.name,
         "job_id": job_id,
         "status": final_status.value,
         "completed_at": utc_now().isoformat(),
-        "errors": all_errors,
+        "errors": redacted_errors,
         "targets": [
             {
-                "url": result.url,
+                "url": redact_userinfo_in_url(result.url),
                 "status": result.status_value,
                 "count": len(result.data),
                 "pages_scraped": result.pages_scraped,
                 "error_type": result.error_type.value if result.error_type else None,
-                "error_detail": result.error_detail,
-                "errors": result.errors,
-                "debug": result.debug,
+                "error_detail": (
+                    redact_userinfo_in_text(result.error_detail)
+                    if result.error_detail is not None
+                    else None
+                ),
+                "errors": [redact_userinfo_in_text(error) for error in result.errors],
+                "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
             }
             for result in all_results
         ],
@@ -486,22 +496,28 @@ def _format_output(
     if config.output.group_by == GroupBy.merge:
         merged: list[Any] = []
         for result in all_results:
+            source = url_host_label(result.url)
             for item in result.data:
                 if isinstance(item, dict):
-                    item["_source"] = urlparse(result.url).netloc
-                merged.append(item)
+                    merged.append({**item, "_source": source})
+                else:
+                    merged.append(item)
         return {**job_meta, "results": merged}
 
     grouped: dict[str, Any] = {}
     for result in all_results:
-        domain = urlparse(result.url).netloc
+        domain = url_host_label(result.url)
         grouped[domain] = {
             "status": result.status_value,
             "count": len(result.data),
             "data": result.data,
-            "debug": result.debug,
+            "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
             "error_type": result.error_type.value if result.error_type else None,
-            "error_detail": result.error_detail,
+            "error_detail": (
+                redact_userinfo_in_text(result.error_detail)
+                if result.error_detail is not None
+                else None
+            ),
         }
     return {**job_meta, "results": grouped}
 

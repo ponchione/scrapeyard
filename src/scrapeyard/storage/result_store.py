@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +27,8 @@ from scrapeyard.storage.result_queries import (
 )
 from scrapeyard.storage.types import ResultPayload, SaveResultMeta
 
+logger = logging.getLogger(__name__)
+
 
 class LocalResultStore:
     """Stores scrape results on the local filesystem with metadata in SQLite.
@@ -46,6 +49,26 @@ class LocalResultStore:
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
 
+    def _checked_result_dir(self, file_path: str) -> Path:
+        path = Path(file_path)
+        root = self._results_dir.resolve(strict=False)
+        resolved = path.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Unsafe result path outside results_dir: {file_path!r}") from exc
+        return path
+
+    def _checked_result_dirs(self, rows: Sequence[Mapping[str, Any]]) -> list[Path]:
+        paths: list[Path] = []
+        for row in rows:
+            file_path = str(row["file_path"])
+            try:
+                paths.append(self._checked_result_dir(file_path))
+            except ValueError:
+                logger.warning("Skipping unsafe result directory during cleanup: %r", file_path)
+        return paths
+
     async def _delete_by_ids(
         self,
         db: Any,
@@ -64,10 +87,7 @@ class LocalResultStore:
         # Delete files after metadata so a crash leaves orphaned files
         # (recoverable) rather than orphaned metadata rows pointing to
         # missing files.
-        await asyncio.to_thread(
-            remove_directories,
-            [row["file_path"] for row in rows],
-        )
+        await asyncio.to_thread(remove_directories, self._checked_result_dirs(rows))
         return len(rows)
 
     async def save_result(
@@ -131,7 +151,7 @@ class LocalResultStore:
         result_run_id = row["run_id"]
         file_path = row["file_path"]
 
-        path = Path(file_path) / "results.json"
+        path = self._checked_result_dir(str(file_path)) / "results.json"
         data = await asyncio.to_thread(read_json_file, path)
         return ResultPayload(run_id=result_run_id, data=data)
 

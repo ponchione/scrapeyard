@@ -119,6 +119,9 @@ class RequestSizeLimitMiddleware:
             except ValueError:
                 await _reject(scope, send, 400, "Invalid Content-Length")
                 return
+            if declared < 0:
+                await _reject(scope, send, 400, "Invalid Content-Length")
+                return
             if declared > self.max_bytes:
                 await _reject(scope, send, 413, "Request body too large")
                 return

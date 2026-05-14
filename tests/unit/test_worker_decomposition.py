@@ -52,6 +52,22 @@ def test_resolve_target_runtime_context_uses_explicit_adaptive_override_and_prox
     assert context.artifacts_dir == "/tmp/artifacts/shop.example"
 
 
+def test_resolve_target_runtime_context_strips_userinfo_from_domain():
+    target_cfg = MagicMock(url="https://user:pass@shop.example:8443/products", proxy=None)
+    config = MagicMock(adaptive=False, schedule=None, proxy=None)
+    settings = MagicMock(proxy_url="")
+
+    context = resolve_target_runtime_context(
+        target_cfg=target_cfg,
+        config=config,
+        settings=settings,
+        run_artifacts_dir="/tmp/artifacts",
+    )
+
+    assert context.domain == "shop.example:8443"
+    assert context.artifacts_dir == "/tmp/artifacts/shop.example:8443"
+
+
 def test_resolve_target_runtime_context_enables_adaptive_for_scheduled_jobs_when_unspecified():
     target_cfg = MagicMock(url="https://shop.example/products", proxy=None)
     config = MagicMock()
@@ -114,6 +130,7 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
         },
     ]
     assert payload["results"] == [{"sku": "a1", "_source": "a.example"}, "raw-item"]
+    assert results[0].data == [{"sku": "a1"}]
 
 
 def test_format_output_groups_results_by_domain_without_mutating_group_items():
@@ -155,3 +172,35 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
     }
     assert first_item == {"sku": "a1"}
     assert second_item == {"sku": "b1"}
+
+
+def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
+    config = MagicMock(project="test", name="job")
+    config.output.group_by = GroupBy.merge
+    result = TargetResult(
+        url="https://user:pass@example.com:8443/products",
+        status="failed",
+        data=[{"sku": "a1"}],
+        errors=["failed at https://user:pass@example.com/private"],
+        error_detail="redirected to https://user:pass@example.com/private",
+        debug={
+            "final_url": "https://user:pass@example.com/private",
+            "headers": {"Authorization": "Bearer secret"},
+        },
+    )
+
+    payload = _format_output(
+        config,
+        [result],
+        [{"sku": "a1"}],
+        "job-1",
+        JobStatus.failed,
+        result.errors,
+    )
+
+    assert payload["targets"][0]["url"] == "https://example.com:8443/products"
+    assert payload["targets"][0]["error_detail"] == "redirected to https://example.com/private"
+    assert payload["targets"][0]["errors"] == ["failed at https://example.com/private"]
+    assert payload["targets"][0]["debug"]["final_url"] == "https://example.com/private"
+    assert payload["targets"][0]["debug"]["headers"]["Authorization"] == "<redacted>"
+    assert payload["results"] == [{"sku": "a1", "_source": "example.com:8443"}]

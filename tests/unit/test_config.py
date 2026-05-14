@@ -73,6 +73,11 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="must be provided"):
             ScrapeConfig(**data)
 
+    def test_empty_targets_raises(self):
+        data = {"project": "test", "name": "job1", "targets": []}
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**data)
+
     @pytest.mark.parametrize("field", ["project", "name"])
     def test_project_and_name_reject_path_components(self, field):
         data = _tier1_config(**{field: "../outside"})
