@@ -206,7 +206,7 @@ def redact_sensitive_config_text(text: str) -> str:
     redacted_text = redact_userinfo_in_text(text)
     try:
         data = yaml.load(redacted_text, Loader=ScrapeyardSafeLoader)
-    except YAMLError:
+    except (TypeError, ValueError, YAMLError):
         return redacted_text
     if not isinstance(data, dict | list):
         return redacted_text

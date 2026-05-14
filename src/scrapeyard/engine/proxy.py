@@ -19,6 +19,10 @@ def normalize_proxy_url(value: str) -> str:
     proxy_url = value.strip()
     if proxy_url == _DIRECT_PROXY:
         return proxy_url
+    if "\\" in proxy_url:
+        raise ValueError("Proxy URL must not contain backslashes")
+    if any(char.isspace() for char in proxy_url):
+        raise ValueError("Proxy URL must not contain whitespace")
 
     parsed = urlparse(proxy_url)
     scheme = parsed.scheme.lower()
@@ -27,6 +31,8 @@ def normalize_proxy_url(value: str) -> str:
         raise ValueError(f"Proxy URL scheme must be one of: {allowed}")
     if not parsed.hostname:
         raise ValueError("Proxy URL must include a hostname")
+    if "%" in parsed.hostname:
+        raise ValueError("Proxy URL hostname must not contain percent escapes")
     try:
         _ = parsed.port
     except ValueError as exc:

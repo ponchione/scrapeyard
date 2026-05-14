@@ -211,6 +211,21 @@ def test_proxy_url_from_env_rejects_invalid_url(monkeypatch):
         ServiceSettings()
 
 
+@pytest.mark.parametrize(
+    ("proxy_url", "message"),
+    [
+        ("http://gate.example.com/a path", "whitespace"),
+        ("http://gate.example.com\\@127.0.0.1:8080", "backslashes"),
+        ("http://%31%32%37.0.0.1:8080", "percent escapes"),
+    ],
+)
+def test_proxy_url_from_env_rejects_ambiguous_url_syntax(monkeypatch, proxy_url, message):
+    monkeypatch.setenv("SCRAPEYARD_PROXY_URL", proxy_url)
+
+    with pytest.raises(ValidationError, match=message):
+        ServiceSettings()
+
+
 def test_log_level_defaults_to_info(monkeypatch):
     monkeypatch.delenv("SCRAPEYARD_LOG_LEVEL", raising=False)
     from scrapeyard.common.settings import ServiceSettings

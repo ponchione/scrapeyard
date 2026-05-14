@@ -197,6 +197,7 @@ def get_scheduler() -> SchedulerService:
         worker_pool=get_worker_pool(),
         job_store=get_job_store(),
         jitter_max_seconds=settings.scheduler_jitter_max_seconds,
+        queued_run_lease_seconds=settings.workers_running_lease_seconds,
     )
 
 

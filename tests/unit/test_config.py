@@ -385,6 +385,10 @@ target:
         with pytest.raises(yaml.YAMLError, match="Duplicate YAML key"):
             load_config(yaml_str)
 
+    def test_rejects_unhashable_yaml_keys(self):
+        with pytest.raises(yaml.YAMLError, match="mapping keys must be hashable"):
+            load_config("? [project]\n: demo\n")
+
     def test_rejects_non_mapping_yaml_root(self):
         with pytest.raises(ValueError, match="root must be a mapping"):
             load_config("- just\n- a\n- list")

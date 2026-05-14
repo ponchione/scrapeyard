@@ -41,10 +41,12 @@ class SchedulerService:
         worker_pool: WorkerPool,
         job_store: JobStore,
         jitter_max_seconds: int = 120,
+        queued_run_lease_seconds: int = 300,
     ) -> None:
         self._pool = worker_pool
         self._job_store = job_store
         self._jitter_max = jitter_max_seconds
+        self._queued_run_lease_seconds = queued_run_lease_seconds
         self._scheduler = AsyncIOScheduler()
 
     def register_job(self, job_id: str, cron_expr: str, enabled: bool = True) -> None:
@@ -107,7 +109,7 @@ class SchedulerService:
             self.remove_job(job_id)
             return
 
-        if job.status == JobStatus.running:
+        if self._job_has_active_run(job):
             return
 
         config = await asyncio.to_thread(load_config, job.config_yaml)
@@ -141,3 +143,19 @@ class SchedulerService:
         """Return the next scheduled fire time, or None if not scheduled."""
         aps_job = self._scheduler.get_job(job_id)
         return aps_job.next_run_time if aps_job else None
+
+    def _job_has_active_run(self, job: object) -> bool:
+        if getattr(job, "status", None) == JobStatus.running:
+            return True
+        if getattr(job, "status", None) != JobStatus.queued:
+            return False
+        if getattr(job, "current_run_id", None) is None:
+            return False
+
+        updated_at = getattr(job, "updated_at", None)
+        if updated_at is None:
+            return True
+        now = utc_now()
+        if updated_at.tzinfo is None:
+            now = now.replace(tzinfo=None)
+        return (now - updated_at).total_seconds() < self._queued_run_lease_seconds

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.middleware import (
+    APIKeyAuthMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
     _api_key_is_valid,
@@ -58,6 +59,17 @@ def _size_limited_app(*, max_bytes: int = 3) -> FastAPI:
         return {"len": len(body)}
 
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=max_bytes)
+    return app
+
+
+def _auth_app(*, keys: set[str] | None = None) -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/protected")
+    async def protected() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.add_middleware(APIKeyAuthMiddleware, keys=keys or {"secret"})
     return app
 
 
@@ -138,8 +150,33 @@ async def test_rate_limit_invalid_api_keys_fall_back_to_client_ip() -> None:
     assert response.status_code == 429
 
 
+@pytest.mark.asyncio
+async def test_rate_limit_duplicate_api_key_headers_fall_back_to_client_ip() -> None:
+    clock = ManualClock()
+    app = _rate_limited_app(requests=1, window_seconds=10.0, api_keys={"key-a"}, clock=clock)
+    transport = ASGITransport(app=app)
+
+    duplicate_headers = [("X-API-Key", "key-a"), ("X-API-Key", "key-a")]
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/limited", headers=duplicate_headers)).status_code == 200
+        assert (await client.get("/limited", headers=duplicate_headers)).status_code == 429
+        assert (await client.get("/limited", headers={"X-API-Key": "key-a"})).status_code == 200
+
+
 def test_api_key_validation_treats_non_ascii_input_as_invalid() -> None:
     assert _api_key_is_valid("kéy", {"key"}) is False
+
+
+@pytest.mark.asyncio
+async def test_auth_rejects_duplicate_api_key_headers() -> None:
+    transport = ASGITransport(app=_auth_app(keys={"secret"}))
+    duplicate_headers = [("X-API-Key", "secret"), ("X-API-Key", "secret")]
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/protected", headers=duplicate_headers)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid X-API-Key"}
 
 
 @pytest.mark.asyncio

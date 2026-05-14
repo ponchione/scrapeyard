@@ -1,8 +1,10 @@
 """Tests for scrapeyard.scheduler.cron — SchedulerService."""
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+from scrapeyard.common.time import utc_now
 from scrapeyard.models.job import JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 
@@ -76,6 +78,43 @@ async def test_trigger_job_skips_if_already_running():
     pool.enqueue.assert_not_called()
 
 
+async def test_trigger_job_skips_if_run_already_queued():
+    job_store = AsyncMock()
+    mock_job = MagicMock()
+    mock_job.status = JobStatus.queued
+    mock_job.current_run_id = "run-queued"
+    mock_job.updated_at = utc_now()
+    job_store.get_job.return_value = mock_job
+
+    pool = MagicMock()
+    pool.enqueue = AsyncMock()
+
+    svc = _make_service(worker_pool=pool, job_store=job_store)
+    await svc._trigger_job("job-1")
+
+    pool.enqueue.assert_not_called()
+
+
+async def test_trigger_job_requeues_stale_queued_run():
+    job_store = AsyncMock()
+    mock_job = MagicMock()
+    mock_job.status = JobStatus.queued
+    mock_job.current_run_id = "run-stale"
+    mock_job.updated_at = utc_now() - timedelta(seconds=301)
+    mock_job.job_id = "job-1"
+    mock_job.config_yaml = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
+    mock_job.model_copy.return_value = mock_job
+    job_store.get_job.return_value = mock_job
+
+    pool = MagicMock()
+    pool.enqueue = AsyncMock()
+
+    svc = _make_service(worker_pool=pool, job_store=job_store, queued_run_lease_seconds=300)
+    await svc._trigger_job("job-1")
+
+    pool.enqueue.assert_called_once()
+
+
 async def test_trigger_job_removes_deleted_jobs():
     job_store = AsyncMock()
     job_store.get_job.side_effect = KeyError("not found")
@@ -115,6 +154,7 @@ async def test_trigger_job_enqueues_queued_job():
     job_store = AsyncMock()
     mock_job = MagicMock()
     mock_job.status = JobStatus.queued
+    mock_job.current_run_id = None
     mock_job.job_id = "job-1"
     mock_job.config_yaml = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
     mock_job.model_copy.return_value = mock_job
@@ -136,6 +176,7 @@ async def test_trigger_job_marks_failed_when_enqueue_fails():
     failed_job = MagicMock()
     mock_job = MagicMock()
     mock_job.status = JobStatus.queued
+    mock_job.current_run_id = None
     mock_job.job_id = "job-1"
     mock_job.config_yaml = "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
     mock_job.model_copy.return_value = queued_job
