@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from scrapeyard.engine import rate_limiter as rate_limiter_module
 from scrapeyard.engine.rate_limiter import (
     LocalDomainRateLimiter,
     RedisDomainRateLimiter,
@@ -42,6 +44,37 @@ class TestLocalDomainRateLimiter:
         start = time.monotonic()
         await limiter.acquire("b.com", 5.0)
         assert time.monotonic() - start < 0.1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquires_for_same_domain_do_not_overlap_waits(self, monkeypatch) -> None:
+        limiter = LocalDomainRateLimiter()
+        current_time = 100.0
+        active_sleepers = 0
+        max_active_sleepers = 0
+        real_sleep = asyncio.sleep
+
+        def fake_monotonic() -> float:
+            return current_time
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal active_sleepers, current_time, max_active_sleepers
+            active_sleepers += 1
+            max_active_sleepers = max(max_active_sleepers, active_sleepers)
+            await real_sleep(0)
+            current_time += delay
+            active_sleepers -= 1
+
+        monkeypatch.setattr(rate_limiter_module.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(rate_limiter_module.asyncio, "sleep", fake_sleep)
+
+        await limiter.acquire("example.com", 1.0)
+        await asyncio.gather(
+            limiter.acquire("example.com", 1.0),
+            limiter.acquire("example.com", 1.0),
+        )
+
+        assert max_active_sleepers == 1
+        assert current_time == 102.0
 
 
 # ---------------------------------------------------------------------------
