@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -151,6 +152,71 @@ async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monk
             retryable_status={500},
             adaptive_dir="/tmp/adaptive",
         )
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_requires_resolved_dns_when_proxy_can_resolve_remotely(monkeypatch):
+    target = TargetConfig(
+        url="https://unresolved.example",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    fetch_called = False
+
+    def _raise_gaierror(*_args, **_kwargs):
+        raise socket.gaierror
+
+    async def _fetch_basic_response(_fetcher_cls, _url, _call_kwargs):
+        nonlocal fetch_called
+        fetch_called = True
+        return SimpleNamespace(status=200, url=target.url, text="<h1>ok</h1>")
+
+    monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+        await _fetch_page(
+            object(),
+            target.url,
+            target,
+            FetcherType.basic,
+            adaptive=False,
+            retryable_status={500},
+            adaptive_dir="/tmp/adaptive",
+            proxy_url="http://proxy.example:8080",
+        )
+
+    assert fetch_called is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_still_allows_unresolved_dns_for_direct_basic_fetch(monkeypatch):
+    target = TargetConfig(
+        url="https://unresolved.example",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+
+    def _raise_gaierror(*_args, **_kwargs):
+        raise socket.gaierror
+
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+
+    monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    outcome = await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.basic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert outcome.debug["final_url"] == target.url
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

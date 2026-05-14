@@ -127,16 +127,18 @@ def assert_public_url(
     *,
     allowed_schemes: tuple[str, ...] = ("http", "https"),
     resolve_dns: bool = True,
+    allow_unresolved: bool = True,
 ) -> None:
     """Reject URLs that point at non-public destinations.
 
     The check has two layers:
 
     1. Lexical — reject banned scheme, banned hostnames, or literal private IPs.
-    2. DNS (best-effort) — when *resolve_dns* is true and the hostname resolves,
-       ensure every resolved address is public. Resolution failures are ignored
-       because a fetch against a non-resolving host will fail anyway, which is
-       not an SSRF vector.
+    2. DNS — when *resolve_dns* is true and the hostname resolves, ensure every
+       resolved address is public. Resolution failures are allowed by default
+       because direct fetches against non-resolving hosts fail anyway. Callers
+       using proxies or remote browsers should set *allow_unresolved* to false
+       because DNS may be resolved outside this process.
     """
 
     if "\\" in url:
@@ -206,9 +208,9 @@ def assert_public_url(
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except UnicodeError as exc:
         raise UnsafeURLError("URL hostname is invalid") from exc
-    except socket.gaierror:
-        # Host does not resolve right now — the fetch will fail loudly. Not an
-        # SSRF vector; do not block config load over transient DNS issues.
+    except socket.gaierror as exc:
+        if not allow_unresolved:
+            raise UnsafeURLError(f"Hostname {host!r} could not be resolved") from exc
         return
 
     seen: set[str] = set()

@@ -128,13 +128,15 @@ async def _fetch_basic_with_safe_redirects(
     url: str,
     call_kwargs: dict[str, Any],
     debug: dict[str, Any],
+    *,
+    require_resolved_dns: bool = False,
 ) -> Any:
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
     redirects: list[str] = []
     call_kwargs["follow_redirects"] = False
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
-        await asyncio.to_thread(assert_public_url, current_url)
+        await _assert_fetch_url(current_url, require_resolved_dns=require_resolved_dns)
         response = await fetch_basic_response(fetcher_cls, current_url, call_kwargs)
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
             if redirects:
@@ -146,9 +148,27 @@ async def _fetch_basic_with_safe_redirects(
         response_url = getattr(response, "url", None)
         base_url = response_url if isinstance(response_url, str) and response_url else current_url
         current_url = urljoin(base_url, location)
-        await asyncio.to_thread(assert_public_url, current_url)
+        await _assert_fetch_url(current_url, require_resolved_dns=require_resolved_dns)
         redirects.append(current_url)
     raise FetchError(310, debug={**debug, "redirects": redirects})
+
+
+async def _assert_fetch_url(url: str, *, require_resolved_dns: bool) -> None:
+    await asyncio.to_thread(
+        assert_public_url,
+        url,
+        allow_unresolved=not require_resolved_dns,
+    )
+
+
+def _requires_verified_dns(target: TargetConfig, fetcher_type: FetcherType, proxy_url: str | None) -> bool:
+    if proxy_url is not None:
+        return True
+    return bool(
+        fetcher_type == FetcherType.dynamic
+        and target.browser is not None
+        and target.browser.cdp_url is not None
+    )
 
 
 def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
@@ -183,14 +203,21 @@ async def _fetch_page(
     """Fetch a single page using the appropriate Scrapling method."""
     call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
     debug = default_debug_blob(fetcher_type, target, url)
+    require_resolved_dns = _requires_verified_dns(target, fetcher_type, proxy_url)
 
     if fetcher_type == FetcherType.basic:
         call_kwargs.setdefault("timeout", get_settings().basic_fetch_timeout_seconds)
         if proxy_url is not None:
             call_kwargs["proxy"] = proxy_url
-        response = await _fetch_basic_with_safe_redirects(fetcher_cls, url, call_kwargs, debug)
+        response = await _fetch_basic_with_safe_redirects(
+            fetcher_cls,
+            url,
+            call_kwargs,
+            debug,
+            require_resolved_dns=require_resolved_dns,
+        )
     else:
-        await asyncio.to_thread(assert_public_url, url)
+        await _assert_fetch_url(url, require_resolved_dns=require_resolved_dns)
         call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
         response, capture = await fetch_browser_response(
             fetcher_cls,
@@ -199,11 +226,12 @@ async def _fetch_page(
             fetcher_type,
             call_kwargs,
             artifacts_dir,
+            require_resolved_dns=require_resolved_dns,
         )
         debug.update(capture)
 
     populate_fetch_debug(debug, response, url)
-    await asyncio.to_thread(assert_public_url, debug["final_url"])
+    await _assert_fetch_url(debug["final_url"], require_resolved_dns=require_resolved_dns)
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)

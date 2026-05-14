@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -409,6 +410,42 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
             FetcherType.dynamic,
             {},
             artifacts_dir=None,
+        )
+
+    assert route.aborted is True
+    assert route.continued is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_can_require_resolved_browser_route_dns(monkeypatch) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"disable_resources": False},
+    )
+    route = FakeRoute("https://unresolved.example/pixel.png", "image")
+
+    def _raise_gaierror(*_args, **_kwargs):
+        raise socket.gaierror
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            await scrapling_pw_engine.async_intercept_route(route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
+
+    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+        await fetch_browser_response(
+            RouteFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+            require_resolved_dns=True,
         )
 
     assert route.aborted is True
