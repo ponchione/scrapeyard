@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import uuid
+from contextlib import suppress
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -24,12 +26,16 @@ def write_json_file(path: str | Path, data: Any) -> None:
     """
     target = Path(path)
     payload = json.dumps(data, default=str, separators=(",", ":"))
-    tmp = target.with_name(target.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(payload)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, target)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    finally:
+        with suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def read_json_file(path: str | Path) -> Any:
