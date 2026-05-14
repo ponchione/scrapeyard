@@ -24,11 +24,16 @@ class UnsafeURLError(ValueError):
 
 _DISALLOWED_HOSTS: frozenset[str] = frozenset(
     {
+        "broadcasthost",
+        "ip6-localhost",
+        "ip6-loopback",
         "metadata.google.internal",
         "metadata.goog",
         "metadata",
         "instance-data",
         "instance-data.ec2.internal",
+        "localhost",
+        "localhost.localdomain",
     }
 )
 
@@ -230,13 +235,46 @@ def redact_sensitive_mapping(value: Any) -> Any:
     return value
 
 
+def _redact_sensitive_yaml_lines(text: str) -> str:
+    """Best-effort fallback for invalid YAML that still contains key/value secrets."""
+    lines: list[str] = []
+    redacting_indent: int | None = None
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        newline = line[len(body):]
+        stripped = body.lstrip()
+        indent = len(body) - len(stripped)
+
+        if redacting_indent is not None:
+            if stripped and indent <= redacting_indent:
+                redacting_indent = None
+            else:
+                lines.append(f"{body[:indent]}{_REDACTED_VALUE}{newline}" if stripped else line)
+                continue
+
+        if not stripped or stripped.startswith("#") or ":" not in body:
+            lines.append(line)
+            continue
+
+        key, _separator, value = body.partition(":")
+        key_name = key.strip().strip("'\"")
+        if not _is_sensitive_key(key_name):
+            lines.append(line)
+            continue
+
+        lines.append(f"{key}: {_REDACTED_VALUE}{newline}")
+        if not value.strip() or value.strip() in {"|", ">"}:
+            redacting_indent = indent
+    return "".join(lines)
+
+
 def redact_sensitive_config_text(text: str) -> str:
     """Redact userinfo and common secret keys from stored YAML config text."""
     redacted_text = redact_userinfo_in_text(text)
     try:
         data = yaml.load(redacted_text, Loader=ScrapeyardSafeLoader)
     except (TypeError, ValueError, YAMLError):
-        return redacted_text
+        return _redact_sensitive_yaml_lines(redacted_text)
     if not isinstance(data, dict | list):
         return redacted_text
     return yaml.safe_dump(redact_sensitive_mapping(data), sort_keys=False)
