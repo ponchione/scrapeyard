@@ -47,6 +47,11 @@ def test_remove_job_removes_existing():
     assert svc._scheduler.get_job("job-1") is None
 
 
+def test_shutdown_before_start_is_noop():
+    svc = _make_service()
+    svc.shutdown()
+
+
 def test_get_next_run_time_returns_none_for_unknown():
     svc = _make_service()
     assert svc.get_next_run_time("unknown-job") is None

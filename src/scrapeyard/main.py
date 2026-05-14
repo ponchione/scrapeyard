@@ -71,11 +71,17 @@ async def _startup_runtime_services(app: FastAPI) -> None:
 
 
 async def _shutdown_runtime_services(app: FastAPI, *, shutdown_grace_seconds: int) -> None:
-    app.state.cleanup_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await app.state.cleanup_task
-    app.state.scheduler.shutdown()
-    await app.state.worker_pool.stop()
+    cleanup_task = getattr(app.state, "cleanup_task", None)
+    if cleanup_task is not None:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler is not None:
+        scheduler.shutdown()
+    worker_pool = getattr(app.state, "worker_pool", None)
+    if worker_pool is not None:
+        await worker_pool.stop()
     await close_webhook_dispatcher(timeout=shutdown_grace_seconds)
     await close_db()
 
@@ -87,14 +93,18 @@ async def lifespan(app: FastAPI):
 
     settings = get_settings()
     setup_logging(settings.log_dir, settings.log_level)
-    await init_db(settings.db_dir)
-    _ensure_runtime_directories()
-    await _recover_stale_running_jobs()
-    await _startup_runtime_services(app)
+    try:
+        await init_db(settings.db_dir)
+        _ensure_runtime_directories()
+        await _recover_stale_running_jobs()
+        await _startup_runtime_services(app)
 
-    yield
-
-    await _shutdown_runtime_services(app, shutdown_grace_seconds=settings.workers_shutdown_grace_seconds)
+        yield
+    finally:
+        await _shutdown_runtime_services(
+            app,
+            shutdown_grace_seconds=settings.workers_shutdown_grace_seconds,
+        )
 
 
 app = FastAPI(
