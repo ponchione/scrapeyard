@@ -242,6 +242,34 @@ async def test_capture_browser_state_runs_configured_browser_actions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_click_selector_omits_timeout_when_configured_as_none() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"click_selector": "#accept", "click_timeout_ms": None},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.locator.return_value.click = AsyncMock(return_value=None)
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=None,
+        capture=capture,
+    )
+
+    page.locator.assert_called_once_with("#accept")
+    page.locator.return_value.click.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_optional_repeat_click_stops_without_raising_when_button_disappears() -> None:
     target = TargetConfig(
         url="https://example.com",

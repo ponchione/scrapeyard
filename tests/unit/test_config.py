@@ -273,6 +273,11 @@ class TestResolvedTargets:
             (ExecutionConfig, {"delay_between": -1}),
             (ExecutionConfig, {"domain_rate_limit": -1}),
             (WebhookConfig, {"url": "https://example.com/hook", "timeout": 0}),
+            (BrowserConfig, {"click_timeout_ms": 0}),
+            (
+                BrowserConfig,
+                {"actions": [{"type": "click", "selector": "button", "timeout_ms": 0}]},
+            ),
         ],
     )
     def test_numeric_runtime_config_rejects_values_that_can_hang_or_spin(self, model, kwargs):

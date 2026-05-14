@@ -293,7 +293,7 @@ class BrowserActionConfig(StrictConfigModel):
     )
     timeout_ms: int | None = Field(
         default=None,
-        ge=0,
+        ge=1,
         le=MAX_BROWSER_TIMEOUT_MS,
         description="Optional timeout in milliseconds for selector-based actions",
     )
@@ -412,7 +412,7 @@ class BrowserConfig(StrictConfigModel):
     )
     click_timeout_ms: int | None = Field(
         default=3000,
-        ge=0,
+        ge=1,
         le=MAX_BROWSER_TIMEOUT_MS,
         description="Optional timeout in milliseconds for click_selector before falling through",
     )

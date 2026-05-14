@@ -55,12 +55,6 @@ COPY pyproject.toml README.md ./
 # Install the project itself (editable not needed in container).
 RUN pip install --no-cache-dir --no-deps .
 
-# Place SQL migrations where database.py expects them (../../sql relative to the package).
-RUN cp -r sql/ "$(python -c 'import scrapeyard, pathlib; print(pathlib.Path(scrapeyard.__file__).resolve().parent / "../../sql")')" \
-    && chown -R scrapeyard:scrapeyard /app /data "$XDG_CACHE_HOME" \
-    && chown root:root /ms-playwright/chromium-1169/chrome-linux/chrome_sandbox \
-    && chmod 4755 /ms-playwright/chromium-1169/chrome-linux/chrome_sandbox
-
 EXPOSE 8420
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
