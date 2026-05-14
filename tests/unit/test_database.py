@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import aiosqlite
 import pytest
 
 from scrapeyard.storage.database import close_db, get_db, init_db
@@ -57,6 +60,61 @@ async def test_init_db_idempotent(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
     await init_db(str(db_dir))
+
+
+async def test_init_db_deduplicates_result_meta_before_unique_index(tmp_path):
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    sql_dir = Path(__file__).resolve().parents[2] / "sql"
+    async with aiosqlite.connect(db_dir / "results_meta.db") as db:
+        await db.executescript((sql_dir / "003_create_results_meta.sql").read_text())
+        await db.executescript((sql_dir / "006_add_results_meta_indexes.sql").read_text())
+        await db.executemany(
+            """INSERT INTO results_meta
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    "job-1",
+                    "acme",
+                    "run-1",
+                    "partial",
+                    1,
+                    "/tmp/old",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "job-1",
+                    "acme",
+                    "run-1",
+                    "complete",
+                    2,
+                    "/tmp/new",
+                    "2026-01-01T00:01:00+00:00",
+                ),
+            ],
+        )
+        await db.commit()
+
+    await init_db(str(db_dir))
+
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            "SELECT status, record_count, file_path FROM results_meta WHERE job_id=? AND run_id=?",
+            ("job-1", "run-1"),
+        )
+        rows = await cursor.fetchall()
+        cursor = await db.execute(
+            "SELECT name, [unique] FROM pragma_index_list('results_meta') "
+            "WHERE name='idx_results_meta_job_run'"
+        )
+        index_row = await cursor.fetchone()
+
+    assert [(row["status"], row["record_count"], row["file_path"]) for row in rows] == [
+        ("complete", 2, "/tmp/new")
+    ]
+    assert index_row is not None
+    assert index_row["unique"] == 1
 
 
 async def test_get_db_before_init():
