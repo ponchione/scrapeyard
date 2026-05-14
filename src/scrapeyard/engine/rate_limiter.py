@@ -30,6 +30,8 @@ class LocalDomainRateLimiter:
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def acquire(self, domain: str, min_interval: float) -> None:
+        if min_interval <= 0:
+            return
         async with self._locks.setdefault(domain, asyncio.Lock()):
             now = time.monotonic()
             last = self._last_request.get(domain, 0.0)
@@ -91,6 +93,8 @@ return {0, remaining_ms}
         return self._script_sha
 
     async def acquire(self, domain: str, min_interval: float) -> None:
+        if min_interval <= 0:
+            return
         key = f"scrapeyard:rate:{domain}"
         ttl = max(int(min_interval) + 1, 2)
         sha = await self._ensure_script()
