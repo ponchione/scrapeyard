@@ -225,3 +225,37 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     assert payload["targets"][0]["debug"]["final_url"] == "https://example.com/private"
     assert payload["targets"][0]["debug"]["headers"]["Authorization"] == "<redacted>"
     assert payload["results"] == [{"sku": "a1", "_source": "example.com:8443"}]
+
+
+def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debug():
+    config = MagicMock(project="test", name="job")
+    config.output.group_by = GroupBy.merge
+    result = TargetResult(
+        url="https://example.com/products?api_key=secret&page=2",
+        status="failed",
+        data=[],
+        errors=["failed at https://example.com/private?access_token=secret"],
+        error_detail="redirected to https://example.com/private?session_id=secret",
+        debug={
+            "final_url": "https://example.com/private?token=secret&page=2",
+            "request_failures": [
+                {"url": "https://example.com/api?signature=secret", "error_text": "blocked"}
+            ],
+        },
+    )
+
+    payload = _format_output(config, [result], [], "job-1", JobStatus.failed, result.errors)
+
+    assert payload["targets"][0]["url"] == "https://example.com/products?api_key=<redacted>&page=2"
+    assert payload["targets"][0]["error_detail"] == (
+        "redirected to https://example.com/private?session_id=<redacted>"
+    )
+    assert payload["targets"][0]["errors"] == [
+        "failed at https://example.com/private?access_token=<redacted>"
+    ]
+    assert payload["targets"][0]["debug"]["final_url"] == (
+        "https://example.com/private?token=<redacted>&page=2"
+    )
+    assert payload["targets"][0]["debug"]["request_failures"][0]["url"] == (
+        "https://example.com/api?signature=<redacted>"
+    )

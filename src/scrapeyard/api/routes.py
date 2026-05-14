@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -66,7 +67,7 @@ async def _read_valid_yaml_config(request: Request) -> ParsedYamlConfig:
     try:
         body = await request.body()
         config_yaml = body.decode("utf-8")
-        config = load_config(config_yaml)
+        config = await asyncio.to_thread(load_config, config_yaml)
     except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
         raise_json_error(422, f"Invalid config: {exc}")
     return ParsedYamlConfig(config_yaml, config)

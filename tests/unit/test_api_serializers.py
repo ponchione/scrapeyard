@@ -87,7 +87,7 @@ webhook:
   headers:
     Authorization: Bearer webhook-secret
 target:
-  url: https://example.com
+  url: https://example.com?api_key=target-secret&page=2
   browser:
     extra_headers:
       X-API-Key: browser-secret
@@ -106,8 +106,9 @@ target:
 
     assert "webhook-secret" not in payload["config_yaml"]
     assert "browser-secret" not in payload["config_yaml"]
+    assert "target-secret" not in payload["config_yaml"]
     assert "user:pass" not in payload["config_yaml"]
-    assert payload["config_yaml"].count("<redacted>") == 2
+    assert payload["config_yaml"].count("<redacted>") == 3
 
 
 def test_serialize_error_record_formats_enum_and_datetime_fields():
@@ -134,3 +135,23 @@ def test_serialize_error_record_formats_enum_and_datetime_fields():
     assert payload["error_message"] == "boom at https://example.com/private"
     assert payload["action_taken"] == "retry"
     assert payload["selectors_matched"] == {"title": 0}
+
+
+def test_serialize_error_record_redacts_sensitive_query_values():
+    error = ErrorRecord(
+        job_id="job-1",
+        run_id="run-1",
+        project="integ",
+        target_url="https://example.com/products?api_key=secret&page=2",
+        attempt=1,
+        timestamp=datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc),
+        error_type=ErrorType.network_error,
+        fetcher_used="basic",
+        error_message="failed at https://example.com/private?access_token=secret",
+        action_taken=ActionTaken.fail,
+    )
+
+    payload = serialize_error_record(error)
+
+    assert payload["target_url"] == "https://example.com/products?api_key=<redacted>&page=2"
+    assert payload["error_message"] == "failed at https://example.com/private?access_token=<redacted>"

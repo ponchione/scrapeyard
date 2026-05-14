@@ -19,6 +19,7 @@ from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
     UnsafeURLError,
     assert_public_url,
+    redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
 )
@@ -198,7 +199,7 @@ class HttpWebhookDispatcher:
         """
         url = str(config.url)
         log_url = redact_userinfo_in_url(url)
-        logger.debug("Webhook payload for %s: %s", log_url, payload)
+        logger.debug("Webhook payload for %s: %s", log_url, redact_sensitive_mapping(payload))
 
         last_error: str | None = None
         for attempt in range(1 + self._max_retries):
