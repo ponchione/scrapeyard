@@ -39,6 +39,7 @@ from scrapeyard.api.serializers import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import ScrapeConfig
+from scrapeyard.engine.url_guard import redact_userinfo_in_text
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.scheduler.cron import SchedulerService
@@ -61,6 +62,34 @@ def _is_yaml_request(request: Request) -> bool:
     return media_type == "application/x-yaml"
 
 
+def _format_validation_error(exc: ValidationError) -> str:
+    messages: list[str] = []
+    for error in exc.errors(include_input=False, include_url=False):
+        loc = ".".join(str(part) for part in error.get("loc", ())) or "config"
+        message = redact_userinfo_in_text(str(error.get("msg") or "Invalid value"))
+        messages.append(f"{loc}: {message}")
+    return "; ".join(messages) or "Validation failed"
+
+
+def _format_yaml_error(exc: YAMLError) -> str:
+    problem = getattr(exc, "problem", None)
+    mark = getattr(exc, "problem_mark", None)
+    if problem:
+        location = ""
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        return f"YAML parse error{location}: {redact_userinfo_in_text(str(problem))}"
+    return redact_userinfo_in_text(str(exc)) or "YAML parse error"
+
+
+def _format_config_error(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        return _format_validation_error(exc)
+    if isinstance(exc, YAMLError):
+        return _format_yaml_error(exc)
+    return redact_userinfo_in_text(str(exc)) or type(exc).__name__
+
+
 async def _read_valid_yaml_config(request: Request) -> ParsedYamlConfig:
     if not _is_yaml_request(request):
         raise_json_error(415, "Content-Type must be application/x-yaml")
@@ -69,7 +98,7 @@ async def _read_valid_yaml_config(request: Request) -> ParsedYamlConfig:
         config_yaml = body.decode("utf-8")
         config = await asyncio.to_thread(load_config, config_yaml)
     except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
-        raise_json_error(422, f"Invalid config: {exc}")
+        raise_json_error(422, f"Invalid config: {_format_config_error(exc)}")
     return ParsedYamlConfig(config_yaml, config)
 
 

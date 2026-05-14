@@ -122,8 +122,12 @@ class RequestSizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        content_length = _header_value(scope.get("headers", []), b"content-length")
-        if content_length is not None:
+        content_lengths = _header_values(scope.get("headers", []), b"content-length")
+        if len(content_lengths) > 1:
+            await _reject(scope, send, 400, "Invalid Content-Length")
+            return
+        if content_lengths:
+            content_length = content_lengths[0]
             try:
                 declared = int(content_length)
             except ValueError:
@@ -208,11 +212,13 @@ class APIKeyAuthMiddleware:
 
 
 def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes | None:
+    values = _header_values(headers, name)
+    return values[0] if values else None
+
+
+def _header_values(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> list[bytes]:
     lowered = name.lower()
-    for key, value in headers:
-        if key.lower() == lowered:
-            return value
-    return None
+    return [value for key, value in headers if key.lower() == lowered]
 
 
 def _api_key_is_valid(provided: str, keys: set[str]) -> bool:
