@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -15,6 +16,7 @@ from scrapeyard.models.job import (
     ErrorType,
     Job,
 )
+from scrapeyard.queue.run_lifecycle import build_run_paths
 from scrapeyard.queue.worker import _run_superseded, scrape_task
 from scrapeyard.storage.database import init_db, reset_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
@@ -69,6 +71,31 @@ class TestRunSuperseded:
         """job.current_run_id is None but run_id is set -> superseded."""
         job = make_job(current_run_id=None)
         assert _run_superseded(job, "run-1") is True
+
+
+def test_build_run_paths_skips_artifacts_when_browser_debug_disabled(tmp_path):
+    settings = SimpleNamespace(
+        adaptive_dir=str(tmp_path / "adaptive"),
+        storage_results_dir=str(tmp_path / "results"),
+        browser_debug_enabled=False,
+    )
+
+    adaptive_dir, artifacts_dir = build_run_paths(settings, "proj", "job", "run-1")
+
+    assert adaptive_dir == str(tmp_path / "adaptive" / "proj")
+    assert artifacts_dir is None
+
+
+def test_build_run_paths_includes_artifacts_when_browser_debug_enabled(tmp_path):
+    settings = SimpleNamespace(
+        adaptive_dir=str(tmp_path / "adaptive"),
+        storage_results_dir=str(tmp_path / "results"),
+        browser_debug_enabled=True,
+    )
+
+    _adaptive_dir, artifacts_dir = build_run_paths(settings, "proj", "job", "run-1")
+
+    assert artifacts_dir == str(tmp_path / "results" / "proj" / "job" / "run-1" / "artifacts")
 
 
 # ---------------------------------------------------------------------------

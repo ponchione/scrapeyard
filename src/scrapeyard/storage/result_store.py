@@ -14,7 +14,7 @@ from scrapeyard.common.paths import safe_join
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.filesystem import (
-    prepare_directory,
+    ensure_directory,
     read_json_file,
     remove_directories,
     write_json_file,
@@ -28,6 +28,7 @@ from scrapeyard.storage.result_queries import (
 from scrapeyard.storage.types import ResultPayload, SaveResultMeta
 
 logger = logging.getLogger(__name__)
+_RESULT_RUN_DIR_DEPTH = 3
 
 
 class LocalResultStore:
@@ -54,10 +55,14 @@ class LocalResultStore:
         root = self._results_dir.resolve(strict=False)
         resolved = path.resolve(strict=False)
         try:
-            resolved.relative_to(root)
+            relative = resolved.relative_to(root)
         except ValueError as exc:
             raise ValueError(f"Unsafe result path outside results_dir: {file_path!r}") from exc
-        return path
+        if len(relative.parts) != _RESULT_RUN_DIR_DEPTH:
+            raise ValueError(
+                f"Unsafe result path must identify a project/job/run directory: {file_path!r}"
+            )
+        return resolved
 
     def _checked_result_dirs(self, rows: Sequence[Mapping[str, Any]]) -> list[Path]:
         paths: list[Path] = []
@@ -101,8 +106,10 @@ class LocalResultStore:
     ) -> SaveResultMeta:
         project, job_name = await self._job_lookup(job_id)
         run_id = run_id or generate_run_id()
-        run_dir = safe_join(self._results_dir, project, job_name, run_id)
-        await asyncio.to_thread(prepare_directory, run_dir)
+        run_dir = self._checked_result_dir(
+            str(safe_join(self._results_dir, project, job_name, run_id))
+        )
+        await asyncio.to_thread(ensure_directory, run_dir)
 
         path = run_dir / "results.json"
         await asyncio.to_thread(write_json_file, path, data)

@@ -205,3 +205,34 @@ async def test_delete_expired_skips_unsafe_metadata_path(store, tmp_path):
 
     assert deleted == 1
     assert outside.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_does_not_remove_results_root_from_bad_metadata(store):
+    from scrapeyard.storage.database import get_db
+
+    root_marker = store._results_dir / "keep.txt"
+    store._results_dir.mkdir(parents=True)
+    root_marker.write_text("keep", encoding="utf-8")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            """INSERT INTO results_meta
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "job-root",
+                "test-project",
+                "run-root",
+                "complete",
+                1,
+                str(store._results_dir),
+                old_date,
+            ),
+        )
+        await db.commit()
+
+    deleted = await store.delete_expired(30)
+
+    assert deleted == 1
+    assert root_marker.read_text(encoding="utf-8") == "keep"

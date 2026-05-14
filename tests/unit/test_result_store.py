@@ -144,6 +144,19 @@ async def test_save_result_rejects_unsafe_job_path_components(tmp_path):
     assert not (tmp_path / "outside").exists()
 
 
+async def test_save_result_rejects_symlinked_run_dir_outside_results_dir(store, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-1"
+    run_dir.parent.mkdir(parents=True)
+    run_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="outside results_dir"):
+        await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
+
+    assert not (outside / "results.json").exists()
+
+
 async def test_save_result_offloads_filesystem_work(store):
     data = [{"price": 9.99}]
     run_dir = store._results_dir / "acme" / "scrape-prices" / "run-1"
@@ -157,9 +170,21 @@ async def test_save_result_offloads_filesystem_work(store):
         await store.save_result("j-1", data, run_id="run-1")
 
     assert mock_to_thread.await_args_list == [
-        call(result_store_module.prepare_directory, run_dir),
+        call(result_store_module.ensure_directory, run_dir),
         call(result_store_module.write_json_file, run_dir / "results.json", data),
     ]
+
+
+async def test_save_result_preserves_existing_artifacts(store):
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-1"
+    artifacts_dir = run_dir / "artifacts" / "example.com"
+    artifacts_dir.mkdir(parents=True)
+    screenshot = artifacts_dir / "dynamic-main.png"
+    screenshot.write_bytes(b"png")
+
+    await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
+
+    assert screenshot.read_bytes() == b"png"
 
 
 async def test_get_result_offloads_json_read(store):
@@ -206,6 +231,28 @@ async def test_get_result_rejects_metadata_path_outside_results_dir(store, tmp_p
 
     with pytest.raises(ValueError, match="outside results_dir"):
         await store.get_result("j-unsafe", "run-unsafe")
+
+
+async def test_get_result_rejects_metadata_path_at_results_root(store):
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            """INSERT INTO results_meta
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "j-root",
+                "acme",
+                "run-root",
+                "complete",
+                1,
+                str(store._results_dir),
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        await db.commit()
+
+    with pytest.raises(ValueError, match="project/job/run"):
+        await store.get_result("j-root", "run-root")
 
 
 async def test_delete_results_offloads_directory_removal(store):
