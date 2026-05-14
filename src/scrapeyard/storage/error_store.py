@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import cast
 
@@ -10,6 +11,31 @@ from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.error_queries import build_query_errors_query
+
+logger = logging.getLogger(__name__)
+
+
+def _loads_selectors_matched(value: str | None) -> dict[str, int] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        logger.warning("Ignoring malformed selectors_matched JSON in error row: %s", exc)
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("Ignoring malformed selectors_matched JSON in error row: expected object")
+        return None
+
+    selectors: dict[str, int] = {}
+    for selector, count in parsed.items():
+        if not isinstance(count, int) or isinstance(count, bool):
+            logger.warning(
+                "Ignoring malformed selectors_matched JSON in error row: expected integer counts"
+            )
+            return None
+        selectors[str(selector)] = count
+    return selectors
 
 
 def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
@@ -28,7 +54,7 @@ def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
         http_status=cast(int | None, row["http_status"]),
         fetcher_used=cast(str, row["fetcher_used"]),
         error_message=cast(str | None, row["error_message"]),
-        selectors_matched=(json.loads(selectors) if selectors is not None else None),
+        selectors_matched=_loads_selectors_matched(selectors),
         action_taken=ActionTaken(cast(str, row["action_taken"])),
         resolved=bool(row["resolved"]),
     )
