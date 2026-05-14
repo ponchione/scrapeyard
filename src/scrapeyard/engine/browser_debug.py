@@ -42,6 +42,9 @@ _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
 _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
     "scrapeyard_browser_block_resources", default=None,
 )
+_BROWSER_REQUIRE_RESOLVED_DNS: ContextVar[bool] = ContextVar(
+    "scrapeyard_browser_require_resolved_dns", default=False,
+)
 
 
 class BrowserPageActionError(RuntimeError):
@@ -80,7 +83,11 @@ async def _guarded_async_intercept_route(route: Any) -> None:
 
     if isinstance(request_url, str) and request_url:
         try:
-            await asyncio.to_thread(assert_public_url, request_url)
+            await asyncio.to_thread(
+                assert_public_url,
+                request_url,
+                allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
+            )
         except UnsafeURLError:
             logger.warning(
                 "Blocked browser request to non-public URL: %s",
@@ -377,7 +384,11 @@ async def capture_browser_state(
         await run_browser_actions(page, browser.actions)
     capture["final_url"] = getattr(page, "url", None)
     if isinstance(capture["final_url"], str) and capture["final_url"]:
-        await asyncio.to_thread(assert_public_url, capture["final_url"])
+        await asyncio.to_thread(
+            assert_public_url,
+            capture["final_url"],
+            allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
+        )
     try:
         capture["page_title"] = await page.title()
     except Exception as exc:
@@ -428,6 +439,8 @@ async def fetch_browser_response(
     fetcher_type: FetcherType,
     call_kwargs: dict[str, Any],
     artifacts_dir: str | None,
+    *,
+    require_resolved_dns: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     capture: dict[str, Any] = {}
     browser = target_browser_config(target)
@@ -461,9 +474,11 @@ async def fetch_browser_response(
     call_kwargs["page_action"] = _page_action
     call_kwargs["disable_resources"] = True
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
+    dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
     try:
         response = await fetcher_cls.async_fetch(url, **call_kwargs)
     finally:
+        _BROWSER_REQUIRE_RESOLVED_DNS.reset(dns_token)
         _BROWSER_BLOCK_RESOURCES.reset(guard_token)
     action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)
     if action_exc is not None:

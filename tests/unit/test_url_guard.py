@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from scrapeyard.engine.url_guard import (
@@ -101,6 +103,16 @@ def test_assert_public_url_rejects_idna_ipv4_literals_without_dns(host: str) -> 
 
 def test_assert_public_url_allows_public_idna_hostname_without_dns() -> None:
     assert_public_url("https://bücher.example/resource", resolve_dns=False)
+
+
+def test_assert_public_url_can_require_dns_resolution(monkeypatch) -> None:
+    def _raise_gaierror(*_args, **_kwargs):
+        raise socket.gaierror
+
+    monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
+
+    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+        assert_public_url("https://unresolved.example/resource", allow_unresolved=False)
 
 
 def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
