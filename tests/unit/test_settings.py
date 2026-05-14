@@ -102,6 +102,10 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.circuit_breaker_cooldown_seconds == 300
 
+    def test_health_include_projects_default(self):
+        settings = ServiceSettings()
+        assert settings.health_include_projects is False
+
 
 class TestServiceSettingsFromEnv:
     """Verify that environment variables override defaults."""
@@ -165,6 +169,11 @@ class TestServiceSettingsFromEnv:
         with patch.dict(os.environ, {"SCRAPEYARD_DB_DIR": "/custom/db"}):
             settings = ServiceSettings()
         assert settings.db_dir == "/custom/db"
+
+    def test_reads_health_include_projects(self):
+        with patch.dict(os.environ, {"SCRAPEYARD_HEALTH_INCLUDE_PROJECTS": "true"}):
+            settings = ServiceSettings()
+        assert settings.health_include_projects is True
 
 
 class TestGetSettings:

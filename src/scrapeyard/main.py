@@ -151,7 +151,7 @@ async def health() -> JSONResponse:
     pool = get_worker_pool()
 
     uptime = _health.uptime
-    projects = await _health.project_summary()
+    projects = await _health.project_summary() if settings.health_include_projects else {}
 
     redis_probe = await probe_redis(pool)
     sqlite_probe = await probe_sqlite()
