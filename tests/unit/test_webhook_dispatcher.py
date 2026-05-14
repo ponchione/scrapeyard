@@ -229,6 +229,23 @@ class TestDispatchRetryExhaustion:
             await dispatcher.dispatch(cfg, {})
         assert client.post.await_count == 2  # 1 + 1 retry
 
+    @pytest.mark.asyncio
+    async def test_http_error_redacts_url_userinfo_in_last_error(self) -> None:
+        client = AsyncMock()
+        client.post = AsyncMock(
+            side_effect=httpx.ConnectError("failed https://user:pass@example.com/hook")
+        )
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+
+        result = await dispatcher.dispatch(
+            _webhook_config("https://user:pass@example.com/hook"),
+            {},
+        )
+
+        assert result.last_error is not None
+        assert "user:pass" not in result.last_error
+        assert "https://example.com/hook" in result.last_error
+
 
 class TestNonRetryableStatus:
     @pytest.mark.asyncio

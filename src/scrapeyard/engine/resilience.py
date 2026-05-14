@@ -81,7 +81,16 @@ class ResultValidator:
 
     def _has_required_field(self, field: str, record: dict[str, Any]) -> bool:
         value = record.get(field)
-        if value not in (None, ""):
+        if isinstance(value, str):
+            if value.strip():
+                return True
+        elif isinstance(value, list | tuple):
+            if any(
+                item is not None and (not isinstance(item, str) or item.strip())
+                for item in value
+            ):
+                return True
+        elif value is not None:
             return True
         if field != "price":
             return False

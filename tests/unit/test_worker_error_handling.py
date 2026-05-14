@@ -350,6 +350,55 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
 
 
 @pytest.mark.asyncio
+async def test_unexpected_target_exception_redacts_url_userinfo():
+    job = make_job(job_id="test-job-1", name="crash-test")
+    job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.update_job_status = AsyncMock()
+
+    result_store = AsyncMock()
+    error_store = AsyncMock()
+    cfg = make_config_mock(targets=[make_target("http://bad.example")])
+    cfg.name = "crash-test"
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(
+                side_effect=RuntimeError("proxy http://user:pass@proxy.example:8080 refused")
+            ),
+        ),
+        patch("scrapeyard.queue.worker.load_config", return_value=cfg),
+        patch("scrapeyard.queue.worker.get_settings") as mock_settings,
+    ):
+        mock_settings.return_value = MagicMock(
+            adaptive_dir="/tmp/adaptive",
+            storage_results_dir="/tmp/results",
+            workers_running_lease_seconds=300,
+            proxy_url="",
+        )
+
+        await scrape_task(
+            job.job_id,
+            SIMPLE_YAML,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    output_data = result_store.save_result.call_args.args[1]
+    target = output_data["targets"][0]
+    assert "user:pass" not in target["error_detail"]
+    assert "user:pass" not in target["errors"][0]
+    assert "http://proxy.example:8080" in target["error_detail"]
+
+    logged_errors = error_store.log_errors.call_args.args[0]
+    assert "user:pass" not in logged_errors[0].error_message
+
+
+@pytest.mark.asyncio
 async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()

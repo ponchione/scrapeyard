@@ -85,7 +85,7 @@ class SQLiteErrorStore:
         sql, params = build_query_errors_query(filters, limit, offset)
         async with get_db("errors.db") as db:
             cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [_row_to_error(r) for r in rows]
 
     async def count_errors_for_run(self, run_id: str) -> int:

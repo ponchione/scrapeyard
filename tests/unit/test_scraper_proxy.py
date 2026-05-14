@@ -68,6 +68,28 @@ async def test_scrape_target_no_proxy_by_default(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scrape_target_redacts_proxy_userinfo_in_error_detail(tmp_path):
+    target = _target(fetcher="basic")
+
+    def fake_get(_url, **_kwargs):
+        raise RuntimeError("proxy http://user:pass@proxy.example:8080 refused")
+
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+        mock_fetcher.get = fake_get
+        result = await scrape_target(
+            target,
+            adaptive=False,
+            retry=RetryConfig(max_attempts=1),
+            adaptive_dir=str(tmp_path),
+            proxy_url="http://user:pass@proxy.example:8080",
+        )
+
+    assert result.error_detail is not None
+    assert "user:pass" not in result.error_detail
+    assert "http://proxy.example:8080" in result.error_detail
+
+
+@pytest.mark.asyncio
 async def test_proxy_passed_to_pagination_fetches(tmp_path):
     """proxy_url should be forwarded to pagination page fetches too."""
     target = _target(

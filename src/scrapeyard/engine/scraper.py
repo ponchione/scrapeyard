@@ -34,7 +34,7 @@ from scrapeyard.engine.selectors import (
     select_items_strict,
 )
 from scrapeyard.models.job import ErrorType
-from scrapeyard.engine.url_guard import assert_public_url
+from scrapeyard.engine.url_guard import assert_public_url, redact_userinfo_in_text
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_BASIC_REDIRECTS = 10
@@ -322,7 +322,7 @@ def _handle_selector_execution_failure(
     target: TargetConfig,
     exc: SelectorExecutionError,
 ) -> None:
-    detail = str(exc)
+    detail = redact_userinfo_in_text(str(exc))
     result.status = TargetStatus.failed
     result.error_type = ErrorType.selector_engine_error
     result.error_detail = detail
@@ -339,6 +339,7 @@ def _handle_scrape_exception(
 ) -> None:
     error_type, http_status, debug = classify_fetch_exception(exc, target.fetcher)
     detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    detail = redact_userinfo_in_text(detail)
     result.status = TargetStatus.failed
     result.error_type = error_type
     result.http_status = http_status

@@ -172,7 +172,7 @@ class SQLiteWebhookOutboxStore:
                 (delivery_id,),
             )
             row = await cursor.fetchone()
-        return None if row is None else row_to_webhook_delivery(row)
+        return None if row is None else row_to_webhook_delivery(cast(Mapping[str, Any], row))
 
     async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
         """List all pending deliveries ordered by next attempt time."""
@@ -188,7 +188,7 @@ class SQLiteWebhookOutboxStore:
             params = (limit,)
         async with get_db("jobs.db") as db:
             cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
+            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
         return [row_to_webhook_delivery(row) for row in rows]
 
     async def mark_delivered(

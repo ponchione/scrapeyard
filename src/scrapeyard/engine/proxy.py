@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from scrapeyard.engine.url_guard import assert_public_url
+
 if TYPE_CHECKING:
     from scrapeyard.config.schema import ProxyConfig, TargetConfig
 
@@ -29,6 +31,14 @@ def normalize_proxy_url(value: str) -> str:
         _ = parsed.port
     except ValueError as exc:
         raise ValueError("Proxy URL port is invalid") from exc
+    return proxy_url
+
+
+def normalize_public_proxy_url(value: str) -> str:
+    """Normalize a user-supplied proxy URL and reject non-public destinations."""
+    proxy_url = normalize_proxy_url(value)
+    if proxy_url != _DIRECT_PROXY:
+        assert_public_url(proxy_url, allowed_schemes=tuple(_ALLOWED_PROXY_SCHEMES))
     return proxy_url
 
 

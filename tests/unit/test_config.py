@@ -566,6 +566,10 @@ class TestProxyConfig:
         with pytest.raises(ValidationError):
             ScrapeConfig(**_tier1_config(proxy={"url": proxy_url}))
 
+    def test_proxy_url_rejects_non_public_destination(self):
+        with pytest.raises(ValidationError, match="non-public"):
+            ScrapeConfig(**_tier1_config(proxy={"url": "http://127.0.0.1:8080"}))
+
 
 class TestMapDetectionConfig:
     """MapDetectionConfig schema parsing and validation."""
