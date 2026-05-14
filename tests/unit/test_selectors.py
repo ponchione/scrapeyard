@@ -32,6 +32,15 @@ class _Node:
         return self._xpath_map.get(query, [])
 
 
+class _NestedTextNode(_Node):
+    def __init__(self, *, text: str = "", all_text: str) -> None:
+        super().__init__(text=text)
+        self._all_text = all_text
+
+    def get_all_text(self) -> str:
+        return self._all_text
+
+
 def test_extract_selectors_page_wide_scalar_and_list() -> None:
     page = _Node(
         css_map={
@@ -43,6 +52,22 @@ def test_extract_selectors_page_wide_scalar_and_list() -> None:
     result = extract_selectors_strict(page, {"title": "h1", "prices": ".price"})
 
     assert result == {"title": "Title", "prices": ["$10", "$20"]}
+
+
+def test_extract_selectors_reads_descendant_text_when_direct_text_is_empty() -> None:
+    page = _Node(css_map={".title": [_NestedTextNode(text="", all_text="Nested Title")]})
+
+    result = extract_selectors_strict(page, {"title": ".title"})
+
+    assert result == {"title": "Nested Title"}
+
+
+def test_extract_selectors_combines_direct_and_descendant_text() -> None:
+    page = _Node(css_map={".title": [_NestedTextNode(text="Title", all_text="Suffix")]})
+
+    result = extract_selectors_strict(page, {"title": ".title"})
+
+    assert result == {"title": "Title\nSuffix"}
 
 
 def test_select_items_returns_one_element_per_item() -> None:
