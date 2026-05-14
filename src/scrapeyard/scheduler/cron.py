@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from datetime import datetime
 
@@ -17,6 +18,8 @@ from scrapeyard.models.job import JobStatus
 
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.storage.protocols import JobStore
+
+logger = logging.getLogger(__name__)
 
 
 class SchedulerService:
@@ -116,14 +119,22 @@ class SchedulerService:
             "current_run_id": run_id,
         })
         await self._job_store.update_job_status(queued_job)
-        await self._pool.enqueue(
-            job.job_id,
-            job.config_yaml,
-            priority,
-            needs_browser,
-            run_id=run_id,
-            trigger="scheduled",
-        )
+        try:
+            await self._pool.enqueue(
+                job.job_id,
+                job.config_yaml,
+                priority,
+                needs_browser,
+                run_id=run_id,
+                trigger="scheduled",
+            )
+        except Exception:
+            logger.exception("Failed to enqueue scheduled job %s", job.job_id)
+            failed_job = queued_job.model_copy(update={
+                "status": JobStatus.failed,
+                "updated_at": utc_now(),
+            })
+            await self._job_store.update_job_status(failed_job)
 
     def get_next_run_time(self, job_id: str) -> datetime | None:
         """Return the next scheduled fire time, or None if not scheduled."""
