@@ -9,7 +9,10 @@ def test_safe_path_part_accepts_regular_names() -> None:
     assert safe_path_part("demo-job_1.2") == "demo-job_1.2"
 
 
-@pytest.mark.parametrize("value", ["", "   ", ".", "..", "../x", "x/y", r"x\y", "x\x00y"])
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", ".", "..", "../x", "x/y", r"x\y", "x\x00y", "x\ny", "x\ty", "x\x7fy"],
+)
 def test_safe_path_part_rejects_unsafe_components(value: str) -> None:
     with pytest.raises(ValueError, match="Unsafe"):
         safe_path_part(value, label="project")

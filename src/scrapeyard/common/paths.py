@@ -14,7 +14,11 @@ def safe_path_part(value: str, *, label: str = "path component") -> str:
         raise TypeError(f"{label} must be a string")
     if not value.strip():
         raise ValueError(f"Unsafe {label}: value must not be blank")
-    if value in {".", ".."} or any(char in value for char in _UNSAFE_PATH_CHARS):
+    if (
+        value in {".", ".."}
+        or any(char in value for char in _UNSAFE_PATH_CHARS)
+        or not value.isprintable()
+    ):
         raise ValueError(f"Unsafe {label}: {value!r}")
     if len(value.encode("utf-8")) > _MAX_PATH_PART_BYTES:
         raise ValueError(f"Unsafe {label}: value must be at most {_MAX_PATH_PART_BYTES} bytes")
