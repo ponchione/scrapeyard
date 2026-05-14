@@ -154,8 +154,9 @@ def assert_public_url(
     if _hostname_is_blocked(host):
         raise UnsafeURLError(f"Hostname {host!r} is blocked")
 
+    ip_host = host.rstrip(".")
     try:
-        literal = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(ip_host)
     except ValueError:
         literal = None
     if literal is not None:
@@ -163,7 +164,7 @@ def assert_public_url(
             raise UnsafeURLError(f"URL points at non-public IP {literal}")
         return
 
-    legacy_ipv4 = _legacy_ipv4_address(host)
+    legacy_ipv4 = _legacy_ipv4_address(ip_host)
     if legacy_ipv4 is not None:
         if _ip_is_blocked(legacy_ipv4):
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")

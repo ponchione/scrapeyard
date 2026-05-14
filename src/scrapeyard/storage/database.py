@@ -30,6 +30,19 @@ _CONNECTION_PRAGMAS: tuple[str, ...] = (
 )
 
 
+def _resolve_sql_dir() -> Path:
+    """Return the SQL migration directory for source and wheel installs."""
+    package_dir = Path(str(importlib.resources.files("scrapeyard"))).resolve()
+    candidates = (
+        package_dir.parent / "sql",
+        package_dir.parent.parent / "sql",
+    )
+    for candidate in candidates:
+        if (candidate / "001_create_jobs.sql").is_file():
+            return candidate
+    raise RuntimeError("Could not find packaged SQL migrations")
+
+
 async def _apply_connection_pragmas(db: aiosqlite.Connection) -> None:
     for pragma in _CONNECTION_PRAGMAS:
         await db.execute(pragma)
@@ -72,8 +85,7 @@ class DatabaseManager:
         db_path.mkdir(parents=True, exist_ok=True)
         self._db_dir = db_path
 
-        sql_dir = importlib.resources.files("scrapeyard") / "../../sql"
-        sql_dir = Path(str(sql_dir)).resolve()
+        sql_dir = _resolve_sql_dir()
 
         for db_name, migration_files in _DB_MIGRATIONS.items():
             async with aiosqlite.connect(db_path / db_name) as db:
