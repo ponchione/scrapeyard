@@ -6,7 +6,12 @@ import ipaddress
 import logging
 import re
 import socket
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+import yaml
+from yaml import YAMLError
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +33,27 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
 # Userinfo (user:pass@) inside http(s) URLs that we scrub before returning stored
 # config YAML to clients. The host portion is preserved.
 _USERINFO_IN_URL_RE = re.compile(
-    r"(?P<scheme>https?://)[^/\s:@\"']+:[^/\s@\"']+@",
+    r"(?P<scheme>https?://)[^/\s@\"']+@",
     re.IGNORECASE,
 )
 
+_REDACTED_VALUE = "<redacted>"
+_SENSITIVE_EXACT_KEYS = frozenset(
+    {
+        "authorization",
+        "proxyauthorization",
+        "xapikey",
+        "apikey",
+        "api_key",
+        "cookie",
+        "setcookie",
+    }
+)
+_SENSITIVE_KEY_PARTS = ("password", "passwd", "secret", "token", "credential")
+
 
 def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    return not ip.is_global or ip.is_multicast
 
 
 def _hostname_is_blocked(host: str) -> bool:
@@ -120,6 +132,40 @@ def redact_userinfo_in_text(text: str) -> str:
     """
 
     return _USERINFO_IN_URL_RE.sub(lambda m: m.group("scheme"), text)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    normalized = lowered.replace("-", "").replace("_", "")
+    return normalized in _SENSITIVE_EXACT_KEYS or any(
+        part in lowered for part in _SENSITIVE_KEY_PARTS
+    )
+
+
+def redact_sensitive_mapping(value: Any) -> Any:
+    """Recursively redact common secret-bearing keys in JSON-like values."""
+    if isinstance(value, Mapping):
+        return {
+            key: _REDACTED_VALUE if _is_sensitive_key(str(key)) else redact_sensitive_mapping(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_mapping(item) for item in value]
+    if isinstance(value, str):
+        return redact_userinfo_in_text(value)
+    return value
+
+
+def redact_sensitive_config_text(text: str) -> str:
+    """Redact userinfo and common secret keys from stored YAML config text."""
+    redacted_text = redact_userinfo_in_text(text)
+    try:
+        data = yaml.safe_load(redacted_text)
+    except YAMLError:
+        return redacted_text
+    if not isinstance(data, dict | list):
+        return redacted_text
+    return yaml.safe_dump(redact_sensitive_mapping(data), sort_keys=False)
 
 
 def redact_userinfo_in_url(url: str) -> str:

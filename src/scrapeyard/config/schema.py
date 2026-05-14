@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
+from scrapeyard.common.paths import safe_path_part
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 
@@ -521,6 +522,11 @@ class ScrapeConfig(BaseModel):
     schedule: Optional[ScheduleConfig] = None
     webhook: Optional[WebhookConfig] = None
     output: OutputConfig = Field(default_factory=OutputConfig)
+
+    @field_validator("project", "name")
+    @classmethod
+    def _reject_unsafe_storage_component(cls, value: str) -> str:
+        return safe_path_part(value, label="project/name")
 
     @model_validator(mode="after")
     def _normalize_targets(self) -> ScrapeConfig:

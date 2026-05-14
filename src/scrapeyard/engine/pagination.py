@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import TargetResult
 from scrapeyard.engine.selectors import select_elements_strict
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 FetchTargetPageCallable = Callable[..., Awaitable[Any]]
 ExtractPageDataCallable = Callable[[Any, TargetConfig], list[dict[str, Any]]]
@@ -52,6 +53,14 @@ def pagination_url_key(url: str) -> str:
     return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
 
+def _pagination_url_is_safe(url: str) -> bool:
+    try:
+        assert_public_url(url)
+    except UnsafeURLError:
+        return False
+    return True
+
+
 async def paginate_target(
     *,
     page: Any,
@@ -83,6 +92,8 @@ async def paginate_target(
             break
         next_url = resolve_href(next_links[0], current_url)
         if not next_url:
+            break
+        if not _pagination_url_is_safe(next_url):
             break
         if pagination_url_key(next_url) in seen_urls:
             break

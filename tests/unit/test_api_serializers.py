@@ -74,6 +74,42 @@ def test_serialize_job_detail_embeds_serialized_runs():
     assert payload["last_run_at"] == completed_at.isoformat()
 
 
+def test_serialize_job_detail_redacts_config_secrets():
+    job = make_job(
+        job_id="job-1",
+        config_yaml="""
+project: integ
+name: secret-job
+proxy:
+  url: http://user:pass@gate.example.com:7777
+webhook:
+  url: https://example.com/hook
+  headers:
+    Authorization: Bearer webhook-secret
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      X-API-Key: browser-secret
+  selectors:
+    title: h1
+""",
+    )
+
+    payload = serialize_job_detail(
+        job,
+        runs=[],
+        run_count=0,
+        last_run_at=None,
+        next_run_at=None,
+    )
+
+    assert "webhook-secret" not in payload["config_yaml"]
+    assert "browser-secret" not in payload["config_yaml"]
+    assert "user:pass" not in payload["config_yaml"]
+    assert payload["config_yaml"].count("<redacted>") == 2
+
+
 def test_serialize_error_record_formats_enum_and_datetime_fields():
     error = ErrorRecord(
         job_id="job-1",

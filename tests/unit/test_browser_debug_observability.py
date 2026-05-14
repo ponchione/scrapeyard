@@ -109,6 +109,29 @@ def test_default_debug_blob_includes_empty_observability_collections() -> None:
     assert debug["request_failures"] == []
 
 
+def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={
+            "extra_headers": {
+                "Authorization": "Bearer secret",
+                "X-Test": "visible",
+            },
+            "additional_arguments": {"api_token": "secret"},
+        },
+    )
+
+    debug = default_debug_blob(FetcherType.dynamic, target, target.url)
+
+    assert debug["browser_settings"]["extra_headers"] == {
+        "Authorization": "<redacted>",
+        "X-Test": "visible",
+    }
+    assert debug["browser_settings"]["additional_arguments"] == {"api_token": "<redacted>"}
+
+
 @pytest.mark.asyncio
 async def test_capture_browser_state_runs_configured_browser_actions() -> None:
     target = TargetConfig(

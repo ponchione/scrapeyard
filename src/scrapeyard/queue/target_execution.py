@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import ScrapeConfig, TargetConfig
 from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
@@ -37,7 +38,9 @@ def resolve_target_runtime_context(
     domain = urlparse(target_cfg.url).netloc
     adaptive = config.adaptive if config.adaptive is not None else config.schedule is not None
     proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
-    artifacts_dir = None if run_artifacts_dir is None else str(Path(run_artifacts_dir) / domain)
+    artifacts_dir = None if run_artifacts_dir is None else str(
+        Path(run_artifacts_dir) / safe_path_part(domain, label="target domain")
+    )
     return TargetRuntimeContext(
         domain=domain,
         adaptive=adaptive,

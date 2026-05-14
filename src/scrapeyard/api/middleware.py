@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -69,7 +70,7 @@ class RateLimitMiddleware:
         provided = _header_value(scope.get("headers", []), b"x-api-key")
         if provided is not None:
             api_key = provided.decode("latin-1")
-            if api_key in self.api_keys:
+            if _api_key_is_valid(api_key, self.api_keys):
                 digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
                 return f"api:{digest}"
 
@@ -184,7 +185,7 @@ class APIKeyAuthMiddleware:
             return
 
         provided = _header_value(scope.get("headers", []), b"x-api-key")
-        if provided is None or provided.decode("latin-1") not in self.keys:
+        if provided is None or not _api_key_is_valid(provided.decode("latin-1"), self.keys):
             await _reject(scope, send, 401, "Missing or invalid API key")
             return
 
@@ -197,6 +198,10 @@ def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes 
         if key.lower() == lowered:
             return value
     return None
+
+
+def _api_key_is_valid(provided: str, keys: set[str]) -> bool:
+    return any(secrets.compare_digest(provided, key) for key in keys)
 
 
 async def _reject(
