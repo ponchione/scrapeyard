@@ -180,6 +180,18 @@ def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
     ) == "https://example.com/path?api_key=<redacted>&page=2&session_id=<redacted>"
 
 
+def test_redact_userinfo_in_url_masks_semicolon_query_values() -> None:
+    assert redact_userinfo_in_url(
+        "https://example.com/path?page=2;api_key=secret;session_id=abc"
+    ) == "https://example.com/path?page=2;api_key=<redacted>;session_id=<redacted>"
+
+
+def test_redact_userinfo_in_url_masks_sensitive_path_params() -> None:
+    assert redact_userinfo_in_url(
+        "https://example.com/products;jsessionid=abc/page;api_key=secret?ok=1"
+    ) == "https://example.com/products;jsessionid=<redacted>/page;api_key=<redacted>?ok=1"
+
+
 def test_redact_userinfo_in_url_masks_sensitive_fragment_values() -> None:
     assert redact_userinfo_in_url(
         "https://example.com/callback#access_token=secret&state=ok"

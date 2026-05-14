@@ -8,7 +8,7 @@ import re
 import socket
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qsl, quote_plus, urlparse, urlunparse
+from urllib.parse import quote_plus, unquote_plus, urlparse, urlunparse
 
 import yaml
 from yaml import YAMLError
@@ -41,6 +41,7 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
 # YAML, logs, or result metadata to clients.
 _URL_IN_TEXT_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"']+", re.IGNORECASE)
 _URL_AUTHORITY_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)([^/?#]*)(.*)$", re.IGNORECASE)
+_QUERY_SEPARATOR_RE = re.compile(r"([&;])")
 
 _REDACTED_VALUE = "<redacted>"
 _SENSITIVE_EXACT_KEYS = frozenset(
@@ -330,15 +331,46 @@ def redact_sensitive_config_text(text: str) -> str:
     return yaml.safe_dump(redact_sensitive_mapping(data), sort_keys=False)
 
 
+def _query_part_key(part: str) -> str | None:
+    key, separator, _value = part.partition("=")
+    if not separator:
+        return None
+    return unquote_plus(key)
+
+
+def _redact_query_part(part: str) -> str:
+    key, separator, _value = part.partition("=")
+    if not separator:
+        return part
+    key_text = unquote_plus(key)
+    if not _is_sensitive_key(key_text):
+        return part
+    return f"{quote_plus(key_text)}={_REDACTED_VALUE}"
+
+
 def _redact_query(query: str) -> str:
-    pairs = parse_qsl(query, keep_blank_values=True)
-    if not pairs or not any(_is_sensitive_key(key) for key, _value in pairs):
+    parts = _QUERY_SEPARATOR_RE.split(query)
+    keys = [_query_part_key(part) for part in parts[::2]]
+    if not any(key is not None and _is_sensitive_key(key) for key in keys):
         return query
-    redacted_pairs = []
-    for key, value in pairs:
-        redacted_value = _REDACTED_VALUE if _is_sensitive_key(key) else quote_plus(value)
-        redacted_pairs.append(f"{quote_plus(key)}={redacted_value}")
-    return "&".join(redacted_pairs)
+    return "".join(
+        part if index % 2 else _redact_query_part(part)
+        for index, part in enumerate(parts)
+    )
+
+
+def _redact_path_params(path: str) -> str:
+    if ";" not in path:
+        return path
+    segments: list[str] = []
+    for segment in path.split("/"):
+        head, *params = segment.split(";")
+        if not params:
+            segments.append(segment)
+            continue
+        redacted_params = [_redact_query_part(param) for param in params]
+        segments.append(";".join((head, *redacted_params)))
+    return "/".join(segments)
 
 
 def _redact_fragment(fragment: str) -> str:
@@ -379,11 +411,15 @@ def redact_userinfo_in_url(url: str) -> str:
         parsed = urlparse(url)
     except ValueError:
         return _redact_malformed_url(url)
+    redacted_path = _redact_path_params(parsed.path)
+    redacted_params = _redact_query(parsed.params)
     redacted_query = _redact_query(parsed.query)
     redacted_fragment = _redact_fragment(parsed.fragment)
     if (
         not parsed.username
         and not parsed.password
+        and redacted_path == parsed.path
+        and redacted_params == parsed.params
         and redacted_query == parsed.query
         and redacted_fragment == parsed.fragment
     ):
@@ -402,6 +438,8 @@ def redact_userinfo_in_url(url: str) -> str:
             netloc = f"{host}:{port}"
     return urlunparse(parsed._replace(
         netloc=netloc,
+        path=redacted_path,
+        params=redacted_params,
         query=redacted_query,
         fragment=redacted_fragment,
     ))
