@@ -9,9 +9,9 @@ import pytest
 
 from tests.integration.conftest import poll_until_ready
 from scrapeyard.common.settings import get_settings
-from scrapeyard.api.dependencies import get_worker_pool
+from scrapeyard.api.dependencies import get_job_store, get_result_store, get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import ErrorType
+from scrapeyard.models.job import ErrorType, Job, JobStatus
 
 
 def _async_scrape_yaml() -> str:
@@ -78,6 +78,37 @@ async def test_scrape_lifecycle_eventually_returns_results(client, monkeypatch):
     results_payload = results_response.json()
     assert results_payload["job_id"] == job_id
     assert "results" in results_payload
+
+
+@pytest.mark.asyncio
+async def test_results_run_id_returns_historical_result_while_latest_is_running(client):
+    job_store = get_job_store()
+    result_store = get_result_store()
+    job = Job(
+        job_id="job-with-history",
+        project="integ",
+        name="historical-results",
+        status=JobStatus.running,
+        config_yaml="target: https://example.com",
+        current_run_id="run-current",
+    )
+    await job_store.save_job(job)
+    await result_store.save_result(
+        job.job_id,
+        {"results": [{"title": "previous"}]},
+        run_id="run-previous",
+        status="complete",
+        record_count=1,
+    )
+
+    latest_response = await client.get(f"/results/{job.job_id}")
+    assert latest_response.status_code == 202
+
+    historical_response = await client.get(f"/results/{job.job_id}?run_id=run-previous")
+    assert historical_response.status_code == 200
+    payload = historical_response.json()
+    assert payload["run_id"] == "run-previous"
+    assert payload["results"] == {"results": [{"title": "previous"}]}
 
 
 @pytest.mark.asyncio

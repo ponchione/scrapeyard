@@ -257,3 +257,5 @@ class WorkerPool:
             await self._task_handler(
                 job_id, config_yaml, run_id=run_id, trigger=trigger,
             )
+            return
+        raise RuntimeError("WorkerPool requires a task_handler to execute queued jobs")

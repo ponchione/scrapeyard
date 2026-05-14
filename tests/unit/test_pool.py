@@ -343,3 +343,11 @@ async def test_execute_delegates_to_task_handler():
         run_id="run-1",
         trigger="scheduled",
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_without_task_handler_raises_instead_of_succeeding_silently():
+    pool = _make_pool()
+
+    with pytest.raises(RuntimeError, match="requires a task_handler"):
+        await pool._execute("job-1", "config: yaml")

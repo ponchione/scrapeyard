@@ -34,7 +34,6 @@ class RetryHandler:
         self._max_attempts = config.max_attempts
         self._backoff = config.backoff
         self._backoff_max = config.backoff_max
-        self._retryable_status = set(config.retryable_status)
 
     def _delay(self, attempt: int) -> float:
         """Calculate delay in seconds for the given attempt (0-indexed)."""

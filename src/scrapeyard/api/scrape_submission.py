@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,8 +54,9 @@ async def submit_scrape_job(
             run_id=job.current_run_id,
             trigger="adhoc",
         )
-    except MemoryError:
-        await job_store.delete_job(job.job_id)
+    except Exception:
+        with suppress(Exception):
+            await job_store.delete_job(job.job_id)
         raise
 
     if not should_wait_for_completion(config):

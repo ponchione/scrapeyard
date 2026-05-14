@@ -79,6 +79,11 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="Unsafe project/name"):
             ScrapeConfig(**data)
 
+    def test_schedule_rejects_invalid_cron_expression(self):
+        data = _tier1_config(schedule={"cron": "not a cron", "enabled": True})
+        with pytest.raises(ValidationError, match="Invalid cron expression"):
+            ScrapeConfig(**data)
+
 
 class TestResolvedTargets:
     """resolved_targets() convenience method."""

@@ -41,6 +41,28 @@ async def test_jobs_bad_yaml_returns_422(client):
 
 
 @pytest.mark.asyncio
+async def test_jobs_invalid_cron_returns_422_without_saving_job(client):
+    response = await client.post(
+        "/jobs",
+        content="""
+project: integ
+name: bad-cron
+schedule:
+  cron: "not a cron"
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    jobs = (await client.get("/jobs?project=integ")).json()
+    assert jobs == []
+
+
+@pytest.mark.asyncio
 async def test_jobs_rejects_non_yaml_content_type(client):
     response = await client.post(
         "/jobs",
