@@ -87,13 +87,16 @@ def assert_public_url(
     if any(char.isspace() for char in url):
         raise UnsafeURLError("URL must not contain whitespace")
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise UnsafeURLError("URL is malformed") from exc
     scheme = (parsed.scheme or "").lower()
     if scheme not in allowed_schemes:
         raise UnsafeURLError(f"URL scheme {scheme!r} is not allowed")
 
     host = parsed.hostname
-    if not host:
+    if not host or not host.strip("."):
         raise UnsafeURLError("URL has no hostname")
     try:
         _ = parsed.port
@@ -117,6 +120,8 @@ def assert_public_url(
 
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except UnicodeError as exc:
+        raise UnsafeURLError("URL hostname is invalid") from exc
     except socket.gaierror:
         # Host does not resolve right now — the fetch will fail loudly. Not an
         # SSRF vector; do not block config load over transient DNS issues.

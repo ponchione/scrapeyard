@@ -27,6 +27,16 @@ def test_assert_public_url_rejects_invalid_port() -> None:
         assert_public_url("https://example.com:99999/resource", resolve_dns=False)
 
 
+def test_assert_public_url_rejects_malformed_ipv6_url() -> None:
+    with pytest.raises(UnsafeURLError, match="malformed"):
+        assert_public_url("http://[::1", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_empty_dns_root_hostname() -> None:
+    with pytest.raises(UnsafeURLError, match="hostname"):
+        assert_public_url("http://.", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_raw_backslash() -> None:
     with pytest.raises(UnsafeURLError, match="backslashes"):
         assert_public_url("http://127.0.0.1\\@example.com/resource", resolve_dns=False)

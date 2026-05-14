@@ -187,6 +187,18 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="non-public"):
             BrowserConfig(cdp_url="ws://127.0.0.1:9222/devtools/browser/abc")
 
+    def test_browser_extra_headers_reject_invalid_name(self):
+        with pytest.raises(ValidationError, match="Invalid HTTP header name"):
+            BrowserConfig(extra_headers={"Bad Header": "value"})
+
+    def test_browser_extra_headers_reject_crlf_value(self):
+        with pytest.raises(ValidationError, match="CR, LF, or NUL"):
+            BrowserConfig(extra_headers={"X-Test": "ok\r\nX-Evil: 1"})
+
+    def test_browser_useragent_rejects_crlf_value(self):
+        with pytest.raises(ValidationError, match="CR, LF, or NUL"):
+            BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
+
     @pytest.mark.parametrize(
         ("model", "kwargs"),
         [
@@ -491,6 +503,14 @@ class TestWebhookConfig:
     def test_invalid_webhook_on_value_raises(self):
         webhook_data = {"url": "https://example.com/hook", "on": ["complet"]}
         with pytest.raises(ValidationError):
+            ScrapeConfig(**_tier1_config(webhook=webhook_data))
+
+    def test_webhook_headers_reject_crlf_value(self):
+        webhook_data = {
+            "url": "https://example.com/hook",
+            "headers": {"X-Test": "ok\r\nX-Evil: 1"},
+        }
+        with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             ScrapeConfig(**_tier1_config(webhook=webhook_data))
 
 

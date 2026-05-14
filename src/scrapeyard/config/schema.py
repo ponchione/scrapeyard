@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 # --- Enums ---
@@ -178,6 +181,20 @@ class SelectorLong(BaseModel):
 SelectorValue = Union[str, SelectorLong]
 
 
+def _validate_http_headers(headers: dict[str, str]) -> dict[str, str]:
+    for name, value in headers.items():
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ValueError(f"Invalid HTTP header name: {name!r}")
+        _validate_header_value(value, label=f"HTTP header {name!r}")
+    return headers
+
+
+def _validate_header_value(value: str, *, label: str) -> str:
+    if any(char in value for char in ("\r", "\n", "\x00")):
+        raise ValueError(f"{label} must not contain CR, LF, or NUL")
+    return value
+
+
 # --- Sub-config Models ---
 
 
@@ -339,6 +356,18 @@ class BrowserConfig(BaseModel):
         default_factory=list,
         description="Ordered browser actions to run after page load and before extraction",
     )
+
+    @field_validator("useragent")
+    @classmethod
+    def _reject_invalid_useragent(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_header_value(value, label="useragent")
+
+    @field_validator("extra_headers")
+    @classmethod
+    def _reject_invalid_extra_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_http_headers(value)
 
     @field_validator("cdp_url")
     @classmethod
@@ -506,6 +535,11 @@ class WebhookConfig(BaseModel):
         default_factory=dict, description="Custom HTTP headers"
     )
     timeout: int = Field(default=10, gt=0, description="Timeout in seconds")
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_invalid_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_http_headers(value)
 
     @field_validator("url")
     @classmethod
