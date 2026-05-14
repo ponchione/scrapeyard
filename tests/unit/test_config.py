@@ -20,7 +20,26 @@ from scrapeyard.config import (
     load_config,
     parse_transform,
 )
-from scrapeyard.config.schema import BrowserConfig, ExecutionConfig, RetryConfig, ValidationConfig
+from scrapeyard.config.schema import (
+    MAX_BROWSER_ACTIONS,
+    MAX_BROWSER_ACTION_REPEAT,
+    MAX_BROWSER_TIMEOUT_MS,
+    MAX_BROWSER_WAIT_MS,
+    MAX_DOMAIN_RATE_LIMIT_SECONDS,
+    MAX_EXECUTION_CONCURRENCY,
+    MAX_EXECUTION_DELAY_SECONDS,
+    MAX_PAGINATION_PAGES,
+    MAX_RETRY_ATTEMPTS,
+    MAX_RETRY_BACKOFF_SECONDS,
+    MAX_RETRYABLE_STATUSES,
+    MAX_TARGETS_PER_JOB,
+    MAX_WEBHOOK_TIMEOUT_SECONDS,
+    BrowserConfig,
+    ExecutionConfig,
+    PaginationConfig,
+    RetryConfig,
+    ValidationConfig,
+)
 
 
 # --- Helpers ---
@@ -200,6 +219,10 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(extra_headers={"X-Test": "ok\r\nX-Evil: 1"})
 
+    def test_browser_extra_headers_reject_client_managed_names(self):
+        with pytest.raises(ValidationError, match="managed by the HTTP client"):
+            BrowserConfig(extra_headers={"Host": "internal.example"})
+
     def test_browser_useragent_rejects_crlf_value(self):
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
@@ -233,6 +256,60 @@ class TestResolvedTargets:
     def test_numeric_runtime_config_rejects_values_that_can_hang_or_spin(self, model, kwargs):
         with pytest.raises(ValidationError):
             model(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("model", "kwargs"),
+        [
+            (BrowserConfig, {"timeout_ms": MAX_BROWSER_TIMEOUT_MS + 1}),
+            (BrowserConfig, {"click_timeout_ms": MAX_BROWSER_TIMEOUT_MS + 1}),
+            (BrowserConfig, {"click_wait_ms": MAX_BROWSER_WAIT_MS + 1}),
+            (BrowserConfig, {"wait_ms": MAX_BROWSER_WAIT_MS + 1}),
+            (
+                BrowserConfig,
+                {"actions": [{"type": "scroll"} for _ in range(MAX_BROWSER_ACTIONS + 1)]},
+            ),
+            (
+                BrowserConfig,
+                {"actions": [{"type": "scroll", "times": MAX_BROWSER_ACTION_REPEAT + 1}]},
+            ),
+            (
+                BrowserConfig,
+                {
+                    "actions": [
+                        {
+                            "type": "repeat_click",
+                            "selector": "button",
+                            "max_times": MAX_BROWSER_ACTION_REPEAT + 1,
+                        }
+                    ]
+                },
+            ),
+            (ExecutionConfig, {"concurrency": MAX_EXECUTION_CONCURRENCY + 1}),
+            (ExecutionConfig, {"delay_between": MAX_EXECUTION_DELAY_SECONDS + 1}),
+            (ExecutionConfig, {"domain_rate_limit": MAX_DOMAIN_RATE_LIMIT_SECONDS + 1}),
+            (PaginationConfig, {"next": "a.next", "max_pages": MAX_PAGINATION_PAGES + 1}),
+            (RetryConfig, {"max_attempts": MAX_RETRY_ATTEMPTS + 1}),
+            (RetryConfig, {"backoff_max": MAX_RETRY_BACKOFF_SECONDS + 1}),
+            (RetryConfig, {"retryable_status": [500] * (MAX_RETRYABLE_STATUSES + 1)}),
+            (
+                WebhookConfig,
+                {"url": "https://example.com/hook", "timeout": MAX_WEBHOOK_TIMEOUT_SECONDS + 1},
+            ),
+        ],
+    )
+    def test_numeric_runtime_config_rejects_unbounded_resource_values(self, model, kwargs):
+        with pytest.raises(ValidationError):
+            model(**kwargs)
+
+    def test_targets_rejects_unbounded_target_lists(self):
+        targets = [_target_dict(url=f"https://example.com/{idx}") for idx in range(MAX_TARGETS_PER_JOB + 1)]
+
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**_tier1_config(target=None, targets=targets))
+
+    def test_retryable_status_rejects_invalid_http_status_codes(self):
+        with pytest.raises(ValidationError, match="valid HTTP status codes"):
+            RetryConfig(retryable_status=[99, 600])
 
 
 # --- Transform Parser ---
@@ -545,6 +622,14 @@ class TestWebhookConfig:
             "headers": {"X-Test": "ok\r\nX-Evil: 1"},
         }
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
+            ScrapeConfig(**_tier1_config(webhook=webhook_data))
+
+    def test_webhook_headers_reject_client_managed_names(self):
+        webhook_data = {
+            "url": "https://example.com/hook",
+            "headers": {"Transfer-Encoding": "chunked"},
+        }
+        with pytest.raises(ValidationError, match="managed by the HTTP client"):
             ScrapeConfig(**_tier1_config(webhook=webhook_data))
 
 
