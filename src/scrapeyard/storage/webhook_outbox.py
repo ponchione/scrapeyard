@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,7 @@ from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import get_db
 
 _UNSET = object()
+logger = logging.getLogger(__name__)
 
 
 class WebhookDeliveryStatus(str, Enum):
@@ -127,6 +129,25 @@ def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
     )
 
 
+def _decode_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery | None:
+    try:
+        return row_to_webhook_delivery(row)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Skipping malformed webhook delivery %r: %s",
+            _row_value(row, "delivery_id"),
+            exc,
+        )
+        return None
+
+
+def _row_value(row: Mapping[str, Any], key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 class SQLiteWebhookOutboxStore:
     """SQLite-backed durable webhook outbox using jobs.db."""
 
@@ -172,7 +193,7 @@ class SQLiteWebhookOutboxStore:
                 (delivery_id,),
             )
             row = await cursor.fetchone()
-        return None if row is None else row_to_webhook_delivery(cast(Mapping[str, Any], row))
+        return None if row is None else _decode_webhook_delivery(cast(Mapping[str, Any], row))
 
     async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
         """List all pending deliveries ordered by next attempt time."""
@@ -189,7 +210,11 @@ class SQLiteWebhookOutboxStore:
         async with get_db("jobs.db") as db:
             cursor = await db.execute(sql, params)
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-        return [row_to_webhook_delivery(row) for row in rows]
+        return [
+            delivery
+            for row in rows
+            if (delivery := _decode_webhook_delivery(row)) is not None
+        ]
 
     async def mark_delivered(
         self,

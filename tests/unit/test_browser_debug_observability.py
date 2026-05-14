@@ -100,6 +100,56 @@ async def test_capture_browser_state_collects_bounded_console_and_request_failur
     assert len(capture["request_failures"][-1]["error_text"]) < len(f"failure-24-{long_text}")
 
 
+@pytest.mark.asyncio
+async def test_capture_browser_state_redacts_observability_urls() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = "https://example.com/final"
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.on = MagicMock()
+    registered_handlers: dict[str, Callable[[object], None]] = {}
+    page.on.side_effect = lambda event_name, handler: registered_handlers.setdefault(
+        event_name,
+        handler,
+    )
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=None,
+        capture=capture,
+    )
+
+    registered_handlers["console"](
+        FakeConsoleMessage("error", "failed https://user:pass@example.com?api_key=secret")
+    )
+    registered_handlers["requestfailed"](
+        FakeRequest(
+            url="https://user:pass@cdn.example.com/asset.js?access_token=secret",
+            method="GET",
+            resource_type="script",
+            error_text="failed https://example.com/asset.js?session_id=abc",
+        )
+    )
+
+    assert capture["console_messages"][0]["text"] == (
+        "failed https://example.com?api_key=<redacted>"
+    )
+    assert capture["request_failures"][0]["url"] == (
+        "https://cdn.example.com/asset.js?access_token=<redacted>"
+    )
+    assert capture["request_failures"][0]["error_text"] == (
+        "failed https://example.com/asset.js?session_id=<redacted>"
+    )
+
+
 def test_default_debug_blob_includes_empty_observability_collections() -> None:
     target = TargetConfig(
         url="https://example.com",

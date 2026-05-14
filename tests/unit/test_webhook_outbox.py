@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from scrapeyard.storage.database import close_db, init_db
+from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
     WebhookDeliveryCreate,
@@ -145,4 +145,70 @@ async def test_delivery_survives_close_and_reopen_cycle(tmp_path):
     assert restored.delivery_id == "delivery-1"
     assert restored.payload["job_id"] == "job-1"
     assert restored.status is WebhookDeliveryStatus.pending
+    await close_db()
+
+
+async def test_list_pending_skips_malformed_delivery_rows(tmp_path, caplog):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteWebhookOutboxStore()
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    await store.enqueue_delivery(_delivery("good"), now=now)
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            """INSERT INTO webhook_deliveries
+               (delivery_id, job_id, run_id, event, url, headers_json,
+                timeout_seconds, payload_json, status, attempts, next_attempt_at,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)""",
+            (
+                "bad-json",
+                "job-1",
+                "run-1",
+                "job.complete",
+                "https://hooks.example.com/scrapeyard",
+                "{}",
+                7.0,
+                "{not-json",
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        await db.commit()
+
+    pending = await store.list_pending()
+
+    assert [delivery.delivery_id for delivery in pending] == ["good"]
+    assert "bad-json" in caplog.text
+    await close_db()
+
+
+async def test_get_delivery_returns_none_for_malformed_delivery_row(tmp_path, caplog):
+    await init_db(str(tmp_path / "db"))
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            """INSERT INTO webhook_deliveries
+               (delivery_id, job_id, run_id, event, url, headers_json,
+                timeout_seconds, payload_json, status, attempts, next_attempt_at,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)""",
+            (
+                "bad-headers",
+                "job-1",
+                "run-1",
+                "job.complete",
+                "https://hooks.example.com/scrapeyard",
+                "[]",
+                7.0,
+                "{}",
+                now.isoformat(),
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        await db.commit()
+
+    assert await SQLiteWebhookOutboxStore().get_delivery("bad-headers") is None
+    assert "bad-headers" in caplog.text
     await close_db()
