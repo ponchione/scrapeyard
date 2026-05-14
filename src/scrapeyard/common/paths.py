@@ -19,7 +19,7 @@ def safe_path_part(value: str, *, label: str = "path component") -> str:
         or any(char in value for char in _UNSAFE_PATH_CHARS)
         or not value.isprintable()
     ):
-        raise ValueError(f"Unsafe {label}: {value!r}")
+        raise ValueError(f"Unsafe {label}")
     if len(value.encode("utf-8")) > MAX_PATH_PART_BYTES:
         raise ValueError(f"Unsafe {label}: value must be at most {MAX_PATH_PART_BYTES} bytes")
     return value

@@ -30,6 +30,30 @@ async def test_scrape_missing_required_field_returns_422(client):
 
 
 @pytest.mark.asyncio
+async def test_scrape_validation_error_redacts_secret_inputs(client):
+    response = await client.post(
+        "/scrape",
+        content="""
+project: integ
+name: redacted-validation
+proxy:
+  url: http://user:pass@127.0.0.1:8080
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    error = response.json()["error"]
+    assert response.status_code == 422
+    assert "user:pass" not in error
+    assert "input_value" not in error
+    assert "proxy.url" in error
+
+
+@pytest.mark.asyncio
 async def test_jobs_bad_yaml_returns_422(client):
     """Malformed YAML to POST /jobs should return 422."""
     response = await client.post(

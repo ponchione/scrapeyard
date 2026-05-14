@@ -18,6 +18,13 @@ def test_safe_path_part_rejects_unsafe_components(value: str) -> None:
         safe_path_part(value, label="project")
 
 
+def test_safe_path_part_error_does_not_echo_rejected_value() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        safe_path_part("secret-token\n", label="project")
+
+    assert "secret-token" not in str(exc_info.value)
+
+
 def test_safe_path_part_rejects_oversized_components() -> None:
     with pytest.raises(ValueError, match="at most 255 bytes"):
         safe_path_part("x" * 256, label="project")
