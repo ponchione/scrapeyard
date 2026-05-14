@@ -196,7 +196,7 @@ async def test_adaptive_domain_override_changes_storage_namespace(tmp_path):
 
 @pytest.mark.asyncio
 async def test_browser_override_changes_fetcher_kwargs(tmp_path):
-    """Explicit browser config should override the built-in defaults."""
+    """Explicit browser config should override fetch tuning except guarded routing."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -223,7 +223,7 @@ async def test_browser_override_changes_fetcher_kwargs(tmp_path):
 
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 90000
-        assert call_kwargs["disable_resources"] is False
+        assert call_kwargs["disable_resources"] is True
         assert call_kwargs["network_idle"] is True
         assert call_kwargs["wait_selector"] == ".product-card a"
         assert call_kwargs["wait"] == 1250

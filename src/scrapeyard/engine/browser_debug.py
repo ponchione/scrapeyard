@@ -6,11 +6,18 @@ import asyncio
 import inspect
 import logging
 import re
+from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
 from typing import Any
 
 from scrapling import PlayWrightFetcher, StealthyFetcher
+from scrapling.engines import camo as scrapling_camo_engine
+from scrapling.engines import pw as scrapling_pw_engine
+from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
+from scrapling.engines.toolbelt.navigation import (
+    async_intercept_route as scrapling_async_intercept_route,
+)
 
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
@@ -21,7 +28,7 @@ from scrapeyard.config.schema import (
     TargetConfig,
 )
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_sensitive_mapping
-from scrapeyard.engine.url_guard import redact_userinfo_in_text
+from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +37,11 @@ _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
+
+
+_BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
+    "scrapeyard_browser_block_resources", default=None,
+)
 
 
 class BrowserPageActionError(RuntimeError):
@@ -48,6 +60,47 @@ def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit
     items.append(entry)
     if len(items) > limit:
         del items[: len(items) - limit]
+
+
+async def _guarded_async_intercept_route(route: Any) -> None:
+    """Scrapling route handler wrapper that blocks unsafe browser requests."""
+    block_resources = _BROWSER_BLOCK_RESOURCES.get()
+    request = route.request
+    request_url = getattr(request, "url", "")
+    resource_type = getattr(request, "resource_type", None)
+
+    if block_resources and resource_type in DEFAULT_DISABLED_RESOURCES:
+        logger.debug(
+            'Blocking background resource "%s" of type "%s"',
+            redact_userinfo_in_url(str(request_url)),
+            resource_type,
+        )
+        await route.abort()
+        return
+
+    if isinstance(request_url, str) and request_url:
+        try:
+            await asyncio.to_thread(assert_public_url, request_url)
+        except UnsafeURLError:
+            logger.warning(
+                "Blocked browser request to non-public URL: %s",
+                redact_userinfo_in_url(request_url),
+            )
+            await route.abort()
+            raise
+
+    if block_resources is None:
+        await scrapling_async_intercept_route(route)
+        return
+    await route.continue_()
+
+
+def _install_browser_route_guard() -> None:
+    scrapling_pw_engine.async_intercept_route = _guarded_async_intercept_route
+    scrapling_camo_engine.async_intercept_route = _guarded_async_intercept_route
+
+
+_install_browser_route_guard()
 
 
 def _safe_text_attr(value: Any, attr: str) -> str | None:
@@ -377,12 +430,13 @@ async def fetch_browser_response(
     artifacts_dir: str | None,
 ) -> tuple[Any, dict[str, Any]]:
     capture: dict[str, Any] = {}
+    browser = target_browser_config(target)
 
     async def _page_action(page: Any) -> Any:
         try:
             return await capture_browser_state(
                 page,
-                browser=target.browser,
+                browser=browser,
                 fetcher_type=fetcher_type,
                 artifacts_dir=artifacts_dir,
                 capture=capture,
@@ -405,7 +459,12 @@ async def fetch_browser_response(
             raise action_exc from exc
 
     call_kwargs["page_action"] = _page_action
-    response = await fetcher_cls.async_fetch(url, **call_kwargs)
+    call_kwargs["disable_resources"] = True
+    guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
+    try:
+        response = await fetcher_cls.async_fetch(url, **call_kwargs)
+    finally:
+        _BROWSER_BLOCK_RESOURCES.reset(guard_token)
     action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)
     if action_exc is not None:
         if isinstance(action_exc, UnsafeURLError):
