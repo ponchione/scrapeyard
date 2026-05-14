@@ -77,6 +77,32 @@ def test_assert_public_url_rejects_known_local_hostnames_without_dns(host: str) 
         assert_public_url(f"http://{host}/resource", resolve_dns=False)
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost。",
+        "localhost．",
+        "localhost｡",
+        "ⓛⓞⓒⓐⓛⓗⓞⓢⓣ",
+        "ℓocalhost",
+        "ｌｏｃａｌｈｏｓｔ",
+    ],
+)
+def test_assert_public_url_rejects_idna_localhost_variants_without_dns(host: str) -> None:
+    with pytest.raises(UnsafeURLError, match="blocked"):
+        assert_public_url(f"http://{host}/resource", resolve_dns=False)
+
+
+@pytest.mark.parametrize("host", ["127。0。0。1", "127．0．0．1", "127｡0｡0｡1"])
+def test_assert_public_url_rejects_idna_ipv4_literals_without_dns(host: str) -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url(f"http://{host}/resource", resolve_dns=False)
+
+
+def test_assert_public_url_allows_public_idna_hostname_without_dns() -> None:
+    assert_public_url("https://bücher.example/resource", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
     with pytest.raises(UnsafeURLError, match="percent escapes"):
         assert_public_url("http://%31%32%37.0.0.1/resource", resolve_dns=False)

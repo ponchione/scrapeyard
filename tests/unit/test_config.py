@@ -381,6 +381,10 @@ class TestParseTransform:
         fn = parse_transform('replace("old,value", "new")')
         assert fn("old,value here") == "new here"
 
+    def test_malformed_function_arguments_raise(self):
+        with pytest.raises(ValueError, match="Invalid transform arguments"):
+            parse_transform('prepend("unterminated)')
+
     def test_regex(self):
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"

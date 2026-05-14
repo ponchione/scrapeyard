@@ -105,6 +105,14 @@ def _hostname_is_blocked(host: str) -> bool:
     return host.lower().rstrip(".") in _DISALLOWED_HOSTS
 
 
+def _canonical_hostname(host: str) -> str:
+    """Return the ASCII hostname form used by Python's resolver."""
+    try:
+        return host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError as exc:
+        raise UnsafeURLError("URL hostname is invalid") from exc
+
+
 def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
     """Parse IPv4 forms accepted by socket/http stacks but not ipaddress."""
     try:
@@ -156,9 +164,6 @@ def assert_public_url(
     except ValueError as exc:
         raise UnsafeURLError("URL port is invalid") from exc
 
-    if _hostname_is_blocked(host):
-        raise UnsafeURLError(f"Hostname {host!r} is blocked")
-
     ip_host = host.rstrip(".")
     try:
         literal = ipaddress.ip_address(ip_host)
@@ -170,6 +175,25 @@ def assert_public_url(
         return
 
     legacy_ipv4 = _legacy_ipv4_address(ip_host)
+    if legacy_ipv4 is not None:
+        if _ip_is_blocked(legacy_ipv4):
+            raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
+        return
+
+    host = _canonical_hostname(host)
+    if _hostname_is_blocked(host):
+        raise UnsafeURLError(f"Hostname {host!r} is blocked")
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _ip_is_blocked(literal):
+            raise UnsafeURLError(f"URL points at non-public IP {literal}")
+        return
+
+    legacy_ipv4 = _legacy_ipv4_address(host)
     if legacy_ipv4 is not None:
         if _ip_is_blocked(legacy_ipv4):
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
