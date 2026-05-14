@@ -157,6 +157,33 @@ def _select_elements(
 
 def _element_text(element: Any) -> str:
     """Extract text from a Scrapling element."""
+    if element is None:
+        return ""
     if isinstance(element, str):
         return element
-    return element.text or ""
+
+    direct_text = _text_attr(element)
+    get_all_text = getattr(element, "get_all_text", None)
+    if callable(get_all_text):
+        nested_text = _coerce_text(get_all_text())
+        if direct_text.strip() and nested_text:
+            return f"{direct_text}\n{nested_text}"
+        if nested_text:
+            return nested_text
+
+    return direct_text
+
+
+def _text_attr(element: Any) -> str:
+    text = getattr(element, "text", None)
+    if callable(text):
+        text = text()
+    return _coerce_text(text)
+
+
+def _coerce_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
