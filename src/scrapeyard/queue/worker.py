@@ -435,6 +435,30 @@ def _collect_result_payload(all_results: list[TargetResult]) -> tuple[list[dict[
     return flat_data, all_errors
 
 
+def _target_result_details(result: TargetResult) -> dict[str, Any]:
+    return {
+        "status": result.status_value,
+        "count": len(result.data),
+        "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
+        "error_type": result.error_type.value if result.error_type else None,
+        "error_detail": (
+            redact_userinfo_in_text(result.error_detail)
+            if result.error_detail is not None
+            else None
+        ),
+    }
+
+
+def _unique_result_group_key(grouped: dict[str, Any], url: str) -> str:
+    base_key = url_host_label(url)
+    if base_key not in grouped:
+        return base_key
+    index = 2
+    while f"{base_key}#{index}" in grouped:
+        index += 1
+    return f"{base_key}#{index}"
+
+
 def _determine_final_status(
     config: ScrapeConfig,
     all_results: list[TargetResult],
@@ -477,17 +501,9 @@ def _format_output(
         "targets": [
             {
                 "url": redact_userinfo_in_url(result.url),
-                "status": result.status_value,
-                "count": len(result.data),
+                **_target_result_details(result),
                 "pages_scraped": result.pages_scraped,
-                "error_type": result.error_type.value if result.error_type else None,
-                "error_detail": (
-                    redact_userinfo_in_text(result.error_detail)
-                    if result.error_detail is not None
-                    else None
-                ),
                 "errors": [redact_userinfo_in_text(error) for error in result.errors],
-                "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
             }
             for result in all_results
         ],
@@ -506,18 +522,10 @@ def _format_output(
 
     grouped: dict[str, Any] = {}
     for result in all_results:
-        domain = url_host_label(result.url)
-        grouped[domain] = {
-            "status": result.status_value,
-            "count": len(result.data),
+        group_key = _unique_result_group_key(grouped, result.url)
+        grouped[group_key] = {
+            **_target_result_details(result),
             "data": result.data,
-            "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
-            "error_type": result.error_type.value if result.error_type else None,
-            "error_detail": (
-                redact_userinfo_in_text(result.error_detail)
-                if result.error_detail is not None
-                else None
-            ),
         }
     return {**job_meta, "results": grouped}
 

@@ -174,6 +174,27 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
     assert second_item == {"sku": "b1"}
 
 
+def test_format_output_keeps_same_domain_targets_separate():
+    config = MagicMock(project="test", name="job")
+    config.output.group_by = "target"
+    results = [
+        TargetResult(url="https://shop.example/products/a", status="success", data=[{"sku": "a"}]),
+        TargetResult(url="https://shop.example/products/b", status="success", data=[{"sku": "b"}]),
+    ]
+
+    payload = _format_output(
+        config,
+        results,
+        [{"sku": "a"}, {"sku": "b"}],
+        "job-1",
+        JobStatus.complete,
+        [],
+    )
+
+    assert payload["results"]["shop.example"]["data"] == [{"sku": "a"}]
+    assert payload["results"]["shop.example#2"]["data"] == [{"sku": "b"}]
+
+
 def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     config = MagicMock(project="test", name="job")
     config.output.group_by = GroupBy.merge
