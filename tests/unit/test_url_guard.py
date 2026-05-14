@@ -68,6 +68,15 @@ def test_assert_public_url_rejects_raw_control_characters() -> None:
         assert_public_url("https://example.com/path\x00secret", resolve_dns=False)
 
 
+@pytest.mark.parametrize(
+    "host",
+    ["localhost", "localhost.", "localhost.localdomain", "ip6-localhost", "broadcasthost"],
+)
+def test_assert_public_url_rejects_known_local_hostnames_without_dns(host: str) -> None:
+    with pytest.raises(UnsafeURLError, match="blocked"):
+        assert_public_url(f"http://{host}/resource", resolve_dns=False)
+
+
 def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
     with pytest.raises(UnsafeURLError, match="percent escapes"):
         assert_public_url("http://%31%32%37.0.0.1/resource", resolve_dns=False)
@@ -215,6 +224,43 @@ def test_redact_sensitive_config_text_rejects_yaml_alias_expansion() -> None:
 
     assert "user:pass" not in redacted
     assert "*copy" in redacted
+
+
+def test_redact_sensitive_config_text_masks_secret_keys_when_yaml_is_invalid() -> None:
+    config_yaml = """
+webhook:
+  headers:
+    Authorization: Bearer webhook-secret
+    X-Test: visible
+target:
+  url: https://example.com?api_key=target-secret&page=2
+copy: &copy [1]
+ref: *copy
+"""
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "webhook-secret" not in redacted
+    assert "target-secret" not in redacted
+    assert "Authorization: <redacted>" in redacted
+    assert "X-Test: visible" in redacted
+    assert "*copy" in redacted
+
+
+def test_redact_sensitive_config_text_masks_invalid_yaml_secret_block_values() -> None:
+    config_yaml = """
+headers:
+  Authorization: |
+    Bearer line one
+    Bearer line two
+copy: &copy [1]
+ref: *copy
+"""
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "Bearer line" not in redacted
+    assert redacted.count("<redacted>") >= 2
 
 
 def test_redact_sensitive_config_text_handles_unhashable_yaml_keys() -> None:
