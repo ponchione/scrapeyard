@@ -49,6 +49,45 @@ def test_write_json_non_serializable_uses_default_str(tmp_path):
     assert result["ts"] == str(dt)
 
 
+def test_write_json_file_uses_unique_temp_paths(tmp_path, monkeypatch):
+    filepath = tmp_path / "data.json"
+    seen_sources = []
+
+    from scrapeyard.storage import filesystem
+
+    real_replace = filesystem.os.replace
+
+    def recording_replace(src, dst):
+        seen_sources.append(src)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(filesystem.os, "replace", recording_replace)
+
+    write_json_file(filepath, {"value": 1})
+    write_json_file(filepath, {"value": 2})
+
+    assert len(seen_sources) == 2
+    assert seen_sources[0] != seen_sources[1]
+    assert filepath.with_name(filepath.name + ".tmp") not in seen_sources
+    assert read_json_file(filepath) == {"value": 2}
+
+
+def test_write_json_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypatch):
+    filepath = tmp_path / "data.json"
+
+    from scrapeyard.storage import filesystem
+
+    def failing_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(filesystem.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        write_json_file(filepath, {"value": 1})
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_read_json_missing_file_raises(tmp_path):
     missing = tmp_path / "no_such_file.json"
     with pytest.raises(FileNotFoundError):
