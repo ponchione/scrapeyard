@@ -47,7 +47,7 @@ async def test_health_cache_uses_cached_summary_until_ttl_expires():
 @pytest.mark.asyncio
 async def test_health_cache_returns_empty_summary_when_store_unavailable():
     cache = main_module.HealthCache(
-        lambda: (_ for _ in ()).throw(RuntimeError("not ready")),
+        lambda: (_ for _ in ()).throw(ValueError("not ready")),
         cache_ttl_seconds=60,
     )
 
@@ -134,6 +134,34 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     pool.stop.assert_awaited_once()
     main_module.close_webhook_dispatcher.assert_awaited_once_with(timeout=7)
     main_module.close_db.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch):
+    app = FastAPI()
+    settings = SimpleNamespace(
+        log_dir="/tmp/logs",
+        log_level="DEBUG",
+        db_dir="/tmp/db",
+        storage_results_dir="/tmp/results",
+        adaptive_dir="/tmp/adaptive",
+        workers_shutdown_grace_seconds=7,
+    )
+    shutdown = AsyncMock()
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(main_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
+    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
+    monkeypatch.setattr(main_module, "_startup_runtime_services", AsyncMock())
+    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with main_module.lifespan(app):
+            raise RuntimeError("boom")
+
+    shutdown.assert_awaited_once_with(app, shutdown_grace_seconds=7)
 
 
 @pytest.mark.asyncio

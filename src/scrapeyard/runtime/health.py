@@ -92,7 +92,8 @@ async def load_project_summary(get_job_store: JobStoreFactory) -> dict[str, dict
     rows: ProjectSummaryRows = []
     try:
         rows = await get_job_store().summary_by_project()
-    except RuntimeError:
+    except Exception as exc:
+        logger.warning("Project summary unavailable for health response: %s", exc)
         rows = []
     return build_project_summary(rows)
 

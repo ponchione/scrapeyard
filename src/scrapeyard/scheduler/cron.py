@@ -9,6 +9,7 @@ from datetime import datetime
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.base import SchedulerNotRunningError
 from apscheduler.triggers.cron import CronTrigger
 
 from scrapeyard.common.ids import generate_run_id
@@ -96,7 +97,8 @@ class SchedulerService:
 
     def shutdown(self) -> None:
         """Gracefully stop the scheduler."""
-        self._scheduler.shutdown(wait=False)
+        with suppress(SchedulerNotRunningError):
+            self._scheduler.shutdown(wait=False)
 
     async def _trigger_job(self, job_id: str) -> None:
         """Called by APScheduler when a cron trigger fires.
