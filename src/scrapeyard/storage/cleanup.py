@@ -39,11 +39,10 @@ def start_cleanup_loop(
 
     Returns the :class:`asyncio.Task` so the caller can cancel it on shutdown.
     """
-    settings = get_settings()
-
     async def _loop() -> None:
         while True:
             try:
+                settings = get_settings()
                 await run_cleanup(
                     result_store=result_store,
                     retention_days=settings.storage_retention_days,
