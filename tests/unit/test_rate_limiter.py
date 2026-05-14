@@ -7,6 +7,7 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from redis.exceptions import NoScriptError
 
 from scrapeyard.engine import rate_limiter as rate_limiter_module
 from scrapeyard.engine.rate_limiter import (
@@ -150,6 +151,19 @@ class TestRedisDomainRateLimiter:
         await limiter.acquire("a.com", 1.0)
         await limiter.acquire("b.com", 1.0)
         redis.script_load.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_noscript_reload_retries_evalsha(self) -> None:
+        redis = AsyncMock()
+        redis.script_load = AsyncMock(side_effect=["old-sha", "new-sha"])
+        redis.evalsha = AsyncMock(side_effect=[NoScriptError("No matching script"), [1, 0]])
+        limiter = RedisDomainRateLimiter(redis)
+
+        await limiter.acquire("example.com", 2.0)
+
+        assert redis.script_load.await_count == 2
+        assert redis.evalsha.await_count == 2
+        assert redis.evalsha.await_args_list[1].args[0] == "new-sha"
 
     @pytest.mark.asyncio
     async def test_ttl_minimum_is_2(self) -> None:

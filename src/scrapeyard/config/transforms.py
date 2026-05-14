@@ -7,11 +7,13 @@ import re
 from collections.abc import Callable
 
 # Pattern matching spec-style func("arg1", "arg2") syntax.
-_FUNC_RE = re.compile(r'^(\w+)\((.+)\)$')
+_FUNC_RE = re.compile(r"^(\w+)\((.*)\)$")
 
 
 def _parse_args(raw_args: str) -> list[str]:
     """Parse comma-separated, optionally quoted arguments."""
+    if not raw_args:
+        return []
     return [part.strip() for part in next(csv.reader([raw_args], skipinitialspace=True))]
 
 

@@ -334,6 +334,10 @@ class TestParseTransform:
         fn = parse_transform("uppercase")
         assert fn("hello") == "HELLO"
 
+    def test_no_arg_function_syntax(self):
+        assert parse_transform("trim()")("  hello  ") == "hello"
+        assert parse_transform("lowercase()")("HELLO") == "hello"
+
     def test_prepend(self):
         fn = parse_transform("prepend:prefix_")
         assert fn("value") == "prefix_value"
