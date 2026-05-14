@@ -47,6 +47,7 @@ class RateLimitMiddleware:
         self.clock = clock or time.monotonic
         self._lock = asyncio.Lock()
         self._requests_by_key: dict[str, deque[float]] = {}
+        self._last_prune_at = 0.0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or self._disabled() or scope.get("path") in self.exempt_paths:
@@ -84,8 +85,9 @@ class RateLimitMiddleware:
 
     async def _record_or_reject(self, key: str, now: float) -> float | None:
         async with self._lock:
-            requests = self._requests_by_key.setdefault(key, deque())
             cutoff = now - self.window_seconds
+            self._prune_expired_keys(cutoff, now)
+            requests = self._requests_by_key.setdefault(key, deque())
             while requests and requests[0] <= cutoff:
                 requests.popleft()
 
@@ -94,6 +96,14 @@ class RateLimitMiddleware:
 
             requests.append(now)
             return None
+
+    def _prune_expired_keys(self, cutoff: float, now: float) -> None:
+        if now < self._last_prune_at + self.window_seconds:
+            return
+        self._last_prune_at = now
+        for key, requests in list(self._requests_by_key.items()):
+            if not requests or requests[-1] <= cutoff:
+                self._requests_by_key.pop(key, None)
 
 
 class RequestSizeLimitMiddleware:

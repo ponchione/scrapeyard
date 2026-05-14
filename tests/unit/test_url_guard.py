@@ -73,10 +73,27 @@ def test_redact_userinfo_in_url_handles_invalid_port_without_raising() -> None:
     )
 
 
+def test_redact_userinfo_in_text_handles_malformed_ipv6_without_raising() -> None:
+    text = "failed at https://user:pass@[::1/private?api_key=secret"
+
+    assert redact_userinfo_in_text(text) == (
+        "failed at https://[::1/private?api_key=<redacted>"
+    )
+
+
 def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
     assert redact_userinfo_in_url(
         "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
     ) == "https://example.com/path?api_key=<redacted>&page=2&session_id=<redacted>"
+
+
+def test_redact_userinfo_in_url_masks_signed_url_query_values() -> None:
+    assert redact_userinfo_in_url(
+        "https://example.com/path?AWSAccessKeyId=akia&sig=abc&key=map-key&page=2"
+    ) == (
+        "https://example.com/path?"
+        "AWSAccessKeyId=<redacted>&sig=<redacted>&key=<redacted>&page=2"
+    )
 
 
 def test_redact_userinfo_in_text_masks_sensitive_query_values() -> None:
