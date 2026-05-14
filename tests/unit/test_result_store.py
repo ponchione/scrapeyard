@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from unittest.mock import AsyncMock, call, patch
 
@@ -178,6 +180,32 @@ async def test_get_result_offloads_json_read(store):
     )
 
 
+async def test_get_result_rejects_metadata_path_outside_results_dir(store, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "results.json").write_text('{"secret": true}', encoding="utf-8")
+
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            """INSERT INTO results_meta
+               (job_id, project, run_id, status, record_count, file_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "j-unsafe",
+                "acme",
+                "run-unsafe",
+                "complete",
+                1,
+                str(outside),
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        await db.commit()
+
+    with pytest.raises(ValueError, match="outside results_dir"):
+        await store.get_result("j-unsafe", "run-unsafe")
+
+
 async def test_delete_results_offloads_directory_removal(store):
     first = await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
     second = await store.save_result("j-1", [{"price": 19.99}], run_id="run-2")
@@ -193,6 +221,6 @@ async def test_delete_results_offloads_directory_removal(store):
     assert mock_to_thread.await_count == 1
     assert mock_to_thread.await_args.args[0] is result_store_module.remove_directories
     assert set(mock_to_thread.await_args.args[1]) == {
-        first.file_path,
-        second.file_path,
+        Path(first.file_path),
+        Path(second.file_path),
     }

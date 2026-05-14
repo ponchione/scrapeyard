@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
 
 
@@ -39,12 +40,12 @@ def build_error_record(
         job_id=job_id,
         run_id=run_id,
         project=project,
-        target_url=url,
+        target_url=redact_userinfo_in_url(url),
         attempt=attempt,
         error_type=error_type,
         http_status=http_status,
         fetcher_used=fetcher_used,
-        error_message=error_message,
+        error_message=redact_userinfo_in_text(error_message) if error_message is not None else None,
         action_taken=action,
     )
 

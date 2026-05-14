@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from scrapeyard.engine.url_guard import redact_sensitive_config_text
+from scrapeyard.engine.url_guard import (
+    redact_sensitive_config_text,
+    redact_userinfo_in_text,
+    redact_userinfo_in_url,
+)
 from scrapeyard.models.job import ErrorRecord, Job, JobRun
 
 
@@ -76,13 +80,17 @@ def serialize_error_record(error: ErrorRecord) -> dict[str, Any]:
         "job_id": error.job_id,
         "run_id": error.run_id,
         "project": error.project,
-        "target_url": error.target_url,
+        "target_url": redact_userinfo_in_url(error.target_url),
         "attempt": error.attempt,
         "timestamp": error.timestamp.isoformat(),
         "error_type": error.error_type.value,
         "http_status": error.http_status,
         "fetcher_used": error.fetcher_used,
-        "error_message": error.error_message,
+        "error_message": (
+            redact_userinfo_in_text(error.error_message)
+            if error.error_message is not None
+            else None
+        ),
         "selectors_matched": error.selectors_matched,
         "action_taken": error.action_taken.value,
         "resolved": error.resolved,

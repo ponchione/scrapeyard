@@ -85,6 +85,10 @@ def assert_public_url(
     host = parsed.hostname
     if not host:
         raise UnsafeURLError("URL has no hostname")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise UnsafeURLError("URL port is invalid") from exc
 
     if _hostname_is_blocked(host):
         raise UnsafeURLError(f"Hostname {host!r} is blocked")
@@ -125,7 +129,7 @@ def assert_public_url(
 
 
 def redact_userinfo_in_text(text: str) -> str:
-    """Strip ``user:pass@`` from any http(s) URL embedded in *text*.
+    """Strip ``user:pass@`` from any URL embedded in *text*.
 
     Used on stored YAML before it is returned to API clients so proxy
     credentials do not leak through ``GET /jobs/{id}``.
@@ -178,6 +182,25 @@ def redact_userinfo_in_url(url: str) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     netloc = host
-    if parsed.port:
-        netloc = f"{host}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port:
+        netloc = f"{host}:{port}"
     return urlunparse(parsed._replace(netloc=netloc))
+
+
+def url_host_label(url: str) -> str:
+    """Return a hostname[:port] label without userinfo for grouping and paths."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or parsed.netloc or "unknown-host").lower().rstrip(".")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        return host
+    return f"{host}:{port}"

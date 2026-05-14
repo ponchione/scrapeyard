@@ -525,7 +525,7 @@ class ScrapeConfig(BaseModel):
 
     # Single target (Tier 1) or multiple targets (Tier 2) — one must be provided.
     target: Optional[TargetConfig] = None
-    targets: Optional[list[TargetConfig]] = None
+    targets: Optional[list[TargetConfig]] = Field(default=None, min_length=1)
 
     adaptive: Optional[bool] = Field(
         default=None, description="Override adaptive tracking (default: auto)"

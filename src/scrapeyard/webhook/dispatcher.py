@@ -16,7 +16,7 @@ import httpx
 
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_userinfo_in_url
 from scrapeyard.storage.protocols import WebhookOutboxStore
 from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookDeliveryCreate, WebhookDeliveryStatus
 
@@ -128,6 +128,7 @@ class HttpWebhookDispatcher:
         payload: dict[str, Any],
     ) -> WebhookDispatchResult:
         url = str(config.url)
+        log_url = redact_userinfo_in_url(url)
         start = time.monotonic()
         try:
             assert_public_url(url)
@@ -141,14 +142,19 @@ class HttpWebhookDispatcher:
             elapsed_ms = (time.monotonic() - start) * 1000
 
             if response.is_success:
-                logger.info("Webhook dispatched to %s — %d in %.0fms", url, response.status_code, elapsed_ms)
+                logger.info(
+                    "Webhook dispatched to %s — %d in %.0fms",
+                    log_url,
+                    response.status_code,
+                    elapsed_ms,
+                )
                 return WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
 
             last_error = f"HTTP {response.status_code}"
             if not self._is_retryable_status(response.status_code):
                 logger.warning(
                     "Webhook to %s returned %d in %.0fms — not retryable",
-                    url, response.status_code, elapsed_ms,
+                    log_url, response.status_code, elapsed_ms,
                 )
                 return WebhookDispatchResult(
                     WebhookDispatchStatus.permanent_failed,
@@ -156,17 +162,22 @@ class HttpWebhookDispatcher:
                     last_error,
                 )
 
-            logger.warning("Webhook to %s returned %d in %.0fms", url, response.status_code, elapsed_ms)
+            logger.warning(
+                "Webhook to %s returned %d in %.0fms",
+                log_url,
+                response.status_code,
+                elapsed_ms,
+            )
             return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
 
         except UnsafeURLError as exc:
             last_error = str(exc)
-            logger.warning("Webhook to %s blocked by URL safety check: %s", url, last_error)
+            logger.warning("Webhook to %s blocked by URL safety check: %s", log_url, last_error)
             return WebhookDispatchResult(WebhookDispatchStatus.permanent_failed, 1, last_error)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             last_error = str(exc) or exc.__class__.__name__
-            logger.warning("Webhook to %s failed after %.0fms: %s", url, elapsed_ms, exc)
+            logger.warning("Webhook to %s failed after %.0fms: %s", log_url, elapsed_ms, exc)
             return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
 
     async def dispatch(
@@ -181,7 +192,8 @@ class HttpWebhookDispatcher:
         persistence.
         """
         url = str(config.url)
-        logger.debug("Webhook payload for %s: %s", url, payload)
+        log_url = redact_userinfo_in_url(url)
+        logger.debug("Webhook payload for %s: %s", log_url, payload)
 
         last_error: str | None = None
         for attempt in range(1 + self._max_retries):
@@ -201,13 +213,14 @@ class HttpWebhookDispatcher:
             if attempt < self._max_retries:
                 delay = self._backoff_delay(attempt)
                 logger.debug(
-                    "Webhook retry to %s in %.1fs", url, delay,
+                    "Webhook retry to %s in %.1fs",
+                    log_url, delay,
                 )
                 await asyncio.sleep(delay)
 
         logger.error(
             "Webhook to %s failed after %d attempts — leaving delivery retryable: %s",
-            url, 1 + self._max_retries, last_error,
+            log_url, 1 + self._max_retries, last_error,
         )
         return WebhookDispatchResult(
             WebhookDispatchStatus.retryable_failed,
@@ -222,8 +235,9 @@ class HttpWebhookDispatcher:
         this method schedules the HTTP task or returns to its caller.
         """
         url = str(config.url)
+        log_url = redact_userinfo_in_url(url)
         if not self._accepting_tasks:
-            logger.warning("Skipping webhook to %s during shutdown", url)
+            logger.warning("Skipping webhook to %s during shutdown", log_url)
             return
 
         if self._outbox_store is None:
@@ -291,7 +305,7 @@ class HttpWebhookDispatcher:
 
         task = asyncio.create_task(
             self._run_persisted_delivery(delivery),
-            name=f"scrapeyard-webhook:{delivery.url}",
+            name=f"scrapeyard-webhook:{redact_userinfo_in_url(delivery.url)}",
         )
         self._track_task(task, delivery_id=delivery.delivery_id)
 
@@ -332,10 +346,16 @@ class HttpWebhookDispatcher:
             try:
                 result = await self.send_once(request_config, current.payload)
             except asyncio.CancelledError:
-                logger.info("Webhook to %s cancelled during shutdown", current.url)
+                logger.info(
+                    "Webhook to %s cancelled during shutdown",
+                    redact_userinfo_in_url(current.url),
+                )
                 raise
             except Exception as exc:
-                logger.exception("Unexpected webhook dispatch failure to %s", current.url)
+                logger.exception(
+                    "Unexpected webhook dispatch failure to %s",
+                    redact_userinfo_in_url(current.url),
+                )
                 result = WebhookDispatchResult(
                     WebhookDispatchStatus.retryable_failed,
                     1,

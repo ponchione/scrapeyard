@@ -9,6 +9,7 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
+    url_host_label,
 )
 
 
@@ -19,6 +20,11 @@ def test_assert_public_url_rejects_non_global_cgnat_address() -> None:
 
 def test_assert_public_url_allows_global_literal_address_without_dns() -> None:
     assert_public_url("http://8.8.8.8/resource", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_invalid_port() -> None:
+    with pytest.raises(UnsafeURLError, match="port"):
+        assert_public_url("https://example.com:99999/resource", resolve_dns=False)
 
 
 def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
@@ -39,6 +45,16 @@ def test_redact_userinfo_in_url_preserves_ipv6_brackets() -> None:
     assert redact_userinfo_in_url("https://user:pass@[2001:4860:4860::8888]:443/a") == (
         "https://[2001:4860:4860::8888]:443/a"
     )
+
+
+def test_redact_userinfo_in_url_handles_invalid_port_without_raising() -> None:
+    assert redact_userinfo_in_url("https://user:pass@example.com:bad/a") == (
+        "https://example.com/a"
+    )
+
+
+def test_url_host_label_strips_userinfo_and_preserves_port() -> None:
+    assert url_host_label("https://user:pass@Example.COM:8443/products") == "example.com:8443"
 
 
 def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:

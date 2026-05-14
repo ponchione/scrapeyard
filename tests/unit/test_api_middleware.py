@@ -141,6 +141,38 @@ async def test_size_limit_rejects_declared_oversized_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_size_limit_rejects_negative_content_length() -> None:
+    app_called = False
+
+    async def app(_scope, _receive, _send):
+        nonlocal app_called
+        app_called = True
+
+    middleware = RequestSizeLimitMiddleware(app, max_bytes=3)
+    messages = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    await middleware(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/echo",
+            "headers": [(b"content-length", b"-1")],
+        },
+        receive,
+        send,
+    )
+
+    assert app_called is False
+    assert messages[0]["status"] == 400
+
+
+@pytest.mark.asyncio
 async def test_size_limit_rejects_streaming_oversized_body() -> None:
     async def chunks():
         yield b"ab"

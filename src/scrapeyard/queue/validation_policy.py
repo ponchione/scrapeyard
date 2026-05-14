@@ -10,6 +10,7 @@ from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.resilience import ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
+from scrapeyard.engine.url_guard import redact_userinfo_in_url
 from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import (
     TargetErrorRecorder,
@@ -60,7 +61,11 @@ async def apply_validation(
     if validation.action == OnEmptyAction.fail:
         return _handle_fail_action(result, target_cfg, validation.message)
 
-    logger.info("Retrying target %s after validation failure: %s", target_cfg.url, validation.message)
+    logger.info(
+        "Retrying target %s after validation failure: %s",
+        redact_userinfo_in_url(target_cfg.url),
+        validation.message,
+    )
     return await _retry_after_validation_failure(
         target_cfg=target_cfg,
         domain=domain,
@@ -95,13 +100,13 @@ def _record_validation_failure(
 
 
 def _handle_warn_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
-    logger.warning("Validation warning for %s: %s", target_cfg.url, message)
+    logger.warning("Validation warning for %s: %s", redact_userinfo_in_url(target_cfg.url), message)
     result.errors.append(message)
     return result
 
 
 def _handle_skip_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
-    logger.info("Skipping invalid result for %s: %s", target_cfg.url, message)
+    logger.info("Skipping invalid result for %s: %s", redact_userinfo_in_url(target_cfg.url), message)
     return TargetResult(
         url=target_cfg.url,
         status=TargetStatus.success,
@@ -113,7 +118,7 @@ def _handle_skip_action(result: TargetResult, target_cfg: TargetConfig, message:
 
 
 def _handle_fail_action(result: TargetResult, target_cfg: TargetConfig, message: str) -> TargetResult:
-    logger.info("Failing target %s due to validation: %s", target_cfg.url, message)
+    logger.info("Failing target %s due to validation: %s", redact_userinfo_in_url(target_cfg.url), message)
     return _build_validation_failed_result(target_cfg, result, message)
 
 
