@@ -358,3 +358,32 @@ async def test_recover_stale_running_jobs_fails_running_job_without_matching_run
     assert stale_job.status == JobStatus.failed
     assert stale_job.updated_at == recovered_at
     assert recent_job.status == JobStatus.running
+
+
+async def test_recover_stale_running_jobs_uses_terminal_run_status(store):
+    cutoff = datetime(2026, 3, 10, 12, 0, 0)
+    recovered_at = datetime(2026, 3, 10, 12, 5, 0)
+    await store.save_job(
+        _make_job(
+            job_id="j-finalized",
+            name="finalized",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 10, 0, 0),
+            current_run_id="r-finalized",
+        )
+    )
+    await _insert_run(
+        "r-finalized",
+        "j-finalized",
+        "partial",
+        "scheduled",
+        "ccc",
+        "2026-03-10T10:00:00",
+    )
+
+    recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
+
+    assert recovered == 1
+    job = await store.get_job("j-finalized")
+    assert job.status == JobStatus.partial
+    assert job.updated_at == recovered_at

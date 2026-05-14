@@ -48,5 +48,7 @@ def remove_directories(paths: Iterable[str | Path]) -> None:
     """Recursively remove any directories in *paths* that still exist."""
     for path in paths:
         target = Path(path)
-        if target.exists():
+        if target.is_symlink() or not target.is_dir():
+            continue
+        with suppress(FileNotFoundError):
             shutil.rmtree(target)

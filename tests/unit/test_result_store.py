@@ -114,12 +114,12 @@ async def test_save_result_reuses_explicit_run_id(store):
 async def test_run_id_format(store):
     meta = await store.save_result("j-1", [{"a": 1}])
     run_id = meta.run_id
-    # Format: YYYYMMDD-HHMMSS-{8 hex chars}
+    # Format: YYYYMMDD-HHMMSS-{16 hex chars}
     parts = run_id.split("-")
     assert len(parts) == 3
     assert len(parts[0]) == 8  # YYYYMMDD
     assert len(parts[1]) == 6  # HHMMSS
-    assert len(parts[2]) == 8  # short uuid
+    assert len(parts[2]) == 16  # short uuid
 
 
 async def test_save_result_writes_json_file(store, tmp_path):
