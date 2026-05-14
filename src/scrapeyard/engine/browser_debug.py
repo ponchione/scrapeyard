@@ -297,7 +297,7 @@ async def capture_browser_state(
         await run_browser_actions(page, browser.actions)
     capture["final_url"] = getattr(page, "url", None)
     if isinstance(capture["final_url"], str) and capture["final_url"]:
-        assert_public_url(capture["final_url"])
+        await asyncio.to_thread(assert_public_url, capture["final_url"])
     try:
         capture["page_title"] = await page.title()
     except Exception as exc:

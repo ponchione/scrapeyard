@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from scrapeyard.common.paths import safe_path_part
+from scrapeyard.config.transforms import parse_transform
 from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
@@ -175,6 +176,21 @@ class SelectorLong(BaseModel):
     query: str
     type: SelectorType = SelectorType.css
     transform: Optional[str] = None
+
+    @field_validator("transform")
+    @classmethod
+    def _validate_transform_pipeline(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        for step in value.split("|"):
+            step = step.strip()
+            if not step:
+                raise ValueError("Selector transform steps must not be blank")
+            try:
+                parse_transform(step)
+            except (ValueError, re.error) as exc:
+                raise ValueError(f"Invalid selector transform: {exc}") from exc
+        return value
 
 
 # A selector value is either a short-form string or a long-form object.
@@ -435,7 +451,11 @@ class TargetConfig(BaseModel):
         default=None,
         description="Optional selector for repeated item containers; when set, field selectors are applied relative to each matched item",
     )
-    selectors: dict[str, SelectorValue] = Field(..., description="Named selector definitions")
+    selectors: dict[str, SelectorValue] = Field(
+        ...,
+        min_length=1,
+        description="Named selector definitions",
+    )
     pagination: Optional[PaginationConfig] = None
     proxy: Optional[ProxyConfig] = Field(
         default=None,
