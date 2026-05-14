@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from scrapeyard.models.job import JobStatus
-from scrapeyard.queue.job_state import build_completed_job, build_failed_job, build_running_job
+from scrapeyard.queue.job_state import (
+    build_completed_job,
+    build_failed_job,
+    build_running_job,
+    run_lease_is_active,
+)
 from tests.unit.worker_helpers import make_job
 
 
@@ -43,3 +48,21 @@ def test_build_failed_job_sets_failed_status_and_timestamp():
 
     assert updated.status == JobStatus.failed
     assert updated.updated_at == failed_at
+
+
+def test_run_lease_is_active_for_recent_timestamp():
+    now = datetime(2026, 4, 9, 12, 10, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 4, 9, 12, 6, tzinfo=timezone.utc)
+
+    assert run_lease_is_active(updated_at, lease_seconds=300, now=now) is True
+
+
+def test_run_lease_is_not_active_for_stale_or_missing_timestamp():
+    now = datetime(2026, 4, 9, 12, 10, tzinfo=timezone.utc)
+
+    assert run_lease_is_active(None, lease_seconds=300, now=now) is False
+    assert run_lease_is_active(
+        datetime(2026, 4, 9, 12, 4, tzinfo=timezone.utc),
+        lease_seconds=300,
+        now=now,
+    ) is False
