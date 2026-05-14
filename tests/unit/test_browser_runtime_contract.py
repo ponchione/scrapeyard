@@ -24,6 +24,14 @@ def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
     assert 'seccomp:unconfined' in compose
 
 
+def test_dockerignore_excludes_local_env_files_from_build_context() -> None:
+    dockerignore = Path(".dockerignore").read_text().splitlines()
+
+    assert ".env" in dockerignore
+    assert ".env.*" in dockerignore
+    assert "!.env.example" in dockerignore
+
+
 def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
     readme = Path("README.md").read_text()
 

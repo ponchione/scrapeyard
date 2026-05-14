@@ -5,6 +5,7 @@ description = "Config-driven web scraping microservice built on Scrapling"
 authors = []
 readme = "README.md"
 packages = [{include = "scrapeyard", from = "src"}]
+include = [{path = "sql/*.sql", format = ["sdist", "wheel"]}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
