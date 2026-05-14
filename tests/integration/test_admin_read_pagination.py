@@ -80,6 +80,17 @@ async def test_jobs_list_returns_array_with_pagination_headers(client):
 
 
 @pytest.mark.asyncio
+async def test_jobs_list_empty_project_filter_does_not_return_all_jobs(client):
+    store = get_job_store()
+    await store.save_job(_make_job(job_id="job-blank-filter", project="integ"))
+
+    response = await client.get("/jobs?project=")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
 async def test_errors_list_returns_newest_first_with_pagination_headers(client):
     store = get_error_store()
     await store.log_errors(

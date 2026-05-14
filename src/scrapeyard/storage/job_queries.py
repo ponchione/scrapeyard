@@ -25,7 +25,7 @@ def build_list_jobs_with_stats_query(
         "LEFT JOIN job_stats s ON j.job_id = s.job_id"
     )
     params: list[object] = []
-    if project:
+    if project is not None:
         sql += " WHERE j.project = ?"
         params.append(project)
     sql += (
