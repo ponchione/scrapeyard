@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.paths import safe_join
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.filesystem import (
@@ -80,7 +81,7 @@ class LocalResultStore:
     ) -> SaveResultMeta:
         project, job_name = await self._job_lookup(job_id)
         run_id = run_id or generate_run_id()
-        run_dir = self._results_dir / project / job_name / run_id
+        run_dir = safe_join(self._results_dir, project, job_name, run_id)
         await asyncio.to_thread(prepare_directory, run_dir)
 
         path = run_dir / "results.json"

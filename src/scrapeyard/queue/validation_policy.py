@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.resilience import ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
@@ -185,4 +186,6 @@ def _build_validation_failed_result(
 
 
 def _build_retry_artifacts_dir(run_artifacts_dir: str | None, domain: str) -> str | None:
-    return None if run_artifacts_dir is None else str(Path(run_artifacts_dir) / domain)
+    return None if run_artifacts_dir is None else str(
+        Path(run_artifacts_dir) / safe_path_part(domain, label="target domain")
+    )

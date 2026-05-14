@@ -71,6 +71,12 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="must be provided"):
             ScrapeConfig(**data)
 
+    @pytest.mark.parametrize("field", ["project", "name"])
+    def test_project_and_name_reject_path_components(self, field):
+        data = _tier1_config(**{field: "../outside"})
+        with pytest.raises(ValidationError, match="Unsafe project/name"):
+            ScrapeConfig(**data)
+
 
 class TestResolvedTargets:
     """resolved_targets() convenience method."""

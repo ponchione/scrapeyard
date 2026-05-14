@@ -113,6 +113,45 @@ async def test_paginate_target_stops_when_next_url_is_current_page():
 
 
 @pytest.mark.asyncio
+async def test_paginate_target_stops_when_next_url_is_unsafe():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/products?page=1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 3},
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    fetch_page = AsyncMock()
+
+    await paginate_target(
+        page=_Page([_Element("http://169.254.169.254/latest/meta-data")]),
+        target=target,
+        result=result,
+        fetch_target_page=fetch_page,
+        extract_page_data=MagicMock(return_value=[{"title": "metadata"}]),
+        retry_handler=MagicMock(spec=RetryConfig),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_not_awaited()
+    assert result.pages_scraped == 1
+    assert result.data == [{"title": "first"}]
+
+
+@pytest.mark.asyncio
 async def test_paginate_target_stops_when_next_url_was_seen_after_redirect():
     target = TargetConfig.model_validate(
         {

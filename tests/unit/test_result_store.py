@@ -16,6 +16,11 @@ async def _lookup(job_id: str) -> tuple[str, str]:
     return ("acme", "scrape-prices")
 
 
+async def _unsafe_lookup(job_id: str) -> tuple[str, str]:
+    """Stub job lookup returning unsafe path components."""
+    return ("../outside", "scrape-prices")
+
+
 async def _run_to_thread(func, *args, **kwargs):
     return func(*args, **kwargs)
 
@@ -121,6 +126,18 @@ async def test_save_result_writes_json_file(store, tmp_path):
     results_dir = tmp_path / "results" / "acme" / "scrape-prices" / run_id
     json_path = results_dir / "results.json"
     assert json_path.exists()
+
+
+async def test_save_result_rejects_unsafe_job_path_components(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    store = LocalResultStore(str(results_dir), _unsafe_lookup)
+
+    with pytest.raises(ValueError, match="Unsafe"):
+        await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
+
+    assert not (tmp_path / "outside").exists()
 
 
 async def test_save_result_offloads_filesystem_work(store):

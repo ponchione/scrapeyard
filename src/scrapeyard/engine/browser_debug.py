@@ -20,6 +20,7 @@ from scrapeyard.config.schema import (
     FetcherType,
     TargetConfig,
 )
+from scrapeyard.engine.url_guard import redact_sensitive_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "screenshot_path": None,
         "console_messages": [],
         "request_failures": [],
-        "browser_settings": browser.model_dump(mode="json"),
+        "browser_settings": redact_sensitive_mapping(browser.model_dump(mode="json")),
     }
 
 

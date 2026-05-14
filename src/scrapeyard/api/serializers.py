@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from scrapeyard.engine.url_guard import redact_userinfo_in_text
+from scrapeyard.engine.url_guard import redact_sensitive_config_text
 from scrapeyard.models.job import ErrorRecord, Job, JobRun
 
 
@@ -59,7 +59,7 @@ def serialize_job_detail(
         "project": job.project,
         "name": job.name,
         "status": job.status.value,
-        "config_yaml": redact_userinfo_in_text(job.config_yaml),
+        "config_yaml": redact_sensitive_config_text(job.config_yaml),
         "created_at": job.created_at.isoformat(),
         "updated_at": _isoformat(job.updated_at),
         "schedule_cron": job.schedule_cron,

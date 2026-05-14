@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
+from scrapeyard.common.paths import safe_join
 from scrapeyard.common.time import utc_now
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.job_state import build_completed_job, build_failed_job, build_running_job
@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def build_run_paths(settings: Any, project: str, job_name: str, run_id: str | None) -> tuple[str, str | None]:
-    adaptive_dir = str(Path(settings.adaptive_dir) / project)
+    adaptive_dir = str(safe_join(settings.adaptive_dir, project))
     run_artifacts_dir = None if run_id is None else str(
-        Path(settings.storage_results_dir) / project / job_name / run_id / "artifacts"
+        safe_join(settings.storage_results_dir, project, job_name, run_id) / "artifacts"
     )
     return adaptive_dir, run_artifacts_dir
 
