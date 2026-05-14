@@ -17,6 +17,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger(__name__)
 
 
+class _RequestBodyTooLarge(Exception):
+    """Internal signal raised when a streaming request exceeds the body cap."""
+
+
 class RateLimitMiddleware:
     """In-memory sliding-window HTTP request limiter.
 
@@ -120,31 +124,29 @@ class RequestSizeLimitMiddleware:
                 return
 
         consumed = 0
-        exceeded = False
 
         async def limited_receive() -> Message:
-            nonlocal consumed, exceeded
+            nonlocal consumed
             message = await receive()
             if message["type"] == "http.request":
                 consumed += len(message.get("body", b""))
                 if consumed > self.max_bytes:
-                    exceeded = True
-                    return {"type": "http.disconnect"}
+                    raise _RequestBodyTooLarge
             return message
 
-        rejected = False
+        response_started = False
 
         async def guarded_send(message: Message) -> None:
-            nonlocal rejected
-            if exceeded and not rejected:
-                rejected = True
-                await _reject(scope, send, 413, "Request body too large")
-                return
-            if rejected:
-                return
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
             await send(message)
 
-        await self.app(scope, limited_receive, guarded_send)
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _RequestBodyTooLarge:
+            if not response_started:
+                await _reject(scope, send, 413, "Request body too large")
 
 
 class APIKeyAuthMiddleware:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -13,47 +14,53 @@ class ServiceSettings(BaseSettings):
     All variables are prefixed with ``SCRAPEYARD_`` and grouped by subsystem.
     """
 
-    workers_max_concurrent: int = 4
-    workers_max_browsers: int = 2
-    workers_memory_limit_mb: int = 4096
-    sync_timeout_seconds: int = 15
-    sync_poll_delay_seconds: float = 0.5
-    basic_fetch_timeout_seconds: float = 30.0
-    workers_shutdown_grace_seconds: int = 30
-    workers_running_lease_seconds: int = 300
-    workers_redis_connect_timeout_seconds: float = 10.0
+    workers_max_concurrent: int = Field(default=4, ge=1)
+    workers_max_browsers: int = Field(default=2, ge=1)
+    workers_memory_limit_mb: int = Field(default=4096, ge=0)
+    sync_timeout_seconds: int = Field(default=15, ge=0)
+    sync_poll_delay_seconds: float = Field(default=0.5, gt=0)
+    basic_fetch_timeout_seconds: float = Field(default=30.0, gt=0)
+    workers_shutdown_grace_seconds: int = Field(default=30, ge=0)
+    workers_running_lease_seconds: int = Field(default=300, gt=0)
+    workers_redis_connect_timeout_seconds: float = Field(default=10.0, gt=0)
 
     redis_dsn: str = "redis://redis:6379/0"
     queue_name: str = "scrapeyard"
 
-    admin_read_default_limit: int = 100
-    admin_read_max_limit: int = 500
+    admin_read_default_limit: int = Field(default=100, ge=1)
+    admin_read_max_limit: int = Field(default=500, ge=1)
 
-    rate_limit_requests: int = 600
-    rate_limit_window_seconds: int = 60
+    rate_limit_requests: int = Field(default=600, ge=0)
+    rate_limit_window_seconds: int = Field(default=60, ge=0)
 
-    scheduler_jitter_max_seconds: int = 120
+    scheduler_jitter_max_seconds: int = Field(default=120, ge=0)
 
-    storage_retention_days: int = 30
+    storage_retention_days: int = Field(default=30, ge=0)
     db_dir: str = "/data/db"
     storage_results_dir: str = "/data/results"
-    storage_max_results_per_job: int = 100
+    storage_max_results_per_job: int = Field(default=100, ge=0)
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False
     browser_debug_artifacts_dir: str = "/data/browser-debug"
 
-    circuit_breaker_max_failures: int = 3
-    circuit_breaker_cooldown_seconds: int = 300
+    circuit_breaker_max_failures: int = Field(default=3, ge=1)
+    circuit_breaker_cooldown_seconds: int = Field(default=300, ge=0)
     proxy_url: str = ""
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
 
     api_keys: str = ""
-    max_request_bytes: int = 262144
-    health_disk_free_min_mb: int = 100
+    max_request_bytes: int = Field(default=262144, ge=0)
+    health_disk_free_min_mb: int = Field(default=100, ge=0)
 
     model_config = {"env_prefix": "SCRAPEYARD_"}
+
+    @model_validator(mode="after")
+    def _validate_read_limits(self) -> ServiceSettings:
+        if self.admin_read_default_limit > self.admin_read_max_limit:
+            raise ValueError("admin_read_default_limit must be <= admin_read_max_limit")
+        return self
 
     def parsed_api_keys(self) -> set[str]:
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}

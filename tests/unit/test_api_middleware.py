@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
-from scrapeyard.api.middleware import RateLimitMiddleware
+from scrapeyard.api.middleware import RateLimitMiddleware, RequestSizeLimitMiddleware
 
 
 class ManualClock:
@@ -42,6 +42,18 @@ def _rate_limited_app(
         exempt_paths={"/health"},
         clock=clock,
     )
+    return app
+
+
+def _size_limited_app(*, max_bytes: int = 3) -> FastAPI:
+    app = FastAPI()
+
+    @app.post("/echo")
+    async def echo(request: Request) -> dict[str, int]:
+        body = await request.body()
+        return {"len": len(body)}
+
+    app.add_middleware(RequestSizeLimitMiddleware, max_bytes=max_bytes)
     return app
 
 
@@ -115,3 +127,29 @@ async def test_rate_limit_exempt_paths_are_not_limited_or_counted() -> None:
         assert (await client.get("/health")).status_code == 200
         assert (await client.get("/limited")).status_code == 200
         assert (await client.get("/limited")).status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_size_limit_rejects_declared_oversized_body() -> None:
+    transport = ASGITransport(app=_size_limited_app(max_bytes=3))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/echo", content=b"abcd")
+
+    assert response.status_code == 413
+    assert response.json() == {"error": "Request body too large"}
+
+
+@pytest.mark.asyncio
+async def test_size_limit_rejects_streaming_oversized_body() -> None:
+    async def chunks():
+        yield b"ab"
+        yield b"cd"
+
+    transport = ASGITransport(app=_size_limited_app(max_bytes=3))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/echo", content=chunks())
+
+    assert response.status_code == 413
+    assert response.json() == {"error": "Request body too large"}

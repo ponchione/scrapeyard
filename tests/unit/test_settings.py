@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
 from scrapeyard.common.settings import ServiceSettings, get_settings
 
 
@@ -227,6 +230,14 @@ def test_domain_rate_limit_shared_from_env(monkeypatch):
     from scrapeyard.common.settings import ServiceSettings
     settings = ServiceSettings()
     assert settings.domain_rate_limit_shared is False
+
+
+def test_admin_read_default_limit_cannot_exceed_max(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_ADMIN_READ_DEFAULT_LIMIT", "50")
+    monkeypatch.setenv("SCRAPEYARD_ADMIN_READ_MAX_LIMIT", "25")
+
+    with pytest.raises(ValidationError, match="admin_read_default_limit"):
+        ServiceSettings()
 
 
 class TestInitRateLimiter:

@@ -8,6 +8,7 @@ from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import missing_adaptive_selectors
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
 from scrapeyard.engine.scraper import _fetch_page
+from scrapeyard.engine.url_guard import UnsafeURLError
 
 
 @pytest.mark.asyncio
@@ -40,6 +41,112 @@ async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
     )
 
     assert captured_kwargs["timeout"] == 12.5
+    assert captured_kwargs["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_records_basic_final_url_from_response(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+        return SimpleNamespace(status=200, url=f"{url}/canonical", text="<h1>ok</h1>")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.get_settings",
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    outcome = await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.basic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert outcome.debug["final_url"] == "https://example.com/canonical"
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    seen_urls: list[str] = []
+
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+        seen_urls.append(url)
+        if len(seen_urls) == 1:
+            return SimpleNamespace(
+                status=302,
+                url=url,
+                headers={"Location": "/next"},
+                text="",
+            )
+        return SimpleNamespace(status=200, url=url, headers={}, text="<h1>ok</h1>")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.get_settings",
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    outcome = await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.basic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert seen_urls == ["https://example.com", "https://example.com/next"]
+    assert outcome.debug["redirects"] == ["https://example.com/next"]
+    assert outcome.debug["final_url"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+        return SimpleNamespace(
+            status=302,
+            url=url,
+            headers={"Location": "http://127.0.0.1/private"},
+            text="",
+        )
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.get_settings",
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        await _fetch_page(
+            object(),
+            target.url,
+            target,
+            FetcherType.basic,
+            adaptive=False,
+            retryable_status={500},
+            adaptive_dir="/tmp/adaptive",
+        )
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

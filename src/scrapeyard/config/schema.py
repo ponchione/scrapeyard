@@ -195,7 +195,7 @@ class PaginationConfig(BaseModel):
     """Pagination rules for a target."""
 
     next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
-    max_pages: int = Field(default=10, description="Maximum pages to scrape")
+    max_pages: int = Field(default=10, ge=0, description="Maximum pages to scrape")
 
 
 class BrowserActionConfig(BaseModel):
@@ -209,26 +209,21 @@ class BrowserActionConfig(BaseModel):
     )
     timeout_ms: int | None = Field(
         default=None,
+        ge=0,
         description="Optional timeout in milliseconds for selector-based actions",
     )
     wait_ms: int | None = Field(
         default=None,
+        ge=0,
         description="Optional wait in milliseconds after this action",
     )
-    times: int = Field(default=1, description="Number of scroll iterations")
+    times: int = Field(default=1, ge=1, description="Number of scroll iterations")
     pixels: int = Field(default=1200, description="Vertical pixels per scroll action")
-    max_times: int = Field(default=1, description="Maximum repeat_click attempts")
+    max_times: int = Field(default=1, ge=1, description="Maximum repeat_click attempts")
     wait_for_selector: str | None = Field(
         default=None,
         description="Optional CSS selector to wait for after each repeat_click",
     )
-
-    @field_validator("times", "max_times")
-    @classmethod
-    def _must_be_positive(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("must be at least 1")
-        return value
 
     @field_validator("pixels")
     @classmethod
@@ -253,7 +248,7 @@ class BrowserActionConfig(BaseModel):
 class BrowserConfig(BaseModel):
     """Browser-backed fetcher tuning."""
 
-    timeout_ms: int = Field(default=60000, description="Browser fetch timeout in milliseconds")
+    timeout_ms: int = Field(default=60000, gt=0, description="Browser fetch timeout in milliseconds")
     disable_resources: bool = Field(
         default=True,
         description="Whether to block non-essential resources during browser fetches",
@@ -316,10 +311,12 @@ class BrowserConfig(BaseModel):
     )
     click_timeout_ms: int | None = Field(
         default=3000,
+        ge=0,
         description="Optional timeout in milliseconds for click_selector before falling through",
     )
     click_wait_ms: int | None = Field(
         default=None,
+        ge=0,
         description="Optional extra browser wait in milliseconds after click_selector is clicked",
     )
     wait_for_selector: str | None = Field(
@@ -328,12 +325,24 @@ class BrowserConfig(BaseModel):
     )
     wait_ms: int | None = Field(
         default=None,
+        ge=0,
         description="Optional extra browser wait in milliseconds after page load/selector wait",
     )
     actions: list[BrowserActionConfig] = Field(
         default_factory=list,
         description="Ordered browser actions to run after page load and before extraction",
     )
+
+    @field_validator("cdp_url")
+    @classmethod
+    def _reject_unsafe_cdp_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            assert_public_url(value, allowed_schemes=("http", "https", "ws", "wss"))
+        except UnsafeURLError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
 
 
 @dataclass(frozen=True)
@@ -418,11 +427,11 @@ class TargetConfig(BaseModel):
 class RetryConfig(BaseModel):
     """Retry policy configuration."""
 
-    max_attempts: int = Field(default=3, description="Maximum retry attempts per request")
+    max_attempts: int = Field(default=3, ge=1, description="Maximum retry attempts per request")
     backoff: BackoffStrategy = Field(
         default=BackoffStrategy.exponential, description="Backoff strategy"
     )
-    backoff_max: int = Field(default=30, description="Maximum backoff delay in seconds")
+    backoff_max: int = Field(default=30, ge=0, description="Maximum backoff delay in seconds")
     retryable_status: list[int] = Field(
         default_factory=lambda: [429, 500, 502, 503, 504],
         description="HTTP status codes that trigger a retry",
@@ -435,7 +444,7 @@ class ValidationConfig(BaseModel):
     required_fields: list[str] = Field(
         default_factory=list, description="Fields that must be non-empty"
     )
-    min_results: int = Field(default=0, description="Minimum number of results expected")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of results expected")
     on_empty: OnEmptyAction = Field(
         default=OnEmptyAction.warn, description="Action when selectors return empty"
     )
@@ -444,10 +453,10 @@ class ValidationConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Concurrency and orchestration settings."""
 
-    concurrency: int = Field(default=2, description="Max simultaneous targets within this job")
-    delay_between: int = Field(default=2, description="Seconds between starting concurrent targets")
+    concurrency: int = Field(default=2, ge=1, description="Max simultaneous targets within this job")
+    delay_between: int = Field(default=2, ge=0, description="Seconds between starting concurrent targets")
     domain_rate_limit: int = Field(
-        default=3, description="Minimum seconds between requests to same domain"
+        default=3, ge=0, description="Minimum seconds between requests to same domain"
     )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")
     priority: Priority = Field(default=Priority.normal, description="Queue priority")
@@ -480,7 +489,7 @@ class WebhookConfig(BaseModel):
     headers: dict[str, str] = Field(
         default_factory=dict, description="Custom HTTP headers"
     )
-    timeout: int = Field(default=10, description="Timeout in seconds")
+    timeout: int = Field(default=10, gt=0, description="Timeout in seconds")
 
     @field_validator("url")
     @classmethod
