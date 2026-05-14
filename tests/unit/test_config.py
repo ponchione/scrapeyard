@@ -485,6 +485,11 @@ class TestProxyConfig:
         )
         assert config.target.proxy.url == "direct"
 
+    def test_proxy_url_is_trimmed(self):
+        config = ScrapeConfig(**_tier1_config(proxy={"url": " http://gate.example.com:7777 "}))
+        assert config.proxy is not None
+        assert config.proxy.url == "http://gate.example.com:7777"
+
     def test_target_without_proxy_defaults_to_none(self):
         config = ScrapeConfig(**_tier1_config())
         assert config.target.proxy is None
@@ -517,6 +522,19 @@ class TestProxyConfig:
     def test_proxy_config_requires_url(self):
         with pytest.raises(ValidationError):
             ScrapeConfig(**_tier1_config(proxy={}))
+
+    @pytest.mark.parametrize(
+        "proxy_url",
+        [
+            "proxy.example.com:8080",
+            "file:///tmp/proxy.sock",
+            "http:///missing-host",
+            "http://gate.example.com:bad",
+        ],
+    )
+    def test_invalid_proxy_url_raises(self, proxy_url):
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**_tier1_config(proxy={"url": proxy_url}))
 
 
 class TestMapDetectionConfig:

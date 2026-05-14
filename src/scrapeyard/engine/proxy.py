@@ -1,10 +1,35 @@
-"""Proxy resolution and URL redaction utilities."""
+"""Proxy URL validation, resolution, and redaction utilities."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from scrapeyard.config.schema import ProxyConfig, TargetConfig
+if TYPE_CHECKING:
+    from scrapeyard.config.schema import ProxyConfig, TargetConfig
+
+_DIRECT_PROXY = "direct"
+_ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
+
+
+def normalize_proxy_url(value: str) -> str:
+    """Return a trimmed proxy URL or raise ValueError for malformed input."""
+    proxy_url = value.strip()
+    if proxy_url == _DIRECT_PROXY:
+        return proxy_url
+
+    parsed = urlparse(proxy_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_PROXY_SCHEMES:
+        allowed = ", ".join(sorted(_ALLOWED_PROXY_SCHEMES | {_DIRECT_PROXY}))
+        raise ValueError(f"Proxy URL scheme must be one of: {allowed}")
+    if not parsed.hostname:
+        raise ValueError("Proxy URL must include a hostname")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("Proxy URL port is invalid") from exc
+    return proxy_url
 
 
 def resolve_proxy(
@@ -18,13 +43,14 @@ def resolve_proxy(
     Returns None if no proxy is configured or if the resolved value is "direct".
     """
     if target.proxy is not None:
-        return None if target.proxy.url == "direct" else target.proxy.url
+        return None if target.proxy.url == _DIRECT_PROXY else target.proxy.url
 
     if job_proxy is not None:
-        return None if job_proxy.url == "direct" else job_proxy.url
+        return None if job_proxy.url == _DIRECT_PROXY else job_proxy.url
 
     if service_proxy_url:
-        return None if service_proxy_url == "direct" else service_proxy_url
+        service_proxy_url = service_proxy_url.strip()
+        return None if service_proxy_url == _DIRECT_PROXY else service_proxy_url
 
     return None
 
@@ -32,6 +58,13 @@ def resolve_proxy(
 def redact_proxy_url(url: str) -> str:
     """Return 'host:port' from a proxy URL, stripping scheme and credentials."""
     parsed = urlparse(url)
-    if parsed.port:
-        return f"{parsed.hostname}:{parsed.port}"
-    return parsed.hostname or url
+    host = parsed.hostname
+    if not host:
+        return url
+    try:
+        port = parsed.port
+    except ValueError:
+        return host
+    if port is not None:
+        return f"{host}:{port}"
+    return host
