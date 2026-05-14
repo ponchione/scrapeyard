@@ -113,6 +113,24 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="Invalid cron expression"):
             ScrapeConfig(**data)
 
+    def test_unknown_top_level_config_key_raises(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            ScrapeConfig(**_tier1_config(typo_mode="sync"))
+
+    def test_unknown_nested_config_key_raises(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            ScrapeConfig(**_tier1_config(target=_target_dict(fetchre="dynamic")))
+
+    def test_unknown_selector_long_form_key_raises(self):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            ScrapeConfig(
+                **_tier1_config(
+                    target=_target_dict(
+                        selectors={"title": {"query": "h1", "unknown": True}}
+                    )
+                )
+            )
+
 
 class TestResolvedTargets:
     """resolved_targets() convenience method."""
@@ -507,6 +525,42 @@ secret-token: second
     def test_rejects_non_mapping_yaml_root(self):
         with pytest.raises(ValueError, match="root must be a mapping"):
             load_config("- just\n- a\n- list")
+
+    def test_webhook_on_key_does_not_require_quotes(self):
+        yaml_str = """
+project: demo
+name: webhook-on-key
+webhook:
+  url: https://example.com/hook
+  on: [complete, failed]
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+        config = load_config(yaml_str)
+
+        assert config.webhook is not None
+        assert [status.value for status in config.webhook.on] == ["complete", "failed"]
+
+    def test_true_false_values_still_parse_as_booleans(self):
+        yaml_str = """
+project: demo
+name: bool-values
+adaptive: true
+schedule:
+  cron: "0 * * * *"
+  enabled: false
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+        config = load_config(yaml_str)
+
+        assert config.adaptive is True
+        assert config.schedule is not None
+        assert config.schedule.enabled is False
 
     def test_root_template_yaml_loads(self):
         template_path = Path(__file__).resolve().parents[2] / "template.yaml"

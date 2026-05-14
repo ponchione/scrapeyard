@@ -252,6 +252,80 @@ async def test_fetch_browser_response_raises_required_action_failures_swallowed_
 
 
 @pytest.mark.asyncio
+async def test_fetch_browser_response_redacts_page_action_exception_text() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"actions": [{"type": "click", "selector": "#accept"}]},
+    )
+    page = MagicMock()
+    page.locator.return_value.click = AsyncMock(
+        side_effect=RuntimeError("failed https://user:pass@example.com/hook?api_key=secret")
+    )
+
+    class SwallowingFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            try:
+                await kwargs["page_action"](page)
+            except Exception:
+                pass
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    with pytest.raises(BrowserPageActionError) as exc_info:
+        await fetch_browser_response(
+            SwallowingFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+        )
+
+    message = str(exc_info.value)
+    debug_message = exc_info.value.debug["page_action_error"]["message"]
+    assert "user:pass" not in message
+    assert "api_key=secret" not in message
+    assert "user:pass" not in debug_message
+    assert "api_key=secret" not in debug_message
+    assert "https://example.com/hook?api_key=<redacted>" in message
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_closes_page_after_unsafe_final_url() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    page = MagicMock()
+    page.url = "http://127.0.0.1/private"
+    page.close = AsyncMock(return_value=None)
+
+    class SwallowingFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            try:
+                await kwargs["page_action"](page)
+            except Exception:
+                pass
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        await fetch_browser_response(
+            SwallowingFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+        )
+
+    page.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_capture_browser_state_rejects_non_public_final_url_before_content_capture() -> None:
     target = TargetConfig(
         url="https://example.com",
