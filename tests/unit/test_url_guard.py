@@ -263,6 +263,52 @@ ref: *copy
     assert redacted.count("<redacted>") >= 2
 
 
+def test_redact_sensitive_config_text_masks_invalid_yaml_list_item_secret_keys() -> None:
+    config_yaml = """
+headers:
+  - Authorization: Bearer webhook-secret
+  - X-Test: visible
+copy: &copy [1]
+ref: *copy
+"""
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "webhook-secret" not in redacted
+    assert "- Authorization: <redacted>" in redacted
+    assert "- X-Test: visible" in redacted
+
+
+def test_redact_sensitive_config_text_masks_invalid_yaml_explicit_secret_keys() -> None:
+    config_yaml = """
+headers:
+  ? Authorization
+  : Bearer webhook-secret
+copy: &copy [1]
+ref: *copy
+"""
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "webhook-secret" not in redacted
+    assert ": <redacted>" in redacted
+
+
+def test_redact_sensitive_config_text_masks_invalid_yaml_list_explicit_secret_keys() -> None:
+    config_yaml = """
+headers:
+  - ? Authorization
+    : Bearer webhook-secret
+copy: &copy [1]
+ref: *copy
+"""
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "webhook-secret" not in redacted
+    assert ": <redacted>" in redacted
+
+
 def test_redact_sensitive_config_text_handles_unhashable_yaml_keys() -> None:
     config_yaml = "? [a]\n: http://user:pass@example.com\n"
 

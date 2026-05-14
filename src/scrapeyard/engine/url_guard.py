@@ -239,6 +239,7 @@ def _redact_sensitive_yaml_lines(text: str) -> str:
     """Best-effort fallback for invalid YAML that still contains key/value secrets."""
     lines: list[str] = []
     redacting_indent: int | None = None
+    pending_sensitive_key_indent: int | None = None
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
         newline = line[len(body):]
@@ -252,12 +253,27 @@ def _redact_sensitive_yaml_lines(text: str) -> str:
                 lines.append(f"{body[:indent]}{_REDACTED_VALUE}{newline}" if stripped else line)
                 continue
 
+        if pending_sensitive_key_indent is not None:
+            if stripped.startswith(":"):
+                prefix, _separator, value = body.partition(":")
+                lines.append(f"{prefix}: {_REDACTED_VALUE}{newline}")
+                if not value.strip() or value.strip() in {"|", ">"}:
+                    redacting_indent = pending_sensitive_key_indent
+                pending_sensitive_key_indent = None
+                continue
+            if stripped:
+                pending_sensitive_key_indent = None
+
         if not stripped or stripped.startswith("#") or ":" not in body:
+            if stripped.startswith(("? ", "- ? ")) and _is_sensitive_key(
+                _yaml_fallback_key_name(stripped)
+            ):
+                pending_sensitive_key_indent = indent
             lines.append(line)
             continue
 
         key, _separator, value = body.partition(":")
-        key_name = key.strip().strip("'\"")
+        key_name = _yaml_fallback_key_name(key)
         if not _is_sensitive_key(key_name):
             lines.append(line)
             continue
@@ -266,6 +282,14 @@ def _redact_sensitive_yaml_lines(text: str) -> str:
         if not value.strip() or value.strip() in {"|", ">"}:
             redacting_indent = indent
     return "".join(lines)
+
+
+def _yaml_fallback_key_name(raw_key: str) -> str:
+    key = raw_key.strip()
+    for prefix in ("- ", "? "):
+        if key.startswith(prefix):
+            key = key[len(prefix):].lstrip()
+    return key.strip("'\"")
 
 
 def redact_sensitive_config_text(text: str) -> str:
