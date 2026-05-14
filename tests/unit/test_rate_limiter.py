@@ -29,6 +29,15 @@ class TestLocalDomainRateLimiter:
         assert time.monotonic() - start < 0.1
 
     @pytest.mark.asyncio
+    async def test_zero_interval_is_noop(self) -> None:
+        limiter = LocalDomainRateLimiter()
+
+        await limiter.acquire("example.com", 0)
+
+        assert limiter._last_request == {}
+        assert limiter._locks == {}
+
+    @pytest.mark.asyncio
     async def test_second_acquire_waits(self) -> None:
         limiter = LocalDomainRateLimiter()
         await limiter.acquire("example.com", 0.2)
@@ -110,6 +119,15 @@ class TestRedisDomainRateLimiter:
         assert call_args[0][0] == "fake-sha"  # sha
         assert call_args[0][1] == 1  # numkeys
         assert call_args[0][2] == "scrapeyard:rate:example.com"
+
+    @pytest.mark.asyncio
+    async def test_zero_interval_is_noop(self) -> None:
+        limiter, redis = self._make_limiter()
+
+        await limiter.acquire("example.com", 0)
+
+        redis.script_load.assert_not_awaited()
+        redis.evalsha.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_acquire_waits_then_succeeds(self) -> None:
