@@ -507,6 +507,18 @@ class TestDurableOutboxDispatch:
         assert delivery.status is WebhookDeliveryStatus.failed
         assert "non-public" in (delivery.last_error or "")
 
+    @pytest.mark.asyncio
+    async def test_sleep_until_due_treats_naive_persisted_time_as_utc(self, monkeypatch) -> None:
+        dispatcher = HttpWebhookDispatcher(outbox_store=MemoryWebhookOutboxStore())
+        now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+        sleep = AsyncMock()
+        monkeypatch.setattr("scrapeyard.webhook.dispatcher.utc_now", lambda: now)
+        monkeypatch.setattr("scrapeyard.webhook.dispatcher.asyncio.sleep", sleep)
+
+        await dispatcher._sleep_until_due(datetime(2026, 4, 24, 12, 1))
+
+        sleep.assert_awaited_once_with(60.0)
+
 
 class TestDeliveryId:
     def test_payload_contains_delivery_id(self) -> None:

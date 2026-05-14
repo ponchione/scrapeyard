@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
@@ -407,7 +407,12 @@ class HttpWebhookDispatcher:
             current = refreshed
 
     async def _sleep_until_due(self, next_attempt_at: datetime) -> None:
-        delay = (next_attempt_at - utc_now()).total_seconds()
+        due_at = (
+            next_attempt_at.replace(tzinfo=timezone.utc)
+            if next_attempt_at.tzinfo is None
+            else next_attempt_at.astimezone(timezone.utc)
+        )
+        delay = (due_at - utc_now()).total_seconds()
         if delay > 0:
             await asyncio.sleep(delay)
 
