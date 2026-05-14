@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Optional, Union
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.transforms import parse_transform
@@ -158,7 +158,13 @@ class StockStatus(str, Enum):
 # --- Detection Config Models ---
 
 
-class MapDetectionConfig(BaseModel):
+class StrictConfigModel(BaseModel):
+    """Base for user-facing YAML config models; unknown keys are errors."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MapDetectionConfig(StrictConfigModel):
     """MAP pricing detection patterns for a target (Doc 2 Section 2.2)."""
 
     text_patterns: list[str] = Field(
@@ -175,7 +181,7 @@ class MapDetectionConfig(BaseModel):
     )
 
 
-class StockPatternConfig(BaseModel):
+class StockPatternConfig(StrictConfigModel):
     """Pattern set for a single stock status value."""
 
     text_patterns: list[str] = Field(
@@ -188,7 +194,7 @@ class StockPatternConfig(BaseModel):
     )
 
 
-class StockDetectionConfig(BaseModel):
+class StockDetectionConfig(StrictConfigModel):
     """Stock status detection patterns, keyed by status value (Doc 1 Section 12.2)."""
 
     in_stock: Optional[StockPatternConfig] = None
@@ -201,7 +207,7 @@ class StockDetectionConfig(BaseModel):
 # --- Selector Models ---
 
 
-class SelectorLong(BaseModel):
+class SelectorLong(StrictConfigModel):
     """Long-form selector with explicit type and optional transform."""
 
     query: str
@@ -247,7 +253,7 @@ def _validate_header_value(value: str, *, label: str) -> str:
 # --- Sub-config Models ---
 
 
-class ProxyConfig(BaseModel):
+class ProxyConfig(StrictConfigModel):
     """Proxy configuration for a target, job, or service default."""
 
     url: str = Field(
@@ -264,7 +270,7 @@ class ProxyConfig(BaseModel):
         return normalize_public_proxy_url(value)
 
 
-class PaginationConfig(BaseModel):
+class PaginationConfig(StrictConfigModel):
     """Pagination rules for a target."""
 
     next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
@@ -276,7 +282,7 @@ class PaginationConfig(BaseModel):
     )
 
 
-class BrowserActionConfig(BaseModel):
+class BrowserActionConfig(StrictConfigModel):
     """One browser action to run after page load and before extraction."""
 
     type: BrowserActionType
@@ -335,7 +341,7 @@ class BrowserActionConfig(BaseModel):
         return self
 
 
-class BrowserConfig(BaseModel):
+class BrowserConfig(StrictConfigModel):
     """Browser-backed fetcher tuning."""
 
     timeout_ms: int = Field(
@@ -506,7 +512,7 @@ BROWSER_FETCH_KWARGS: tuple[BrowserFetchKwarg, ...] = (
 )
 
 
-class TargetConfig(BaseModel):
+class TargetConfig(StrictConfigModel):
     """Single scrape target definition."""
 
     url: str = Field(..., description="Target URL to scrape")
@@ -552,7 +558,7 @@ class TargetConfig(BaseModel):
         return value
 
 
-class RetryConfig(BaseModel):
+class RetryConfig(StrictConfigModel):
     """Retry policy configuration."""
 
     max_attempts: int = Field(
@@ -585,7 +591,7 @@ class RetryConfig(BaseModel):
         return value
 
 
-class ValidationConfig(BaseModel):
+class ValidationConfig(StrictConfigModel):
     """Result validation rules."""
 
     required_fields: list[str] = Field(
@@ -597,7 +603,7 @@ class ValidationConfig(BaseModel):
     )
 
 
-class ExecutionConfig(BaseModel):
+class ExecutionConfig(StrictConfigModel):
     """Concurrency and orchestration settings."""
 
     concurrency: int = Field(
@@ -625,7 +631,7 @@ class ExecutionConfig(BaseModel):
     )
 
 
-class ScheduleConfig(BaseModel):
+class ScheduleConfig(StrictConfigModel):
     """Cron-style scheduling configuration."""
 
     cron: str = Field(..., description="Cron expression")
@@ -641,13 +647,13 @@ class ScheduleConfig(BaseModel):
         return value
 
 
-class OutputConfig(BaseModel):
+class OutputConfig(StrictConfigModel):
     """Output grouping settings."""
 
     group_by: GroupBy = Field(default=GroupBy.target, description="Result grouping strategy")
 
 
-class WebhookConfig(BaseModel):
+class WebhookConfig(StrictConfigModel):
     """Webhook notification configuration."""
 
     url: HttpUrl = Field(..., description="URL to POST webhook payload to")
@@ -683,7 +689,7 @@ class WebhookConfig(BaseModel):
 # --- Top-Level Config ---
 
 
-class ScrapeConfig(BaseModel):
+class ScrapeConfig(StrictConfigModel):
     """Top-level YAML configuration schema (spec section 3.5).
 
     Supports both Tier 1 (single target) and Tier 2 (multi-target) configs.

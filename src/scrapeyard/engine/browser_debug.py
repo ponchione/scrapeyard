@@ -21,6 +21,7 @@ from scrapeyard.config.schema import (
     TargetConfig,
 )
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_sensitive_mapping
+from scrapeyard.engine.url_guard import redact_userinfo_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,10 @@ class BrowserPageActionError(RuntimeError):
     def __init__(self, message: str, *, debug: dict[str, Any]) -> None:
         self.debug = debug
         super().__init__(message)
+
+
+def _exception_text(exc: Exception) -> str:
+    return redact_userinfo_in_text(str(exc)) or type(exc).__name__
 
 
 def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit: int) -> None:
@@ -75,7 +80,11 @@ def _register_console_capture(page: Any, capture: dict[str, Any]) -> None:
     try:
         page.on("console", _on_console)
     except Exception as exc:
-        logger.debug("Failed to register browser console capture: %s: %s", type(exc).__name__, exc)
+        logger.debug(
+            "Failed to register browser console capture: %s: %s",
+            type(exc).__name__,
+            _exception_text(exc),
+        )
 
 
 def _register_request_failure_capture(page: Any, capture: dict[str, Any]) -> None:
@@ -99,7 +108,11 @@ def _register_request_failure_capture(page: Any, capture: dict[str, Any]) -> Non
     try:
         page.on("requestfailed", _on_request_failed)
     except Exception as exc:
-        logger.debug("Failed to register browser requestfailed capture: %s: %s", type(exc).__name__, exc)
+        logger.debug(
+            "Failed to register browser requestfailed capture: %s: %s",
+            type(exc).__name__,
+            _exception_text(exc),
+        )
 
 
 def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str) -> dict[str, Any]:
@@ -154,6 +167,20 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _close_page_safely(page: Any) -> None:
+    close = getattr(page, "close", None)
+    if not callable(close):
+        return
+    try:
+        await _maybe_await(close())
+    except Exception as exc:
+        logger.debug(
+            "Failed to close unsafe browser page: %s: %s",
+            type(exc).__name__,
+            _exception_text(exc),
+        )
 
 
 async def _click_selector(page: Any, selector: str, timeout_ms: int | None) -> None:
@@ -232,7 +259,7 @@ async def run_browser_actions(page: Any, actions: list[BrowserActionConfig]) -> 
                 "Optional browser action did not complete: %s (%s: %s)",
                 action.type.value,
                 type(exc).__name__,
-                exc,
+                _exception_text(exc),
             )
 
 
@@ -291,7 +318,7 @@ async def capture_browser_state(
                 "Optional browser click_selector did not resolve or click: %s (%s: %s)",
                 browser.click_selector,
                 type(exc).__name__,
-                exc,
+                _exception_text(exc),
             )
     if browser is not None and browser.actions:
         await run_browser_actions(page, browser.actions)
@@ -301,12 +328,22 @@ async def capture_browser_state(
     try:
         capture["page_title"] = await page.title()
     except Exception as exc:
-        logger.debug("Failed to capture browser page title: %s: %s", type(exc).__name__, exc, exc_info=exc)
+        logger.debug(
+            "Failed to capture browser page title: %s: %s",
+            type(exc).__name__,
+            _exception_text(exc),
+            exc_info=exc,
+        )
         capture["page_title"] = None
     try:
         capture["html_excerpt"] = truncate_text(await page.content())
     except Exception as exc:
-        logger.debug("Failed to capture browser HTML excerpt: %s: %s", type(exc).__name__, exc, exc_info=exc)
+        logger.debug(
+            "Failed to capture browser HTML excerpt: %s: %s",
+            type(exc).__name__,
+            _exception_text(exc),
+            exc_info=exc,
+        )
         capture["html_excerpt"] = None
     if artifacts_dir is not None:
         artifacts_path = Path(artifacts_dir)
@@ -320,7 +357,7 @@ async def capture_browser_state(
                 "Failed to capture browser screenshot at %s: %s: %s",
                 screenshot_path,
                 type(exc).__name__,
-                exc,
+                _exception_text(exc),
                 exc_info=exc,
             )
             capture["screenshot_path"] = None
@@ -351,12 +388,21 @@ async def fetch_browser_response(
                 capture=capture,
             )
         except Exception as exc:
+            message = truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS)
             capture["page_action_error"] = {
                 "exception_type": type(exc).__name__,
-                "message": truncate_text(coerce_to_text(exc), _EVENT_TEXT_CHARS),
+                "message": message,
             }
-            capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
-            raise
+            if isinstance(exc, UnsafeURLError):
+                capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
+                await _close_page_safely(page)
+                raise
+            action_exc = BrowserPageActionError(
+                f"Browser page action failed: {message}",
+                debug=capture,
+            )
+            capture[_PAGE_ACTION_EXCEPTION_KEY] = action_exc
+            raise action_exc from exc
 
     call_kwargs["page_action"] = _page_action
     response = await fetcher_cls.async_fetch(url, **call_kwargs)
@@ -364,6 +410,8 @@ async def fetch_browser_response(
     if action_exc is not None:
         if isinstance(action_exc, UnsafeURLError):
             action_exc.debug = capture
+            raise action_exc
+        if isinstance(action_exc, BrowserPageActionError):
             raise action_exc
         message = capture.get("page_action_error", {}).get("message") or type(action_exc).__name__
         raise BrowserPageActionError(

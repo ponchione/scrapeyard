@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import yaml
 from yaml.events import AliasEvent
 from yaml.nodes import MappingNode
+
+_BOOL_TAG = "tag:yaml.org,2002:bool"
+_YAML_1_2_BOOL_RE = re.compile(r"^(?:true|false)$", re.IGNORECASE)
 
 
 class ScrapeyardSafeLoader(yaml.SafeLoader):
@@ -34,6 +38,16 @@ def _construct_mapping_without_duplicates(
             raise yaml.YAMLError("YAML mapping keys must be hashable") from exc
     return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
 
+
+ScrapeyardSafeLoader.yaml_implicit_resolvers = {
+    key: [
+        (tag, regexp)
+        for tag, regexp in resolvers
+        if tag != _BOOL_TAG
+    ]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+ScrapeyardSafeLoader.add_implicit_resolver(_BOOL_TAG, _YAML_1_2_BOOL_RE, list("tTfF"))
 
 ScrapeyardSafeLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
