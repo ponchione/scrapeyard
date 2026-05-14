@@ -20,7 +20,7 @@ from scrapeyard.config.schema import (
     FetcherType,
     TargetConfig,
 )
-from scrapeyard.engine.url_guard import redact_sensitive_mapping
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_sensitive_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,17 @@ _HTML_EXCERPT_CHARS = 2000
 _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
+_PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
+
+
+class BrowserPageActionError(RuntimeError):
+    """Raised when Scrapling swallowed a configured browser action failure."""
+
+    def __init__(self, message: str, *, debug: dict[str, Any]) -> None:
+        self.debug = debug
+        super().__init__(message)
+
+
 def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit: int) -> None:
     items.append(entry)
     if len(items) > limit:
@@ -285,6 +296,8 @@ async def capture_browser_state(
     if browser is not None and browser.actions:
         await run_browser_actions(page, browser.actions)
     capture["final_url"] = getattr(page, "url", None)
+    if isinstance(capture["final_url"], str) and capture["final_url"]:
+        assert_public_url(capture["final_url"])
     try:
         capture["page_title"] = await page.title()
     except Exception as exc:
@@ -330,16 +343,34 @@ async def fetch_browser_response(
     capture: dict[str, Any] = {}
 
     async def _page_action(page: Any) -> Any:
-        return await capture_browser_state(
-            page,
-            browser=target.browser,
-            fetcher_type=fetcher_type,
-            artifacts_dir=artifacts_dir,
-            capture=capture,
-        )
+        try:
+            return await capture_browser_state(
+                page,
+                browser=target.browser,
+                fetcher_type=fetcher_type,
+                artifacts_dir=artifacts_dir,
+                capture=capture,
+            )
+        except Exception as exc:
+            capture["page_action_error"] = {
+                "exception_type": type(exc).__name__,
+                "message": truncate_text(coerce_to_text(exc), _EVENT_TEXT_CHARS),
+            }
+            capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
+            raise
 
     call_kwargs["page_action"] = _page_action
     response = await fetcher_cls.async_fetch(url, **call_kwargs)
+    action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)
+    if action_exc is not None:
+        if isinstance(action_exc, UnsafeURLError):
+            action_exc.debug = capture
+            raise action_exc
+        message = capture.get("page_action_error", {}).get("message") or type(action_exc).__name__
+        raise BrowserPageActionError(
+            f"Browser page action failed: {message}",
+            debug=capture,
+        ) from action_exc
     return response, capture
 
 
