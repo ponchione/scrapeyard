@@ -9,6 +9,7 @@ import time
 from typing import Protocol
 
 from arq.connections import ArqRedis
+from redis.exceptions import NoScriptError
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,15 @@ return {0, remaining_ms}
 
         while True:
             now = time.time()
-            eval_result = self._redis.evalsha(
-                sha, 1, key, str(min_interval), str(now), str(ttl),
-            )
-            result = await eval_result if inspect.isawaitable(eval_result) else eval_result
+            try:
+                eval_result = self._redis.evalsha(
+                    sha, 1, key, str(min_interval), str(now), str(ttl),
+                )
+                result = await eval_result if inspect.isawaitable(eval_result) else eval_result
+            except NoScriptError:
+                self._script_sha = None
+                sha = await self._ensure_script()
+                continue
             acquired = int(result[0])
             if acquired:
                 return

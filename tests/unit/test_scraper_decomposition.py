@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
-from scrapeyard.engine.adaptive_diagnostics import missing_adaptive_selectors
+from scrapeyard.engine.adaptive_diagnostics import (
+    log_adaptive_selector_gap,
+    missing_adaptive_selectors,
+)
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
 from scrapeyard.engine.scraper import _fetch_page
 from scrapeyard.engine.url_guard import UnsafeURLError
@@ -357,3 +361,18 @@ def test_missing_adaptive_selectors_ignores_present_values_and_flags_empty_ones(
     )
 
     assert missing == ["price", "sku"]
+
+
+def test_log_adaptive_selector_gap_redacts_target_url_secrets(caplog):
+    caplog.set_level(logging.INFO, logger="scrapeyard.engine.adaptive_diagnostics")
+    target = TargetConfig(
+        url="https://user:pass@example.com/products?api_key=secret&page=2",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1", "price": ".price"},
+    )
+
+    log_adaptive_selector_gap(target, [{"title": "Scope", "price": ""}])
+
+    assert "user:pass" not in caplog.text
+    assert "api_key=secret" not in caplog.text
+    assert "https://example.com/products?api_key=<redacted>&page=2" in caplog.text

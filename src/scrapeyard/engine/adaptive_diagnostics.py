@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from scrapeyard.config.schema import TargetConfig
+from scrapeyard.engine.url_guard import redact_userinfo_in_url
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def log_adaptive_selector_gap(target: TargetConfig, data: list[dict[str, Any]]) 
     if missing:
         logger.info(
             "Adaptive relocation check: url=%s missing_selectors=%s",
-            target.url,
+            redact_userinfo_in_url(target.url),
             ",".join(missing),
         )
 
