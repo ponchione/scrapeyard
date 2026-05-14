@@ -244,11 +244,11 @@ async def get_results(
     """Get results for a job."""
     job = await _get_job_or_404(job_store, job_id)
 
-    if job.status in (JobStatus.queued, JobStatus.running):
-        return _queued_scrape_response(job_id, status=job.status.value, poll_url=f"/jobs/{job_id}")
-
-    if run_id is None and not latest:
-        raise_json_error(400, "Provide run_id when latest=false")
+    if run_id is None:
+        if not latest:
+            raise_json_error(400, "Provide run_id when latest=false")
+        if job.status in (JobStatus.queued, JobStatus.running):
+            return _queued_scrape_response(job_id, status=job.status.value, poll_url=f"/jobs/{job_id}")
 
     try:
         payload = await result_store.get_result(job_id, run_id=run_id)

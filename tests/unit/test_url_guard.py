@@ -8,6 +8,7 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_config_text,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
+    redact_userinfo_in_url,
 )
 
 
@@ -26,18 +27,32 @@ def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
     assert redact_userinfo_in_text(text) == "proxy: http://gate.example.com:7777"
 
 
+def test_redact_userinfo_in_text_handles_non_http_schemes() -> None:
+    text = "proxy: socks5://user:pass@gate.example.com:1080 cdp: ws://token@browser.example/devtools"
+
+    assert redact_userinfo_in_text(text) == (
+        "proxy: socks5://gate.example.com:1080 cdp: ws://browser.example/devtools"
+    )
+
+
+def test_redact_userinfo_in_url_preserves_ipv6_brackets() -> None:
+    assert redact_userinfo_in_url("https://user:pass@[2001:4860:4860::8888]:443/a") == (
+        "https://[2001:4860:4860::8888]:443/a"
+    )
+
+
 def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:
     value = {
         "headers": {"Authorization": "Bearer secret", "X-Test": "visible"},
         "nested": {"api_token": "secret"},
-        "proxy": "http://user:pass@gate.example.com:7777",
+        "proxy": "socks5://user:pass@gate.example.com:7777",
     }
 
     redacted = redact_sensitive_mapping(value)
 
     assert redacted["headers"] == {"Authorization": "<redacted>", "X-Test": "visible"}
     assert redacted["nested"] == {"api_token": "<redacted>"}
-    assert redacted["proxy"] == "http://gate.example.com:7777"
+    assert redacted["proxy"] == "socks5://gate.example.com:7777"
 
 
 def test_redact_sensitive_config_text_masks_yaml_secrets() -> None:
@@ -45,7 +60,7 @@ def test_redact_sensitive_config_text_masks_yaml_secrets() -> None:
 project: demo
 name: secret-job
 proxy:
-  url: http://user:pass@gate.example.com:7777
+  url: socks5://user:pass@gate.example.com:7777
 webhook:
   url: https://example.com/hook
   headers:

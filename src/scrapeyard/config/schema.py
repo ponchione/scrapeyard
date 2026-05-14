@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from scrapeyard.common.paths import safe_path_part
@@ -470,6 +471,15 @@ class ScheduleConfig(BaseModel):
 
     cron: str = Field(..., description="Cron expression")
     enabled: bool = Field(default=True, description="Whether the schedule is active")
+
+    @field_validator("cron")
+    @classmethod
+    def _validate_cron(cls, value: str) -> str:
+        try:
+            CronTrigger.from_crontab(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid cron expression: {exc}") from exc
+        return value
 
 
 class OutputConfig(BaseModel):

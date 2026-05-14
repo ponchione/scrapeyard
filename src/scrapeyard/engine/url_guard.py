@@ -30,10 +30,10 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
     }
 )
 
-# Userinfo (user:pass@) inside http(s) URLs that we scrub before returning stored
-# config YAML to clients. The host portion is preserved.
+# Userinfo (user:pass@) inside URLs that we scrub before returning stored
+# config YAML to clients. The scheme and host portion are preserved.
 _USERINFO_IN_URL_RE = re.compile(
-    r"(?P<scheme>https?://)[^/\s@\"']+@",
+    r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/\s@\"']+@",
     re.IGNORECASE,
 )
 
@@ -175,6 +175,8 @@ def redact_userinfo_in_url(url: str) -> str:
     if not parsed.username and not parsed.password:
         return url
     host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     netloc = host
     if parsed.port:
         netloc = f"{host}:{parsed.port}"

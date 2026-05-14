@@ -109,3 +109,25 @@ async def test_submit_scrape_job_prefers_async_response_for_non_basic_targets():
     assert submission.completed is False
     assert submission.status == "queued"
     result_store.get_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_scrape_job_removes_job_when_enqueue_fails():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    worker_pool.enqueue.side_effect = RuntimeError("redis unavailable")
+
+    with pytest.raises(RuntimeError, match="redis unavailable"):
+        await submit_scrape_job(
+            config_yaml="project: integ",
+            config=_config(ExecutionMode.async_),
+            job_store=job_store,
+            result_store=result_store,
+            worker_pool=worker_pool,
+            sync_timeout_seconds=5,
+            sync_poll_delay_seconds=0.1,
+        )
+
+    saved_job = job_store.save_job.call_args.args[0]
+    job_store.delete_job.assert_awaited_once_with(saved_job.job_id)
