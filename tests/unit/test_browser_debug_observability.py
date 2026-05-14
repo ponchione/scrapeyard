@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.browser_debug import (
@@ -37,6 +38,19 @@ class FakeRequest:
 
     def failure(self):
         return self._failure
+
+
+class FakeRoute:
+    def __init__(self, url: str, resource_type: str):
+        self.request = SimpleNamespace(url=url, resource_type=resource_type)
+        self.aborted = False
+        self.continued = False
+
+    async def abort(self):
+        self.aborted = True
+
+    async def continue_(self):
+        self.continued = True
 
 
 @pytest.mark.asyncio
@@ -368,6 +382,78 @@ async def test_fetch_browser_response_redacts_page_action_exception_text() -> No
     assert "user:pass" not in debug_message
     assert "api_key=secret" not in debug_message
     assert "https://example.com/hook?api_key=<redacted>" in message
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"disable_resources": False},
+    )
+    route = FakeRoute("http://127.0.0.1/private", "document")
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            assert kwargs["disable_resources"] is True
+            await scrapling_pw_engine.async_intercept_route(route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        await fetch_browser_response(
+            RouteFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+        )
+
+    assert route.aborted is True
+    assert route.continued is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("browser_config", "expected_aborted", "expected_continued"),
+    [
+        ({"disable_resources": False}, False, True),
+        (None, True, False),
+    ],
+)
+async def test_fetch_browser_response_applies_configured_resource_blocking(
+    browser_config: dict[str, bool] | None,
+    expected_aborted: bool,
+    expected_continued: bool,
+) -> None:
+    route = FakeRoute("https://8.8.8.8/pixel.png", "image")
+    target_kwargs = {} if browser_config is None else {"browser": browser_config}
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        **target_kwargs,
+    )
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            await scrapling_pw_engine.async_intercept_route(route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    assert route.aborted is expected_aborted
+    assert route.continued is expected_continued
 
 
 @pytest.mark.asyncio
