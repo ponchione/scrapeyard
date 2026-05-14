@@ -236,6 +236,39 @@ async def test_size_limit_rejects_negative_content_length() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", [b"", b"+1", b" 1", b"1 ", b"1.0"])
+async def test_size_limit_rejects_ambiguous_content_length(value: bytes) -> None:
+    app_called = False
+
+    async def app(_scope, _receive, _send):
+        nonlocal app_called
+        app_called = True
+
+    middleware = RequestSizeLimitMiddleware(app, max_bytes=3)
+    messages = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    await middleware(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/echo",
+            "headers": [(b"content-length", value)],
+        },
+        receive,
+        send,
+    )
+
+    assert app_called is False
+    assert messages[0]["status"] == 400
+
+
+@pytest.mark.asyncio
 async def test_size_limit_rejects_duplicate_content_length_headers() -> None:
     app_called = False
 
