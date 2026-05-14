@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import suppress
 from datetime import datetime
@@ -109,7 +110,7 @@ class SchedulerService:
         if job.status == JobStatus.running:
             return
 
-        config = load_config(job.config_yaml)
+        config = await asyncio.to_thread(load_config, job.config_yaml)
         priority = config.execution.priority.value
         needs_browser = any(t.fetcher != FetcherType.basic for t in config.resolved_targets())
         run_id = generate_run_id()

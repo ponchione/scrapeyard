@@ -206,7 +206,13 @@ def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes 
 
 
 def _api_key_is_valid(provided: str, keys: set[str]) -> bool:
-    return any(secrets.compare_digest(provided, key) for key in keys)
+    valid = False
+    for key in keys:
+        try:
+            valid |= secrets.compare_digest(provided, key)
+        except TypeError:
+            continue
+    return valid
 
 
 async def _reject(

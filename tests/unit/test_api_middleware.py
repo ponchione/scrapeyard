@@ -6,7 +6,11 @@ import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
-from scrapeyard.api.middleware import RateLimitMiddleware, RequestSizeLimitMiddleware
+from scrapeyard.api.middleware import (
+    RateLimitMiddleware,
+    RequestSizeLimitMiddleware,
+    _api_key_is_valid,
+)
 
 
 class ManualClock:
@@ -114,6 +118,10 @@ async def test_rate_limit_invalid_api_keys_fall_back_to_client_ip() -> None:
         response = await client.get("/limited", headers={"X-API-Key": "bad-b"})
 
     assert response.status_code == 429
+
+
+def test_api_key_validation_treats_non_ascii_input_as_invalid() -> None:
+    assert _api_key_is_valid("kéy", {"key"}) is False
 
 
 @pytest.mark.asyncio

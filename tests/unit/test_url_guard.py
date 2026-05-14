@@ -27,6 +27,16 @@ def test_assert_public_url_rejects_invalid_port() -> None:
         assert_public_url("https://example.com:99999/resource", resolve_dns=False)
 
 
+def test_assert_public_url_rejects_raw_backslash() -> None:
+    with pytest.raises(UnsafeURLError, match="backslashes"):
+        assert_public_url("http://127.0.0.1\\@example.com/resource", resolve_dns=False)
+
+
+def test_assert_public_url_rejects_raw_whitespace() -> None:
+    with pytest.raises(UnsafeURLError, match="whitespace"):
+        assert_public_url("http://127.0.0.1\t@example.com/resource", resolve_dns=False)
+
+
 def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
     text = "proxy: http://token@gate.example.com:7777"
 
@@ -50,6 +60,20 @@ def test_redact_userinfo_in_url_preserves_ipv6_brackets() -> None:
 def test_redact_userinfo_in_url_handles_invalid_port_without_raising() -> None:
     assert redact_userinfo_in_url("https://user:pass@example.com:bad/a") == (
         "https://example.com/a"
+    )
+
+
+def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
+    assert redact_userinfo_in_url(
+        "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
+    ) == "https://example.com/path?api_key=<redacted>&page=2&session_id=<redacted>"
+
+
+def test_redact_userinfo_in_text_masks_sensitive_query_values() -> None:
+    text = "failed at https://example.com/path?access_token=secret&page=2"
+
+    assert redact_userinfo_in_text(text) == (
+        "failed at https://example.com/path?access_token=<redacted>&page=2"
     )
 
 
@@ -82,7 +106,7 @@ webhook:
   headers:
     Authorization: Bearer webhook-secret
 target:
-  url: https://example.com
+  url: https://example.com?api_key=target-secret&page=2
   browser:
     extra_headers:
       X-API-Key: browser-secret
@@ -94,5 +118,6 @@ target:
 
     assert "webhook-secret" not in redacted
     assert "browser-secret" not in redacted
+    assert "target-secret" not in redacted
     assert "user:pass" not in redacted
-    assert redacted.count("<redacted>") == 2
+    assert redacted.count("<redacted>") == 3

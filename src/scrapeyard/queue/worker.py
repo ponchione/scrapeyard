@@ -149,7 +149,7 @@ async def _load_job_execution_context(
     job_store: JobStore,
 ) -> JobExecutionContext | None:
     started_at = utc_now()
-    config = load_config(config_yaml)
+    config = await asyncio.to_thread(load_config, config_yaml)
     job = await job_store.get_job(job_id)
     settings = get_settings()
     adaptive_dir, run_artifacts_dir = build_run_paths(

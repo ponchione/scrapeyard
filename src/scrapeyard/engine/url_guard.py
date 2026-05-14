@@ -8,7 +8,7 @@ import re
 import socket
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, urlparse, urlunparse
 
 import yaml
 from yaml import YAMLError
@@ -30,12 +30,9 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
     }
 )
 
-# Userinfo (user:pass@) inside URLs that we scrub before returning stored
-# config YAML to clients. The scheme and host portion are preserved.
-_USERINFO_IN_URL_RE = re.compile(
-    r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/\s@\"']+@",
-    re.IGNORECASE,
-)
+# URLs embedded in free-form text that we scrub before returning stored config
+# YAML, logs, or result metadata to clients.
+_URL_IN_TEXT_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"']+", re.IGNORECASE)
 
 _REDACTED_VALUE = "<redacted>"
 _SENSITIVE_EXACT_KEYS = frozenset(
@@ -49,7 +46,15 @@ _SENSITIVE_EXACT_KEYS = frozenset(
         "setcookie",
     }
 )
-_SENSITIVE_KEY_PARTS = ("password", "passwd", "secret", "token", "credential")
+_SENSITIVE_KEY_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "signature",
+    "session",
+)
 
 
 def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -76,6 +81,11 @@ def assert_public_url(
        because a fetch against a non-resolving host will fail anyway, which is
        not an SSRF vector.
     """
+
+    if "\\" in url:
+        raise UnsafeURLError("URL must not contain backslashes")
+    if any(char.isspace() for char in url):
+        raise UnsafeURLError("URL must not contain whitespace")
 
     parsed = urlparse(url)
     scheme = (parsed.scheme or "").lower()
@@ -129,13 +139,13 @@ def assert_public_url(
 
 
 def redact_userinfo_in_text(text: str) -> str:
-    """Strip ``user:pass@`` from any URL embedded in *text*.
+    """Strip userinfo and sensitive query values from URLs embedded in *text*.
 
     Used on stored YAML before it is returned to API clients so proxy
-    credentials do not leak through ``GET /jobs/{id}``.
+    credentials and URL-bearing tokens do not leak through ``GET /jobs/{id}``.
     """
 
-    return _USERINFO_IN_URL_RE.sub(lambda m: m.group("scheme"), text)
+    return _URL_IN_TEXT_RE.sub(lambda match: redact_userinfo_in_url(match.group(0)), text)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -172,23 +182,37 @@ def redact_sensitive_config_text(text: str) -> str:
     return yaml.safe_dump(redact_sensitive_mapping(data), sort_keys=False)
 
 
+def _redact_query(query: str) -> str:
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not pairs or not any(_is_sensitive_key(key) for key, _value in pairs):
+        return query
+    redacted_pairs = []
+    for key, value in pairs:
+        redacted_value = _REDACTED_VALUE if _is_sensitive_key(key) else quote_plus(value)
+        redacted_pairs.append(f"{quote_plus(key)}={redacted_value}")
+    return "&".join(redacted_pairs)
+
+
 def redact_userinfo_in_url(url: str) -> str:
-    """Return *url* with any userinfo component removed."""
+    """Return *url* with userinfo and sensitive query values removed."""
 
     parsed = urlparse(url)
-    if not parsed.username and not parsed.password:
+    redacted_query = _redact_query(parsed.query)
+    if not parsed.username and not parsed.password and redacted_query == parsed.query:
         return url
-    host = parsed.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = host
-    try:
-        port = parsed.port
-    except ValueError:
-        port = None
-    if port:
-        netloc = f"{host}:{port}"
-    return urlunparse(parsed._replace(netloc=netloc))
+    netloc = parsed.netloc
+    if parsed.username or parsed.password:
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port:
+            netloc = f"{host}:{port}"
+    return urlunparse(parsed._replace(netloc=netloc, query=redacted_query))
 
 
 def url_host_label(url: str) -> str:
