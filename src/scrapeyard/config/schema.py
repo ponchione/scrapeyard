@@ -32,6 +32,7 @@ _FORBIDDEN_CUSTOM_HEADERS = frozenset(
         "upgrade",
     }
 )
+_FORBIDDEN_BROWSER_ADDITIONAL_ARGUMENTS = frozenset({"addons", "proxy"})
 
 MAX_BROWSER_ACTIONS = 50
 MAX_BROWSER_ACTION_REPEAT = 50
@@ -442,6 +443,19 @@ class BrowserConfig(BaseModel):
     @classmethod
     def _reject_invalid_extra_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return _validate_http_headers(value)
+
+    @field_validator("additional_arguments")
+    @classmethod
+    def _reject_managed_additional_arguments(cls, value: dict[str, object]) -> dict[str, object]:
+        forbidden = sorted(
+            key for key in value if key.lower() in _FORBIDDEN_BROWSER_ADDITIONAL_ARGUMENTS
+        )
+        if forbidden:
+            raise ValueError(
+                "browser.additional_arguments must not override managed option(s): "
+                + ", ".join(forbidden)
+            )
+        return value
 
     @field_validator("cdp_url")
     @classmethod

@@ -227,6 +227,10 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
 
+    def test_browser_additional_arguments_rejects_proxy_override(self):
+        with pytest.raises(ValidationError, match="managed option"):
+            BrowserConfig(additional_arguments={"proxy": "http://127.0.0.1:8080"})
+
     def test_long_form_selector_transform_is_validated_at_config_load(self):
         with pytest.raises(ValidationError, match="Invalid selector transform"):
             ScrapeConfig(
