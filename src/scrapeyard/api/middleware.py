@@ -132,11 +132,8 @@ class RequestSizeLimitMiddleware:
         if content_lengths:
             content_length = content_lengths[0]
             try:
-                declared = int(content_length)
+                declared = _parse_content_length(content_length)
             except ValueError:
-                await _reject(scope, send, 400, "Invalid Content-Length")
-                return
-            if declared < 0:
                 await _reject(scope, send, 400, "Invalid Content-Length")
                 return
             if declared > self.max_bytes:
@@ -228,6 +225,12 @@ def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes 
 def _header_values(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> list[bytes]:
     lowered = name.lower()
     return [value for key, value in headers if key.lower() == lowered]
+
+
+def _parse_content_length(value: bytes) -> int:
+    if not value or not value.isdigit():
+        raise ValueError("invalid content-length")
+    return int(value)
 
 
 def _api_key_is_valid(provided: str, keys: set[str]) -> bool:
