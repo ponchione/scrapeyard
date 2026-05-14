@@ -61,6 +61,9 @@ class TestResolveProxy:
     def test_direct_at_service_level(self):
         assert resolve_proxy(_target(), None, "direct") is None
 
+    def test_direct_at_service_level_ignores_whitespace(self):
+        assert resolve_proxy(_target(), None, " direct ") is None
+
     def test_job_only_no_service(self):
         assert resolve_proxy(
             _target(), _proxy("http://job:9090"), ""
@@ -84,3 +87,6 @@ class TestRedactProxyUrl:
 
     def test_socks5_url(self):
         assert redact_proxy_url("socks5://user:pass@proxy.example.com:1080") == "proxy.example.com:1080"
+
+    def test_invalid_port_does_not_raise(self):
+        assert redact_proxy_url("http://user:pass@gate.example.com:bad") == "gate.example.com"
