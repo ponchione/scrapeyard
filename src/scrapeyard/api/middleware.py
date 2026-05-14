@@ -72,7 +72,10 @@ class RateLimitMiddleware:
         return self.request_limit <= 0 or self.window_seconds <= 0
 
     def _key_for_scope(self, scope: Scope) -> str:
-        provided = _header_value(scope.get("headers", []), b"x-api-key")
+        try:
+            provided = _header_value(scope.get("headers", []), b"x-api-key")
+        except ValueError:
+            provided = None
         if provided is not None:
             api_key = provided.decode("latin-1")
             if _api_key_is_valid(api_key, self.api_keys):
@@ -203,7 +206,11 @@ class APIKeyAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        provided = _header_value(scope.get("headers", []), b"x-api-key")
+        try:
+            provided = _header_value(scope.get("headers", []), b"x-api-key")
+        except ValueError:
+            await _reject(scope, send, 400, "Invalid X-API-Key")
+            return
         if provided is None or not _api_key_is_valid(provided.decode("latin-1"), self.keys):
             await _reject(scope, send, 401, "Missing or invalid API key")
             return
@@ -213,6 +220,8 @@ class APIKeyAuthMiddleware:
 
 def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes | None:
     values = _header_values(headers, name)
+    if len(values) > 1:
+        raise ValueError("duplicate header")
     return values[0] if values else None
 
 

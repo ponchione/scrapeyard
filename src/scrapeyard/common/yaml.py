@@ -26,9 +26,12 @@ def _construct_mapping_without_duplicates(
     seen: set[Any] = set()
     for key_node, _value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        if key in seen:
-            raise yaml.YAMLError(f"Duplicate YAML key: {key!r}")
-        seen.add(key)
+        try:
+            if key in seen:
+                raise yaml.YAMLError(f"Duplicate YAML key: {key!r}")
+            seen.add(key)
+        except TypeError as exc:
+            raise yaml.YAMLError("YAML mapping keys must be hashable") from exc
     return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
 
 

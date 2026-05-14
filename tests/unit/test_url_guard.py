@@ -172,3 +172,12 @@ def test_redact_sensitive_config_text_rejects_yaml_alias_expansion() -> None:
 
     assert "user:pass" not in redacted
     assert "*copy" in redacted
+
+
+def test_redact_sensitive_config_text_handles_unhashable_yaml_keys() -> None:
+    config_yaml = "? [a]\n: http://user:pass@example.com\n"
+
+    redacted = redact_sensitive_config_text(config_yaml)
+
+    assert "user:pass" not in redacted
+    assert "http://example.com" in redacted

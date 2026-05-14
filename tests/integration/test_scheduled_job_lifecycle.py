@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from scrapeyard.api.dependencies import get_job_store, get_scheduler, get_worker_pool
+from scrapeyard.models.job import JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 
 
@@ -105,7 +106,7 @@ target:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_assigns_distinct_run_ids_per_trigger(client, monkeypatch):
+async def test_scheduler_assigns_distinct_run_ids_per_completed_trigger(client, monkeypatch):
     scheduler = get_scheduler()
     pool = get_worker_pool()
     run_ids: list[str | None] = []
@@ -133,6 +134,8 @@ async def test_scheduler_assigns_distinct_run_ids_per_trigger(client, monkeypatc
     job_id = response.json()["job_id"]
 
     await scheduler._trigger_job(job_id)
+    job = await get_job_store().get_job(job_id)
+    await get_job_store().update_job_status(job.model_copy(update={"status": JobStatus.complete}))
     await scheduler._trigger_job(job_id)
 
     assert len(run_ids) == 2
