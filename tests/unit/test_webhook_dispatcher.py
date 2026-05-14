@@ -292,6 +292,17 @@ class TestNonRetryableStatus:
         assert "non-public" in (result.last_error or "")
         client.post.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_send_once_disables_http_redirect_following(self) -> None:
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=_ok_response(200))
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+
+        result = await dispatcher.send_once(_webhook_config(), {})
+
+        assert result.status is WebhookDispatchStatus.delivered
+        assert client.post.await_args.kwargs["follow_redirects"] is False
+
 
 class TestBackoffDelay:
     def test_exponential_backoff(self) -> None:

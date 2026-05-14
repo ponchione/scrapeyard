@@ -144,6 +144,7 @@ class HttpWebhookDispatcher:
                 json=payload,
                 headers=config.headers,
                 timeout=config.timeout,
+                follow_redirects=False,
             )
             elapsed_ms = (time.monotonic() - start) * 1000
 
