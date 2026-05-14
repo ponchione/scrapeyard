@@ -310,9 +310,9 @@ async def capture_browser_state(
     _register_request_failure_capture(page, capture)
     if browser is not None and browser.click_selector:
         try:
-            await page.locator(browser.click_selector).click(timeout=browser.click_timeout_ms)
+            await _click_selector(page, browser.click_selector, browser.click_timeout_ms)
             if browser.click_wait_ms is not None:
-                await page.wait_for_timeout(browser.click_wait_ms)
+                await _wait_for_timeout(page, browser.click_wait_ms)
         except Exception as exc:
             logger.info(
                 "Optional browser click_selector did not resolve or click: %s (%s: %s)",
