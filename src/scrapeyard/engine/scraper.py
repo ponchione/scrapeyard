@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
@@ -34,7 +34,10 @@ from scrapeyard.engine.selectors import (
     select_items_strict,
 )
 from scrapeyard.models.job import ErrorType
+from scrapeyard.engine.url_guard import assert_public_url
 
+_BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_MAX_BASIC_REDIRECTS = 10
 
 @dataclass(frozen=True)
 class ScrapeContext:
@@ -108,6 +111,45 @@ def _get_fetcher(fetcher_type: FetcherType) -> Any:
     return mapping[fetcher_type]
 
 
+def _response_header(response: Any, name: str) -> str | None:
+    headers = getattr(response, "headers", None) or {}
+    if not hasattr(headers, "items"):
+        return None
+    lowered = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == lowered:
+            return str(value)
+    return None
+
+
+async def _fetch_basic_with_safe_redirects(
+    fetcher_cls: Any,
+    url: str,
+    call_kwargs: dict[str, Any],
+    debug: dict[str, Any],
+) -> Any:
+    """Follow basic-fetch redirects only after validating each destination."""
+    current_url = url
+    redirects: list[str] = []
+    call_kwargs["follow_redirects"] = False
+    for _ in range(_MAX_BASIC_REDIRECTS + 1):
+        assert_public_url(current_url)
+        response = await fetch_basic_response(fetcher_cls, current_url, call_kwargs)
+        if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
+            if redirects:
+                debug["redirects"] = redirects
+            return response
+        location = _response_header(response, "location")
+        if not location:
+            return response
+        response_url = getattr(response, "url", None)
+        base_url = response_url if isinstance(response_url, str) and response_url else current_url
+        current_url = urljoin(base_url, location)
+        assert_public_url(current_url)
+        redirects.append(current_url)
+    raise FetchError(310, debug={**debug, "redirects": redirects})
+
+
 def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
     item_selector_count = None
     selector_scope = page
@@ -145,8 +187,9 @@ async def _fetch_page(
         call_kwargs.setdefault("timeout", get_settings().basic_fetch_timeout_seconds)
         if proxy_url is not None:
             call_kwargs["proxy"] = proxy_url
-        response = await fetch_basic_response(fetcher_cls, url, call_kwargs)
+        response = await _fetch_basic_with_safe_redirects(fetcher_cls, url, call_kwargs, debug)
     else:
+        assert_public_url(url)
         call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
         response, capture = await fetch_browser_response(
             fetcher_cls,
@@ -159,6 +202,7 @@ async def _fetch_page(
         debug.update(capture)
 
     populate_fetch_debug(debug, response, url)
+    assert_public_url(debug["final_url"])
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)
@@ -341,5 +385,3 @@ async def scrape_target(
         _handle_scrape_exception(result, target, exc)
 
     return result
-
-

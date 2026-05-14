@@ -345,6 +345,9 @@ async def fetch_browser_response(
 
 def populate_fetch_debug(debug: dict[str, Any], response: Any, url: str) -> None:
     debug["main_document_status"] = getattr(response, "status", None)
-    debug["final_url"] = debug.get("final_url") or getattr(response, "url", None) or url
+    response_url = getattr(response, "url", None)
+    if not isinstance(response_url, str) or not response_url:
+        response_url = None
+    debug["final_url"] = response_url or debug.get("final_url") or url
     debug["page_title"] = debug.get("page_title") or response_title(response)
     debug["html_excerpt"] = debug.get("html_excerpt") or (truncate_text(response_text(response)) or None)

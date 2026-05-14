@@ -14,11 +14,13 @@ from scrapeyard.config import (
     ScrapeConfig,
     StockDetectionConfig,  # noqa: F401
     TargetConfig,
+    WebhookConfig,
     WebhookStatus,
     apply_transforms,
     load_config,
     parse_transform,
 )
+from scrapeyard.config.schema import BrowserConfig, ExecutionConfig, RetryConfig, ValidationConfig
 
 
 # --- Helpers ---
@@ -170,6 +172,25 @@ class TestResolvedTargets:
                     target=_target_dict(browser={"actions": [{"type": "click"}]})
                 )
             )
+
+    def test_browser_cdp_url_rejects_local_destinations(self):
+        with pytest.raises(ValidationError, match="non-public"):
+            BrowserConfig(cdp_url="ws://127.0.0.1:9222/devtools/browser/abc")
+
+    @pytest.mark.parametrize(
+        ("model", "kwargs"),
+        [
+            (RetryConfig, {"max_attempts": 0}),
+            (ValidationConfig, {"min_results": -1}),
+            (ExecutionConfig, {"concurrency": 0}),
+            (ExecutionConfig, {"delay_between": -1}),
+            (ExecutionConfig, {"domain_rate_limit": -1}),
+            (WebhookConfig, {"url": "https://example.com/hook", "timeout": 0}),
+        ],
+    )
+    def test_numeric_runtime_config_rejects_values_that_can_hang_or_spin(self, model, kwargs):
+        with pytest.raises(ValidationError):
+            model(**kwargs)
 
 
 # --- Transform Parser ---

@@ -16,6 +16,7 @@ import httpx
 
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 from scrapeyard.storage.protocols import WebhookOutboxStore
 from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookDeliveryCreate, WebhookDeliveryStatus
 
@@ -129,6 +130,7 @@ class HttpWebhookDispatcher:
         url = str(config.url)
         start = time.monotonic()
         try:
+            assert_public_url(url)
             client = await self._get_client()
             response = await client.post(
                 url,
@@ -157,6 +159,10 @@ class HttpWebhookDispatcher:
             logger.warning("Webhook to %s returned %d in %.0fms", url, response.status_code, elapsed_ms)
             return WebhookDispatchResult(WebhookDispatchStatus.retryable_failed, 1, last_error)
 
+        except UnsafeURLError as exc:
+            last_error = str(exc)
+            logger.warning("Webhook to %s blocked by URL safety check: %s", url, last_error)
+            return WebhookDispatchResult(WebhookDispatchStatus.permanent_failed, 1, last_error)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             last_error = str(exc) or exc.__class__.__name__

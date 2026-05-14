@@ -17,7 +17,11 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
     WebhookDeliveryStatus,
 )
-from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
+from scrapeyard.webhook.dispatcher import (
+    HttpWebhookDispatcher,
+    WebhookDispatchStatus,
+    WebhookRequestConfig,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +256,25 @@ class TestNonRetryableStatus:
             await dispatcher.dispatch(cfg, {})
         assert client.post.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_send_once_blocks_non_public_persisted_urls(self) -> None:
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=_ok_response(200))
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+
+        result = await dispatcher.send_once(
+            WebhookRequestConfig(
+                url="http://127.0.0.1/hook",
+                headers={},
+                timeout=5,
+            ),
+            {},
+        )
+
+        assert result.status is WebhookDispatchStatus.permanent_failed
+        assert "non-public" in (result.last_error or "")
+        client.post.assert_not_awaited()
+
 
 class TestBackoffDelay:
     def test_exponential_backoff(self) -> None:
@@ -421,6 +444,40 @@ class TestDurableOutboxDispatch:
         assert delivery.status is WebhookDeliveryStatus.failed
         assert delivery.attempts == 1
         assert delivery.last_error == "HTTP 404"
+
+    @pytest.mark.asyncio
+    async def test_startup_marks_unsafe_persisted_delivery_failed_without_http(self) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        now = datetime.now(timezone.utc)
+        await outbox.enqueue_delivery(
+            WebhookDeliveryCreate(
+                delivery_id="delivery-1",
+                job_id="job-1",
+                run_id="run-1",
+                event="job.complete",
+                url="http://127.0.0.1/hook",
+                headers={},
+                timeout_seconds=5.0,
+                payload=_payload(),
+                next_attempt_at=now - timedelta(seconds=1),
+            ),
+            now=now,
+        )
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=_ok_response(200))
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            max_retries=0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher.startup()
+        await dispatcher.shutdown(timeout=1.0)
+
+        client.post.assert_not_awaited()
+        delivery = outbox.deliveries["delivery-1"]
+        assert delivery.status is WebhookDeliveryStatus.failed
+        assert "non-public" in (delivery.last_error or "")
 
 
 class TestDeliveryId:
