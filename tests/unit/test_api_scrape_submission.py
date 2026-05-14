@@ -9,6 +9,7 @@ import pytest
 from scrapeyard.api.scrape_submission import submit_scrape_job
 from scrapeyard.config.schema import ExecutionMode, FailStrategy, FetcherType
 from scrapeyard.models.job import JobStatus
+from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.types import ResultPayload
 
 
@@ -138,6 +139,41 @@ async def test_submit_scrape_job_removes_job_when_enqueue_fails():
 
     saved_job = job_store.save_job.call_args.args[0]
     job_store.delete_job.assert_awaited_once_with(saved_job.job_id)
+
+
+@pytest.mark.asyncio
+async def test_submit_scrape_job_retries_ad_hoc_name_collision(monkeypatch):
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    worker_pool.enqueue.return_value = _QueuedJob()
+    generated_names = iter(["duplicate", "unique"])
+
+    async def _save_job(job):
+        if job.name == "duplicate":
+            raise DuplicateJobError(job.project, job.name)
+
+    monkeypatch.setattr(
+        "scrapeyard.api.scrape_submission._adhoc_job_name",
+        lambda _config_name: next(generated_names),
+    )
+    job_store.save_job.side_effect = _save_job
+
+    submission = await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.async_),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=5,
+        sync_poll_delay_seconds=0.1,
+    )
+
+    saved_jobs = [call.args[0] for call in job_store.save_job.await_args_list]
+    assert [job.name for job in saved_jobs] == ["duplicate", "unique"]
+    assert submission.job_id == saved_jobs[1].job_id
+    worker_pool.enqueue.assert_awaited_once()
+    assert worker_pool.enqueue.await_args.args[0] == saved_jobs[1].job_id
 
 
 @pytest.mark.asyncio

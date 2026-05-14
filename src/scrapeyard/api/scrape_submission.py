@@ -14,7 +14,10 @@ from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import ExecutionMode, FetcherType
 from scrapeyard.models.job import Job
 from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
+from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import JobStore, ResultStore
+
+_ADHOC_JOB_SAVE_ATTEMPTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,16 +38,11 @@ async def submit_scrape_job(
     sync_timeout_seconds: int,
     sync_poll_delay_seconds: float,
 ) -> ScrapeSubmission:
-    job_name = _adhoc_job_name(config.name)
-    job = Job(
-        job_id=str(uuid.uuid4()),
-        project=config.project,
-        name=job_name,
+    job = await _save_adhoc_job(
         config_yaml=config_yaml,
-        updated_at=utc_now(),
-        current_run_id=generate_run_id(),
+        config=config,
+        job_store=job_store,
     )
-    await job_store.save_job(job)
 
     has_browser_target = any(target.fetcher != FetcherType.basic for target in config.resolved_targets())
     try:
@@ -83,6 +81,33 @@ async def submit_scrape_job(
         completed=True,
         results=payload.data if payload else None,
     )
+
+
+async def _save_adhoc_job(
+    *,
+    config_yaml: str,
+    config: Any,
+    job_store: JobStore,
+) -> Job:
+    last_duplicate: DuplicateJobError | None = None
+    for _ in range(_ADHOC_JOB_SAVE_ATTEMPTS):
+        job = Job(
+            job_id=str(uuid.uuid4()),
+            project=config.project,
+            name=_adhoc_job_name(config.name),
+            config_yaml=config_yaml,
+            updated_at=utc_now(),
+            current_run_id=generate_run_id(),
+        )
+        try:
+            await job_store.save_job(job)
+        except DuplicateJobError as exc:
+            last_duplicate = exc
+            continue
+        return job
+    if last_duplicate is not None:
+        raise last_duplicate
+    raise RuntimeError("Unable to save ad-hoc job")
 
 
 def _adhoc_job_name(config_name: str) -> str:
