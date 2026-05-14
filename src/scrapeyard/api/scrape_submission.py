@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.paths import MAX_PATH_PART_BYTES, safe_path_part
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import ExecutionMode, FetcherType
 from scrapeyard.models.job import Job
@@ -34,10 +35,11 @@ async def submit_scrape_job(
     sync_timeout_seconds: int,
     sync_poll_delay_seconds: float,
 ) -> ScrapeSubmission:
+    job_name = _adhoc_job_name(config.name)
     job = Job(
         job_id=str(uuid.uuid4()),
         project=config.project,
-        name=f"{config.name}-{uuid.uuid4().hex[:8]}",
+        name=job_name,
         config_yaml=config_yaml,
         updated_at=utc_now(),
         current_run_id=generate_run_id(),
@@ -81,6 +83,15 @@ async def submit_scrape_job(
         completed=True,
         results=payload.data if payload else None,
     )
+
+
+def _adhoc_job_name(config_name: str) -> str:
+    """Return a unique ad-hoc job name that remains safe as one path segment."""
+    config_name = safe_path_part(config_name, label="config name")
+    suffix = f"-{uuid.uuid4().hex[:8]}"
+    max_base_bytes = MAX_PATH_PART_BYTES - len(suffix.encode("utf-8"))
+    base = config_name.encode("utf-8")[:max_base_bytes].decode("utf-8", errors="ignore")
+    return safe_path_part(f"{base}{suffix}", label="ad-hoc job name")
 
 
 def should_wait_for_completion(config: Any) -> bool:

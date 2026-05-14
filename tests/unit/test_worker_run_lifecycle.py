@@ -16,7 +16,7 @@ from scrapeyard.models.job import (
     ErrorType,
     Job,
 )
-from scrapeyard.queue.run_lifecycle import build_run_paths
+from scrapeyard.queue.run_lifecycle import build_run_paths, handle_crash
 from scrapeyard.queue.worker import _run_superseded, scrape_task
 from scrapeyard.storage.database import init_db, reset_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
@@ -581,8 +581,8 @@ class TestRunCrashHandling:
         reset_db()
 
     @pytest.mark.asyncio
-    async def test_crash_no_run_id_skips_db_update(self, tmp_path):
-        """When run_id is None, crash handler does not attempt any DB update."""
+    async def test_crash_no_run_id_skips_run_update(self, tmp_path):
+        """When run_id is None, crash handler does not attempt a run-row update."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
@@ -645,6 +645,16 @@ class TestRunCrashHandling:
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
             )
+
+    @pytest.mark.asyncio
+    async def test_crash_handler_does_not_fail_superseded_job(self):
+        job_store = AsyncMock()
+        job_store.get_job.return_value = make_job(current_run_id="new-run")
+
+        await handle_crash("job-1", "old-run", job_store)
+
+        job_store.update_job_status.assert_not_awaited()
+        job_store.fail_run.assert_awaited_once_with("old-run")
 
 
 # ---------------------------------------------------------------------------
