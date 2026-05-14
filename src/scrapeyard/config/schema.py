@@ -16,6 +16,36 @@ from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_FORBIDDEN_CUSTOM_HEADERS = frozenset(
+    {
+        "connection",
+        "content-length",
+        "expect",
+        "host",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+MAX_BROWSER_ACTIONS = 50
+MAX_BROWSER_ACTION_REPEAT = 50
+MAX_BROWSER_TIMEOUT_MS = 300_000
+MAX_BROWSER_WAIT_MS = 60_000
+MAX_DOMAIN_RATE_LIMIT_SECONDS = 3_600
+MAX_EXECUTION_CONCURRENCY = 50
+MAX_EXECUTION_DELAY_SECONDS = 3_600
+MAX_PAGINATION_PAGES = 100
+MAX_RETRY_ATTEMPTS = 10
+MAX_RETRY_BACKOFF_SECONDS = 300
+MAX_RETRYABLE_STATUSES = 32
+MAX_TARGETS_PER_JOB = 100
+MAX_WEBHOOK_TIMEOUT_SECONDS = 60
 
 
 # --- Enums ---
@@ -201,6 +231,8 @@ def _validate_http_headers(headers: dict[str, str]) -> dict[str, str]:
     for name, value in headers.items():
         if not _HEADER_NAME_RE.fullmatch(name):
             raise ValueError(f"Invalid HTTP header name: {name!r}")
+        if name.lower() in _FORBIDDEN_CUSTOM_HEADERS:
+            raise ValueError(f"HTTP header {name!r} is managed by the HTTP client")
         _validate_header_value(value, label=f"HTTP header {name!r}")
     return headers
 
@@ -235,7 +267,12 @@ class PaginationConfig(BaseModel):
     """Pagination rules for a target."""
 
     next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
-    max_pages: int = Field(default=10, ge=0, description="Maximum pages to scrape")
+    max_pages: int = Field(
+        default=10,
+        ge=0,
+        le=MAX_PAGINATION_PAGES,
+        description="Maximum pages to scrape",
+    )
 
 
 class BrowserActionConfig(BaseModel):
@@ -250,16 +287,28 @@ class BrowserActionConfig(BaseModel):
     timeout_ms: int | None = Field(
         default=None,
         ge=0,
+        le=MAX_BROWSER_TIMEOUT_MS,
         description="Optional timeout in milliseconds for selector-based actions",
     )
     wait_ms: int | None = Field(
         default=None,
         ge=0,
+        le=MAX_BROWSER_WAIT_MS,
         description="Optional wait in milliseconds after this action",
     )
-    times: int = Field(default=1, ge=1, description="Number of scroll iterations")
+    times: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_BROWSER_ACTION_REPEAT,
+        description="Number of scroll iterations",
+    )
     pixels: int = Field(default=1200, description="Vertical pixels per scroll action")
-    max_times: int = Field(default=1, ge=1, description="Maximum repeat_click attempts")
+    max_times: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_BROWSER_ACTION_REPEAT,
+        description="Maximum repeat_click attempts",
+    )
     wait_for_selector: str | None = Field(
         default=None,
         description="Optional CSS selector to wait for after each repeat_click",
@@ -288,7 +337,12 @@ class BrowserActionConfig(BaseModel):
 class BrowserConfig(BaseModel):
     """Browser-backed fetcher tuning."""
 
-    timeout_ms: int = Field(default=60000, gt=0, description="Browser fetch timeout in milliseconds")
+    timeout_ms: int = Field(
+        default=60000,
+        gt=0,
+        le=MAX_BROWSER_TIMEOUT_MS,
+        description="Browser fetch timeout in milliseconds",
+    )
     disable_resources: bool = Field(
         default=True,
         description="Whether to block non-essential resources during browser fetches",
@@ -352,11 +406,13 @@ class BrowserConfig(BaseModel):
     click_timeout_ms: int | None = Field(
         default=3000,
         ge=0,
+        le=MAX_BROWSER_TIMEOUT_MS,
         description="Optional timeout in milliseconds for click_selector before falling through",
     )
     click_wait_ms: int | None = Field(
         default=None,
         ge=0,
+        le=MAX_BROWSER_WAIT_MS,
         description="Optional extra browser wait in milliseconds after click_selector is clicked",
     )
     wait_for_selector: str | None = Field(
@@ -366,10 +422,12 @@ class BrowserConfig(BaseModel):
     wait_ms: int | None = Field(
         default=None,
         ge=0,
+        le=MAX_BROWSER_WAIT_MS,
         description="Optional extra browser wait in milliseconds after page load/selector wait",
     )
     actions: list[BrowserActionConfig] = Field(
         default_factory=list,
+        max_length=MAX_BROWSER_ACTIONS,
         description="Ordered browser actions to run after page load and before extraction",
     )
 
@@ -483,15 +541,34 @@ class TargetConfig(BaseModel):
 class RetryConfig(BaseModel):
     """Retry policy configuration."""
 
-    max_attempts: int = Field(default=3, ge=1, description="Maximum retry attempts per request")
+    max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=MAX_RETRY_ATTEMPTS,
+        description="Maximum retry attempts per request",
+    )
     backoff: BackoffStrategy = Field(
         default=BackoffStrategy.exponential, description="Backoff strategy"
     )
-    backoff_max: int = Field(default=30, ge=0, description="Maximum backoff delay in seconds")
+    backoff_max: int = Field(
+        default=30,
+        ge=0,
+        le=MAX_RETRY_BACKOFF_SECONDS,
+        description="Maximum backoff delay in seconds",
+    )
     retryable_status: list[int] = Field(
         default_factory=lambda: [429, 500, 502, 503, 504],
+        max_length=MAX_RETRYABLE_STATUSES,
         description="HTTP status codes that trigger a retry",
     )
+
+    @field_validator("retryable_status")
+    @classmethod
+    def _validate_retryable_status(cls, value: list[int]) -> list[int]:
+        invalid = [status for status in value if status < 100 or status > 599]
+        if invalid:
+            raise ValueError("retryable_status values must be valid HTTP status codes")
+        return value
 
 
 class ValidationConfig(BaseModel):
@@ -509,10 +586,23 @@ class ValidationConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Concurrency and orchestration settings."""
 
-    concurrency: int = Field(default=2, ge=1, description="Max simultaneous targets within this job")
-    delay_between: int = Field(default=2, ge=0, description="Seconds between starting concurrent targets")
+    concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=MAX_EXECUTION_CONCURRENCY,
+        description="Max simultaneous targets within this job",
+    )
+    delay_between: int = Field(
+        default=2,
+        ge=0,
+        le=MAX_EXECUTION_DELAY_SECONDS,
+        description="Seconds between starting concurrent targets",
+    )
     domain_rate_limit: int = Field(
-        default=3, ge=0, description="Minimum seconds between requests to same domain"
+        default=3,
+        ge=0,
+        le=MAX_DOMAIN_RATE_LIMIT_SECONDS,
+        description="Minimum seconds between requests to same domain",
     )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")
     priority: Priority = Field(default=Priority.normal, description="Queue priority")
@@ -554,7 +644,12 @@ class WebhookConfig(BaseModel):
     headers: dict[str, str] = Field(
         default_factory=dict, description="Custom HTTP headers"
     )
-    timeout: int = Field(default=10, gt=0, description="Timeout in seconds")
+    timeout: int = Field(
+        default=10,
+        gt=0,
+        le=MAX_WEBHOOK_TIMEOUT_SECONDS,
+        description="Timeout in seconds",
+    )
 
     @field_validator("headers")
     @classmethod
@@ -585,7 +680,11 @@ class ScrapeConfig(BaseModel):
 
     # Single target (Tier 1) or multiple targets (Tier 2) — one must be provided.
     target: Optional[TargetConfig] = None
-    targets: Optional[list[TargetConfig]] = Field(default=None, min_length=1)
+    targets: Optional[list[TargetConfig]] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_TARGETS_PER_JOB,
+    )
 
     adaptive: Optional[bool] = Field(
         default=None, description="Override adaptive tracking (default: auto)"
