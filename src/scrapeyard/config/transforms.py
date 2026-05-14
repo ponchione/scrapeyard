@@ -17,6 +17,12 @@ def _parse_args(raw_args: str) -> list[str]:
     return [part.strip() for part in next(csv.reader([raw_args], skipinitialspace=True))]
 
 
+def _require_arg(name: str, raw: str, args: list[str], label: str = "a value") -> str:
+    if not args:
+        raise ValueError(f"{name} requires {label}, got '{raw}'")
+    return args[0]
+
+
 def parse_transform(raw: str) -> Callable[[str], str]:
     """Parse a single transform string into a callable.
 
@@ -44,14 +50,10 @@ def parse_transform(raw: str) -> Callable[[str], str]:
     elif name == "uppercase":
         return str.upper
     elif name == "prepend":
-        if not args:
-            raise ValueError(f"prepend requires a value, got '{raw}'")
-        prefix = args[0]
+        prefix = _require_arg(name, raw, args)
         return lambda s, p=prefix: p + s  # type: ignore[misc]
     elif name == "append":
-        if not args:
-            raise ValueError(f"append requires a value, got '{raw}'")
-        suffix = args[0]
+        suffix = _require_arg(name, raw, args)
         return lambda s, sf=suffix: s + sf  # type: ignore[misc]
     elif name == "replace":
         if len(args) < 2:
@@ -59,32 +61,24 @@ def parse_transform(raw: str) -> Callable[[str], str]:
         old, new = args[0], args[1]
         return lambda s, o=old, n=new: s.replace(o, n)  # type: ignore[misc]
     elif name == "remove":
-        if not args:
-            raise ValueError(f"remove requires a value, got '{raw}'")
-        needle = args[0]
+        needle = _require_arg(name, raw, args)
         return lambda s, n=needle: s.replace(n, "")  # type: ignore[misc]
     elif name == "strip_prefix":
-        if not args:
-            raise ValueError(f"strip_prefix requires a value, got '{raw}'")
-        prefix = args[0]
+        prefix = _require_arg(name, raw, args)
 
         def _strip_prefix(value: str, p: str = prefix) -> str:
             return value.removeprefix(p)
 
         return _strip_prefix
     elif name == "strip_suffix":
-        if not args:
-            raise ValueError(f"strip_suffix requires a value, got '{raw}'")
-        suffix = args[0]
+        suffix = _require_arg(name, raw, args)
 
         def _strip_suffix(value: str, sf: str = suffix) -> str:
             return value.removesuffix(sf)
 
         return _strip_suffix
     elif name == "extract":
-        if not args:
-            raise ValueError(f"extract requires a pattern, got '{raw}'")
-        compiled = re.compile(args[0])
+        compiled = re.compile(_require_arg(name, raw, args, "a pattern"))
 
         def _extract(value: str, c: re.Pattern[str] = compiled) -> str:
             match = c.search(value)
@@ -96,9 +90,7 @@ def parse_transform(raw: str) -> Callable[[str], str]:
 
         return _extract
     elif name == "default":
-        if not args:
-            raise ValueError(f"default requires a value, got '{raw}'")
-        fallback = args[0]
+        fallback = _require_arg(name, raw, args)
         return lambda s, fb=fallback: s if s.strip() else fb  # type: ignore[misc]
     elif name == "regex":
         if len(args) < 2:
