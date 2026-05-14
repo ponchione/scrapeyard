@@ -137,7 +137,7 @@ class HttpWebhookDispatcher:
         log_url = redact_userinfo_in_url(url)
         start = time.monotonic()
         try:
-            assert_public_url(url)
+            await asyncio.to_thread(assert_public_url, url)
             client = await self._get_client()
             response = await client.post(
                 url,

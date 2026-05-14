@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -133,7 +134,7 @@ async def _fetch_basic_with_safe_redirects(
     redirects: list[str] = []
     call_kwargs["follow_redirects"] = False
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
-        assert_public_url(current_url)
+        await asyncio.to_thread(assert_public_url, current_url)
         response = await fetch_basic_response(fetcher_cls, current_url, call_kwargs)
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
             if redirects:
@@ -145,7 +146,7 @@ async def _fetch_basic_with_safe_redirects(
         response_url = getattr(response, "url", None)
         base_url = response_url if isinstance(response_url, str) and response_url else current_url
         current_url = urljoin(base_url, location)
-        assert_public_url(current_url)
+        await asyncio.to_thread(assert_public_url, current_url)
         redirects.append(current_url)
     raise FetchError(310, debug={**debug, "redirects": redirects})
 
@@ -189,7 +190,7 @@ async def _fetch_page(
             call_kwargs["proxy"] = proxy_url
         response = await _fetch_basic_with_safe_redirects(fetcher_cls, url, call_kwargs, debug)
     else:
-        assert_public_url(url)
+        await asyncio.to_thread(assert_public_url, url)
         call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
         response, capture = await fetch_browser_response(
             fetcher_cls,
@@ -202,7 +203,7 @@ async def _fetch_page(
         debug.update(capture)
 
     populate_fetch_debug(debug, response, url)
-    assert_public_url(debug["final_url"])
+    await asyncio.to_thread(assert_public_url, debug["final_url"])
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)

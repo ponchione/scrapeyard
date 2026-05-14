@@ -78,6 +78,11 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError):
             ScrapeConfig(**data)
 
+    def test_target_selectors_must_not_be_empty(self):
+        data = _tier1_config(target=_target_dict(selectors={}))
+        with pytest.raises(ValidationError):
+            ScrapeConfig(**data)
+
     @pytest.mark.parametrize("field", ["project", "name"])
     def test_project_and_name_reject_path_components(self, field):
         data = _tier1_config(**{field: "../outside"})
@@ -198,6 +203,21 @@ class TestResolvedTargets:
     def test_browser_useragent_rejects_crlf_value(self):
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
+
+    def test_long_form_selector_transform_is_validated_at_config_load(self):
+        with pytest.raises(ValidationError, match="Invalid selector transform"):
+            ScrapeConfig(
+                **_tier1_config(
+                    target=_target_dict(
+                        selectors={
+                            "price": {
+                                "query": ".price",
+                                "transform": "regex:[0-9+",
+                            }
+                        }
+                    )
+                )
+            )
 
     @pytest.mark.parametrize(
         ("model", "kwargs"),
@@ -384,6 +404,16 @@ target:
 """
         with pytest.raises(yaml.YAMLError, match="Duplicate YAML key"):
             load_config(yaml_str)
+
+    def test_duplicate_yaml_key_error_does_not_echo_secret_key(self):
+        yaml_str = """
+secret-token: first
+secret-token: second
+"""
+        with pytest.raises(yaml.YAMLError) as exc_info:
+            load_config(yaml_str)
+
+        assert "secret-token" not in str(exc_info.value)
 
     def test_rejects_unhashable_yaml_keys(self):
         with pytest.raises(yaml.YAMLError, match="mapping keys must be hashable"):
