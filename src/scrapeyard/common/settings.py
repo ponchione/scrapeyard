@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+from scrapeyard.engine.proxy import normalize_proxy_url
 
 
 class ServiceSettings(BaseSettings):
@@ -55,6 +57,13 @@ class ServiceSettings(BaseSettings):
     health_disk_free_min_mb: int = Field(default=100, ge=0)
 
     model_config = {"env_prefix": "SCRAPEYARD_"}
+
+    @field_validator("proxy_url")
+    @classmethod
+    def _normalize_proxy_url(cls, value: str) -> str:
+        if not value.strip():
+            return ""
+        return normalize_proxy_url(value)
 
     @model_validator(mode="after")
     def _validate_read_limits(self) -> ServiceSettings:

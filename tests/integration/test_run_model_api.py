@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from tests.integration.conftest import poll_until_ready
+from scrapeyard.api.dependencies import get_job_store
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import JobStatus
 
 
 def _adhoc_yaml() -> str:
@@ -192,6 +194,33 @@ async def test_results_can_be_requested_by_explicit_run_id(client, monkeypatch):
     assert by_run.status_code == 200
     assert by_run.json()["run_id"] == run_id
     assert by_run.json()["results"] == results_resp.json()["results"]
+
+
+@pytest.mark.asyncio
+async def test_results_status_comes_from_persisted_run_metadata(client, monkeypatch):
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_success_scrape_target)
+
+    response = await client.post(
+        "/scrape",
+        content=_adhoc_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    job_id = response.json()["job_id"]
+
+    results_resp = await poll_until_ready(
+        lambda: client.get(f"/results/{job_id}"),
+        lambda response: response.status_code == 200,
+        failure_message="Timed out waiting for persisted results",
+    )
+    run_id = results_resp.json()["run_id"]
+
+    job_store = get_job_store()
+    job = await job_store.get_job(job_id)
+    await job_store.update_job_status(job.model_copy(update={"status": JobStatus.failed}))
+
+    by_run = await client.get(f"/results/{job_id}?latest=false&run_id={run_id}")
+    assert by_run.status_code == 200
+    assert by_run.json()["status"] == "complete"
 
 
 @pytest.mark.asyncio

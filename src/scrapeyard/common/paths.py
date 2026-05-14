@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 _UNSAFE_PATH_CHARS = ("/", "\\", "\x00")
+_MAX_PATH_PART_BYTES = 255
 
 
 def safe_path_part(value: str, *, label: str = "path component") -> str:
@@ -15,6 +16,8 @@ def safe_path_part(value: str, *, label: str = "path component") -> str:
         raise ValueError(f"Unsafe {label}: value must not be blank")
     if value in {".", ".."} or any(char in value for char in _UNSAFE_PATH_CHARS):
         raise ValueError(f"Unsafe {label}: {value!r}")
+    if len(value.encode("utf-8")) > _MAX_PATH_PART_BYTES:
+        raise ValueError(f"Unsafe {label}: value must be at most {_MAX_PATH_PART_BYTES} bytes")
     return value
 
 

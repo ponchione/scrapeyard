@@ -85,6 +85,7 @@ async def test_save_result_with_record_count(store):
 
 async def test_save_result_persists_explicit_status(store):
     meta = await store.save_result("j-1", [{"price": 9.99}], status="partial")
+    payload = await store.get_result("j-1", meta.run_id)
 
     async with get_db("results_meta.db") as db:
         cursor = await db.execute(
@@ -94,6 +95,7 @@ async def test_save_result_persists_explicit_status(store):
         row = await cursor.fetchone()
 
     assert row["status"] == "partial"
+    assert payload.status == "partial"
 
 
 async def test_save_result_reuses_explicit_run_id(store):
