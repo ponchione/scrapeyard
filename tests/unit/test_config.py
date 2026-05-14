@@ -241,6 +241,10 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="managed by the HTTP client"):
             BrowserConfig(extra_headers={"Host": "internal.example"})
 
+    def test_browser_extra_headers_reject_case_insensitive_duplicates(self):
+        with pytest.raises(ValidationError, match="Duplicate HTTP header name"):
+            BrowserConfig(extra_headers={"X-Test": "one", "x-test": "two"})
+
     def test_browser_useragent_rejects_crlf_value(self):
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
@@ -701,6 +705,14 @@ class TestWebhookConfig:
             "headers": {"Transfer-Encoding": "chunked"},
         }
         with pytest.raises(ValidationError, match="managed by the HTTP client"):
+            ScrapeConfig(**_tier1_config(webhook=webhook_data))
+
+    def test_webhook_headers_reject_case_insensitive_duplicates(self):
+        webhook_data = {
+            "url": "https://example.com/hook",
+            "headers": {"X-Test": "one", "x-test": "two"},
+        }
+        with pytest.raises(ValidationError, match="Duplicate HTTP header name"):
             ScrapeConfig(**_tier1_config(webhook=webhook_data))
 
 

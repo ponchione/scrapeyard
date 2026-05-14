@@ -235,10 +235,15 @@ SelectorValue = Union[str, SelectorLong]
 
 
 def _validate_http_headers(headers: dict[str, str]) -> dict[str, str]:
+    seen: set[str] = set()
     for name, value in headers.items():
         if not _HEADER_NAME_RE.fullmatch(name):
             raise ValueError(f"Invalid HTTP header name: {name!r}")
-        if name.lower() in _FORBIDDEN_CUSTOM_HEADERS:
+        lowered = name.lower()
+        if lowered in seen:
+            raise ValueError(f"Duplicate HTTP header name: {name!r}")
+        seen.add(lowered)
+        if lowered in _FORBIDDEN_CUSTOM_HEADERS:
             raise ValueError(f"HTTP header {name!r} is managed by the HTTP client")
         _validate_header_value(value, label=f"HTTP header {name!r}")
     return headers
