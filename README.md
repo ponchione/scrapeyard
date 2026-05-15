@@ -295,9 +295,12 @@ See [docs/TESTING.md](docs/TESTING.md) for the testing lanes.
 ## Deployment Notes
 
 - Set `SCRAPEYARD_API_KEYS` before exposing non-health endpoints.
-- Keep port `8420` private or place it behind a TLS-terminating proxy.
+- Keep port `8420` private. Scrapeyard is designed to be consumed by Eyebox or
+  another trusted internal service, not exposed as a public API.
 - Use persistent storage for `/data` and Redis append-only data.
 - Treat the current service as single-instance. The queue is Redis-backed, but
   SQLite stores and local result artifacts are not a horizontally scaled
   deployment model.
 - Store secrets in environment variables or an orchestrator secret store.
+- Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before promoting a runtime
+  environment.
