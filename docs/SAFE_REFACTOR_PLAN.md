@@ -4,6 +4,9 @@ This plan resolves the refactor findings from the July 2026 wide-sweep audit.
 The work is ordered so that schema-backed optimizations build on a safe migration
 foundation and every slice can be reviewed, reverted, and verified independently.
 
+Status: completed on 2026-07-11. See `docs/AUDIT_HANDOFF.md` for the commit and
+verification record.
+
 ## Safety rules
 
 - Preserve the `src/` package layout and the queue-backed sync scrape path.

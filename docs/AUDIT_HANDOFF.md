@@ -1,97 +1,59 @@
-# Audit Implementation Handoff
+# Safe Refactor Completion Handoff
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
-## Where we left off
+## Status
 
-Audit items 01 through 09 are implemented cumulatively in the current working
-tree. Item 09, result-artifact reconciliation, is complete. No work has begun
-on item 10 or any later item.
+The July 2026 safe-refactor program is complete. The implementation plan and
+safety constraints are recorded in `docs/SAFE_REFACTOR_PLAN.md`. All work is
+committed locally on `main`; nothing has been pushed.
 
-The working tree is authoritative and intentionally uncommitted. Preserve all
-existing tracked and untracked changes, including the Docker PID-1/setpriv
-correction and `src/scrapeyard/queue/priority.py` from item 08. Do not reset,
-restore, checkout, stash, clean, broadly reformat, stage, commit, or push unless
-the user explicitly changes those instructions.
+The pre-existing reliability work for audit items 01-09 was first preserved as
+an explicit checkpoint (`70134c6`). The refactor program then landed in
+independent, reviewable slices:
 
-`HEAD`, `main`, and `origin/main` all remain at:
+| Commit | Slice |
+|---|---|
+| `e8d1cb8` | Add checksummed, per-database migration ledgers and forward-only migrations. |
+| `026d64d` | Bound terminal webhook reconciliation with a durable run marker. |
+| `a72305b` | Index and narrow destructive artifact ownership rechecks. |
+| `21e5242` | Centralize cancellation-safe SQLite transactions. |
+| `70519a1` | Chunk result-metadata deletion below SQLite variable limits. |
+| `13220a4` | Remove obsolete and unsafe alternate lifecycle APIs. |
+| `d02bdf9` | Scope run-stat aggregation before project-filtered job listing. |
+| `65f0656` | Validate each basic-fetch redirect target once before request. |
+| `cc3506a` | Align integration assertions with bounded reconciliation behavior. |
+| `31e2d96` | Repair and harden the authenticated live-Redis verification lane. |
 
-```text
-e9c6cfe0a5977bbcca46d0b7bcaa2e2c94166ae6
-```
+## Resulting invariants
 
-Immediately before this handoff file was added, the cumulative tracked diff
-contained 82 modified files, 11,248 insertions, and 1,370 deletions. There were
-48 pre-existing untracked files and an empty index. This handoff is one new
-untracked file, so `git ls-files --others --exclude-standard` should now report
-49 files. Nothing was staged, committed, pushed, reset, restored, stashed,
-cleaned, or discarded.
+- Each SQLite database records migration filename, SHA-256 checksum, and
+  application time. Startup rejects history gaps, assignment drift, checksum
+  drift, and partial migrations; known pre-ledger schemas are reflected before
+  baselining.
+- Terminal webhook recovery reads only unresolved runs or terminal runs whose
+  parent still needs convergence. Intent creation and reconciliation marking
+  remain atomic and deterministic.
+- Artifact race checks use the `(project, run_id)` index before exact safe-path
+  comparison. Symlink, active-run, grace-period, and final recheck defenses are
+  unchanged.
+- Shared database transactions roll back on every `BaseException`, including
+  cancellation, and tolerate deliberate compare-and-set early rollbacks.
+- Result metadata IDs are deleted in batches of 500 while preserving the
+  intentionally different retention and lifecycle deletion orderings.
+- Generic whole-job mutation, unpaginated store listing, non-atomic webhook
+  submission/retry, and obsolete failure wrappers no longer remain as alternate
+  production paths.
+- Project-filtered job statistics constrain the run aggregation before grouping.
+- Basic redirects are validated exactly once immediately before each fetch;
+  final response and browser URL defenses remain in place.
+- The documented live-Redis runner authenticates requests, avoids the global
+  coverage floor for its focused lane, supports an overridable port, checks
+  prerequisites, and removes its containers, network, and volumes.
 
-## Item 09 implementation
+## Verification
 
-The main implementation is in:
-
-- `src/scrapeyard/storage/result_store.py`
-- `src/scrapeyard/storage/filesystem.py`
-- `src/scrapeyard/storage/cleanup.py`
-- `src/scrapeyard/storage/types.py`
-- `src/scrapeyard/storage/protocols.py`
-- `src/scrapeyard/storage/job_store.py`
-- `src/scrapeyard/api/dependencies.py`
-- `src/scrapeyard/common/settings.py`
-
-`results_meta.file_path` is authoritative when it identifies exactly one
-contained `project/job/run` directory. A valid artifact has a regular,
-non-symlink `results.json` containing valid UTF-8 JSON. Metadata remains
-authoritative after parent deletion with `delete_results=false`.
-
-Reconciliation:
-
-- scans only beneath `storage_results_dir` at exact project/job/run depth;
-- uses non-following stats, `O_NOFOLLOW` where supported, and symlink-safe
-  recursive removal;
-- reports but does not repair or delete metadata for missing, corrupt,
-  unreadable, unsafe, symlinked, or non-regular result artifacts;
-- protects recent work with a 24-hour default grace period;
-- protects exact queued/running project, job-name, and `current_run_id`
-  ownership from `jobs.db`, with metadata/active/timestamp rechecks before
-  destructive removal;
-- removes only exact known atomic temp names for `results.json`,
-  `dynamic-main.png`, and `stealthy-main.png` with a positive PID and
-  32-lowercase-hex UUID;
-- supports typed dry-run and destructive reports and converges idempotently;
-- keeps blocking traversal, parsing, accounting, and removal off the event
-  loop through cancellation-safe thread offloading.
-
-Periodic cleanup order is expired-result retention, per-job pruning,
-orphan/temp reconciliation, then webhook tombstone scrubbing. Normal retention
-remains metadata-first; explicit deletion remains filesystem-first and
-retryable. Reconciliation failures are isolated and retried on the next pass,
-while cleanup-task cancellation still propagates.
-
-New settings are:
-
-```text
-SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS=86400
-SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN=true
-```
-
-They are wired through Pydantic settings, Compose, cleanup, tests, README, and
-deployment documentation.
-
-## Verification checkpoint
-
-Focused verification passed:
-
-- `tests/unit/test_filesystem.py`: 11 passed
-- `tests/unit/test_result_store.py`: 26 passed
-- `tests/unit/test_result_store_cleanup.py`: 25 passed
-- `tests/unit/test_cleanup.py`: 6 passed
-- `tests/unit/test_cleanup_loop.py`: 4 passed
-- `tests/unit/test_job_deletion.py`: 11 passed
-- `tests/integration`: 59 passed
-
-Final verification passed:
+The final committed implementation passed:
 
 ```text
 poetry run ruff check src tests
@@ -100,47 +62,30 @@ poetry run ruff check src tests
 poetry run mypy src
   Success: no issues found in 77 source files.
 
+poetry run pytest tests/unit
+  1,036 passed.
+
+poetry run pytest --no-cov tests/integration
+  59 passed.
+
 poetry run pytest
-  1,099 passed, 8 skipped, 89.16% coverage.
+  1,095 passed, 8 skipped, 89.37% coverage.
 
-git diff --check
-  Passed with no output.
+./scripts/run_live_redis_tests.sh
+  8 passed on two consecutive default-port runs.
 
-poetry run pytest --no-cov tests/live_redis -rs
-  8 passed, with 9 known arq close() deprecation warnings.
+SCRAPEYARD_TEST_REDIS_PORT=56380 ./scripts/run_live_redis_tests.sh
+  8 passed.
 ```
 
-The isolated `scrapeyard-live-redis` container was stopped and auto-removed.
-No container with that name exists, and `127.0.0.1:56379` is free.
+The live-Redis runner left no container, network, volume, or listening test
+port after each run. `git diff --check` also passed throughout the slices.
 
-## Known limits
+## Known limit
 
-Filesystem and SQLite changes are not one transaction. Filesystem timestamps
-can be coarse or administratively changed, permissions can make candidates
-unverifiable, and a final active-state/metadata race remains after the last
-check. Symlink-safe operations reduce but cannot eliminate hostile concurrent
-path replacement. There is no multi-instance reconciliation lease. Corrupt
-content is diagnosed only; no recovery, metadata synthesis, or repair is
-attempted.
-
-## Where to pick up
-
-At the start of the next session, treat the working tree as authoritative and
-run the preservation checks before editing:
-
-```bash
-git status --short --branch
-git rev-parse HEAD main origin/main
-git diff --stat
-git diff --cached --stat
-git ls-files --others --exclude-standard
-docker ps -a --filter name='^/scrapeyard-live-redis$'
-ss -ltn '( sport = :56379 )'
-```
-
-Confirm the index is empty, all three refs still match the commit above, this
-handoff is the only additional untracked file beyond the prior 48, the Redis
-container is absent, and port 56379 is free. Then read `AGENTS.md` and the audit
-work-item document explicitly assigned by the user. If the next assignment is
-item 10, build directly on items 01 through 09; do not restart or redesign any
-completed implementation.
+The live-Redis lane emits an upstream `arq` deprecation warning because
+`arq.worker.Worker.close()` calls the deprecated Redis `close()` alias
+internally. Scrapeyard uses the public worker shutdown API; replacing that
+third-party implementation detail locally would be a riskier change than the
+warning warrants. It remains non-fatal and is visible in test output for future
+dependency upgrades.
