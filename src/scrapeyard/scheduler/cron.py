@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,12 +15,13 @@ from apscheduler.triggers.cron import CronTrigger
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FetcherType
-from scrapeyard.models.job import JobStatus
+from scrapeyard.models.job import Job, JobStatus
 
+from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.job_state import run_lease_is_active
 from scrapeyard.queue.pool import WorkerPool
-from scrapeyard.storage.protocols import JobStore
+from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
+from scrapeyard.storage.protocols import JobStore, ResultStore
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,16 @@ class SchedulerService:
         worker_pool: WorkerPool,
         job_store: JobStore,
         jitter_max_seconds: int = 120,
-        queued_run_lease_seconds: int = 300,
+        queued_claim_timeout_seconds: int = 300,
+        running_heartbeat_timeout_seconds: int = 600,
+        result_store: ResultStore | None = None,
     ) -> None:
         self._pool = worker_pool
         self._job_store = job_store
         self._jitter_max = jitter_max_seconds
-        self._queued_run_lease_seconds = queued_run_lease_seconds
+        self._queued_claim_timeout_seconds = queued_claim_timeout_seconds
+        self._running_heartbeat_timeout_seconds = running_heartbeat_timeout_seconds
+        self._result_store = result_store
         self._scheduler = AsyncIOScheduler()
 
     def register_job(self, job_id: str, cron_expr: str, enabled: bool = True) -> None:
@@ -112,62 +117,154 @@ class SchedulerService:
             self.remove_job(job_id)
             return
 
-        if self._job_has_active_run(job):
+        if job.status in {JobStatus.cancelled, JobStatus.deleting}:
+            logger.info(
+                "Scheduled trigger blocked by lifecycle state job_id=%s run_id=%s "
+                "status=%s recovery_action=remove_local_schedule",
+                job_id,
+                job.current_run_id,
+                job.status.value,
+            )
+            self.remove_job(job_id)
             return
 
-        await self._fail_stale_running_run(job)
+        now = utc_now()
+        if await self._job_has_active_run(job, now=now):
+            return
+
+        if job.status == JobStatus.running:
+            run_id = job.current_run_id
+            if run_id is None:
+                logger.warning(
+                    "Recovering running job without run ownership job_id=%s run_id=None",
+                    job_id,
+                )
+                recovered = await self._job_store.recover_stale_run(
+                    job_id,
+                    None,
+                    now - timedelta(seconds=self._running_heartbeat_timeout_seconds),
+                    now,
+                )
+                if not recovered:
+                    return
+            else:
+                recovered = await self._job_store.recover_stale_run(
+                    job_id,
+                    run_id,
+                    now - timedelta(seconds=self._running_heartbeat_timeout_seconds),
+                    now,
+                )
+                if not recovered:
+                    logger.info(
+                        "Scheduled stale recovery became a no-op job_id=%s run_id=%s "
+                        "timeout_seconds=%s recovery_action=no_op",
+                        job_id,
+                        run_id,
+                        self._running_heartbeat_timeout_seconds,
+                    )
+                    return
+                logger.warning(
+                    "Recovered stale scheduled run job_id=%s run_id=%s "
+                    "timeout_seconds=%s recovery_action=failed_stale_run",
+                    job_id,
+                    run_id,
+                    self._running_heartbeat_timeout_seconds,
+                )
+            if self._result_store is not None:
+                await reconcile_terminal_webhook_intents(
+                    job_store=self._job_store,
+                    result_store=self._result_store,
+                )
+            job = await self._job_store.get_job(job_id)
+
         config = await asyncio.to_thread(load_config, job.config_yaml)
-        priority = config.execution.priority.value
-        needs_browser = any(t.fetcher != FetcherType.basic for t in config.resolved_targets())
+        delivery = queue_delivery_metadata(config)
         run_id = generate_run_id()
-        queued_job = job.model_copy(update={
-            "status": JobStatus.queued,
-            "updated_at": utc_now(),
-            "current_run_id": run_id,
-        })
-        await self._job_store.update_job_status(queued_job)
+        stale_before = None
+        if job.status == JobStatus.queued and job.current_run_id is not None:
+            stale_before = now - timedelta(seconds=self._queued_claim_timeout_seconds)
+        queued = await self._job_store.queue_run(
+            job_id,
+            expected_status=job.status.value,
+            expected_run_id=job.current_run_id,
+            new_run_id=run_id,
+            queued_at=now,
+            stale_before=stale_before,
+        )
+        if not queued:
+            logger.info(
+                "Scheduled queue replacement became a no-op job_id=%s "
+                "expected_run_id=%s new_run_id=%s ownership_outcome=lost",
+                job_id,
+                job.current_run_id,
+                run_id,
+            )
+            return
         try:
             await self._pool.enqueue(
                 job.job_id,
                 job.config_yaml,
-                priority,
-                needs_browser,
+                delivery.priority,
+                delivery.needs_browser,
                 run_id=run_id,
                 trigger="scheduled",
             )
         except Exception:
             logger.exception("Failed to enqueue scheduled job %s", job.job_id)
-            failed_job = queued_job.model_copy(update={
-                "status": JobStatus.failed,
-                "updated_at": utc_now(),
-            })
-            await self._job_store.update_job_status(failed_job)
-
-    async def _fail_stale_running_run(self, job: object) -> None:
-        if getattr(job, "status", None) != JobStatus.running:
-            return
-        run_id = getattr(job, "current_run_id", None)
-        if run_id is None:
-            return
-        try:
-            await self._job_store.fail_run(run_id)
-        except Exception:
-            logger.exception("Failed to mark stale scheduled run %s as failed", run_id)
+            failed = await self._job_store.fail_queued_run(job_id, run_id, utc_now())
+            if not failed:
+                logger.info(
+                    "Skipping failed enqueue mutation after ownership loss "
+                    "job_id=%s run_id=%s",
+                    job_id,
+                    run_id,
+                )
 
     def get_next_run_time(self, job_id: str) -> datetime | None:
         """Return the next scheduled fire time, or None if not scheduled."""
         aps_job = self._scheduler.get_job(job_id)
         return aps_job.next_run_time if aps_job else None
 
-    def _job_has_active_run(self, job: object) -> bool:
-        status = getattr(job, "status", None)
+    async def _job_has_active_run(self, job: Job, *, now: datetime) -> bool:
+        status = job.status
         if status not in {JobStatus.queued, JobStatus.running}:
             return False
-        if status == JobStatus.queued and getattr(job, "current_run_id", None) is None:
+        if status == JobStatus.queued and job.current_run_id is None:
             return False
+        if status == JobStatus.queued:
+            active = run_lease_is_active(
+                job.updated_at,
+                lease_seconds=self._queued_claim_timeout_seconds,
+                now=now,
+            )
+            if active:
+                logger.info(
+                    "Skipping scheduled trigger for queued delivery job_id=%s run_id=%s "
+                    "queued_timeout_seconds=%s",
+                    job.job_id,
+                    job.current_run_id,
+                    self._queued_claim_timeout_seconds,
+                )
+            return active
 
-        return run_lease_is_active(
-            getattr(job, "updated_at", None),
-            lease_seconds=self._queued_run_lease_seconds,
-            now=utc_now(),
+        run_id = job.current_run_id
+        if run_id is None:
+            return False
+        run = await self._job_store.get_job_run(job.job_id, run_id)
+        if run is None or run.status != JobStatus.running:
+            return False
+        active = run_lease_is_active(
+            run.heartbeat_at,
+            lease_seconds=self._running_heartbeat_timeout_seconds,
+            now=now,
         )
+        if active:
+            logger.info(
+                "Skipping scheduled trigger for healthy run job_id=%s run_id=%s "
+                "last_heartbeat=%s timeout_seconds=%s recovery_action=skip",
+                job.job_id,
+                run_id,
+                run.heartbeat_at.isoformat(),
+                self._running_heartbeat_timeout_seconds,
+            )
+        return active

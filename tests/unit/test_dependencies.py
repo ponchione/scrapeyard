@@ -10,6 +10,7 @@ from scrapeyard.api.dependencies import (
     init_rate_limiter,
     reset_cached_dependencies,
 )
+from scrapeyard.common.settings import get_settings
 
 
 def test_reset_cached_dependencies_clears_cached_singletons_and_rate_limiter():
@@ -37,3 +38,23 @@ def test_reset_cached_dependencies_clears_cached_singletons_and_rate_limiter():
     assert get_webhook_dispatcher.cache_info().currsize == 0
     assert get_worker_pool.cache_info().currsize == 0
     assert get_scheduler.cache_info().currsize == 0
+
+
+def test_result_store_cache_reset_applies_changed_reconciliation_environment(
+    monkeypatch, tmp_path
+):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    monkeypatch.setenv("SCRAPEYARD_STORAGE_RESULTS_DIR", str(first))
+    get_settings.cache_clear()
+    reset_cached_dependencies()
+    first_store = get_result_store()
+
+    monkeypatch.setenv("SCRAPEYARD_STORAGE_RESULTS_DIR", str(second))
+    get_settings.cache_clear()
+    reset_cached_dependencies()
+    second_store = get_result_store()
+
+    assert first_store._results_dir == first
+    assert second_store._results_dir == second
+    assert second_store._active_run_lookup is not None

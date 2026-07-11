@@ -13,6 +13,13 @@ from scrapeyard.models.job import Job, JobRun, JobStatus
 RowMapping = Mapping[str, object]
 
 
+def _optional_row_value(row: RowMapping, key: str) -> object | None:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def row_to_job(row: RowMapping) -> Job:
     created_at = parse_dt(cast(str | None, row["created_at"]))
     if created_at is None:
@@ -28,6 +35,14 @@ def row_to_job(row: RowMapping) -> Job:
         schedule_cron=cast(str | None, row["schedule_cron"]),
         schedule_enabled=bool(row["schedule_enabled"]),
         current_run_id=cast(str | None, row["current_run_id"]),
+        deletion_requested_at=parse_dt(
+            cast(str | None, _optional_row_value(row, "deletion_requested_at"))
+        ),
+        delete_results_on_delete=(
+            None
+            if _optional_row_value(row, "delete_results_on_delete") is None
+            else bool(_optional_row_value(row, "delete_results_on_delete"))
+        ),
     )
 
 
@@ -35,6 +50,9 @@ def row_to_job_run(row: RowMapping) -> JobRun:
     started_at = parse_dt(cast(str | None, row["started_at"]))
     if started_at is None:
         raise ValueError("Job run row is missing started_at")
+    heartbeat_at = parse_dt(cast(str | None, row["heartbeat_at"]))
+    if heartbeat_at is None:
+        raise ValueError("Job run row is missing heartbeat_at")
     return JobRun(
         run_id=cast(str, row["run_id"]),
         job_id=cast(str, row["job_id"]),
@@ -42,6 +60,7 @@ def row_to_job_run(row: RowMapping) -> JobRun:
         trigger=cast(str, row["trigger"]),
         config_hash=cast(str, row["config_hash"]),
         started_at=started_at,
+        heartbeat_at=heartbeat_at,
         completed_at=parse_dt(cast(str | None, row["completed_at"])),
         record_count=cast(int | None, row["record_count"]),
         error_count=cast(int, row["error_count"]),

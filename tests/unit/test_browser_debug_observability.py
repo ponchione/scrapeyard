@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,6 +10,7 @@ import pytest
 from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.engine.browser_debug import (
     BrowserPageActionError,
     capture_browser_state,
@@ -17,6 +19,16 @@ from scrapeyard.engine.browser_debug import (
     run_browser_actions,
 )
 from scrapeyard.engine.url_guard import UnsafeURLError
+
+
+def _debug_budget(max_bytes: int) -> RunBudget:
+    return RunBudget(
+        max_duration_seconds=60,
+        max_fetched_bytes=1000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=max_bytes,
+    )
 
 
 class FakeConsoleMessage:
@@ -550,3 +562,103 @@ async def test_capture_browser_state_rejects_non_public_final_url_before_content
 
     page.title.assert_not_awaited()
     page.content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_debug_budget_omits_screenshot_that_does_not_fit(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="abc")
+    page.screenshot = AsyncMock(return_value=b"1234")
+    budget = _debug_budget(5)
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        capture=capture,
+        budget=budget,
+    )
+
+    assert capture["html_excerpt"] == "abc"
+    assert capture["screenshot_path"] is None
+    assert capture["debug_artifact_limits"] == [
+        {
+            "limit_name": "browser_debug_bytes",
+            "configured_limit": 5,
+            "requested_amount": 4,
+            "stored_amount": 0,
+            "artifact": "screenshot",
+            "action": "omitted",
+        }
+    ]
+    assert list(tmp_path.rglob("*.png")) == []
+    assert budget.browser_debug_bytes == 3
+
+
+@pytest.mark.asyncio
+async def test_browser_debug_budget_truncates_excerpt_at_utf8_boundary() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="cafés")
+    budget = _debug_budget(4)
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=None,
+        capture=capture,
+        budget=budget,
+    )
+
+    assert capture["html_excerpt"] == "caf"
+    assert capture["debug_artifact_limits"][0]["action"] == "truncated"
+    assert capture["debug_artifact_limits"][0]["requested_amount"] == 6
+    assert capture["debug_artifact_limits"][0]["stored_amount"] == 4
+    assert budget.browser_debug_bytes == 4
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_exact_boundary_is_written_atomically(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="")
+    page.screenshot = AsyncMock(return_value=b"1234")
+    budget = _debug_budget(4)
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        capture=capture,
+        budget=budget,
+    )
+
+    screenshot_path = Path(capture["screenshot_path"])
+    assert screenshot_path.read_bytes() == b"1234"
+    assert list(screenshot_path.parent.glob(".*.tmp")) == []
+    assert budget.browser_debug_bytes == 4

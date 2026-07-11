@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import OnEmptyAction
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ActionTaken, ErrorType
@@ -100,3 +102,48 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
     assert scrape.await_count == 1
     circuit_breaker.record_success.assert_called_once_with("example.com")
     assert [record.action_taken for record in pending_errors] == [ActionTaken.retry, ActionTaken.fail]
+
+
+@pytest.mark.asyncio
+async def test_validation_retry_rate_limit_wait_uses_overall_deadline():
+    target = make_target("https://example.com")
+    result = TargetResult(url=target.url, status="success", data=[])
+    validator = MagicMock()
+    validator.validate.return_value = MagicMock(
+        passed=False,
+        action=OnEmptyAction.retry,
+        message="empty first pass",
+    )
+    rate_limiter = AsyncMock()
+
+    async def block_rate_limit(*_args) -> None:
+        await asyncio.Event().wait()
+
+    rate_limiter.acquire.side_effect = block_rate_limit
+    budget = RunBudget(
+        max_duration_seconds=0.01,
+        max_fetched_bytes=1000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1000,
+    )
+    scrape = AsyncMock()
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await apply_validation(
+            target_cfg=target,
+            domain="example.com",
+            adaptive=False,
+            result=result,
+            config=_config(domain_rate_limit=5),
+            adaptive_dir="/tmp/adaptive",
+            run_artifacts_dir=None,
+            recorder=_recorder([]),
+            rate_limiter=rate_limiter,
+            validator=validator,
+            scrape=scrape,
+            budget=budget,
+        )
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
+    scrape.assert_not_awaited()

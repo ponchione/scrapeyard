@@ -44,6 +44,8 @@ async def test_scheduled_job_create_list_delete(client):
     jobs = list_response.json()
     assert any(j["job_id"] == job_id for j in jobs)
 
+    cancel_response = await client.post(f"/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 204
     delete_response = await client.delete(f"/jobs/{job_id}")
     assert delete_response.status_code == 204
 

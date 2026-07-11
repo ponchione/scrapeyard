@@ -4,7 +4,46 @@ from __future__ import annotations
 
 from scrapeyard.config.schema import WebhookConfig, WebhookStatus
 from scrapeyard.models.job import JobStatus
-from scrapeyard.webhook.payload import build_webhook_payload, should_fire
+from scrapeyard.webhook.payload import (
+    build_webhook_payload,
+    deterministic_delivery_id,
+    should_fire,
+)
+
+
+def test_deterministic_delivery_id_is_stable_for_same_logical_event():
+    first = deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-1",
+        event="job.complete",
+    )
+    second = deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-1",
+        event="job.complete",
+    )
+
+    assert first == second
+    assert first.startswith("whv1_")
+
+
+def test_deterministic_delivery_id_distinguishes_runs_and_events():
+    base = deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-1",
+        event="job.complete",
+    )
+
+    assert base != deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-2",
+        event="job.complete",
+    )
+    assert base != deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-1",
+        event="job.failed",
+    )
 
 
 class TestShouldFire:

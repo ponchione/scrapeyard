@@ -49,6 +49,12 @@ async def test_init_db_creates_tables(tmp_path):
         cursor = await db.execute("PRAGMA table_info(jobs)")
         columns = {column[1] for column in await cursor.fetchall()}
         assert "schedule_enabled" in columns
+        assert "deletion_requested_at" in columns
+        assert "delete_results_on_delete" in columns
+        cursor = await db.execute("PRAGMA table_info(job_runs)")
+        run_columns = {column[1]: column for column in await cursor.fetchall()}
+        assert "heartbeat_at" in run_columns
+        assert run_columns["heartbeat_at"][3] == 1
         cursor = await db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
         )
@@ -75,6 +81,121 @@ async def test_init_db_idempotent(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
     await init_db(str(db_dir))
+
+
+async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_path):
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    async with aiosqlite.connect(db_dir / "jobs.db") as db:
+        await db.executescript(
+            """CREATE TABLE jobs (
+                   job_id TEXT PRIMARY KEY,
+                   project TEXT NOT NULL,
+                   name TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'queued',
+                   config_yaml TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT,
+                   schedule_cron TEXT,
+                   schedule_enabled INTEGER NOT NULL DEFAULT 1,
+                   current_run_id TEXT,
+                   UNIQUE (project, name)
+               );
+               CREATE TABLE job_runs (
+                   run_id TEXT PRIMARY KEY,
+                   job_id TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'running',
+                   trigger TEXT NOT NULL,
+                   config_hash TEXT NOT NULL,
+                   started_at TEXT NOT NULL,
+                   completed_at TEXT,
+                   record_count INTEGER,
+                   error_count INTEGER NOT NULL DEFAULT 0
+               );
+               INSERT INTO job_runs
+                   (run_id, job_id, status, trigger, config_hash, started_at)
+               VALUES
+                   ('old-run', 'old-job', 'running', 'adhoc', 'hash',
+                    '2026-07-10T12:00:00+00:00');"""
+        )
+        await db.commit()
+
+    await init_db(str(db_dir))
+    await init_db(str(db_dir))
+
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute("PRAGMA table_info(jobs)")
+        job_columns = [row[1] for row in await cursor.fetchall()]
+        cursor = await db.execute("PRAGMA table_info(job_runs)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        cursor = await db.execute(
+            "SELECT heartbeat_at FROM job_runs WHERE run_id = 'old-run'"
+        )
+        row = await cursor.fetchone()
+
+    assert columns.count("heartbeat_at") == 1
+    assert job_columns.count("deletion_requested_at") == 1
+    assert job_columns.count("delete_results_on_delete") == 1
+    assert row is not None
+    assert row["heartbeat_at"] == "2026-07-10T12:00:00+00:00"
+
+
+async def test_init_db_upgrades_existing_webhook_outbox_item06_columns(tmp_path):
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    async with aiosqlite.connect(db_dir / "jobs.db") as db:
+        await db.executescript(
+            """CREATE TABLE webhook_deliveries (
+                   delivery_id TEXT PRIMARY KEY,
+                   job_id TEXT NOT NULL,
+                   run_id TEXT,
+                   event TEXT NOT NULL,
+                   url TEXT NOT NULL,
+                   headers_json TEXT NOT NULL DEFAULT '{}',
+                   timeout_seconds REAL NOT NULL DEFAULT 10,
+                   payload_json TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'pending',
+                   attempts INTEGER NOT NULL DEFAULT 0,
+                   next_attempt_at TEXT NOT NULL,
+                   last_attempt_at TEXT,
+                   delivered_at TEXT,
+                   last_error TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+               );
+               INSERT INTO webhook_deliveries
+                   (delivery_id, job_id, run_id, event, url, payload_json,
+                    status, attempts, next_attempt_at, last_attempt_at,
+                    last_error, created_at, updated_at)
+               VALUES
+                   ('legacy-failed', 'job-1', 'run-1', 'job.failed',
+                    'https://hooks.example.com', '{}', 'failed', 1,
+                    '2026-07-10T12:00:00+00:00',
+                    '2026-07-10T12:00:01+00:00', 'HTTP 400',
+                    '2026-07-10T12:00:00+00:00',
+                    '2026-07-10T12:00:01+00:00');"""
+        )
+        await db.commit()
+
+    await init_db(str(db_dir))
+    await init_db(str(db_dir))
+
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute("PRAGMA table_info(webhook_deliveries)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        cursor = await db.execute(
+            """SELECT failed_at, failure_reason, scrubbed_at
+               FROM webhook_deliveries WHERE delivery_id = 'legacy-failed'"""
+        )
+        row = await cursor.fetchone()
+
+    assert columns.count("failed_at") == 1
+    assert columns.count("failure_reason") == 1
+    assert columns.count("scrubbed_at") == 1
+    assert row is not None
+    assert row["failed_at"] == "2026-07-10T12:00:01+00:00"
+    assert row["failure_reason"] == "non_retryable_failure"
+    assert row["scrubbed_at"] is None
 
 
 async def test_init_db_deduplicates_result_meta_before_unique_index(tmp_path):

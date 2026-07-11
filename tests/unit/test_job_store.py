@@ -92,16 +92,34 @@ async def test_list_jobs_empty(store):
     assert jobs == []
 
 
-async def test_delete_job(store):
-    await store.save_job(_make_job())
-    await store.delete_job("j-1")
+async def test_rollback_queued_submission(store):
+    await store.save_job(_make_job(current_run_id="run-1"))
+    assert await store.rollback_queued_submission("j-1", "run-1") is True
 
     with pytest.raises(KeyError):
         await store.get_job("j-1")
 
 
-async def test_delete_nonexistent_is_silent(store):
-    await store.delete_job("no-such-id")
+async def test_rollback_queued_submission_nonexistent_is_noop(store):
+    assert await store.rollback_queued_submission("no-such-id", "run-1") is False
+
+
+async def test_result_run_active_lookup_protects_exact_queued_or_running_owner(store):
+    await store.save_job(_make_job(current_run_id="run-queued"))
+
+    assert await store.result_run_is_active("acme", "scrape-prices", "run-queued")
+    assert not await store.result_run_is_active("acme", "scrape-prices", "other")
+    assert not await store.result_run_is_active("other", "scrape-prices", "run-queued")
+
+    job = await store.get_job("j-1")
+    await store.update_job(
+        job.model_copy(
+            update={"status": JobStatus.complete, "current_run_id": "run-queued"}
+        )
+    )
+    assert not await store.result_run_is_active(
+        "acme", "scrape-prices", "run-queued"
+    )
 
 
 async def test_update_job(store):

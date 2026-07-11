@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -26,7 +27,17 @@ from scrapeyard.api.routes import router
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
-from scrapeyard.runtime.health import HealthCache, probe_disk, probe_redis, probe_sqlite
+from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
+from scrapeyard.queue.terminal_reconciliation import (
+    reconcile_terminal_webhook_intents,
+)
+from scrapeyard.runtime.health import (
+    HealthCache,
+    ProbeResult,
+    probe_disk,
+    probe_redis,
+    probe_sqlite,
+)
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 
@@ -39,13 +50,23 @@ async def _recover_stale_running_jobs() -> None:
     """Fail stale running jobs/runs before workers and scheduler start."""
     settings = get_settings()
     recovered_at = utc_now()
-    cutoff = recovered_at - timedelta(seconds=settings.workers_running_lease_seconds * 2)
-    recovered_jobs = await get_job_store().recover_stale_running_jobs(cutoff, recovered_at)
-    if recovered_jobs:
+    cutoff = recovered_at - timedelta(
+        seconds=settings.workers_running_heartbeat_timeout_seconds
+    )
+    recoveries = await get_job_store().recover_stale_running_jobs(cutoff, recovered_at)
+    for recovery in recoveries:
         logger.warning(
-            "Recovered %d stale running job(s) older than %ds",
-            recovered_jobs,
-            settings.workers_running_lease_seconds * 2,
+            "Recovered running state job_id=%s run_id=%s last_heartbeat=%s "
+            "timeout_seconds=%s recovery_action=%s",
+            recovery.job_id,
+            recovery.run_id,
+            (
+                recovery.last_heartbeat_at.isoformat()
+                if recovery.last_heartbeat_at is not None
+                else None
+            ),
+            settings.workers_running_heartbeat_timeout_seconds,
+            recovery.action,
         )
 
 
@@ -63,11 +84,27 @@ def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
 async def _startup_runtime_services(app: FastAPI) -> None:
     services = build_runtime_services()
     _assign_runtime_services(app, services)
+    app.state.terminal_intent_reconciliation = (
+        await reconcile_terminal_webhook_intents(
+            job_store=get_job_store(),
+            result_store=services.result_store,
+        )
+    )
     await services.webhook_dispatcher.startup()
     await services.worker_pool.start()
     init_rate_limiter(redis=services.worker_pool.redis)
+    app.state.queued_reconciliation = await reconcile_stale_queued_jobs(
+        job_store=get_job_store(),
+        worker_pool=services.worker_pool,
+        queued_claim_timeout_seconds=(
+            get_settings().workers_queued_claim_timeout_seconds
+        ),
+    )
     await services.scheduler.start()
-    app.state.cleanup_task = start_cleanup_loop(services.result_store)
+    app.state.cleanup_task = start_cleanup_loop(
+        services.result_store,
+        services.webhook_outbox_store,
+    )
 
 
 async def _shutdown_runtime_services(app: FastAPI, *, shutdown_grace_seconds: int) -> None:
@@ -164,6 +201,15 @@ async def health() -> JSONResponse:
     projects = await _health.project_summary() if settings.health_include_projects else {}
 
     redis_probe = await probe_redis(pool)
+    queue_depths: dict[str, int | None]
+    try:
+        queue_depths = cast(dict[str, int | None], await pool.queue_depths())
+    except Exception as exc:
+        queue_depths = {"high": None, "normal": None, "low": None}
+        redis_probe = ProbeResult(
+            False,
+            f"redis queue depth probe failed: {exc}",
+        )
     sqlite_probe = await probe_sqlite()
     disk_probe = probe_disk(settings.storage_results_dir, settings.health_disk_free_min_mb)
 
@@ -189,6 +235,7 @@ async def health() -> JSONResponse:
             "active_tasks": pool.active_tasks,
             "max_browsers": pool.max_browsers,
             "active_browsers": pool.active_browsers,
+            "queue_depths": queue_depths,
         },
         "dependencies": dependencies,
         "projects": projects,

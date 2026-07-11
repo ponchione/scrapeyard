@@ -9,7 +9,12 @@ from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.worker import scrape_task
-from tests.unit.worker_helpers import make_job, make_target
+from tests.unit.worker_helpers import (
+    finalized_status,
+    make_job,
+    make_settings_mock,
+    make_target,
+)
 
 
 @pytest.mark.asyncio
@@ -26,7 +31,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
@@ -51,8 +56,7 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job_status.call_args_list[-1][0][0]
-    assert final_update.status == JobStatus.partial
+    assert finalized_status(job_store) == JobStatus.partial
 
 
 @pytest.mark.asyncio
@@ -69,7 +73,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
@@ -94,8 +98,7 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job_status.call_args_list[-1][0][0]
-    assert final_update.status == JobStatus.failed
+    assert finalized_status(job_store) == JobStatus.failed
     # Worker still persists the result metadata (with 0 records) for
     # observability — the important thing is that flat_data was cleared.
     result_store.save_result.assert_called_once()
@@ -118,7 +121,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
@@ -143,8 +146,7 @@ async def test_continue_completes_even_with_failures(mock_stores):
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    final_update = job_store.update_job_status.call_args_list[-1][0][0]
-    assert final_update.status == JobStatus.complete
+    assert finalized_status(job_store) == JobStatus.complete
     result_store.save_result.assert_called_once()
 
 
@@ -163,7 +165,7 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"
@@ -207,7 +209,7 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
     with patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.scrape_target") as mock_scrape, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(adaptive_dir="/tmp/adaptive", proxy_url="")
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "test-job"

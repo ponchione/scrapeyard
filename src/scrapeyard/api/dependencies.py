@@ -15,6 +15,7 @@ from scrapeyard.engine.rate_limiter import (
 )
 from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.queue.pool import WorkerPool
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.worker import scrape_task
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
@@ -28,6 +29,7 @@ from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 @dataclass(frozen=True)
 class RuntimeServices:
     result_store: ResultStore
+    webhook_outbox_store: WebhookOutboxStore
     webhook_dispatcher: HttpWebhookDispatcher
     worker_pool: WorkerPool
     scheduler: SchedulerService
@@ -52,7 +54,10 @@ def get_result_store() -> ResultStore:
         job = await job_store.get_job(job_id)
         return job.project, job.name
 
-    return LocalResultStore(settings.storage_results_dir, _lookup)
+    async def _active_lookup(project: str, job_name: str, run_id: str) -> bool:
+        return await job_store.result_run_is_active(project, job_name, run_id)
+
+    return LocalResultStore(settings.storage_results_dir, _lookup, _active_lookup)
 
 
 @lru_cache(maxsize=1)
@@ -71,7 +76,14 @@ def get_webhook_outbox_store() -> WebhookOutboxStore:
 
 @lru_cache(maxsize=1)
 def get_webhook_dispatcher() -> HttpWebhookDispatcher:
-    return HttpWebhookDispatcher(outbox_store=get_webhook_outbox_store())
+    settings = get_settings()
+    return HttpWebhookDispatcher(
+        outbox_store=get_webhook_outbox_store(),
+        max_delivery_attempts=settings.webhook_max_delivery_attempts,
+        max_delivery_age_seconds=settings.webhook_max_delivery_age_seconds,
+        dispatch_concurrency=settings.webhook_dispatch_concurrency,
+        dispatch_batch_size=settings.webhook_dispatch_batch_size,
+    )
 
 
 async def close_webhook_dispatcher(*, timeout: float | None = None) -> None:
@@ -166,6 +178,7 @@ def get_worker_pool() -> WorkerPool:
         *,
         run_id: str | None = None,
         trigger: str = "adhoc",
+        browser_limiter: BrowserExecutionLimiter,
     ) -> None:
         await scrape_task(
             job_id,
@@ -177,6 +190,7 @@ def get_worker_pool() -> WorkerPool:
             error_store=error_store,
             circuit_breaker=circuit_breaker,
             rate_limiter=get_rate_limiter(),
+            browser_limiter=browser_limiter,
             webhook_dispatcher=webhook_dispatcher,
         )
 
@@ -187,6 +201,7 @@ def get_worker_pool() -> WorkerPool:
         redis_settings=RedisSettings.from_dsn(settings.redis_dsn),
         queue_name=settings.queue_name,
         task_handler=_task_handler,
+        cancellation_grace_seconds=settings.workers_cancellation_grace_seconds,
     )
 
 
@@ -197,7 +212,11 @@ def get_scheduler() -> SchedulerService:
         worker_pool=get_worker_pool(),
         job_store=get_job_store(),
         jitter_max_seconds=settings.scheduler_jitter_max_seconds,
-        queued_run_lease_seconds=settings.workers_running_lease_seconds,
+        queued_claim_timeout_seconds=settings.workers_queued_claim_timeout_seconds,
+        running_heartbeat_timeout_seconds=(
+            settings.workers_running_heartbeat_timeout_seconds
+        ),
+        result_store=get_result_store(),
     )
 
 
@@ -205,6 +224,7 @@ def build_runtime_services() -> RuntimeServices:
     """Materialize the cached runtime singletons used during app lifespan."""
     return RuntimeServices(
         result_store=get_result_store(),
+        webhook_outbox_store=get_webhook_outbox_store(),
         webhook_dispatcher=get_webhook_dispatcher(),
         worker_pool=get_worker_pool(),
         scheduler=get_scheduler(),

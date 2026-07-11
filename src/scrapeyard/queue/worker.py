@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, cast
+from datetime import datetime, timedelta
+from typing import Any
 
+from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FailStrategy, GroupBy, ScrapeConfig, TargetConfig
+from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, ScrapeConfig, TargetConfig
 from scrapeyard.engine.fetch_classifier import classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
@@ -22,18 +25,23 @@ from scrapeyard.engine.url_guard import (
     redact_userinfo_in_url,
     url_host_label,
 )
-from scrapeyard.models.job import ErrorRecord, Job, JobStatus
-from scrapeyard.queue.error_records import TargetErrorRecorder
-from scrapeyard.queue.job_state import run_lease_is_active
+from scrapeyard.models.job import (
+    ActionTaken,
+    BudgetErrorDetails,
+    ErrorRecord,
+    ErrorType,
+    Job,
+    JobStatus,
+)
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
+from scrapeyard.queue.cancellation import RunActivityGuard
+from scrapeyard.queue.error_records import TargetErrorRecorder, build_error_record
+from scrapeyard.queue.heartbeat import RunHeartbeat, RunHeartbeatLeaseLost
 from scrapeyard.queue.run_lifecycle import (
     build_run_paths,
-    create_run_record,
     dispatch_webhook,
-    finalize_run,
     handle_crash,
-    mark_job_running,
     save_run_result,
-    update_job_completion,
 )
 from scrapeyard.queue.target_execution import (
     TargetRuntimeContext,
@@ -44,8 +52,10 @@ from scrapeyard.queue.target_execution import (
 )
 from scrapeyard.queue.validation_policy import apply_validation
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
-from scrapeyard.storage.types import SaveResultMeta
+from scrapeyard.storage.types import RunOwnershipError, SaveResultMeta
+from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
 from scrapeyard.webhook.dispatcher import WebhookDispatcher
+from scrapeyard.webhook.payload import build_terminal_webhook_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +68,9 @@ class JobExecutionContext:
     started_at: datetime
     adaptive_dir: str
     run_artifacts_dir: str | None
+    budget: RunBudget
+    run_id: str
+    activity: RunActivityGuard
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,9 @@ class TargetProcessingContext:
     circuit_breaker: CircuitBreaker
     rate_limiter: DomainRateLimiter
     validator: ResultValidator
+    browser_limiter: BrowserExecutionLimiter | None
+    budget: RunBudget
+    activity: RunActivityGuard
 
     def recorder(self, pending_errors: list[ErrorRecord]) -> TargetErrorRecorder:
         return TargetErrorRecorder(
@@ -101,46 +117,298 @@ async def scrape_task(
     error_store: ErrorStore,
     circuit_breaker: CircuitBreaker,
     rate_limiter: DomainRateLimiter,
+    browser_limiter: BrowserExecutionLimiter | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
 ) -> None:
     """Execute a complete scrape job."""
+    context: JobExecutionContext | None = None
+    heartbeat: RunHeartbeat | None = None
+    active_run_id = run_id
     try:
         context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
         if context is None:
             return
+        active_run_id = context.run_id
 
-        await _mark_run_started(context, job_id, run_id, trigger, config_yaml, job_store)
+        claimed = await _mark_run_started(
+            context,
+            job_id,
+            context.run_id,
+            trigger,
+            config_yaml,
+            job_store,
+        )
+        if not claimed:
+            return
+        heartbeat = RunHeartbeat(
+            job_store=job_store,
+            job_id=job_id,
+            run_id=context.run_id,
+            last_success_at=context.started_at,
+            interval_seconds=context.settings.workers_heartbeat_interval_seconds,
+            timeout_seconds=context.settings.workers_running_heartbeat_timeout_seconds,
+        )
+        heartbeat.start()
+        await context.activity.checkpoint("before_targets")
         all_results = await _process_all_targets(
             context=context,
             job_id=job_id,
-            run_id=run_id,
+            run_id=context.run_id,
             circuit_breaker=circuit_breaker,
             rate_limiter=rate_limiter,
+            browser_limiter=browser_limiter,
             error_store=error_store,
         )
         persisted = await _persist_job_results(
             context=context,
             job_id=job_id,
-            run_id=run_id,
+            run_id=context.run_id,
             all_results=all_results,
-            job_store=job_store,
             result_store=result_store,
-            error_store=error_store,
         )
-        if persisted is None:
-            return
-
+        heartbeat.ensure_owned()
+        await heartbeat.stop()
         await _finalize_job_execution(
             context=context,
             job_id=job_id,
-            run_id=run_id,
+            run_id=context.run_id,
             persisted=persisted,
             job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
             webhook_dispatcher=webhook_dispatcher,
         )
+    except BudgetExceeded as exc:
+        if context is None:
+            logger.error(
+                "Run budget exceeded before context load job_id=%s run_id=%s "
+                "limit_name=%s configured_limit=%s observed_amount=%s",
+                job_id,
+                active_run_id,
+                exc.limit_name.value,
+                exc.configured_limit,
+                exc.observed_amount,
+            )
+            await _handle_execution_crash(
+                context=None,
+                job_id=job_id,
+                run_id=active_run_id,
+                job_store=job_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+            )
+            return
+        await _handle_budget_exhaustion(
+            context=context,
+            job_id=job_id,
+            run_id=context.run_id,
+            error=exc,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+            heartbeat=heartbeat,
+        )
+    except asyncio.CancelledError:
+        lease_lost = heartbeat is not None and heartbeat.ownership_lost
+        if heartbeat is not None:
+            await heartbeat.stop()
+        if lease_lost:
+            logger.error(
+                "Stopping scrape after heartbeat lease loss job_id=%s run_id=%s reason=%s",
+                job_id,
+                active_run_id,
+                heartbeat.lost_reason if heartbeat is not None else None,
+            )
+            await _discard_unowned_result(result_store, job_id, active_run_id)
+            return
+        active = False
+        if active_run_id is not None:
+            try:
+                active = await job_store.run_is_active(job_id, active_run_id)
+            except Exception as exc:
+                logger.warning(
+                    "Cancellation ownership check unavailable job_id=%s run_id=%s "
+                    "cancellation_phase=worker_cancel_handler error_type=%s",
+                    job_id,
+                    active_run_id,
+                    type(exc).__name__,
+                )
+                active = True
+        logger.warning("scrape_task cancelled for job_id=%s run_id=%s", job_id, active_run_id)
+        await _discard_unowned_result(result_store, job_id, active_run_id)
+        if not active:
+            logger.info(
+                "Cooperative worker cancellation completed job_id=%s run_id=%s "
+                "cancellation_checkpoint=task_cancel_handler "
+                "recovery_action=skip_failed_finalization",
+                job_id,
+                active_run_id,
+            )
+            raise
+        recovery = asyncio.create_task(
+            _handle_execution_crash(
+                context=context,
+                job_id=job_id,
+                run_id=active_run_id,
+                job_store=job_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+            )
+        )
+        try:
+            await asyncio.shield(recovery)
+        except asyncio.CancelledError:
+            await recovery
+        raise
+    except (RunHeartbeatLeaseLost, RunOwnershipError) as exc:
+        if heartbeat is not None:
+            await heartbeat.stop()
+        logger.info(
+            "Stopping stale worker job_id=%s run_id=%s ownership_outcome=lost detail=%s",
+            job_id,
+            active_run_id,
+            exc,
+        )
+        await _discard_unowned_result(result_store, job_id, active_run_id)
     except Exception as exc:
-        logger.error("scrape_task crashed for job_id=%s: %s", job_id, _exception_detail(exc))
-        await handle_crash(job_id, run_id, job_store)
+        if heartbeat is not None:
+            await heartbeat.stop()
+        logger.error(
+            "scrape_task crashed for job_id=%s run_id=%s: %s",
+            job_id,
+            active_run_id,
+            _exception_detail(exc),
+        )
+        await _discard_unowned_result(result_store, job_id, active_run_id)
+        await _handle_execution_crash(
+            context=context,
+            job_id=job_id,
+            run_id=active_run_id,
+            job_store=job_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
+    finally:
+        if heartbeat is not None:
+            await heartbeat.stop()
+
+
+def _heartbeat_cutoff(context: JobExecutionContext | None) -> datetime | None:
+    if context is None:
+        return None
+    return utc_now() - timedelta(
+        seconds=context.settings.workers_running_heartbeat_timeout_seconds
+    )
+
+
+async def _error_count_snapshot(
+    error_store: ErrorStore,
+    *,
+    job_id: str,
+    run_id: str | None,
+) -> int:
+    if run_id is None:
+        return 0
+    try:
+        return await error_store.count_errors_for_run(run_id)
+    except Exception as exc:
+        logger.warning(
+            "Terminal error-count snapshot unavailable "
+            "job_id=%s run_id=%s terminal_status=%s "
+            "recovery_action=use_zero_error_count error_type=%s",
+            job_id,
+            run_id,
+            JobStatus.failed.value,
+            type(exc).__name__,
+        )
+        return 0
+
+
+def _failed_webhook_delivery(
+    *,
+    context: JobExecutionContext | None,
+    job_id: str,
+    run_id: str | None,
+    error_count: int,
+    failed_at: datetime,
+) -> WebhookDeliveryCreate | None:
+    if context is None or run_id is None:
+        return None
+    return build_terminal_webhook_delivery(
+        config=context.config,
+        job_id=job_id,
+        status=JobStatus.failed,
+        run_id=run_id,
+        result_path=None,
+        result_count=0,
+        error_count=error_count,
+        started_at=context.started_at,
+        completed_at=failed_at,
+    )
+
+
+async def _handle_execution_crash(
+    *,
+    context: JobExecutionContext | None,
+    job_id: str,
+    run_id: str | None,
+    job_store: JobStore,
+    error_store: ErrorStore,
+    webhook_dispatcher: WebhookDispatcher | None,
+) -> None:
+    failed_at = utc_now()
+    error_count = await _error_count_snapshot(
+        error_store,
+        job_id=job_id,
+        run_id=run_id,
+    )
+    delivery = _failed_webhook_delivery(
+        context=context,
+        job_id=job_id,
+        run_id=run_id,
+        error_count=error_count,
+        failed_at=failed_at,
+    )
+    committed = await handle_crash(
+        job_id,
+        run_id,
+        job_store,
+        failed_at=failed_at,
+        heartbeat_cutoff=_heartbeat_cutoff(context),
+        error_count=error_count,
+        webhook_delivery=delivery,
+    )
+    if committed and context is not None:
+        await dispatch_webhook(
+            webhook_dispatcher=webhook_dispatcher,
+            config=context.config,
+            delivery=delivery,
+        )
+
+
+async def _discard_unowned_result(
+    result_store: ResultStore,
+    job_id: str,
+    run_id: str | None,
+) -> None:
+    if run_id is None:
+        return
+    try:
+        deleted = await result_store.delete_result(job_id, run_id)
+    except Exception:
+        logger.exception(
+            "Failed to discard unowned result artifact job_id=%s run_id=%s",
+            job_id,
+            run_id,
+        )
+    else:
+        if deleted:
+            logger.warning(
+                "Discarded result artifact after ownership loss job_id=%s run_id=%s",
+                job_id,
+                run_id,
+            )
 
 
 async def _load_job_execution_context(
@@ -149,19 +417,27 @@ async def _load_job_execution_context(
     run_id: str | None,
     job_store: JobStore,
 ) -> JobExecutionContext | None:
-    started_at = utc_now()
     config = await asyncio.to_thread(load_config, config_yaml)
     job = await job_store.get_job(job_id)
+    effective_run_id = run_id or job.current_run_id or generate_run_id()
     settings = get_settings()
     adaptive_dir, run_artifacts_dir = build_run_paths(
         settings,
         config.project,
         job.name,
-        run_id,
+        effective_run_id,
     )
-    if _should_skip_delivery(job, run_id, settings.workers_running_lease_seconds, started_at):
-        logger.info("Skipping duplicate or superseded delivery for job_id=%s run_id=%s", job_id, run_id)
+    if _should_skip_delivery(job, effective_run_id):
+        logger.info(
+            "Skipping duplicate, terminal, or superseded delivery "
+            "job_id=%s run_id=%s current_run_id=%s status=%s",
+            job_id,
+            effective_run_id,
+            job.current_run_id,
+            job.status.value,
+        )
         return None
+    started_at = utc_now()
     return JobExecutionContext(
         config=config,
         job=job,
@@ -169,49 +445,70 @@ async def _load_job_execution_context(
         started_at=started_at,
         adaptive_dir=adaptive_dir,
         run_artifacts_dir=run_artifacts_dir,
+        budget=RunBudget.from_settings(settings),
+        run_id=effective_run_id,
+        activity=RunActivityGuard(
+            job_store=job_store,
+            job_id=job_id,
+            run_id=effective_run_id,
+        ),
     )
 
 
 async def _mark_run_started(
     context: JobExecutionContext,
     job_id: str,
-    run_id: str | None,
+    run_id: str,
     trigger: str,
     config_yaml: str,
     job_store: JobStore,
-) -> None:
-    await mark_job_running(job_store, context.job, context.started_at)
-    await create_run_record(
-        job_store,
-        run_id=run_id,
-        job_id=job_id,
-        trigger=trigger,
-        config_yaml=config_yaml,
-        started_at=context.started_at,
+) -> bool:
+    if context.job.current_run_id is None:
+        queued = await job_store.queue_run(
+            job_id,
+            expected_status=JobStatus.queued.value,
+            expected_run_id=None,
+            new_run_id=run_id,
+            queued_at=context.started_at,
+        )
+        if not queued:
+            return False
+    config_hash = hashlib.sha256(config_yaml.encode()).hexdigest()
+    claimed = await job_store.claim_run(
+        run_id,
+        job_id,
+        trigger,
+        config_hash,
+        context.started_at,
     )
+    if not claimed:
+        logger.info(
+            "Run claim rejected job_id=%s run_id=%s ownership_outcome=lost",
+            job_id,
+            run_id,
+        )
+        return False
+    context.budget.check_deadline()
+    return True
 
 
 async def _persist_job_results(
     *,
     context: JobExecutionContext,
     job_id: str,
-    run_id: str | None,
+    run_id: str,
     all_results: list[TargetResult],
-    job_store: JobStore,
     result_store: ResultStore,
-    error_store: ErrorStore,
-) -> PersistedJobResult | None:
+) -> PersistedJobResult:
+    await context.activity.checkpoint("before_result_persistence")
+    context.budget.check_deadline()
     flat_data, all_errors = _collect_result_payload(all_results)
     final_status = _determine_final_status(context.config, all_results, flat_data)
     if final_status == JobStatus.failed and context.config.execution.fail_strategy == FailStrategy.all_or_nothing:
         flat_data.clear()
 
-    latest_job = await job_store.get_job(job_id)
-    if _run_superseded(latest_job, run_id):
-        logger.info("Skipping result save for superseded job_id=%s run_id=%s", job_id, run_id)
-        return None
-
     output_data = _format_output(context.config, all_results, flat_data, job_id, final_status, all_errors)
+    context.budget.check_deadline()
     save_meta = await save_run_result(
         job_id=job_id,
         run_id=run_id,
@@ -219,8 +516,9 @@ async def _persist_job_results(
         output_data=output_data,
         final_status=final_status,
         record_count=len(flat_data),
+        budget=context.budget,
     )
-    await finalize_run(run_id, final_status, len(flat_data), job_store, error_store)
+    await context.activity.checkpoint("after_result_persistence")
     return PersistedJobResult(
         final_status=final_status,
         flat_data=flat_data,
@@ -233,28 +531,219 @@ async def _finalize_job_execution(
     *,
     context: JobExecutionContext,
     job_id: str,
-    run_id: str | None,
+    run_id: str,
     persisted: PersistedJobResult,
     job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
     webhook_dispatcher: WebhookDispatcher | None,
 ) -> None:
+    await context.activity.checkpoint("before_terminal_finalization")
     completed_at = utc_now()
-    latest_job = await job_store.get_job(job_id)
-    if _run_superseded(latest_job, run_id):
-        logger.info("Skipping finalization for superseded job_id=%s run_id=%s", job_id, run_id)
+    error_count = await error_store.count_errors_for_run(run_id)
+    webhook_delivery = build_terminal_webhook_delivery(
+        config=context.config,
+        job_id=job_id,
+        status=persisted.final_status,
+        run_id=run_id,
+        result_path=persisted.save_meta.file_path,
+        result_count=persisted.save_meta.record_count,
+        error_count=error_count,
+        started_at=context.started_at,
+        completed_at=completed_at,
+    )
+    try:
+        await job_store.finalize_owned_run(
+            job_id,
+            run_id,
+            persisted.final_status.value,
+            len(persisted.flat_data),
+            error_count,
+            completed_at,
+            completed_at
+            - timedelta(
+                seconds=context.settings.workers_running_heartbeat_timeout_seconds
+            ),
+            webhook_delivery=webhook_delivery,
+        )
+    except RunOwnershipError:
+        logger.info(
+            "Finalization rejected job_id=%s run_id=%s ownership_outcome=lost "
+            "last_heartbeat_timeout_seconds=%s",
+            job_id,
+            run_id,
+            context.settings.workers_running_heartbeat_timeout_seconds,
+        )
+        await _discard_unowned_result(result_store, job_id, run_id)
         return
 
     await dispatch_webhook(
         webhook_dispatcher=webhook_dispatcher,
         config=context.config,
+        delivery=webhook_delivery,
+    )
+
+
+async def _handle_budget_exhaustion(
+    *,
+    context: JobExecutionContext,
+    job_id: str,
+    run_id: str,
+    error: BudgetExceeded,
+    job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
+    webhook_dispatcher: WebhookDispatcher | None,
+    heartbeat: RunHeartbeat | None,
+) -> None:
+    """Persist a controlled, queryable failed outcome for any hard run limit."""
+    try:
+        await context.activity.checkpoint("before_budget_failure_persistence")
+    except RunOwnershipError:
+        await _discard_unowned_result(result_store, job_id, run_id)
+        return
+    details = BudgetErrorDetails(
+        limit_name=error.limit_name.value,
+        configured_limit=error.configured_limit,
+        observed_amount=error.observed_amount,
+    )
+    message = str(error)
+    logger.error(
+        "Run budget exceeded job_id=%s run_id=%s limit_name=%s "
+        "configured_limit=%s observed_amount=%s",
+        job_id,
+        run_id,
+        error.limit_name.value,
+        error.configured_limit,
+        error.observed_amount,
+    )
+    budget_record = build_error_record(
+        job_id,
+        run_id,
+        context.config.project,
+        "",
+        0,
+        ErrorType.budget_exceeded,
+        None,
+        "service_budget",
+        ActionTaken.fail,
+        error_message=message,
+        budget=details,
+    )
+    try:
+        await context.activity.checkpoint("before_budget_error_flush")
+        await error_store.log_error(budget_record)
+    except Exception:
+        logger.exception(
+            "Failed to persist budget error job_id=%s run_id=%s",
+            job_id,
+            run_id,
+        )
+
+    completed_at = utc_now()
+    output_data: dict[str, Any] = {
+        "project": context.config.project,
+        "name": context.config.name,
+        "job_id": job_id,
+        "status": JobStatus.failed.value,
+        "completed_at": completed_at.isoformat(),
+        "errors": [message],
+        "targets": [],
+        "budget_error": details.model_dump(mode="json"),
+        "results": [] if context.config.output.group_by == GroupBy.merge else {},
+    }
+    save_meta: SaveResultMeta | None = None
+    try:
+        await context.activity.checkpoint("before_budget_result_persistence")
+        save_meta = await save_run_result(
+            job_id=job_id,
+            run_id=run_id,
+            result_store=result_store,
+            output_data=output_data,
+            final_status=JobStatus.failed,
+            record_count=0,
+            max_serialized_bytes=context.budget.max_serialized_result_bytes,
+        )
+        await context.activity.checkpoint("after_budget_result_persistence")
+    except RunOwnershipError:
+        await _discard_unowned_result(result_store, job_id, run_id)
+        return
+    except Exception:
+        logger.exception(
+            "Failed to persist terminal budget result job_id=%s run_id=%s",
+            job_id,
+            run_id,
+        )
+
+    if heartbeat is not None:
+        try:
+            heartbeat.ensure_owned()
+        except RunHeartbeatLeaseLost:
+            await heartbeat.stop()
+            await _discard_unowned_result(result_store, job_id, run_id)
+            return
+        await heartbeat.stop()
+
+    error_count = await _error_count_snapshot(
+        error_store,
         job_id=job_id,
-        final_status=persisted.final_status,
-        save_meta=persisted.save_meta,
-        all_errors=persisted.all_errors,
+        run_id=run_id,
+    )
+    webhook_delivery = build_terminal_webhook_delivery(
+        config=context.config,
+        job_id=job_id,
+        status=JobStatus.failed,
+        run_id=run_id,
+        result_path=save_meta.file_path if save_meta is not None else None,
+        result_count=save_meta.record_count if save_meta is not None else 0,
+        error_count=error_count,
         started_at=context.started_at,
         completed_at=completed_at,
     )
-    await update_job_completion(job_store, latest_job, persisted.final_status, completed_at, run_id)
+    try:
+        await job_store.finalize_owned_run(
+            job_id,
+            run_id,
+            JobStatus.failed.value,
+            0,
+            error_count,
+            completed_at,
+            completed_at
+            - timedelta(
+                seconds=context.settings.workers_running_heartbeat_timeout_seconds
+            ),
+            webhook_delivery=webhook_delivery,
+        )
+    except RunOwnershipError:
+        logger.info(
+            "Budget finalization rejected job_id=%s run_id=%s ownership_outcome=lost",
+            job_id,
+            run_id,
+        )
+        await _discard_unowned_result(result_store, job_id, run_id)
+        return
+    except Exception:
+        logger.exception(
+            "Failed to finalize terminal budget status job_id=%s run_id=%s",
+            job_id,
+            run_id,
+        )
+        await _discard_unowned_result(result_store, job_id, run_id)
+        await _handle_execution_crash(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            job_store=job_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
+        return
+
+    await dispatch_webhook(
+        webhook_dispatcher=webhook_dispatcher,
+        config=context.config,
+        delivery=webhook_delivery,
+    )
 
 
 async def _process_all_targets(
@@ -264,6 +753,7 @@ async def _process_all_targets(
     run_id: str | None,
     circuit_breaker: CircuitBreaker,
     rate_limiter: DomainRateLimiter,
+    browser_limiter: BrowserExecutionLimiter | None,
     error_store: ErrorStore,
 ) -> list[TargetResult]:
     """Dispatch all targets with concurrency, delay, and rate limiting."""
@@ -280,45 +770,52 @@ async def _process_all_targets(
         circuit_breaker=circuit_breaker,
         rate_limiter=rate_limiter,
         validator=ResultValidator(config.validation),
+        browser_limiter=browser_limiter,
+        budget=context.budget,
+        activity=context.activity,
     )
 
-    async def _process_one(target_cfg: TargetConfig) -> TargetResult:
+    async def _process_one(index: int, target_cfg: TargetConfig) -> TargetResult:
         pending_errors: list[ErrorRecord] = []
+        cancelled = False
         try:
+            await context.activity.checkpoint("before_target_start")
+            if index > 0 and config.execution.delay_between > 0:
+                await context.budget.sleep(index * config.execution.delay_between)
+                await context.activity.checkpoint("after_target_delay")
             async with sem:
+                await context.activity.checkpoint("before_target_fetch")
+                context.budget.check_deadline()
                 return await _fetch_and_validate_target(
                     target_cfg=target_cfg,
                     context=target_context,
                     pending_errors=pending_errors,
                 )
+        except asyncio.CancelledError:
+            cancelled = True
+            pending_errors.clear()
+            raise
         finally:
-            await _flush_errors(error_store, pending_errors)
+            if not cancelled:
+                await _flush_errors(
+                    error_store,
+                    pending_errors,
+                    activity=context.activity,
+                )
 
-    tasks: list[asyncio.Task[TargetResult]] = []
-    for i, target_cfg in enumerate(targets):
-        if i > 0 and config.execution.delay_between > 0:
-            await asyncio.sleep(config.execution.delay_between)
-        tasks.append(asyncio.create_task(_process_one(target_cfg)))
-
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-
-    all_results: list[TargetResult] = []
-    task_errors: list[Exception] = []
-    for outcome in outcomes:
-        if isinstance(outcome, TargetResult):
-            all_results.append(outcome)
-        elif isinstance(outcome, asyncio.CancelledError):
-            raise outcome
-        elif isinstance(outcome, Exception):
-            task_errors.append(outcome)
-        elif isinstance(outcome, BaseException):
-            raise outcome
-        else:
-            task_errors.append(TypeError(f"Unexpected target task result: {type(outcome).__name__}"))
-
-    if task_errors:
-        raise task_errors[0]
-    return all_results
+    tasks = [
+        asyncio.create_task(_process_one(index, target_cfg))
+        for index, target_cfg in enumerate(targets)
+    ]
+    try:
+        outcomes = await context.budget.wait_for(asyncio.gather(*tasks))
+        return list(outcomes)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _fetch_and_validate_target(
@@ -342,44 +839,24 @@ async def _fetch_and_validate_target(
         circuit_breaker=context.circuit_breaker,
         rate_limiter=context.rate_limiter,
         recorder=recorder,
+        budget=context.budget,
+        cancellation_guard=context.activity.checkpoint,
     )
     if circuit_open is not None:
         return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
 
     log_target_fetch(target_cfg, runtime)
     try:
-        result = await scrape_target(
-            target_cfg,
-            runtime.adaptive,
-            context.config.retry,
-            adaptive_dir=context.adaptive_dir,
-            proxy_url=runtime.proxy_url,
-            artifacts_dir=runtime.artifacts_dir,
-        )
-        if not result.is_success:
-            record_failed_target(
-                runtime=runtime,
-                result=result,
-                target_cfg=target_cfg,
-                recorder=recorder,
-            )
-            return result
-
-        recorder.record_success(runtime.domain)
-        return await apply_validation(
-            target_cfg=target_cfg,
-            domain=runtime.domain,
-            adaptive=runtime.adaptive,
-            result=result,
-            config=context.config,
-            adaptive_dir=context.adaptive_dir,
-            run_artifacts_dir=context.run_artifacts_dir,
-            recorder=recorder,
-            rate_limiter=context.rate_limiter,
-            validator=context.validator,
-            scrape=scrape_target,
-            proxy_url=runtime.proxy_url,
-        )
+        if target_cfg.fetcher in (FetcherType.dynamic, FetcherType.stealthy):
+            if context.browser_limiter is None:
+                return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+            async with context.browser_limiter.slot():
+                return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+        return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+    except RunOwnershipError:
+        raise
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         return _target_exception_result(
             runtime=runtime,
@@ -387,6 +864,51 @@ async def _fetch_and_validate_target(
             recorder=recorder,
             exc=exc,
         )
+
+
+async def _scrape_and_validate_target(
+    target_cfg: TargetConfig,
+    context: TargetProcessingContext,
+    runtime: TargetRuntimeContext,
+    recorder: TargetErrorRecorder,
+) -> TargetResult:
+    result = await scrape_target(
+        target_cfg,
+        runtime.adaptive,
+        context.config.retry,
+        adaptive_dir=context.adaptive_dir,
+        proxy_url=runtime.proxy_url,
+        artifacts_dir=runtime.artifacts_dir,
+        budget=context.budget,
+        cancellation_guard=context.activity.checkpoint,
+    )
+    await context.activity.checkpoint("after_target_fetch")
+    if not result.is_success:
+        record_failed_target(
+            runtime=runtime,
+            result=result,
+            target_cfg=target_cfg,
+            recorder=recorder,
+        )
+        return result
+
+    recorder.record_success(runtime.domain)
+    return await apply_validation(
+        target_cfg=target_cfg,
+        domain=runtime.domain,
+        adaptive=runtime.adaptive,
+        result=result,
+        config=context.config,
+        adaptive_dir=context.adaptive_dir,
+        run_artifacts_dir=context.run_artifacts_dir,
+        recorder=recorder,
+        rate_limiter=context.rate_limiter,
+        validator=context.validator,
+        scrape=scrape_target,
+        proxy_url=runtime.proxy_url,
+        budget=context.budget,
+        cancellation_guard=context.activity.checkpoint,
+    )
 
 
 def _exception_detail(exc: Exception) -> str:
@@ -534,30 +1056,44 @@ def _format_output(
     return {**job_meta, "results": grouped}
 
 
-def _run_superseded(job: Any, run_id: str | None) -> bool:
-    return run_id is not None and job.current_run_id != run_id
-
-
-def _should_skip_delivery(
-    job: Any,
-    run_id: str | None,
-    running_lease_seconds: int,
-    now: datetime,
-) -> bool:
-    if _run_superseded(job, run_id):
-        return True
-    if job.status in {JobStatus.complete, JobStatus.partial, JobStatus.failed}:
-        return run_id is None or job.current_run_id == run_id
-    if job.status != JobStatus.running:
-        return False
-    return run_lease_is_active(
-        cast(datetime | None, job.updated_at),
-        lease_seconds=running_lease_seconds,
-        now=now,
+def _run_superseded(job: Job, run_id: str | None) -> bool:
+    return (
+        run_id is not None
+        and job.current_run_id is not None
+        and job.current_run_id != run_id
     )
 
 
-async def _flush_errors(error_store: ErrorStore, errors: list[ErrorRecord]) -> None:
+def _should_skip_delivery(
+    job: Job,
+    run_id: str,
+) -> bool:
+    if _run_superseded(job, run_id):
+        return True
+    if job.status in {
+        JobStatus.complete,
+        JobStatus.partial,
+        JobStatus.failed,
+        JobStatus.cancelled,
+        JobStatus.deleting,
+    }:
+        return True
+    # A run can only be claimed once. Duplicate delivery of a running run must
+    # wait for conditional recovery to create a new run_id; sharing one run_id
+    # between workers would make ownership impossible to prove.
+    return job.status == JobStatus.running
+
+
+async def _flush_errors(
+    error_store: ErrorStore,
+    errors: list[ErrorRecord],
+    *,
+    activity: RunActivityGuard | None = None,
+) -> None:
     if not errors:
         return
+    if activity is not None:
+        await activity.checkpoint("before_error_flush")
     await error_store.log_errors(errors)
+    if activity is not None:
+        await activity.checkpoint("after_error_flush")

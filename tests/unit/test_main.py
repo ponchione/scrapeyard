@@ -11,7 +11,12 @@ import pytest
 from fastapi import FastAPI
 
 import scrapeyard.main as main_module
+from scrapeyard.queue.reconciliation import (
+    QueuedReconciliationError,
+    QueuedReconciliationSummary,
+)
 from scrapeyard.api.middleware import APIKeyAuthMiddleware, RateLimitMiddleware, RequestSizeLimitMiddleware
+from scrapeyard.storage.types import RunRecovery
 
 
 @pytest.mark.asyncio
@@ -67,10 +72,22 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         adaptive_dir=str(tmp_path / "adaptive"),
         browser_debug_enabled=False,
         workers_shutdown_grace_seconds=7,
-        workers_running_lease_seconds=300,
+        workers_queued_claim_timeout_seconds=300,
+        workers_running_heartbeat_timeout_seconds=600,
     )
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    job_store = SimpleNamespace(recover_stale_running_jobs=AsyncMock(return_value=0))
+    job_store = SimpleNamespace(
+        recover_stale_running_jobs=AsyncMock(
+            return_value=[
+                RunRecovery(
+                    job_id="recovered-job",
+                    run_id="recovered-run",
+                    action="failed_stale_heartbeat",
+                    last_heartbeat_at=now - timedelta(seconds=601),
+                )
+            ]
+        )
+    )
     pool = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), redis=object())
     scheduler = SimpleNamespace(start=AsyncMock(), shutdown=MagicMock())
     webhook_dispatcher = SimpleNamespace(startup=AsyncMock())
@@ -97,13 +114,29 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         "build_runtime_services",
         lambda: main_module.RuntimeServices(
             result_store="result-store",
+            webhook_outbox_store="webhook-outbox-store",
             webhook_dispatcher=webhook_dispatcher,
             worker_pool=pool,
             scheduler=scheduler,
         ),
     )
     monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
-    monkeypatch.setattr(main_module, "start_cleanup_loop", lambda _store: cleanup_task)
+    terminal_reconciliation = AsyncMock()
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_terminal_webhook_intents",
+        terminal_reconciliation,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_stale_queued_jobs",
+        AsyncMock(return_value=QueuedReconciliationSummary()),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_cleanup_loop",
+        lambda _result_store, _outbox_store: cleanup_task,
+    )
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
 
@@ -126,14 +159,131 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         now,
     )
     webhook_dispatcher.startup.assert_awaited_once()
+    terminal_reconciliation.assert_awaited_once_with(
+        job_store=job_store,
+        result_store="result-store",
+    )
     pool.start.assert_awaited_once()
     main_module.init_rate_limiter.assert_called_once_with(redis=pool.redis)
+    main_module.reconcile_stale_queued_jobs.assert_awaited_once_with(
+        job_store=job_store,
+        worker_pool=pool,
+        queued_claim_timeout_seconds=300,
+    )
     scheduler.start.assert_awaited_once()
     cleanup_task.cancel.assert_called_once()
     scheduler.shutdown.assert_called_once()
     pool.stop.assert_awaited_once()
     main_module.close_webhook_dispatcher.assert_awaited_once_with(timeout=7)
     main_module.close_db.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypatch):
+    app = FastAPI()
+    events: list[str] = []
+    job_store = object()
+
+    async def _start_pool() -> None:
+        events.append("redis_connected")
+
+    async def _reconcile_terminal(**kwargs):
+        assert kwargs == {
+            "job_store": job_store,
+            "result_store": "result-store",
+        }
+        events.append("terminal_intents_reconciled")
+
+    async def _replay_webhooks() -> None:
+        events.append("webhook_outbox_replayed")
+
+    async def _reconcile(**kwargs):
+        assert kwargs == {
+            "job_store": job_store,
+            "worker_pool": pool,
+            "queued_claim_timeout_seconds": 300,
+        }
+        events.append("queued_reconciled")
+        return QueuedReconciliationSummary()
+
+    async def _start_scheduler() -> None:
+        events.append("scheduler_started")
+
+    pool = SimpleNamespace(start=_start_pool, redis=object())
+    scheduler = SimpleNamespace(start=_start_scheduler)
+    services = main_module.RuntimeServices(
+        result_store="result-store",
+        webhook_outbox_store="webhook-outbox-store",
+        webhook_dispatcher=SimpleNamespace(startup=_replay_webhooks),
+        worker_pool=pool,
+        scheduler=scheduler,
+    )
+    monkeypatch.setattr(main_module, "build_runtime_services", lambda: services)
+    monkeypatch.setattr(main_module, "get_job_store", lambda: job_store)
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(workers_queued_claim_timeout_seconds=300),
+    )
+    monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_terminal_webhook_intents",
+        _reconcile_terminal,
+    )
+    monkeypatch.setattr(main_module, "reconcile_stale_queued_jobs", _reconcile)
+    monkeypatch.setattr(main_module, "start_cleanup_loop", MagicMock())
+
+    await main_module._startup_runtime_services(app)
+
+    assert events == [
+        "terminal_intents_reconciled",
+        "webhook_outbox_replayed",
+        "redis_connected",
+        "queued_reconciled",
+        "scheduler_started",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
+    app = FastAPI()
+    pool = SimpleNamespace(start=AsyncMock(), redis=object())
+    scheduler = SimpleNamespace(start=AsyncMock())
+    services = main_module.RuntimeServices(
+        result_store="result-store",
+        webhook_outbox_store="webhook-outbox-store",
+        webhook_dispatcher=SimpleNamespace(startup=AsyncMock()),
+        worker_pool=pool,
+        scheduler=scheduler,
+    )
+    monkeypatch.setattr(main_module, "build_runtime_services", lambda: services)
+    monkeypatch.setattr(main_module, "get_job_store", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(workers_queued_claim_timeout_seconds=300),
+    )
+    monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_terminal_webhook_intents",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_stale_queued_jobs",
+        AsyncMock(side_effect=QueuedReconciliationError("inspection unavailable")),
+    )
+    cleanup = MagicMock()
+    monkeypatch.setattr(main_module, "start_cleanup_loop", cleanup)
+
+    with pytest.raises(QueuedReconciliationError, match="inspection unavailable"):
+        await main_module._startup_runtime_services(app)
+
+    pool.start.assert_awaited_once()
+    scheduler.start.assert_not_awaited()
+    cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -170,7 +320,15 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
 
     from scrapeyard.runtime.health import ProbeResult
 
-    pool = SimpleNamespace(max_concurrent=2, active_tasks=2, max_browsers=1, active_browsers=1)
+    pool = SimpleNamespace(
+        max_concurrent=2,
+        active_tasks=2,
+        max_browsers=1,
+        active_browsers=1,
+        queue_depths=AsyncMock(
+            return_value={"high": 0, "normal": 0, "low": 0}
+        ),
+    )
     monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
     monkeypatch.setattr(main_module._health, "project_summary", AsyncMock(return_value={"proj": {"status": "healthy"}}))
     monkeypatch.setattr(main_module._health, "start_time", 1.0)

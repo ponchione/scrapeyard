@@ -48,6 +48,80 @@ async def _apply_connection_pragmas(db: aiosqlite.Connection) -> None:
         await db.execute(pragma)
 
 
+async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
+    """Add the item-03 lease column to databases created before heartbeats.
+
+    Initialization intentionally replays the repository's idempotent SQL files.
+    SQLite has no portable ``ADD COLUMN IF NOT EXISTS`` form, so this narrow
+    compatibility check upgrades only the required column without introducing
+    the general migration framework reserved for audit item 10.
+    """
+    cursor = await db.execute("PRAGMA table_info(job_runs)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "heartbeat_at" not in columns:
+        await db.execute("ALTER TABLE job_runs ADD COLUMN heartbeat_at TEXT")
+        await db.execute(
+            "UPDATE job_runs SET heartbeat_at = started_at WHERE heartbeat_at IS NULL"
+        )
+
+
+async def _ensure_webhook_outbox_item06_columns(db: aiosqlite.Connection) -> None:
+    """Apply the narrow item-06 outbox compatibility upgrade.
+
+    This intentionally mirrors the item-03 column check instead of introducing
+    the general migration ledger reserved for audit item 10.
+    """
+
+    cursor = await db.execute("PRAGMA table_info(webhook_deliveries)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    additions = {
+        "failed_at": "TEXT",
+        "failure_reason": "TEXT",
+        "scrubbed_at": "TEXT",
+    }
+    for column, declaration in additions.items():
+        if column not in columns:
+            await db.execute(
+                f"ALTER TABLE webhook_deliveries ADD COLUMN {column} {declaration}"
+            )
+
+    await db.execute(
+        """UPDATE webhook_deliveries
+           SET failed_at = COALESCE(failed_at, last_attempt_at, updated_at),
+               failure_reason = COALESCE(failure_reason, 'non_retryable_failure')
+           WHERE status = 'failed'
+             AND (failed_at IS NULL OR failure_reason IS NULL)"""
+    )
+    await db.execute(
+        """CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_terminal_cleanup
+           ON webhook_deliveries (status, scrubbed_at, delivered_at, failed_at)"""
+    )
+
+
+async def _ensure_jobs_item07_columns(db: aiosqlite.Connection) -> None:
+    """Apply only the cancellation/deletion columns required by audit item 07.
+
+    This remains a narrow idempotent compatibility check and deliberately does
+    not introduce the versioned migration ledger reserved for audit item 10.
+    """
+
+    cursor = await db.execute("PRAGMA table_info(jobs)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    additions = {
+        "deletion_requested_at": "TEXT",
+        "delete_results_on_delete": "INTEGER",
+    }
+    for column, declaration in additions.items():
+        if column not in columns:
+            await db.execute(
+                f"ALTER TABLE jobs ADD COLUMN {column} {declaration}"
+            )
+    await db.execute(
+        """CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_job_status
+           ON webhook_deliveries (job_id, status)"""
+    )
+
+
 class DatabaseManager:
     """Encapsulates database directory, cached connections, and re-entrant locks.
 
@@ -93,6 +167,10 @@ class DatabaseManager:
                 for migration_file in migration_files:
                     migration_sql = (sql_dir / migration_file).read_text()
                     await db.executescript(migration_sql)
+                if db_name == "jobs.db":
+                    await _ensure_job_runs_heartbeat_column(db)
+                    await _ensure_webhook_outbox_item06_columns(db)
+                    await _ensure_jobs_item07_columns(db)
                 await db.commit()
 
     async def _get_cached_connection(self, db_name: str) -> aiosqlite.Connection:

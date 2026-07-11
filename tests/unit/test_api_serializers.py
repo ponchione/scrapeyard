@@ -8,7 +8,14 @@ from scrapeyard.api.serializers import (
     serialize_job_summary,
     serialize_job_run,
 )
-from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, JobRun, JobStatus
+from scrapeyard.models.job import (
+    ActionTaken,
+    BudgetErrorDetails,
+    ErrorRecord,
+    ErrorType,
+    JobRun,
+    JobStatus,
+)
 from tests.unit.worker_helpers import make_job
 
 
@@ -55,6 +62,7 @@ def test_serialize_job_detail_embeds_serialized_runs():
         trigger="adhoc",
         config_hash="abc123",
         started_at=started_at,
+        heartbeat_at=started_at,
         completed_at=completed_at,
         record_count=4,
         error_count=1,
@@ -70,6 +78,7 @@ def test_serialize_job_detail_embeds_serialized_runs():
 
     assert payload["job_id"] == "job-1"
     assert payload["runs"] == [serialize_job_run(run)]
+    assert payload["runs"][0]["heartbeat_at"] == started_at.isoformat()
     assert payload["next_run_at"] == next_run_at.isoformat()
     assert payload["last_run_at"] == completed_at.isoformat()
 
@@ -155,3 +164,31 @@ def test_serialize_error_record_redacts_sensitive_query_values():
 
     assert payload["target_url"] == "https://example.com/products?api_key=<redacted>&page=2"
     assert payload["error_message"] == "failed at https://example.com/private?access_token=<redacted>"
+
+
+def test_serialize_error_record_includes_structured_budget_details():
+    error = ErrorRecord(
+        job_id="job-1",
+        run_id="run-1",
+        project="integ",
+        target_url="",
+        attempt=0,
+        error_type=ErrorType.budget_exceeded,
+        fetcher_used="service_budget",
+        error_message="record budget exceeded",
+        budget=BudgetErrorDetails(
+            limit_name="extracted_records",
+            configured_limit=10,
+            observed_amount=11,
+        ),
+        action_taken=ActionTaken.fail,
+    )
+
+    payload = serialize_error_record(error)
+
+    assert payload["error_type"] == "budget_exceeded"
+    assert payload["budget"] == {
+        "limit_name": "extracted_records",
+        "configured_limit": 10,
+        "observed_amount": 11,
+    }

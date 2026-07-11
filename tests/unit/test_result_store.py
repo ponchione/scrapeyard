@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
 from unittest.mock import AsyncMock, call, patch
 
 import scrapeyard.storage.result_store as result_store_module
+from scrapeyard.common.budgets import BudgetExceeded
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
@@ -74,6 +77,7 @@ async def test_save_result_returns_meta(store):
     assert isinstance(meta.run_id, str)
     assert meta.file_path.endswith(meta.run_id)
     assert meta.record_count is None  # no record_count passed
+    assert meta.serialized_bytes == len(result_store_module.serialize_json_bytes(data))
 
 
 async def test_save_result_with_record_count(store):
@@ -96,6 +100,27 @@ async def test_save_result_persists_explicit_status(store):
 
     assert row["status"] == "partial"
     assert payload.status == "partial"
+
+
+async def test_get_result_metadata_does_not_read_artifact(store):
+    meta = await store.save_result(
+        "j-1",
+        [{"price": 9.99}],
+        run_id="run-1",
+        status="partial",
+        record_count=1,
+    )
+    (Path(meta.file_path) / "results.json").unlink()
+
+    metadata = await store.get_result_metadata("j-1", "run-1")
+
+    assert metadata is not None
+    assert metadata.job_id == "j-1"
+    assert metadata.run_id == "run-1"
+    assert metadata.status == "partial"
+    assert metadata.record_count == 1
+    assert metadata.file_path == meta.file_path
+    assert await store.get_result_metadata("j-1", "missing") is None
 
 
 async def test_save_result_reuses_explicit_run_id(store):
@@ -170,8 +195,13 @@ async def test_save_result_offloads_filesystem_work(store):
         await store.save_result("j-1", data, run_id="run-1")
 
     assert mock_to_thread.await_args_list == [
+        call(result_store_module.serialize_json_bytes, data),
         call(result_store_module.ensure_directory, run_dir),
-        call(result_store_module.write_json_file, run_dir / "results.json", data),
+        call(
+            result_store_module.write_bytes_file,
+            run_dir / "results.json",
+            result_store_module.serialize_json_bytes(data),
+        ),
     ]
 
 
@@ -185,6 +215,115 @@ async def test_save_result_preserves_existing_artifacts(store):
     await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
 
     assert screenshot.read_bytes() == b"png"
+
+
+async def test_save_result_allows_exact_serialized_byte_boundary(store):
+    data = {"value": "café"}
+    exact_size = len(result_store_module.serialize_json_bytes(data))
+
+    meta = await store.save_result(
+        "j-1",
+        data,
+        run_id="run-exact",
+        max_serialized_bytes=exact_size,
+    )
+
+    assert meta.serialized_bytes == exact_size
+    assert (Path(meta.file_path) / "results.json").stat().st_size == exact_size
+
+
+async def test_save_result_rejects_one_byte_over_before_file_or_metadata(store):
+    data = {"value": "café"}
+    exact_size = len(result_store_module.serialize_json_bytes(data))
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await store.save_result(
+            "j-1",
+            data,
+            run_id="run-over",
+            max_serialized_bytes=exact_size - 1,
+        )
+
+    assert "serialized_result_bytes" in str(exc_info.value)
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-over"
+    assert not run_dir.exists()
+    async with get_db("results_meta.db") as db:
+        row = await (
+            await db.execute("SELECT id FROM results_meta WHERE run_id='run-over'")
+        ).fetchone()
+    assert row is None
+
+
+async def test_save_result_serialization_failure_creates_no_run_directory(store):
+    class BrokenValue:
+        def __str__(self):
+            raise RuntimeError("cannot serialize")
+
+    with pytest.raises(RuntimeError, match="cannot serialize"):
+        await store.save_result(
+            "j-1",
+            {"value": BrokenValue()},
+            run_id="run-serialization-error",
+        )
+
+    run_dir = (
+        store._results_dir
+        / "acme"
+        / "scrape-prices"
+        / "run-serialization-error"
+    )
+    assert not run_dir.exists()
+
+
+async def test_save_result_disk_failure_leaves_no_temp_file_or_metadata(store, monkeypatch):
+    def fail_replace(*_args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("scrapeyard.storage.filesystem.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="No space"):
+        await store.save_result("j-1", {"value": 1}, run_id="run-full")
+
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-full"
+    assert not (run_dir / "results.json").exists()
+    assert list(run_dir.glob("*.tmp")) == []
+    assert list(run_dir.glob(".*.tmp")) == []
+    async with get_db("results_meta.db") as db:
+        row = await (
+            await db.execute("SELECT id FROM results_meta WHERE run_id='run-full'")
+        ).fetchone()
+    assert row is None
+
+
+async def test_save_result_cancellation_cleans_completed_uncommitted_file(store, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    real_write = result_store_module.write_bytes_file
+
+    def delayed_write(path, payload):
+        started.set()
+        release.wait(timeout=2)
+        real_write(path, payload)
+
+    monkeypatch.setattr(result_store_module, "write_bytes_file", delayed_write)
+    task = asyncio.create_task(
+        store.save_result("j-1", {"value": 1}, run_id="run-cancelled")
+    )
+    await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-cancelled"
+    assert not (run_dir / "results.json").exists()
+    assert list(run_dir.glob(".*.tmp")) == []
+    async with get_db("results_meta.db") as db:
+        row = await (
+            await db.execute("SELECT id FROM results_meta WHERE run_id='run-cancelled'")
+        ).fetchone()
+    assert row is None
 
 
 async def test_get_result_offloads_json_read(store):
@@ -273,3 +412,24 @@ async def test_delete_results_offloads_directory_removal(store):
         Path(first.file_path),
         Path(second.file_path),
     }
+
+
+async def test_delete_result_removes_metadata_and_run_directory(store):
+    meta = await store.save_result("j-1", [{"price": 9.99}], run_id="run-owned")
+
+    assert await store.delete_result("j-1", "run-owned") is True
+
+    assert not Path(meta.file_path).exists()
+    with pytest.raises(KeyError):
+        await store.get_result("j-1", "run-owned")
+
+
+async def test_delete_result_removes_unindexed_browser_artifacts_idempotently(store):
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-unindexed"
+    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    (artifacts_dir / "page.png").write_bytes(b"debug")
+
+    assert await store.delete_result("j-1", "run-unindexed") is True
+    assert not run_dir.exists()
+    assert await store.delete_result("j-1", "run-unindexed") is False

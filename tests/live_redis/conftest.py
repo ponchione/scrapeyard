@@ -29,6 +29,7 @@ def _clear_singletons() -> None:
         get_result_store as _get_result_store,
         get_scheduler as _get_scheduler,
         get_webhook_dispatcher as _get_webhook_dispatcher,
+        get_webhook_outbox_store as _get_webhook_outbox_store,
         get_worker_pool as _get_worker_pool,
     )
 
@@ -38,6 +39,7 @@ def _clear_singletons() -> None:
         _get_error_store,
         _get_result_store,
         _get_circuit_breaker,
+        _get_webhook_outbox_store,
         _get_webhook_dispatcher,
         _get_worker_pool,
         _get_scheduler,

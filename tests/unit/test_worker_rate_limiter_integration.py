@@ -8,7 +8,7 @@ import pytest
 
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.queue.worker import scrape_task
-from tests.unit.worker_helpers import make_job
+from tests.unit.worker_helpers import make_job, make_settings_mock
 
 
 @pytest.mark.asyncio
@@ -17,6 +17,8 @@ async def test_scrape_task_calls_rate_limiter_acquire():
     job = make_job(job_id="j-rate", name="rate-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.claim_run.return_value = True
+    job_store.queue_run.return_value = True
     job_store.update_job_status.side_effect = lambda j: None
 
     rate_limiter = AsyncMock()
@@ -51,11 +53,7 @@ async def test_scrape_task_calls_rate_limiter_acquire():
         cfg.output.group_by = MagicMock(value="target")
         cfg.proxy = None
         mock_load.return_value = cfg
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adapt",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock(adaptive_dir="/tmp/adapt")
 
         await scrape_task(
             job.job_id,

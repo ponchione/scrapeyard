@@ -7,7 +7,13 @@ from typing import Any
 
 import pytest
 
-from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
+from scrapeyard.models.job import (
+    ActionTaken,
+    BudgetErrorDetails,
+    ErrorFilters,
+    ErrorRecord,
+    ErrorType,
+)
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
 
@@ -62,6 +68,30 @@ async def test_log_error_null_optionals(store):
     assert len(results) == 1
     assert results[0].http_status is None
     assert results[0].error_message is None
+    assert results[0].selectors_matched is None
+
+
+async def test_budget_error_details_round_trip_as_structured_data(store):
+    details = BudgetErrorDetails(
+        limit_name="extracted_records",
+        configured_limit=100,
+        observed_amount=101,
+    )
+    await store.log_error(
+        _make_error(
+            error_type=ErrorType.budget_exceeded,
+            http_status=None,
+            fetcher_used="service_budget",
+            selectors_matched=None,
+            budget=details,
+            action_taken=ActionTaken.fail,
+        )
+    )
+
+    results = await store.query_errors(ErrorFilters(error_type=ErrorType.budget_exceeded))
+
+    assert len(results) == 1
+    assert results[0].budget == details
     assert results[0].selectors_matched is None
 
 

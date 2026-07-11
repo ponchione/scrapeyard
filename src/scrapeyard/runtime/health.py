@@ -69,6 +69,8 @@ def build_project_summary(rows: ProjectSummaryRows) -> dict[str, dict[str, Any]]
                     "complete": 0,
                     "partial": 0,
                     "failed": 0,
+                    "cancelled": 0,
+                    "deleting": 0,
                 },
             },
         )
@@ -80,7 +82,11 @@ def build_project_summary(rows: ProjectSummaryRows) -> dict[str, dict[str, Any]]
         counts = project_entry["status_counts"]
         if counts["failed"] > 0:
             project_entry["status"] = "failing"
-        elif counts["partial"] > 0 or counts["running"] > 0:
+        elif (
+            counts["partial"] > 0
+            or counts["running"] > 0
+            or counts["deleting"] > 0
+        ):
             project_entry["status"] = "degraded"
         else:
             project_entry["status"] = "healthy"

@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import cast
+from typing import NoReturn, cast
 
 import aiosqlite
 
-from scrapeyard.common.dt import fmt_dt
-from scrapeyard.common.time import utc_now
-from scrapeyard.models.job import Job, JobRun
+from scrapeyard.common.dt import fmt_dt, parse_dt
+from scrapeyard.models.job import Job, JobRun, JobStatus
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_queries import (
     PROJECT_SUMMARY_QUERY,
@@ -25,6 +25,32 @@ from scrapeyard.storage.job_rows import (
     row_to_schedule_state,
 )
 from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS, select_columns
+from scrapeyard.storage.types import (
+    CancellationAction,
+    CancellationOutcome,
+    DeletionFinalizationAction,
+    DeletionFinalizationOutcome,
+    DeletionReservationAction,
+    DeletionReservationOutcome,
+    RunOwnershipError,
+    RunRecovery,
+    StaleQueuedJob,
+    TerminalIntentAction,
+    TerminalIntentReconcileResult,
+    TerminalWebhookCandidate,
+)
+from scrapeyard.storage.webhook_outbox import (
+    WebhookDeliveryCreate,
+    insert_webhook_delivery,
+)
+
+
+_TERMINAL_RUN_STATUSES = {
+    JobStatus.complete.value,
+    JobStatus.partial.value,
+    JobStatus.failed.value,
+}
+logger = logging.getLogger(__name__)
 
 
 class DuplicateJobError(Exception):
@@ -58,9 +84,39 @@ class SQLiteJobStore:
             return cursor
 
     @staticmethod
+    async def _begin_immediate(db: aiosqlite.Connection) -> None:
+        await db.execute("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def _raise_ownership(operation: str, job_id: str, run_id: str) -> NoReturn:
+        raise RunOwnershipError(operation, job_id, run_id)
+
+    @staticmethod
     def _raise_if_missing_job(cursor: aiosqlite.Cursor, job_id: str) -> None:
         if cursor.rowcount == 0:
             raise KeyError(f"Job not found: {job_id!r}")
+
+    @staticmethod
+    def _validate_terminal_delivery(
+        delivery: WebhookDeliveryCreate,
+        *,
+        job_id: str,
+        run_id: str,
+        status: str,
+    ) -> None:
+        event = f"job.{status}"
+        if (
+            delivery.job_id != job_id
+            or delivery.run_id != run_id
+            or delivery.event != event
+            or delivery.payload.get("job_id") != job_id
+            or delivery.payload.get("run_id") != run_id
+            or delivery.payload.get("event") != event
+            or delivery.payload.get("status") != status
+        ):
+            raise ValueError(
+                "Terminal webhook delivery does not match the owned job/run/status"
+            )
 
     async def _execute_job_update(
         self,
@@ -77,8 +133,9 @@ class SQLiteJobStore:
                 await db.execute(
                     """INSERT INTO jobs (job_id, project, name, status,
                        config_yaml, created_at, updated_at, schedule_cron,
-                       schedule_enabled, current_run_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       schedule_enabled, current_run_id,
+                       deletion_requested_at, delete_results_on_delete)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         job.job_id,
                         job.project,
@@ -90,6 +147,12 @@ class SQLiteJobStore:
                         job.schedule_cron,
                         int(job.schedule_enabled),
                         job.current_run_id,
+                        fmt_dt(job.deletion_requested_at),
+                        (
+                            None
+                            if job.delete_results_on_delete is None
+                            else int(job.delete_results_on_delete)
+                        ),
                     ),
                 )
             except aiosqlite.IntegrityError as exc:
@@ -104,7 +167,8 @@ class SQLiteJobStore:
             """UPDATE jobs SET project=?, name=?, status=?,
                config_yaml=?, created_at=?, updated_at=?,
                schedule_cron=?, schedule_enabled=?,
-               current_run_id=?
+               current_run_id=?, deletion_requested_at=?,
+               delete_results_on_delete=?
                WHERE job_id=?""",
             (
                 job.project,
@@ -116,6 +180,12 @@ class SQLiteJobStore:
                 job.schedule_cron,
                 int(job.schedule_enabled),
                 job.current_run_id,
+                fmt_dt(job.deletion_requested_at),
+                (
+                    None
+                    if job.delete_results_on_delete is None
+                    else int(job.delete_results_on_delete)
+                ),
                 job.job_id,
             ),
             job.job_id,
@@ -160,6 +230,330 @@ class SQLiteJobStore:
             raise KeyError(f"Job not found: {job_id!r}")
         return row_to_job(cast(Mapping[str, object], row))
 
+    async def cancel_job(
+        self,
+        job_id: str,
+        cancelled_at: datetime,
+    ) -> CancellationOutcome:
+        """Cancel the exact accepted delivery under one immediate transaction."""
+
+        cancelled_text = fmt_dt(cancelled_at)
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    "SELECT status, current_run_id FROM jobs WHERE job_id = ?",
+                    (job_id,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return CancellationOutcome(
+                        CancellationAction.missing,
+                        job_id,
+                        None,
+                        None,
+                        None,
+                    )
+
+                prior_status = JobStatus(str(row["status"]))
+                run_id = cast(str | None, row["current_run_id"])
+                if prior_status is JobStatus.cancelled:
+                    await db.rollback()
+                    return CancellationOutcome(
+                        CancellationAction.already_cancelled,
+                        job_id,
+                        run_id,
+                        prior_status,
+                        JobStatus.cancelled,
+                    )
+                if prior_status not in {JobStatus.queued, JobStatus.running}:
+                    await db.rollback()
+                    return CancellationOutcome(
+                        CancellationAction.conflict,
+                        job_id,
+                        run_id,
+                        prior_status,
+                        prior_status,
+                    )
+
+                if prior_status is JobStatus.running:
+                    if run_id is None:
+                        raise RuntimeError(
+                            "Running job cannot be cancelled without current_run_id"
+                        )
+                    cursor = await db.execute(
+                        """UPDATE job_runs
+                           SET status = 'cancelled', completed_at = ?
+                           WHERE job_id = ?
+                             AND run_id = ?
+                             AND status = 'running'""",
+                        (cancelled_text, job_id, run_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "Running job cancellation could not update its exact run"
+                        )
+
+                cursor = await db.execute(
+                    """UPDATE jobs
+                       SET status = 'cancelled',
+                           schedule_enabled = 0,
+                           updated_at = ?
+                       WHERE job_id = ?
+                         AND status = ?
+                         AND current_run_id IS ?""",
+                    (cancelled_text, job_id, prior_status.value, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "Job cancellation lost ownership inside its transaction"
+                    )
+                await db.commit()
+                return CancellationOutcome(
+                    CancellationAction.cancelled,
+                    job_id,
+                    run_id,
+                    prior_status,
+                    JobStatus.cancelled,
+                )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
+
+    async def run_is_active(self, job_id: str, run_id: str) -> bool:
+        """Check exact parent/run ownership at a cooperative lifecycle boundary."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT 1
+                   FROM jobs
+                   JOIN job_runs
+                     ON job_runs.job_id = jobs.job_id
+                    AND job_runs.run_id = jobs.current_run_id
+                   WHERE jobs.job_id = ?
+                     AND jobs.current_run_id = ?
+                     AND jobs.status = 'running'
+                     AND job_runs.status = 'running'""",
+                (job_id, run_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def result_run_is_active(
+        self,
+        project: str,
+        job_name: str,
+        run_id: str,
+    ) -> bool:
+        """Protect exact queued/running result ownership during reconciliation."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT 1
+                   FROM jobs
+                   WHERE project = ?
+                     AND name = ?
+                     AND current_run_id = ?
+                     AND status IN ('queued', 'running')
+                   LIMIT 1""",
+                (project, job_name, run_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def reserve_job_deletion(
+        self,
+        job_id: str,
+        *,
+        delete_results: bool,
+        requested_at: datetime,
+    ) -> DeletionReservationOutcome:
+        """Create or resume a deletion reservation without crossing databases."""
+
+        requested_text = fmt_dt(requested_at)
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    """SELECT status, current_run_id, delete_results_on_delete
+                       FROM jobs WHERE job_id = ?""",
+                    (job_id,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return DeletionReservationOutcome(
+                        DeletionReservationAction.missing,
+                        job_id,
+                        None,
+                        None,
+                        delete_results,
+                    )
+
+                prior_status = JobStatus(str(row["status"]))
+                run_id = cast(str | None, row["current_run_id"])
+                stored_policy = row["delete_results_on_delete"]
+                if prior_status in {JobStatus.queued, JobStatus.running}:
+                    await db.rollback()
+                    return DeletionReservationOutcome(
+                        DeletionReservationAction.active_conflict,
+                        job_id,
+                        run_id,
+                        prior_status,
+                        delete_results,
+                    )
+                if prior_status is JobStatus.deleting:
+                    if stored_policy is None or bool(stored_policy) != delete_results:
+                        await db.rollback()
+                        return DeletionReservationOutcome(
+                            DeletionReservationAction.policy_conflict,
+                            job_id,
+                            run_id,
+                            prior_status,
+                            delete_results,
+                        )
+                    action = DeletionReservationAction.resumed
+                elif prior_status in {
+                    JobStatus.cancelled,
+                    JobStatus.complete,
+                    JobStatus.partial,
+                    JobStatus.failed,
+                }:
+                    action = DeletionReservationAction.created
+                else:  # pragma: no cover - exhaustive enum defense
+                    raise RuntimeError(
+                        f"Unsupported deletion source status: {prior_status.value}"
+                    )
+
+                cursor = await db.execute(
+                    """SELECT 1 FROM webhook_deliveries
+                       WHERE job_id = ? AND status = 'pending'
+                       LIMIT 1""",
+                    (job_id,),
+                )
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return DeletionReservationOutcome(
+                        DeletionReservationAction.pending_webhook_conflict,
+                        job_id,
+                        run_id,
+                        prior_status,
+                        delete_results,
+                    )
+
+                if action is DeletionReservationAction.created:
+                    cursor = await db.execute(
+                        """UPDATE jobs
+                           SET status = 'deleting',
+                               schedule_enabled = 0,
+                               updated_at = ?,
+                               deletion_requested_at = ?,
+                               delete_results_on_delete = ?
+                           WHERE job_id = ?
+                             AND status = ?
+                             AND current_run_id IS ?""",
+                        (
+                            requested_text,
+                            requested_text,
+                            int(delete_results),
+                            job_id,
+                            prior_status.value,
+                            run_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "Deletion reservation lost ownership inside transaction"
+                        )
+                await db.commit()
+                return DeletionReservationOutcome(
+                    action,
+                    job_id,
+                    run_id,
+                    prior_status,
+                    delete_results,
+                )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
+
+    async def finalize_job_deletion(
+        self,
+        job_id: str,
+        *,
+        delete_results: bool,
+    ) -> DeletionFinalizationOutcome:
+        """Delete all jobs.db state only while the reservation still matches."""
+
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    "SELECT status, delete_results_on_delete FROM jobs WHERE job_id = ?",
+                    (job_id,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return DeletionFinalizationOutcome(
+                        DeletionFinalizationAction.missing,
+                        job_id,
+                    )
+                if row["status"] != JobStatus.deleting.value:
+                    await db.rollback()
+                    return DeletionFinalizationOutcome(
+                        DeletionFinalizationAction.not_reserved,
+                        job_id,
+                    )
+                if (
+                    row["delete_results_on_delete"] is None
+                    or bool(row["delete_results_on_delete"]) != delete_results
+                ):
+                    await db.rollback()
+                    return DeletionFinalizationOutcome(
+                        DeletionFinalizationAction.policy_conflict,
+                        job_id,
+                    )
+                cursor = await db.execute(
+                    """SELECT 1 FROM webhook_deliveries
+                       WHERE job_id = ? AND status = 'pending'
+                       LIMIT 1""",
+                    (job_id,),
+                )
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return DeletionFinalizationOutcome(
+                        DeletionFinalizationAction.pending_webhook_conflict,
+                        job_id,
+                    )
+
+                await db.execute(
+                    "DELETE FROM webhook_deliveries WHERE job_id = ?",
+                    (job_id,),
+                )
+                await db.execute("DELETE FROM job_runs WHERE job_id = ?", (job_id,))
+                cursor = await db.execute(
+                    """DELETE FROM jobs
+                       WHERE job_id = ?
+                         AND status = 'deleting'
+                         AND delete_results_on_delete = ?""",
+                    (job_id, int(delete_results)),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "Final job deletion lost its persisted reservation"
+                    )
+                await db.commit()
+                return DeletionFinalizationOutcome(
+                    DeletionFinalizationAction.deleted,
+                    job_id,
+                )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
+
     async def list_jobs(self, project: str | None = None) -> list[Job]:
         async with get_db("jobs.db") as db:
             if project is not None:
@@ -184,6 +578,19 @@ class SQLiteJobStore:
             )
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
             return [row_to_job_run(row) for row in rows]
+
+    async def get_job_run(self, job_id: str, run_id: str) -> JobRun | None:
+        """Return one run only when it belongs to the expected parent job."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                f"SELECT {select_columns(JOB_RUN_COLUMNS)} FROM job_runs "
+                "WHERE job_id = ? AND run_id = ?",
+                (job_id, run_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return row_to_job_run(cast(Mapping[str, object], row))
 
     async def get_job_run_stats(
         self, job_id: str,
@@ -222,149 +629,770 @@ class SQLiteJobStore:
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_project_summary(row) for row in rows]
 
-    async def create_run(
+    async def claim_run(
         self,
         run_id: str,
         job_id: str,
         trigger: str,
         config_hash: str,
         started_at: datetime,
-    ) -> None:
-        """Insert a new job_runs row with status='running'."""
-        await self._execute_write(
-            """INSERT INTO job_runs
-               (run_id, job_id, status, trigger,
-                config_hash, started_at)
-               VALUES (?, ?, 'running', ?, ?, ?)""",
-            (
-                run_id, job_id, trigger,
-                config_hash,
-                fmt_dt(started_at),
-            ),
-        )
+    ) -> bool:
+        """Atomically transition one queued delivery to an owned running run."""
+        timestamp = fmt_dt(started_at)
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    """UPDATE jobs
+                       SET status = 'running', updated_at = ?
+                       WHERE job_id = ?
+                         AND status = 'queued'
+                         AND current_run_id IS ?""",
+                    (timestamp, job_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    return False
+                await db.execute(
+                    """INSERT INTO job_runs
+                       (run_id, job_id, status, trigger, config_hash,
+                        started_at, heartbeat_at)
+                       VALUES (?, ?, 'running', ?, ?, ?, ?)""",
+                    (run_id, job_id, trigger, config_hash, timestamp, timestamp),
+                )
+                await db.commit()
+                return True
+            except BaseException:
+                await db.rollback()
+                raise
 
-    async def finalize_run(
+    async def heartbeat_run(
         self,
+        job_id: str,
+        run_id: str,
+        heartbeat_at: datetime,
+    ) -> None:
+        """Refresh the expected active run without touching the parent timestamp."""
+        cursor = await self._execute_write(
+            """UPDATE job_runs
+               SET heartbeat_at = ?
+               WHERE job_id = ?
+                 AND run_id = ?
+                 AND status = 'running'
+                 AND EXISTS (
+                     SELECT 1 FROM jobs
+                     WHERE jobs.job_id = job_runs.job_id
+                       AND jobs.status = 'running'
+                       AND jobs.current_run_id = job_runs.run_id
+                 )""",
+            (fmt_dt(heartbeat_at), job_id, run_id),
+        )
+        if cursor.rowcount != 1:
+            self._raise_ownership("heartbeat", job_id, run_id)
+
+    async def finalize_owned_run(
+        self,
+        job_id: str,
         run_id: str,
         status: str,
         record_count: int,
         error_count: int,
+        completed_at: datetime,
+        heartbeat_cutoff: datetime,
+        *,
+        webhook_delivery: WebhookDeliveryCreate | None = None,
     ) -> None:
-        """Update a job_runs row with final status, counts, and completed_at."""
-        await self._execute_write(
-            """UPDATE job_runs
-               SET status = ?, completed_at = ?,
-                   record_count = ?, error_count = ?
-               WHERE run_id = ?""",
-            (
-                status,
-                fmt_dt(utc_now()),
-                record_count,
-                error_count,
-                run_id,
-            ),
-        )
+        """Finalize the run, parent, and required intent in one CAS transaction."""
+        if status not in _TERMINAL_RUN_STATUSES:
+            raise ValueError(f"Invalid terminal run status: {status!r}")
+        if webhook_delivery is not None:
+            self._validate_terminal_delivery(
+                webhook_delivery,
+                job_id=job_id,
+                run_id=run_id,
+                status=status,
+            )
+        completed_text = fmt_dt(completed_at)
+        cutoff_text = fmt_dt(heartbeat_cutoff)
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    """UPDATE job_runs
+                       SET status = ?, completed_at = ?,
+                           record_count = ?, error_count = ?
+                       WHERE job_id = ?
+                         AND run_id = ?
+                         AND status = 'running'
+                         AND heartbeat_at > ?""",
+                    (
+                        status,
+                        completed_text,
+                        record_count,
+                        error_count,
+                        job_id,
+                        run_id,
+                        cutoff_text,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    self._raise_ownership("finalize", job_id, run_id)
+                cursor = await db.execute(
+                    """UPDATE jobs
+                       SET status = ?, updated_at = ?
+                       WHERE job_id = ?
+                         AND status = 'running'
+                         AND current_run_id = ?""",
+                    (status, completed_text, job_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    self._raise_ownership("finalize", job_id, run_id)
+                intent_created = False
+                if webhook_delivery is not None:
+                    intent_created = await insert_webhook_delivery(
+                        db,
+                        webhook_delivery,
+                        created_at=completed_at,
+                    )
+                await db.commit()
+                if webhook_delivery is not None:
+                    logger.info(
+                        "Terminal webhook intent persisted atomically "
+                        "job_id=%s run_id=%s event=%s delivery_id=%s "
+                        "terminal_status=%s recovery_action=%s",
+                        job_id,
+                        run_id,
+                        webhook_delivery.event,
+                        webhook_delivery.delivery_id,
+                        status,
+                        (
+                            "atomic_intent_created"
+                            if intent_created
+                            else "existing_intent_noop"
+                        ),
+                    )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
 
-    async def fail_run(self, run_id: str) -> None:
-        """Mark a running run as failed (crash recovery)."""
-        await self._execute_write(
-            """UPDATE job_runs
-               SET status = 'failed',
-                   completed_at = ?
-               WHERE run_id = ?
-                 AND status = 'running'""",
+    async def fail_owned_run(
+        self,
+        job_id: str,
+        run_id: str,
+        failed_at: datetime,
+        heartbeat_cutoff: datetime | None = None,
+        *,
+        error_count: int = 0,
+        webhook_delivery: WebhookDeliveryCreate | None = None,
+    ) -> None:
+        """Fail matching ownership with optional atomic terminal intent."""
+        if webhook_delivery is not None:
+            self._validate_terminal_delivery(
+                webhook_delivery,
+                job_id=job_id,
+                run_id=run_id,
+                status=JobStatus.failed.value,
+            )
+        failed_text = fmt_dt(failed_at)
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    "SELECT status FROM jobs WHERE job_id = ? AND current_run_id = ?",
+                    (job_id, run_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    self._raise_ownership("fail", job_id, run_id)
+                job_status = str(row["status"])
+                if job_status == JobStatus.queued.value:
+                    cursor = await db.execute(
+                        """UPDATE jobs
+                           SET status = 'failed', updated_at = ?
+                           WHERE job_id = ?
+                             AND status = 'queued'
+                             AND current_run_id = ?""",
+                        (failed_text, job_id, run_id),
+                    )
+                    if cursor.rowcount != 1:
+                        await db.rollback()
+                        self._raise_ownership("fail", job_id, run_id)
+                    await db.commit()
+                    return
+                if job_status != JobStatus.running.value:
+                    await db.rollback()
+                    self._raise_ownership("fail", job_id, run_id)
+
+                heartbeat_clause = ""
+                params: list[object] = [failed_text, error_count, job_id, run_id]
+                if heartbeat_cutoff is not None:
+                    heartbeat_clause = " AND heartbeat_at > ?"
+                    params.append(fmt_dt(heartbeat_cutoff))
+                cursor = await db.execute(
+                    """UPDATE job_runs
+                       SET status = 'failed', completed_at = ?,
+                           record_count = COALESCE(record_count, 0),
+                           error_count = ?
+                       WHERE job_id = ?
+                         AND run_id = ?
+                         AND status = 'running'"""
+                    + heartbeat_clause,
+                    params,
+                )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    self._raise_ownership("fail", job_id, run_id)
+                cursor = await db.execute(
+                    """UPDATE jobs
+                       SET status = 'failed', updated_at = ?
+                       WHERE job_id = ?
+                         AND status = 'running'
+                         AND current_run_id = ?""",
+                    (failed_text, job_id, run_id),
+                )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    self._raise_ownership("fail", job_id, run_id)
+                intent_created = False
+                if webhook_delivery is not None:
+                    intent_created = await insert_webhook_delivery(
+                        db,
+                        webhook_delivery,
+                        created_at=failed_at,
+                    )
+                await db.commit()
+                if webhook_delivery is not None:
+                    logger.info(
+                        "Terminal webhook intent persisted atomically "
+                        "job_id=%s run_id=%s event=%s delivery_id=%s "
+                        "terminal_status=%s recovery_action=%s",
+                        job_id,
+                        run_id,
+                        webhook_delivery.event,
+                        webhook_delivery.delivery_id,
+                        JobStatus.failed.value,
+                        (
+                            "atomic_intent_created"
+                            if intent_created
+                            else "existing_intent_noop"
+                        ),
+                    )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
+
+    async def list_terminal_webhook_candidates(
+        self,
+    ) -> list[TerminalWebhookCandidate]:
+        """Return terminal runs and their current logical outbox state."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT job_runs.job_id,
+                          job_runs.run_id,
+                          job_runs.status,
+                          job_runs.config_hash,
+                          job_runs.started_at,
+                          job_runs.heartbeat_at,
+                          job_runs.completed_at,
+                          job_runs.record_count,
+                          job_runs.error_count,
+                          jobs.project,
+                          jobs.name,
+                          jobs.config_yaml,
+                          jobs.status AS parent_status,
+                          jobs.current_run_id,
+                          webhook_deliveries.delivery_id AS existing_delivery_id,
+                          webhook_deliveries.status AS existing_delivery_status,
+                          webhook_deliveries.scrubbed_at AS existing_delivery_scrubbed_at
+                   FROM job_runs
+                   JOIN jobs ON jobs.job_id = job_runs.job_id
+                   LEFT JOIN webhook_deliveries
+                     ON webhook_deliveries.delivery_id = (
+                         SELECT candidate_delivery.delivery_id
+                         FROM webhook_deliveries AS candidate_delivery
+                         WHERE candidate_delivery.job_id = job_runs.job_id
+                           AND candidate_delivery.run_id = job_runs.run_id
+                           AND candidate_delivery.event = 'job.' || job_runs.status
+                         ORDER BY candidate_delivery.created_at ASC,
+                                  candidate_delivery.delivery_id ASC
+                         LIMIT 1
+                     )
+                   WHERE job_runs.status IN ('complete', 'partial', 'failed')
+                     AND jobs.status != 'deleting'
+                   ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at) ASC,
+                            job_runs.job_id ASC,
+                            job_runs.run_id ASC"""
+            )
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
+
+        candidates: list[TerminalWebhookCandidate] = []
+        for row in rows:
+            started_at = parse_dt(cast(str | None, row["started_at"]))
+            heartbeat_at = parse_dt(cast(str | None, row["heartbeat_at"]))
+            if started_at is None or heartbeat_at is None:
+                raise ValueError(
+                    "Terminal run is missing required lifecycle timestamps "
+                    f"for job_id={row['job_id']!r} run_id={row['run_id']!r}"
+                )
+            candidates.append(
+                TerminalWebhookCandidate(
+                    job_id=cast(str, row["job_id"]),
+                    run_id=cast(str, row["run_id"]),
+                    status=JobStatus(cast(str, row["status"])),
+                    project=cast(str, row["project"]),
+                    name=cast(str, row["name"]),
+                    config_yaml=cast(str, row["config_yaml"]),
+                    config_hash=cast(str, row["config_hash"]),
+                    started_at=started_at,
+                    heartbeat_at=heartbeat_at,
+                    completed_at=parse_dt(cast(str | None, row["completed_at"])),
+                    record_count=cast(int | None, row["record_count"]),
+                    error_count=cast(int, row["error_count"]),
+                    parent_status=JobStatus(cast(str, row["parent_status"])),
+                    current_run_id=cast(str | None, row["current_run_id"]),
+                    existing_delivery_id=cast(
+                        str | None,
+                        row["existing_delivery_id"],
+                    ),
+                    existing_delivery_status=cast(
+                        str | None,
+                        row["existing_delivery_status"],
+                    ),
+                    existing_delivery_scrubbed_at=parse_dt(
+                        cast(str | None, row["existing_delivery_scrubbed_at"])
+                    ),
+                )
+            )
+        return candidates
+
+    async def reconcile_terminal_webhook_candidate(
+        self,
+        candidate: TerminalWebhookCandidate,
+        webhook_delivery: WebhookDeliveryCreate | None,
+    ) -> TerminalIntentReconcileResult:
+        """CAS-recheck terminal state, converge its parent, and ensure intent."""
+
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                cursor = await db.execute(
+                    """SELECT job_runs.status AS run_status,
+                              job_runs.config_hash,
+                              jobs.status AS parent_status,
+                              jobs.current_run_id,
+                              jobs.config_yaml
+                       FROM job_runs
+                       JOIN jobs ON jobs.job_id = job_runs.job_id
+                       WHERE job_runs.job_id = ? AND job_runs.run_id = ?""",
+                    (candidate.job_id, candidate.run_id),
+                )
+                row = await cursor.fetchone()
+                if (
+                    row is None
+                    or row["run_status"] != candidate.status.value
+                    or row["run_status"] not in _TERMINAL_RUN_STATUSES
+                    or row["config_hash"] != candidate.config_hash
+                    or row["config_yaml"] != candidate.config_yaml
+                    or row["parent_status"] == JobStatus.deleting.value
+                ):
+                    await db.rollback()
+                    return TerminalIntentReconcileResult(
+                        TerminalIntentAction.race_noop
+                    )
+
+                parent_converged = False
+                if (
+                    row["current_run_id"] == candidate.run_id
+                    and row["parent_status"] == JobStatus.running.value
+                ):
+                    cursor = await db.execute(
+                        """UPDATE jobs
+                           SET status = ?, updated_at = ?
+                           WHERE job_id = ?
+                             AND status = 'running'
+                             AND current_run_id = ?""",
+                        (
+                            candidate.status.value,
+                            fmt_dt(candidate.completed_at or candidate.heartbeat_at),
+                            candidate.job_id,
+                            candidate.run_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        await db.rollback()
+                        return TerminalIntentReconcileResult(
+                            TerminalIntentAction.race_noop
+                        )
+                    parent_converged = True
+
+                event = f"job.{candidate.status.value}"
+                cursor = await db.execute(
+                    """SELECT delivery_id
+                       FROM webhook_deliveries
+                       WHERE job_id = ? AND run_id = ? AND event = ?
+                       ORDER BY created_at ASC, delivery_id ASC
+                       LIMIT 1""",
+                    (candidate.job_id, candidate.run_id, event),
+                )
+                existing = await cursor.fetchone()
+                if existing is not None:
+                    await db.commit()
+                    return TerminalIntentReconcileResult(
+                        TerminalIntentAction.existing,
+                        parent_converged=parent_converged,
+                        delivery_id=str(existing["delivery_id"]),
+                    )
+
+                if webhook_delivery is None:
+                    await db.commit()
+                    return TerminalIntentReconcileResult(
+                        TerminalIntentAction.not_required,
+                        parent_converged=parent_converged,
+                    )
+
+                self._validate_terminal_delivery(
+                    webhook_delivery,
+                    job_id=candidate.job_id,
+                    run_id=candidate.run_id,
+                    status=candidate.status.value,
+                )
+                created = await insert_webhook_delivery(
+                    db,
+                    webhook_delivery,
+                    created_at=candidate.completed_at or candidate.heartbeat_at,
+                )
+                if not created:
+                    cursor = await db.execute(
+                        """SELECT job_id, run_id, event
+                           FROM webhook_deliveries
+                           WHERE delivery_id = ?""",
+                        (webhook_delivery.delivery_id,),
+                    )
+                    collision = await cursor.fetchone()
+                    if (
+                        collision is None
+                        or collision["job_id"] != candidate.job_id
+                        or collision["run_id"] != candidate.run_id
+                        or collision["event"] != event
+                    ):
+                        raise RuntimeError(
+                            "Deterministic webhook delivery ID collided with another event"
+                        )
+                await db.commit()
+                return TerminalIntentReconcileResult(
+                    (
+                        TerminalIntentAction.created
+                        if created
+                        else TerminalIntentAction.existing
+                    ),
+                    parent_converged=parent_converged,
+                    delivery_id=webhook_delivery.delivery_id,
+                )
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
+
+    async def queue_run(
+        self,
+        job_id: str,
+        *,
+        expected_status: str,
+        expected_run_id: str | None,
+        new_run_id: str,
+        queued_at: datetime,
+        stale_before: datetime | None = None,
+    ) -> bool:
+        """Queue a replacement only if the scheduler's observed state still holds."""
+        if expected_status in {
+            JobStatus.cancelled.value,
+            JobStatus.deleting.value,
+        }:
+            return False
+        params: list[object] = [fmt_dt(queued_at), new_run_id, job_id, expected_status, expected_run_id]
+        stale_clause = ""
+        if stale_before is not None:
+            stale_clause = " AND (updated_at IS NULL OR updated_at <= ?)"
+            params.append(fmt_dt(stale_before))
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET status = 'queued', updated_at = ?, current_run_id = ?
+               WHERE job_id = ?
+                 AND status = ?
+                 AND current_run_id IS ?"""
+            + stale_clause,
+            params,
+        )
+        return cursor.rowcount == 1
+
+    async def fail_queued_run(
+        self,
+        job_id: str,
+        run_id: str,
+        failed_at: datetime,
+    ) -> bool:
+        """Fail an enqueue attempt only while its delivery is still current."""
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET status = 'failed', updated_at = ?
+               WHERE job_id = ?
+                 AND status = 'queued'
+                 AND current_run_id = ?""",
+            (fmt_dt(failed_at), job_id, run_id),
+        )
+        return cursor.rowcount == 1
+
+    async def list_stale_queued_jobs(
+        self,
+        stale_before: datetime,
+    ) -> list[StaleQueuedJob]:
+        """Return stale queued deliveries with all reconciliation inputs.
+
+        ``jobs.updated_at`` is the persisted queued timestamp established by
+        submission, scheduling, or an earlier recovery reservation. Rows with
+        no owned run or no queued timestamp are deliberately excluded.
+        """
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT job_id, current_run_id, config_yaml, updated_at,
+                          schedule_cron, schedule_enabled
+                   FROM jobs
+                   WHERE status = 'queued'
+                     AND current_run_id IS NOT NULL
+                     AND updated_at IS NOT NULL
+                     AND updated_at <= ?
+                   ORDER BY updated_at ASC, job_id ASC""",
+                (fmt_dt(stale_before),),
+            )
+            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
+
+        stale_jobs: list[StaleQueuedJob] = []
+        for row in rows:
+            queued_at = parse_dt(cast(str | None, row["updated_at"]))
+            run_id = cast(str | None, row["current_run_id"])
+            if queued_at is None or run_id is None:
+                continue
+            stale_jobs.append(
+                StaleQueuedJob(
+                    job_id=cast(str, row["job_id"]),
+                    run_id=run_id,
+                    config_yaml=cast(str, row["config_yaml"]),
+                    queued_at=queued_at,
+                    schedule_cron=cast(str | None, row["schedule_cron"]),
+                    schedule_enabled=bool(row["schedule_enabled"]),
+                )
+            )
+        return stale_jobs
+
+    async def reserve_queued_run_recovery(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        expected_queued_at: datetime,
+        stale_before: datetime,
+        reserved_at: datetime,
+    ) -> bool:
+        """Reserve the exact stale snapshot while preserving its run ID."""
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET updated_at = ?
+               WHERE job_id = ?
+                 AND status = 'queued'
+                 AND current_run_id = ?
+                 AND updated_at = ?
+                 AND updated_at <= ?""",
             (
-                fmt_dt(utc_now()),
+                fmt_dt(reserved_at),
+                job_id,
                 run_id,
+                fmt_dt(expected_queued_at),
+                fmt_dt(stale_before),
             ),
         )
+        return cursor.rowcount == 1
+
+    async def fail_queued_run_recovery(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        expected_queued_at: datetime,
+        failed_at: datetime,
+    ) -> bool:
+        """Fail only the exact queued timestamp reconciliation still owns."""
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET status = 'failed', updated_at = ?
+               WHERE job_id = ?
+                 AND status = 'queued'
+                 AND current_run_id = ?
+                 AND updated_at = ?""",
+            (
+                fmt_dt(failed_at),
+                job_id,
+                run_id,
+                fmt_dt(expected_queued_at),
+            ),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _heartbeat_is_stale(value: str | None, cutoff: datetime) -> bool:
+        heartbeat = parse_dt(value)
+        if heartbeat is None:
+            return True
+        comparable_cutoff = cutoff.replace(tzinfo=None) if heartbeat.tzinfo is None else cutoff
+        return heartbeat <= comparable_cutoff
+
+    async def _recover_current_run(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        job_id: str,
+        expected_run_id: str | None,
+        heartbeat_cutoff: datetime,
+        recovered_at: datetime,
+    ) -> RunRecovery | None:
+        cursor = await db.execute(
+            """SELECT jobs.status AS job_status,
+                      jobs.current_run_id AS current_run_id,
+                      job_runs.status AS run_status,
+                      job_runs.heartbeat_at AS heartbeat_at
+               FROM jobs
+               LEFT JOIN job_runs
+                 ON job_runs.job_id = jobs.job_id
+                AND job_runs.run_id = jobs.current_run_id
+               WHERE jobs.job_id = ?""",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        if (
+            row is None
+            or row["job_status"] != JobStatus.running.value
+            or row["current_run_id"] != expected_run_id
+        ):
+            return None
+
+        run_id = cast(str | None, row["current_run_id"])
+        run_status = cast(str | None, row["run_status"])
+        heartbeat_text = cast(str | None, row["heartbeat_at"])
+        last_heartbeat = parse_dt(heartbeat_text)
+        recovered_text = fmt_dt(recovered_at)
+
+        if run_id is None or run_status is None:
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = 'failed', updated_at = ?
+                   WHERE job_id = ?
+                     AND status = 'running'
+                     AND current_run_id IS ?""",
+                (recovered_text, job_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return RunRecovery(job_id, run_id, "failed_missing_run", last_heartbeat)
+
+        if run_status in _TERMINAL_RUN_STATUSES:
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = ?, updated_at = ?
+                   WHERE job_id = ?
+                     AND status = 'running'
+                     AND current_run_id = ?""",
+                (run_status, recovered_text, job_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return RunRecovery(job_id, run_id, "reconciled_terminal_run", last_heartbeat)
+
+        if run_status != JobStatus.running.value or not self._heartbeat_is_stale(
+            heartbeat_text,
+            heartbeat_cutoff,
+        ):
+            return None
+
+        cursor = await db.execute(
+            """UPDATE job_runs
+               SET status = 'failed', completed_at = ?
+               WHERE job_id = ?
+                 AND run_id = ?
+                 AND status = 'running'""",
+            (recovered_text, job_id, run_id),
+        )
+        if cursor.rowcount != 1:
+            return None
+        cursor = await db.execute(
+            """UPDATE jobs
+               SET status = 'failed', updated_at = ?
+               WHERE job_id = ?
+                 AND status = 'running'
+                 AND current_run_id = ?""",
+            (recovered_text, job_id, run_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Stale recovery lost job ownership inside transaction")
+        return RunRecovery(job_id, run_id, "failed_stale_heartbeat", last_heartbeat)
+
+    async def recover_stale_run(
+        self,
+        job_id: str,
+        run_id: str | None,
+        heartbeat_cutoff: datetime,
+        recovered_at: datetime,
+    ) -> bool:
+        """Recover one run only if it is still current and genuinely stale."""
+        async with get_db("jobs.db") as db:
+            await self._begin_immediate(db)
+            try:
+                recovery = await self._recover_current_run(
+                    db,
+                    job_id=job_id,
+                    expected_run_id=run_id,
+                    heartbeat_cutoff=heartbeat_cutoff,
+                    recovered_at=recovered_at,
+                )
+                await db.commit()
+                return recovery is not None
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def recover_stale_running_jobs(
         self,
         cutoff: datetime,
         recovered_at: datetime,
-    ) -> int:
-        """Fail stale running runs and matching running jobs after a crash.
-
-        A process crash can leave either:
-        - a ``job_runs`` row stuck in ``running``; or
-        - a ``jobs`` row stuck in ``running`` before its run row was created.
-
-        This startup recovery pass marks stale run rows failed, then transitions
-        only matching/stale ``jobs`` rows to ``failed``. Jobs with a fresh active
-        run are left alone.
-        """
-        cutoff_text = fmt_dt(cutoff)
-        recovered_text = fmt_dt(recovered_at)
+    ) -> list[RunRecovery]:
+        """Recover stale/invalid running state under one SQLite write lock."""
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """SELECT run_id
-                   FROM job_runs
-                   WHERE status = 'running'
-                     AND started_at <= ?""",
-                (cutoff_text,),
-            )
-            stale_run_ids = [row["run_id"] for row in await cursor.fetchall()]
-
-            recovered_jobs = 0
-            if stale_run_ids:
-                placeholders = ",".join("?" for _ in stale_run_ids)
-                await db.execute(
-                    f"""UPDATE job_runs
-                       SET status = 'failed', completed_at = ?
-                       WHERE status = 'running'
-                         AND run_id IN ({placeholders})""",
-                    (recovered_text, *stale_run_ids),
-                )
+            await self._begin_immediate(db)
+            try:
                 cursor = await db.execute(
-                    f"""UPDATE jobs
-                       SET status = 'failed', updated_at = ?
-                       WHERE status = 'running'
-                         AND current_run_id IN ({placeholders})""",
-                    (recovered_text, *stale_run_ids),
+                    "SELECT job_id, current_run_id FROM jobs WHERE status = 'running'"
                 )
-                recovered_jobs += max(cursor.rowcount, 0)
-
-            cursor = await db.execute(
-                """UPDATE jobs
-                   SET status = (
-                           SELECT job_runs.status
-                           FROM job_runs
-                           WHERE job_runs.run_id = jobs.current_run_id
-                       ),
-                       updated_at = ?
-                   WHERE status = 'running'
-                     AND (updated_at IS NULL OR updated_at <= ?)
-                     AND current_run_id IS NOT NULL
-                     AND EXISTS (
-                         SELECT 1
-                         FROM job_runs
-                         WHERE job_runs.run_id = jobs.current_run_id
-                           AND job_runs.status IN ('complete', 'partial', 'failed')
-                     )""",
-                (recovered_text, cutoff_text),
-            )
-            recovered_jobs += max(cursor.rowcount, 0)
-
-            cursor = await db.execute(
-                """UPDATE jobs
-                   SET status = 'failed', updated_at = ?
-                   WHERE status = 'running'
-                     AND (updated_at IS NULL OR updated_at <= ?)
-                     AND (
-                         current_run_id IS NULL
-                         OR NOT EXISTS (
-                             SELECT 1
-                             FROM job_runs
-                             WHERE job_runs.run_id = jobs.current_run_id
-                               AND job_runs.status = 'running'
-                         )
-                     )""",
-                (recovered_text, cutoff_text),
-            )
-            recovered_jobs += max(cursor.rowcount, 0)
-            await db.commit()
-            return recovered_jobs
+                rows = await cursor.fetchall()
+                recoveries: list[RunRecovery] = []
+                for row in rows:
+                    recovery = await self._recover_current_run(
+                        db,
+                        job_id=cast(str, row["job_id"]),
+                        expected_run_id=cast(str | None, row["current_run_id"]),
+                        heartbeat_cutoff=cutoff,
+                        recovered_at=recovered_at,
+                    )
+                    if recovery is not None:
+                        recoveries.append(recovery)
+                await db.commit()
+                return recoveries
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def list_scheduled_jobs(self) -> list[tuple[str, str, bool]]:
         """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
@@ -373,8 +1401,23 @@ class SQLiteJobStore:
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_schedule_state(row) for row in rows]
 
-    async def delete_job(self, job_id: str) -> None:
+    async def rollback_queued_submission(self, job_id: str, run_id: str) -> bool:
+        """Remove only a queued ad-hoc row whose Redis enqueue never succeeded."""
+
         async with get_db("jobs.db") as db:
-            await db.execute("DELETE FROM job_runs WHERE job_id=?", (job_id,))
-            await db.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+            cursor = await db.execute(
+                """DELETE FROM jobs
+                   WHERE job_id = ?
+                     AND status = 'queued'
+                     AND current_run_id = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM job_runs WHERE job_runs.job_id = jobs.job_id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM webhook_deliveries
+                         WHERE webhook_deliveries.job_id = jobs.job_id
+                     )""",
+                (job_id, run_id),
+            )
             await db.commit()
+            return cursor.rowcount == 1

@@ -24,6 +24,7 @@ def serialize_job_run(run: JobRun) -> dict[str, Any]:
         "trigger": run.trigger,
         "config_hash": run.config_hash,
         "started_at": run.started_at.isoformat(),
+        "heartbeat_at": run.heartbeat_at.isoformat(),
         "completed_at": _isoformat(run.completed_at),
         "record_count": run.record_count,
         "error_count": run.error_count,
@@ -92,6 +93,7 @@ def serialize_error_record(error: ErrorRecord) -> dict[str, Any]:
             else None
         ),
         "selectors_matched": error.selectors_matched,
+        "budget": error.budget.model_dump(mode="json") if error.budget is not None else None,
         "action_taken": error.action_taken.value,
         "resolved": error.resolved,
     }

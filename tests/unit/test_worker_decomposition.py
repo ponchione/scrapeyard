@@ -1,12 +1,245 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from scrapeyard.config.schema import GroupBy
-from scrapeyard.engine.scraper import TargetResult
+import pytest
+
+from scrapeyard.common.budgets import RunBudget
+from scrapeyard.config.schema import FetcherType, GroupBy, OnEmptyAction
+from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import JobStatus
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.target_execution import resolve_target_runtime_context
-from scrapeyard.queue.worker import _collect_result_payload, _format_output
+from scrapeyard.queue.worker import (
+    JobExecutionContext,
+    _collect_result_payload,
+    _format_output,
+    _process_all_targets,
+)
+
+
+def _concurrent_target(url: str, fetcher: FetcherType) -> MagicMock:
+    return MagicMock(url=url, fetcher=fetcher, proxy=None)
+
+
+def _job_execution_context(
+    targets: list[MagicMock],
+    *,
+    concurrency: int | None = None,
+) -> JobExecutionContext:
+    config = MagicMock()
+    config.project = "test"
+    config.resolved_targets.return_value = targets
+    config.execution.concurrency = concurrency or len(targets)
+    config.execution.delay_between = 0
+    config.execution.domain_rate_limit = 0
+    config.adaptive = False
+    config.schedule = None
+    config.proxy = None
+    config.retry = MagicMock()
+    config.validation.required_fields = []
+    config.validation.min_results = 0
+    config.validation.on_empty = OnEmptyAction.warn
+    return JobExecutionContext(
+        config=config,
+        job=MagicMock(),
+        settings=MagicMock(proxy_url=""),
+        started_at=datetime.now(UTC),
+        adaptive_dir="/tmp/adaptive",
+        run_artifacts_dir=None,
+        budget=RunBudget(
+            max_duration_seconds=60,
+            max_fetched_bytes=1_000_000,
+            max_extracted_records=10_000,
+            max_serialized_result_bytes=1_000_000,
+            max_browser_debug_bytes=1_000_000,
+        ),
+        run_id="run-test",
+        activity=MagicMock(checkpoint=AsyncMock()),
+    )
+
+
+async def _run_targets(
+    context: JobExecutionContext,
+    limiter: BrowserExecutionLimiter,
+    *,
+    job_id: str,
+) -> list[TargetResult]:
+    circuit_breaker = MagicMock()
+    return await _process_all_targets(
+        context=context,
+        job_id=job_id,
+        run_id=f"run-{job_id}",
+        circuit_breaker=circuit_breaker,
+        rate_limiter=AsyncMock(),
+        browser_limiter=limiter,
+        error_store=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_limiter_caps_multiple_targets_in_one_job():
+    limiter = BrowserExecutionLimiter(2)
+    targets = [
+        _concurrent_target(f"https://browser-{index}.example", FetcherType.dynamic)
+        for index in range(4)
+    ]
+    context = _job_execution_context(targets)
+    release = asyncio.Event()
+    first_pair_started = asyncio.Event()
+    active_fetches = 0
+    max_active_fetches = 0
+    total_started = 0
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        nonlocal active_fetches, max_active_fetches, total_started
+        active_fetches += 1
+        total_started += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        if total_started == 2:
+            first_pair_started.set()
+        try:
+            await release.wait()
+            return TargetResult(url=target.url, status=TargetStatus.success)
+        finally:
+            active_fetches -= 1
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape) as scrape:
+        task = asyncio.create_task(_run_targets(context, limiter, job_id="one-job"))
+        await asyncio.wait_for(first_pair_started.wait(), timeout=1)
+
+        assert limiter.active == 2
+        assert scrape.call_count == 2
+
+        release.set()
+        results = await asyncio.wait_for(task, timeout=1)
+
+    assert len(results) == 4
+    assert max_active_fetches == 2
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_limiter_is_shared_across_multiple_jobs():
+    limiter = BrowserExecutionLimiter(2)
+    contexts = [
+        _job_execution_context(
+            [
+                _concurrent_target(
+                    f"https://job-{job_index}-target-{target_index}.example",
+                    FetcherType.stealthy,
+                )
+                for target_index in range(2)
+            ]
+        )
+        for job_index in range(2)
+    ]
+    release = asyncio.Event()
+    first_pair_started = asyncio.Event()
+    active_fetches = 0
+    max_active_fetches = 0
+    total_started = 0
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        nonlocal active_fetches, max_active_fetches, total_started
+        active_fetches += 1
+        total_started += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        if total_started == 2:
+            first_pair_started.set()
+        try:
+            await release.wait()
+            return TargetResult(url=target.url, status=TargetStatus.success)
+        finally:
+            active_fetches -= 1
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+        tasks = [
+            asyncio.create_task(_run_targets(context, limiter, job_id=f"job-{index}"))
+            for index, context in enumerate(contexts)
+        ]
+        await asyncio.wait_for(first_pair_started.wait(), timeout=1)
+        assert limiter.active == 2
+
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+
+    assert [len(job_results) for job_results in results] == [2, 2]
+    assert max_active_fetches == 2
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_basic_target_runs_while_browser_permit_is_exhausted():
+    limiter = BrowserExecutionLimiter(1)
+    dynamic = _concurrent_target("https://browser.example", FetcherType.dynamic)
+    basic = _concurrent_target("https://basic.example", FetcherType.basic)
+    context = _job_execution_context([dynamic, basic])
+    browser_started = asyncio.Event()
+    release_browser = asyncio.Event()
+    basic_completed = asyncio.Event()
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        if target.fetcher is FetcherType.dynamic:
+            browser_started.set()
+            await release_browser.wait()
+        else:
+            basic_completed.set()
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+        task = asyncio.create_task(_run_targets(context, limiter, job_id="mixed"))
+        await asyncio.wait_for(browser_started.wait(), timeout=1)
+        await asyncio.wait_for(basic_completed.wait(), timeout=1)
+        assert limiter.active == 1
+
+        release_browser.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_permit_recovers_after_target_exception():
+    limiter = BrowserExecutionLimiter(1)
+    target = _concurrent_target("https://failing.example", FetcherType.dynamic)
+    context = _job_execution_context([target])
+
+    async def _raise(*_args, **_kwargs) -> TargetResult:
+        raise RuntimeError("browser crashed")
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_raise):
+        results = await _run_targets(context, limiter, job_id="failure")
+
+    assert results[0].status is TargetStatus.failed
+    assert results[0].error_detail == "RuntimeError: browser crashed"
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_permit_recovers_after_target_cancellation():
+    limiter = BrowserExecutionLimiter(1)
+    target = _concurrent_target("https://cancelled.example", FetcherType.stealthy)
+    context = _job_execution_context([target])
+    browser_started = asyncio.Event()
+
+    async def _block(*_args, **_kwargs) -> TargetResult:
+        browser_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_block):
+        task = asyncio.create_task(_run_targets(context, limiter, job_id="cancelled"))
+        await asyncio.wait_for(browser_started.wait(), timeout=1)
+        assert limiter.active == 1
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert limiter.active == 0
 
 
 def test_collect_result_payload_flattens_data_and_errors_in_order():

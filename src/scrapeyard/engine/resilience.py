@@ -8,7 +8,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import BackoffStrategy, OnEmptyAction, RetryConfig, ValidationConfig
+from scrapeyard.queue.cancellation import (
+    CancellationCheckpoint,
+    cancellation_checkpoint,
+)
 
 T = TypeVar("T")
 
@@ -30,10 +35,17 @@ class RetryHandler:
         Retry configuration from the scrape config.
     """
 
-    def __init__(self, config: RetryConfig) -> None:
+    def __init__(
+        self,
+        config: RetryConfig,
+        budget: RunBudget | None = None,
+        cancellation_guard: CancellationCheckpoint | None = None,
+    ) -> None:
         self._max_attempts = config.max_attempts
         self._backoff = config.backoff
         self._backoff_max = config.backoff_max
+        self._budget = budget
+        self._cancellation_guard = cancellation_guard
 
     def _delay(self, attempt: int) -> float:
         """Calculate delay in seconds for the given attempt (0-indexed)."""
@@ -49,12 +61,33 @@ class RetryHandler:
         """Call *fn* with retries on :class:`RetryableError`."""
         last_exc: Exception | None = None
         for attempt in range(self._max_attempts):
+            await cancellation_checkpoint(
+                self._cancellation_guard,
+                "before_retry_attempt",
+            )
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
+                await cancellation_checkpoint(
+                    self._cancellation_guard,
+                    "after_retry_attempt",
+                )
+                return result
             except RetryableError as exc:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
-                    await asyncio.sleep(self._delay(attempt))
+                    await cancellation_checkpoint(
+                        self._cancellation_guard,
+                        "before_retry_backoff",
+                    )
+                    delay = self._delay(attempt)
+                    if self._budget is None:
+                        await asyncio.sleep(delay)
+                    else:
+                        await self._budget.sleep(delay)
+                    await cancellation_checkpoint(
+                        self._cancellation_guard,
+                        "after_retry_backoff",
+                    )
         if last_exc is None:
             raise RuntimeError("RetryHandler exhausted attempts without catching an exception")
         raise last_exc

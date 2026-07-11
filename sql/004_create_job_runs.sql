@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS job_runs (
     trigger       TEXT NOT NULL,
     config_hash   TEXT NOT NULL,
     started_at    TEXT NOT NULL,
+    heartbeat_at  TEXT NOT NULL,
     completed_at  TEXT,
     record_count  INTEGER,
     error_count   INTEGER NOT NULL DEFAULT 0

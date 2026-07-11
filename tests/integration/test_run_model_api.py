@@ -279,7 +279,6 @@ async def test_delete_job_with_delete_results(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_nonexistent_job_returns_404(client):
+async def test_delete_nonexistent_job_is_idempotent(client):
     resp = await client.delete("/jobs/does-not-exist")
-    assert resp.status_code == 404
-    assert "not found" in resp.json()["error"]
+    assert resp.status_code == 204

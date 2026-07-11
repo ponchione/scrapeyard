@@ -13,6 +13,7 @@ from scrapeyard.common.paths import MAX_PATH_PART_BYTES, safe_path_part
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import ExecutionMode, FetcherType
 from scrapeyard.models.job import Job
+from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import JobStore, ResultStore
@@ -44,19 +45,23 @@ async def submit_scrape_job(
         job_store=job_store,
     )
 
-    has_browser_target = any(target.fetcher != FetcherType.basic for target in config.resolved_targets())
+    delivery = queue_delivery_metadata(config)
     try:
         queued_job = await worker_pool.enqueue(
             job.job_id,
             config_yaml,
-            config.execution.priority.value,
-            needs_browser=has_browser_target,
+            delivery.priority,
+            needs_browser=delivery.needs_browser,
             run_id=job.current_run_id,
             trigger="adhoc",
         )
     except Exception:
         with suppress(Exception):
-            await job_store.delete_job(job.job_id)
+            if job.current_run_id is not None:
+                await job_store.rollback_queued_submission(
+                    job.job_id,
+                    job.current_run_id,
+                )
         raise
 
     if not should_wait_for_completion(config):
@@ -70,11 +75,14 @@ async def submit_scrape_job(
     if not completed:
         return ScrapeSubmission(job_id=job.job_id, status="queued", completed=False, results=None)
 
+    updated_job = await job_store.get_job(job.job_id)
     try:
-        payload = await result_store.get_result(job.job_id)
+        payload = await result_store.get_result(
+            job.job_id,
+            run_id=updated_job.current_run_id,
+        )
     except KeyError:
         payload = None
-    updated_job = await job_store.get_job(job.job_id)
     return ScrapeSubmission(
         job_id=job.job_id,
         status=updated_job.status.value,

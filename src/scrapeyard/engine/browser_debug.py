@@ -9,7 +9,7 @@ import re
 from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from scrapling import PlayWrightFetcher, StealthyFetcher
 from scrapling.engines import camo as scrapling_camo_engine
@@ -19,6 +19,7 @@ from scrapling.engines.toolbelt.navigation import (
     async_intercept_route as scrapling_async_intercept_route,
 )
 
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
     BrowserActionConfig,
@@ -29,6 +30,11 @@ from scrapeyard.config.schema import (
 )
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_sensitive_mapping
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
+from scrapeyard.storage.filesystem import (
+    cleanup_safe_to_thread,
+    ensure_directory,
+    write_bytes_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,11 +313,20 @@ async def _run_browser_action(page: Any, action: BrowserActionConfig) -> None:
             await _run_post_action_waits(page, action)
 
 
-async def run_browser_actions(page: Any, actions: list[BrowserActionConfig]) -> None:
+async def run_browser_actions(
+    page: Any,
+    actions: list[BrowserActionConfig],
+    budget: RunBudget | None = None,
+) -> None:
     """Execute configured browser actions in order."""
     for action in actions:
         try:
-            await _run_browser_action(page, action)
+            if budget is None:
+                await _run_browser_action(page, action)
+            else:
+                await budget.wait_for(_run_browser_action(page, action))
+        except BudgetExceeded:
+            raise
         except Exception as exc:
             if not action.optional:
                 raise
@@ -356,6 +371,114 @@ def response_title(page: Any) -> str | None:
     return None
 
 
+def _debug_limit_diagnostic(
+    budget: RunBudget,
+    *,
+    artifact: str,
+    requested: int,
+    stored: int,
+    action: str,
+) -> dict[str, Any]:
+    return {
+        "limit_name": BudgetLimitName.browser_debug_bytes.value,
+        "configured_limit": budget.max_browser_debug_bytes,
+        "requested_amount": requested,
+        "stored_amount": stored,
+        "artifact": artifact,
+        "action": action,
+    }
+
+
+async def _capture_html_excerpt(
+    page: Any,
+    capture: dict[str, Any],
+    budget: RunBudget | None,
+) -> None:
+    content_awaitable = page.content()
+    content = (
+        await content_awaitable
+        if budget is None
+        else await budget.wait_for(content_awaitable)
+    )
+    excerpt = truncate_text(content)
+    payload = excerpt.encode("utf-8")
+    capture["_html_excerpt_captured"] = True
+    if budget is None:
+        capture["html_excerpt"] = excerpt
+        return
+
+    granted = await budget.reserve_browser_debug_bytes(len(payload), allow_partial=True)
+    if granted == len(payload):
+        capture["html_excerpt"] = excerpt
+        return
+
+    capture.setdefault("debug_artifact_limits", []).append(
+        _debug_limit_diagnostic(
+            budget,
+            artifact="html_excerpt",
+            requested=len(payload),
+            stored=granted,
+            action="omitted" if granted == 0 else "truncated",
+        )
+    )
+    capture["html_excerpt_omitted"] = granted == 0
+    capture["html_excerpt"] = (
+        payload[:granted].decode("utf-8", errors="ignore") or None
+        if granted > 0
+        else None
+    )
+
+
+async def _capture_screenshot(
+    page: Any,
+    *,
+    fetcher_type: FetcherType,
+    artifacts_dir: str,
+    capture: dict[str, Any],
+    budget: RunBudget | None,
+) -> None:
+    screenshot_awaitable = page.screenshot(full_page=True)
+    screenshot = (
+        await screenshot_awaitable
+        if budget is None
+        else await budget.wait_for(screenshot_awaitable)
+    )
+    if not isinstance(screenshot, (bytes, bytearray, memoryview)):
+        capture["screenshot_path"] = None
+        capture["screenshot_capture_error"] = {
+            "reason": "browser API did not return screenshot bytes"
+        }
+        return
+
+    payload = bytes(screenshot)
+    granted = len(payload)
+    if budget is not None:
+        granted = await budget.reserve_browser_debug_bytes(len(payload))
+        if granted == 0 and payload:
+            capture["screenshot_path"] = None
+            capture.setdefault("debug_artifact_limits", []).append(
+                _debug_limit_diagnostic(
+                    budget,
+                    artifact="screenshot",
+                    requested=len(payload),
+                    stored=0,
+                    action="omitted",
+                )
+            )
+            return
+
+    artifacts_path = Path(artifacts_dir)
+    screenshot_path = artifacts_path / f"{fetcher_type.value}-main.png"
+    try:
+        await cleanup_safe_to_thread(ensure_directory, artifacts_path)
+        await cleanup_safe_to_thread(write_bytes_file, screenshot_path, payload)
+    except BaseException:
+        if budget is not None and granted:
+            await budget.release_browser_debug_bytes(granted)
+        raise
+    capture["screenshot_path"] = str(screenshot_path)
+
+
 async def capture_browser_state(
     page: Any,
     *,
@@ -363,6 +486,7 @@ async def capture_browser_state(
     fetcher_type: FetcherType,
     artifacts_dir: str | None,
     capture: dict[str, Any],
+    budget: RunBudget | None = None,
 ) -> Any:
     capture.setdefault("console_messages", [])
     capture.setdefault("request_failures", [])
@@ -370,9 +494,19 @@ async def capture_browser_state(
     _register_request_failure_capture(page, capture)
     if browser is not None and browser.click_selector:
         try:
-            await _click_selector(page, browser.click_selector, browser.click_timeout_ms)
+            click = _click_selector(page, browser.click_selector, browser.click_timeout_ms)
+            if budget is None:
+                await click
+            else:
+                await budget.wait_for(click)
             if browser.click_wait_ms is not None:
-                await _wait_for_timeout(page, browser.click_wait_ms)
+                wait = _wait_for_timeout(page, browser.click_wait_ms)
+                if budget is None:
+                    await wait
+                else:
+                    await budget.wait_for(wait)
+        except BudgetExceeded:
+            raise
         except Exception as exc:
             logger.info(
                 "Optional browser click_selector did not resolve or click: %s (%s: %s)",
@@ -381,16 +515,25 @@ async def capture_browser_state(
                 _exception_text(exc),
             )
     if browser is not None and browser.actions:
-        await run_browser_actions(page, browser.actions)
+        await run_browser_actions(page, browser.actions, budget=budget)
     capture["final_url"] = getattr(page, "url", None)
     if isinstance(capture["final_url"], str) and capture["final_url"]:
-        await asyncio.to_thread(
+        validate_url = asyncio.to_thread(
             assert_public_url,
             capture["final_url"],
             allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
         )
+        if budget is None:
+            await validate_url
+        else:
+            await budget.wait_for(validate_url)
     try:
-        capture["page_title"] = await page.title()
+        title = page.title()
+        capture["page_title"] = (
+            await title if budget is None else await budget.wait_for(title)
+        )
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         logger.debug(
             "Failed to capture browser page title: %s: %s",
@@ -400,7 +543,9 @@ async def capture_browser_state(
         )
         capture["page_title"] = None
     try:
-        capture["html_excerpt"] = truncate_text(await page.content())
+        await _capture_html_excerpt(page, capture, budget)
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         logger.debug(
             "Failed to capture browser HTML excerpt: %s: %s",
@@ -409,17 +554,22 @@ async def capture_browser_state(
             exc_info=exc,
         )
         capture["html_excerpt"] = None
+        capture["_html_excerpt_captured"] = True
     if artifacts_dir is not None:
-        artifacts_path = Path(artifacts_dir)
-        artifacts_path.mkdir(parents=True, exist_ok=True)
-        screenshot_path = artifacts_path / f"{fetcher_type.value}-main.png"
         try:
-            await page.screenshot(path=str(screenshot_path), full_page=True)
-            capture["screenshot_path"] = str(screenshot_path)
+            await _capture_screenshot(
+                page,
+                fetcher_type=fetcher_type,
+                artifacts_dir=artifacts_dir,
+                capture=capture,
+                budget=budget,
+            )
+        except BudgetExceeded:
+            raise
         except Exception as exc:
             logger.debug(
-                "Failed to capture browser screenshot at %s: %s: %s",
-                screenshot_path,
+                "Failed to capture browser screenshot in %s: %s: %s",
+                artifacts_dir,
                 type(exc).__name__,
                 _exception_text(exc),
                 exc_info=exc,
@@ -441,6 +591,7 @@ async def fetch_browser_response(
     artifacts_dir: str | None,
     *,
     require_resolved_dns: bool = False,
+    budget: RunBudget | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     capture: dict[str, Any] = {}
     browser = target_browser_config(target)
@@ -453,7 +604,12 @@ async def fetch_browser_response(
                 fetcher_type=fetcher_type,
                 artifacts_dir=artifacts_dir,
                 capture=capture,
+                budget=budget,
             )
+        except BudgetExceeded as exc:
+            capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
+            await _close_page_safely(page)
+            raise
         except Exception as exc:
             message = truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS)
             capture["page_action_error"] = {
@@ -476,14 +632,17 @@ async def fetch_browser_response(
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
     try:
-        response = await fetcher_cls.async_fetch(url, **call_kwargs)
+        fetch = fetcher_cls.async_fetch(url, **call_kwargs)
+        response = await fetch if budget is None else await budget.wait_for(fetch)
     finally:
         _BROWSER_REQUIRE_RESOLVED_DNS.reset(dns_token)
         _BROWSER_BLOCK_RESOURCES.reset(guard_token)
     action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)
     if action_exc is not None:
+        if isinstance(action_exc, BudgetExceeded):
+            raise action_exc
         if isinstance(action_exc, UnsafeURLError):
-            action_exc.debug = capture
+            cast(Any, action_exc).debug = capture
             raise action_exc
         if isinstance(action_exc, BrowserPageActionError):
             raise action_exc
@@ -502,4 +661,8 @@ def populate_fetch_debug(debug: dict[str, Any], response: Any, url: str) -> None
         response_url = None
     debug["final_url"] = response_url or debug.get("final_url") or url
     debug["page_title"] = debug.get("page_title") or response_title(response)
-    debug["html_excerpt"] = debug.get("html_excerpt") or (truncate_text(response_text(response)) or None)
+    excerpt_captured = bool(debug.pop("_html_excerpt_captured", False))
+    if not excerpt_captured and not debug.get("html_excerpt_omitted"):
+        debug["html_excerpt"] = debug.get("html_excerpt") or (
+            truncate_text(response_text(response)) or None
+        )

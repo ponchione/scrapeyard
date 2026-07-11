@@ -21,7 +21,13 @@ from scrapeyard.queue.worker import _run_superseded, scrape_task
 from scrapeyard.storage.database import init_db, reset_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
-from tests.unit.worker_helpers import make_job, make_config_mock, SIMPLE_YAML
+from scrapeyard.storage.types import RunOwnershipError
+from tests.unit.worker_helpers import (
+    SIMPLE_YAML,
+    make_config_mock,
+    make_job,
+    make_settings_mock,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,10 +73,10 @@ class TestRunSuperseded:
         job = make_job(current_run_id="run-1")
         assert _run_superseded(job, "run-2") is True
 
-    def test_returns_true_when_job_has_no_current_run(self):
-        """job.current_run_id is None but run_id is set -> superseded."""
+    def test_returns_false_when_job_has_no_current_run(self):
+        """A generated run may atomically reserve an unassigned queued job."""
         job = make_job(current_run_id=None)
-        assert _run_superseded(job, "run-1") is True
+        assert _run_superseded(job, "run-1") is False
 
 
 def test_build_run_paths_skips_artifacts_when_browser_debug_disabled(tmp_path):
@@ -121,10 +127,8 @@ class TestRunCreation:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -179,10 +183,8 @@ class TestRunCreation:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -209,15 +211,16 @@ class TestRunCreation:
         reset_db()
 
     @pytest.mark.asyncio
-    async def test_no_run_id_skips_insert(self, tmp_path):
-        """When run_id is None, no job_runs row is created."""
+    async def test_no_run_id_generates_and_claims_owned_run(self, tmp_path):
+        """A legacy delivery without run_id reserves and claims a generated ID."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
         job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job_store.queue_run.return_value = True
+        job_store.claim_run.return_value = True
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],
@@ -226,10 +229,8 @@ class TestRunCreation:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -243,8 +244,11 @@ class TestRunCreation:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        # create_run should not have been called.
-        job_store.create_run.assert_not_called()
+        job_store.queue_run.assert_awaited_once()
+        generated_run_id = job_store.queue_run.await_args.kwargs["new_run_id"]
+        assert generated_run_id
+        assert job_store.claim_run.await_args.args[0] == generated_run_id
+        assert job_store.finalize_owned_run.await_args.args[1] == generated_run_id
 
         reset_db()
 
@@ -273,10 +277,8 @@ class TestRunFinalization:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -342,10 +344,8 @@ class TestRunFinalization:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -390,10 +390,8 @@ class TestRunFinalization:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=fail_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -424,15 +422,16 @@ class TestRunFinalization:
         reset_db()
 
     @pytest.mark.asyncio
-    async def test_no_finalization_when_run_id_is_none(self, tmp_path):
-        """When run_id is None, no finalization happens."""
+    async def test_generated_run_id_is_finalized_when_delivery_omits_id(self, tmp_path):
+        """The generated fallback run remains ownership-checked through finalization."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
         job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job_store.queue_run.return_value = True
+        job_store.claim_run.return_value = True
 
         success_result = TargetResult(
             url="http://example.com", status="success",
@@ -442,10 +441,8 @@ class TestRunFinalization:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=success_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -459,8 +456,9 @@ class TestRunFinalization:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        # finalize_run and count_errors_for_run should not have been called.
-        job_store.finalize_run.assert_not_called()
+        job_store.finalize_owned_run.assert_awaited_once()
+        generated_run_id = job_store.queue_run.await_args.kwargs["new_run_id"]
+        assert job_store.finalize_owned_run.await_args.args[1] == generated_run_id
 
         reset_db()
 
@@ -477,39 +475,19 @@ class TestRunCrashHandling:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        # Pre-insert a running row (simulating the creation step completing
-        # before the crash occurs after it).
-        async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
-            await db.execute(
-                "INSERT INTO job_runs "
-                "(run_id, job_id, status, trigger, config_hash, started_at) "
-                "VALUES (?, ?, 'running', 'adhoc', 'abc', '2024-01-01T00:00:00')",
-                ("run-crash", "job-1"),
-            )
-            await db.commit()
-
-        job = make_job()
+        job = make_job(current_run_id="run-crash")
         job_store = SQLiteJobStore()
         await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
+        claimed = await job_store.claim_run(
+            "run-crash",
+            "job-1",
+            "adhoc",
+            "abc",
+            job.created_at,
+        )
+        assert claimed is True
 
-        # Make load_config raise so we hit the crash handler.
-        with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
-             patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
-                adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
-            )
-
-            await scrape_task(
-                "job-1", SIMPLE_YAML,
-                run_id="run-crash",
-                job_store=job_store,
-                result_store=AsyncMock(),
-                error_store=AsyncMock(),
-                circuit_breaker=MagicMock(),
-                rate_limiter=LocalDomainRateLimiter(),
-            )
+        await handle_crash("job-1", "run-crash", job_store)
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
             cursor = await db.execute(
@@ -531,40 +509,26 @@ class TestRunCrashHandling:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        # Pre-insert a row that is already 'complete' — the crash handler
-        # should NOT overwrite it.
+        job = make_job(
+            status="complete",
+            current_run_id="run-no-overwrite",
+        )
+        job_store = SQLiteJobStore()
+        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
+
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
             await db.execute(
                 "INSERT INTO job_runs "
-                "(run_id, job_id, status, trigger, config_hash, started_at, "
+                "(run_id, job_id, status, trigger, config_hash, started_at, heartbeat_at, "
                 "completed_at, record_count, error_count) "
                 "VALUES (?, ?, 'complete', 'adhoc', 'abc', "
-                "'2024-01-01T00:00:00', '2024-01-01T00:01:00', 5, 0)",
+                "'2024-01-01T00:00:00', '2024-01-01T00:00:30', "
+                "'2024-01-01T00:01:00', 5, 0)",
                 ("run-no-overwrite", "job-1"),
             )
             await db.commit()
 
-        job = make_job()
-        job_store = SQLiteJobStore()
-        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
-
-        with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
-             patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
-                adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
-            )
-
-            await scrape_task(
-                "job-1", SIMPLE_YAML,
-                run_id="run-no-overwrite",
-                job_store=job_store,
-                result_store=AsyncMock(),
-                error_store=AsyncMock(),
-                circuit_breaker=MagicMock(),
-                rate_limiter=LocalDomainRateLimiter(),
-            )
+        await handle_crash("job-1", "run-no-overwrite", job_store)
 
         async with aiosqlite.connect(tmp_path / "db" / "jobs.db") as db:
             cursor = await db.execute(
@@ -593,10 +557,8 @@ class TestRunCrashHandling:
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
 
             await scrape_task(
@@ -609,8 +571,7 @@ class TestRunCrashHandling:
                 rate_limiter=LocalDomainRateLimiter(),
             )
 
-        # fail_run should not be called when run_id is None.
-        job_store.fail_run.assert_not_called()
+        job_store.fail_owned_run.assert_not_awaited()
 
         reset_db()
 
@@ -624,15 +585,12 @@ class TestRunCrashHandling:
         job_store = AsyncMock()
         job_store.get_job.return_value = job
         job_store.update_job_status = AsyncMock()
-        # Make fail_run raise to simulate DB failure.
-        job_store.fail_run.side_effect = RuntimeError("DB is dead")
+        job_store.fail_owned_run.side_effect = RuntimeError("DB is dead")
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
 
             # Should not raise.
@@ -649,12 +607,17 @@ class TestRunCrashHandling:
     @pytest.mark.asyncio
     async def test_crash_handler_does_not_fail_superseded_job(self):
         job_store = AsyncMock()
-        job_store.get_job.return_value = make_job(current_run_id="new-run")
+        job_store.fail_owned_run.side_effect = RunOwnershipError(
+            "fail",
+            "job-1",
+            "old-run",
+        )
 
         await handle_crash("job-1", "old-run", job_store)
 
         job_store.update_job_status.assert_not_awaited()
-        job_store.fail_run.assert_awaited_once_with("old-run")
+        job_store.fail_owned_run.assert_awaited_once()
+        assert job_store.fail_owned_run.await_args.args[:2] == ("job-1", "old-run")
 
 
 # ---------------------------------------------------------------------------
@@ -691,10 +654,8 @@ class TestErrorLoggingWithRunId:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=fail_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
@@ -716,15 +677,16 @@ class TestErrorLoggingWithRunId:
         reset_db()
 
     @pytest.mark.asyncio
-    async def test_errors_use_empty_string_when_run_id_none(self, tmp_path):
-        """When run_id is None, errors use empty string as run_id."""
+    async def test_errors_use_generated_owned_id_when_delivery_omits_run_id(self, tmp_path):
+        """Every executing delivery tags errors with its generated owned run ID."""
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
         job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
+        job_store.queue_run.return_value = True
+        job_store.claim_run.return_value = True
 
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []
@@ -743,25 +705,27 @@ class TestErrorLoggingWithRunId:
         with patch("scrapeyard.queue.worker.load_config") as mock_load, \
              patch("scrapeyard.queue.worker.scrape_target", return_value=fail_result), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
+            mock_settings.return_value = make_settings_mock(
                 adaptive_dir=str(tmp_path / "adaptive"),
-                workers_running_lease_seconds=300,
-                proxy_url="",
             )
             mock_load.return_value = make_config_mock()
 
-            await scrape_task(
-                "job-1", SIMPLE_YAML,
-                run_id=None,
-                job_store=job_store,
-                result_store=AsyncMock(),
-                error_store=error_store,
-                circuit_breaker=MagicMock(),
-                rate_limiter=LocalDomainRateLimiter(),
-            )
+            with patch(
+                "scrapeyard.queue.worker.generate_run_id",
+                return_value="run-generated",
+            ):
+                await scrape_task(
+                    "job-1", SIMPLE_YAML,
+                    run_id=None,
+                    job_store=job_store,
+                    result_store=AsyncMock(),
+                    error_store=error_store,
+                    circuit_breaker=MagicMock(),
+                    rate_limiter=LocalDomainRateLimiter(),
+                )
 
         assert len(logged_errors) > 0
         for record in logged_errors:
-            assert record.run_id == ""
+            assert record.run_id == "run-generated"
 
         reset_db()
