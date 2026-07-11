@@ -453,7 +453,7 @@ class SQLiteWebhookOutboxStore:
         if expected_attempts is None:
             assignments.extend(["attempts = attempts + ?", "last_attempt_at = ?"])
             params.extend([attempts, fmt_dt(delivered_at)])
-        return await self._terminal_update(
+        return await self._pending_update(
             delivery_id,
             assignments=assignments,
             params=params,
@@ -492,27 +492,6 @@ class SQLiteWebhookOutboxStore:
             expected_attempts=expected_attempts,
         )
 
-    async def mark_permanent_failure(
-        self,
-        delivery_id: str,
-        *,
-        attempted_at: datetime,
-        last_error: str,
-        reason: WebhookFailureReason = WebhookFailureReason.non_retryable_failure,
-        expected_attempts: int | None = None,
-        attempts: int = 1,
-    ) -> bool:
-        """Compatibility wrapper for a terminal failure after an attempt."""
-
-        return await self.mark_failed(
-            delivery_id,
-            failed_at=attempted_at,
-            reason=reason,
-            last_error=last_error,
-            expected_attempts=expected_attempts,
-            attempts=attempts,
-        )
-
     async def mark_failed(
         self,
         delivery_id: str,
@@ -541,7 +520,7 @@ class SQLiteWebhookOutboxStore:
         if expected_attempts is None and attempts:
             assignments.extend(["attempts = attempts + ?", "last_attempt_at = ?"])
             params.extend([attempts, fmt_dt(failed_at)])
-        return await self._terminal_update(
+        return await self._pending_update(
             delivery_id,
             assignments=assignments,
             params=params,
@@ -628,21 +607,6 @@ class SQLiteWebhookOutboxStore:
         return await self._execute_update(
             f"UPDATE webhook_deliveries SET {', '.join(assignments)} WHERE {where}",
             params,
-        )
-
-    async def _terminal_update(
-        self,
-        delivery_id: str,
-        *,
-        assignments: list[str],
-        params: list[object],
-        expected_attempts: int | None,
-    ) -> bool:
-        return await self._pending_update(
-            delivery_id,
-            assignments=assignments,
-            params=params,
-            expected_attempts=expected_attempts,
         )
 
     async def _execute_update(

@@ -23,7 +23,6 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -65,7 +64,6 @@ async def test_all_or_nothing_fails_on_any_failure(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -113,7 +111,6 @@ async def test_continue_completes_even_with_failures(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])
@@ -156,7 +153,6 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(
         url="http://a.com", status="success", data=[{"title": "A"}, {"title": "B"}]
@@ -201,7 +197,6 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     success_result = TargetResult(url="http://a.com", status="success", data=[{"title": "A"}])
     fail_result = TargetResult(url="http://b.com", status="failed", errors=["timeout"])

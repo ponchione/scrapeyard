@@ -34,15 +34,7 @@ class JobStore(Protocol):
 
     async def save_job(self, job: Job) -> str: ...
 
-    async def update_job(self, job: Job) -> None: ...
-
-    async def update_job_status(self, job: Job) -> None: ...
-
-    async def update_job_schedule_state(self, job: Job) -> None: ...
-
     async def get_job(self, job_id: str) -> Job: ...
-
-    async def list_jobs(self, project: str | None = None) -> list[Job]: ...
 
     async def rollback_queued_submission(self, job_id: str, run_id: str) -> bool:
         """Remove only a never-accepted queued submission after enqueue failure."""
@@ -372,17 +364,6 @@ class WebhookOutboxStore(Protocol):
         attempted_at: datetime,
         next_attempt_at: datetime,
         last_error: str,
-        expected_attempts: int | None = None,
-        attempts: int = 1,
-    ) -> bool: ...
-
-    async def mark_permanent_failure(
-        self,
-        delivery_id: str,
-        *,
-        attempted_at: datetime,
-        last_error: str,
-        reason: WebhookFailureReason = WebhookFailureReason.non_retryable_failure,
         expected_attempts: int | None = None,
         attempts: int = 1,
     ) -> bool: ...

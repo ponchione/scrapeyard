@@ -127,7 +127,6 @@ webhook:
     assert intent is not None
     assert intent.event == "job.failed"
     assert intent.payload["delivery_id"] == intent.delivery_id
-    job_store.update_job_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -184,4 +183,3 @@ execution:
         0,
         1,
     )
-    job_store.update_job_status.assert_not_awaited()

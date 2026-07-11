@@ -109,15 +109,16 @@ async def test_mark_retryable_failure_keeps_delivery_pending_with_backoff(tmp_pa
     await close_db()
 
 
-async def test_mark_permanent_failure_is_inspectable_and_not_due(tmp_path):
+async def test_mark_failed_is_inspectable_and_not_due(tmp_path):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     await store.enqueue_delivery(_delivery(), now=now)
 
-    await store.mark_permanent_failure(
+    await store.mark_failed(
         "delivery-1",
-        attempted_at=now + timedelta(seconds=1),
+        failed_at=now + timedelta(seconds=1),
+        reason=WebhookFailureReason.non_retryable_failure,
         last_error="HTTP 404",
         attempts=1,
     )
@@ -329,9 +330,9 @@ async def test_outbox_summary_counts_oldest_age_and_attempt_distribution(tmp_pat
     await store.enqueue_delivery(_delivery("delivered"), now=now)
     await store.mark_delivered("delivered", delivered_at=now)
     await store.enqueue_delivery(_delivery("failed"), now=now)
-    await store.mark_permanent_failure(
+    await store.mark_failed(
         "failed",
-        attempted_at=now,
+        failed_at=now,
         last_error="HTTP 404",
         reason=WebhookFailureReason.permanent_http_response,
     )
@@ -354,9 +355,9 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
     for delivery_id in ("delivered", "failed", "pending"):
         await store.enqueue_delivery(_delivery(delivery_id), now=now)
     await store.mark_delivered("delivered", delivered_at=now + timedelta(seconds=1))
-    await store.mark_permanent_failure(
+    await store.mark_failed(
         "failed",
-        attempted_at=now + timedelta(seconds=1),
+        failed_at=now + timedelta(seconds=1),
         last_error="HTTP 400 with sensitive context",
         reason=WebhookFailureReason.permanent_http_response,
     )

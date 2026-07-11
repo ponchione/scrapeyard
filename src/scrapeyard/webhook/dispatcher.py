@@ -18,16 +18,10 @@ from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 from scrapeyard.storage.protocols import WebhookOutboxStore
-from scrapeyard.storage.webhook_outbox import (
-    WebhookDelivery,
-    WebhookDeliveryCreate,
-    WebhookFailureReason,
-)
-from scrapeyard.webhook.payload import webhook_delivery_from_payload
+from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookFailureReason
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_BASE = 1.0
 _DEFAULT_BACKOFF_MAX = 30.0
 _DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
@@ -75,43 +69,25 @@ class WebhookDispatchResult:
     retry_after_seconds: float | None = None
 
 
-class WebhookDispatcher(Protocol):
-    """Async interface for dispatching webhook notifications."""
-
-    async def send_once(
-        self,
-        config: WebhookConfig | WebhookRequestConfig,
-        payload: dict[str, Any],
-    ) -> WebhookDispatchResult: ...
-
-    async def dispatch(
-        self,
-        config: WebhookConfig | WebhookRequestConfig,
-        payload: dict[str, Any],
-    ) -> WebhookDispatchResult: ...
-
-    async def submit(self, config: WebhookConfig, payload: dict[str, Any]) -> None: ...
+class WebhookNotifier(Protocol):
+    """Worker-facing interface for waking already-durable webhook intents."""
 
     async def notify(self) -> None:
         """Wake processing for an intent already committed in jobs.db."""
         ...
-
-    async def shutdown(self, timeout: float | None = None) -> None: ...
 
 
 class HttpWebhookDispatcher:
     """Durable dispatcher with one coordinator and a fixed worker pool.
 
     Persistent delivery limits apply to total attempts, including the first.
-    Direct :meth:`dispatch` calls retain their separate in-memory ``max_retries``
-    behavior for diagnostics and unit-level use.
+    HTTP attempts are made only for durable outbox rows.
     """
 
     def __init__(
         self,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
         *,
-        max_retries: int = _DEFAULT_MAX_RETRIES,
         backoff_base: float = _DEFAULT_BACKOFF_BASE,
         backoff_max: float = _DEFAULT_BACKOFF_MAX,
         outbox_store: WebhookOutboxStore | None = None,
@@ -136,7 +112,6 @@ class HttpWebhookDispatcher:
         self._accepting_tasks = True
         self._started = False
         self._stopping = False
-        self._max_retries = max_retries
         self._backoff_base = backoff_base
         self._backoff_max = backoff_max
         self._outbox_store = outbox_store
@@ -382,78 +357,6 @@ class HttpWebhookDispatcher:
                 WebhookDispatchReason.transport_failure,
             )
 
-    async def dispatch(
-        self,
-        config: WebhookConfig | WebhookRequestConfig,
-        payload: dict[str, Any],
-    ) -> WebhookDispatchResult:
-        """Immediately dispatch with the legacy bounded in-memory retry loop."""
-
-        last_error: str | None = None
-        reason_code: WebhookDispatchReason | None = None
-        for attempt in range(1 + self._max_retries):
-            attempts_so_far = attempt + 1
-            result = await self.send_once(config, payload)
-            if result.status is WebhookDispatchStatus.delivered:
-                return WebhookDispatchResult(
-                    WebhookDispatchStatus.delivered,
-                    attempts_so_far,
-                )
-            if result.status is WebhookDispatchStatus.permanent_failed:
-                return WebhookDispatchResult(
-                    WebhookDispatchStatus.permanent_failed,
-                    attempts_so_far,
-                    result.last_error,
-                    result.reason_code,
-                )
-
-            last_error = result.last_error
-            reason_code = result.reason_code
-            if attempt < self._max_retries:
-                delay = max(
-                    self._backoff_delay(attempt),
-                    result.retry_after_seconds or 0.0,
-                )
-                await asyncio.sleep(delay)
-
-        logger.error(
-            "Webhook direct dispatch exhausted attempts=%s reason_code=%s",
-            1 + self._max_retries,
-            None if reason_code is None else reason_code.value,
-        )
-        return WebhookDispatchResult(
-            WebhookDispatchStatus.retryable_failed,
-            1 + self._max_retries,
-            last_error,
-            reason_code,
-        )
-
-    async def submit(self, config: WebhookConfig, payload: dict[str, Any]) -> None:
-        """Durably submit and wake bounded processing without awaiting HTTP."""
-
-        if self._outbox_store is None and not self._accepting_tasks:
-            return
-        if self._outbox_store is None:
-            raise RuntimeError("HttpWebhookDispatcher.submit() requires an outbox_store")
-
-        now = utc_now()
-        delivery = self._build_delivery(config, payload, now)
-        await self._outbox_store.enqueue_delivery(delivery, now=now)
-        if not self._accepting_tasks:
-            logger.info(
-                "Webhook submission persisted during shutdown "
-                "delivery_id=%s job_id=%s run_id=%s event=%s "
-                "recovery_action=leave_pending_for_restart",
-                delivery.delivery_id,
-                delivery.job_id,
-                delivery.run_id,
-                delivery.event,
-            )
-            return
-        if not self._started:
-            await self.startup()
-        self._wake_event.set()
-
     async def notify(self) -> None:
         """Wake bounded workers without recreating an already-durable intent."""
 
@@ -532,14 +435,6 @@ class HttpWebhookDispatcher:
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-
-    def _build_delivery(
-        self,
-        config: WebhookConfig,
-        payload: dict[str, Any],
-        now: datetime,
-    ) -> WebhookDeliveryCreate:
-        return webhook_delivery_from_payload(config, payload, next_attempt_at=now)
 
     async def _coordinator_loop(self) -> None:
         assert self._outbox_store is not None

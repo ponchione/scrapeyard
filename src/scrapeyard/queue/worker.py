@@ -54,7 +54,7 @@ from scrapeyard.queue.validation_policy import apply_validation
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.types import RunOwnershipError, SaveResultMeta
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
-from scrapeyard.webhook.dispatcher import WebhookDispatcher
+from scrapeyard.webhook.dispatcher import WebhookNotifier
 from scrapeyard.webhook.payload import build_terminal_webhook_delivery
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ async def scrape_task(
     circuit_breaker: CircuitBreaker,
     rate_limiter: DomainRateLimiter,
     browser_limiter: BrowserExecutionLimiter | None = None,
-    webhook_dispatcher: WebhookDispatcher | None = None,
+    webhook_dispatcher: WebhookNotifier | None = None,
 ) -> None:
     """Execute a complete scrape job."""
     context: JobExecutionContext | None = None
@@ -355,7 +355,7 @@ async def _handle_execution_crash(
     run_id: str | None,
     job_store: JobStore,
     error_store: ErrorStore,
-    webhook_dispatcher: WebhookDispatcher | None,
+    webhook_dispatcher: WebhookNotifier | None,
 ) -> None:
     failed_at = utc_now()
     error_count = await _error_count_snapshot(
@@ -536,7 +536,7 @@ async def _finalize_job_execution(
     job_store: JobStore,
     result_store: ResultStore,
     error_store: ErrorStore,
-    webhook_dispatcher: WebhookDispatcher | None,
+    webhook_dispatcher: WebhookNotifier | None,
 ) -> None:
     await context.activity.checkpoint("before_terminal_finalization")
     completed_at = utc_now()
@@ -593,7 +593,7 @@ async def _handle_budget_exhaustion(
     job_store: JobStore,
     result_store: ResultStore,
     error_store: ErrorStore,
-    webhook_dispatcher: WebhookDispatcher | None,
+    webhook_dispatcher: WebhookNotifier | None,
     heartbeat: RunHeartbeat | None,
 ) -> None:
     """Persist a controlled, queryable failed outcome for any hard run limit."""
