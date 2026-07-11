@@ -372,12 +372,11 @@ async def db_transaction(
 
 
 async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
-    """Add the item-03 lease column to databases created before heartbeats.
+    """Add the lease column when baselining a known pre-ledger database.
 
-    Initialization intentionally replays the repository's idempotent SQL files.
-    SQLite has no portable ``ADD COLUMN IF NOT EXISTS`` form, so this narrow
-    compatibility check upgrades only the required column without introducing
-    the general migration framework reserved for audit item 10.
+    SQLite has no portable ``ADD COLUMN IF NOT EXISTS`` form, so legacy
+    compatibility upgrades use this narrow schema check before the migration
+    history is recorded.
     """
     cursor = await db.execute("PRAGMA table_info(job_runs)")
     columns = {row[1] for row in await cursor.fetchall()}
@@ -387,11 +386,7 @@ async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
 
 
 async def _ensure_webhook_outbox_item06_columns(db: aiosqlite.Connection) -> None:
-    """Apply the narrow item-06 outbox compatibility upgrade.
-
-    This intentionally mirrors the item-03 column check instead of introducing
-    the general migration ledger reserved for audit item 10.
-    """
+    """Apply the narrow outbox upgrade needed before legacy baselining."""
 
     cursor = await db.execute("PRAGMA table_info(webhook_deliveries)")
     columns = {row[1] for row in await cursor.fetchall()}
@@ -418,11 +413,7 @@ async def _ensure_webhook_outbox_item06_columns(db: aiosqlite.Connection) -> Non
 
 
 async def _ensure_jobs_item07_columns(db: aiosqlite.Connection) -> None:
-    """Apply only the cancellation/deletion columns required by audit item 07.
-
-    This remains a narrow idempotent compatibility check and deliberately does
-    not introduce the versioned migration ledger reserved for audit item 10.
-    """
+    """Apply cancellation/deletion columns needed before legacy baselining."""
 
     cursor = await db.execute("PRAGMA table_info(jobs)")
     columns = {row[1] for row in await cursor.fetchall()}

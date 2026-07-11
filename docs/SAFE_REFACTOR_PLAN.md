@@ -115,6 +115,15 @@ the duplicate destination validation between redirect iterations while retaining
 final-response URL validation and browser redirect defenses. Add tests that count
 validation calls and prove a private redirect target is rejected before fetch.
 
+## Slice 9: repair the live-Redis verification harness
+
+The final queue-path gate exposed a pre-existing harness mismatch: the runner
+enables API-key authentication while its client omits the key, and a focused
+lane inherits the whole-project coverage floor. Make the client authenticate,
+disable aggregate coverage for this isolated lane, validate Docker and port
+prerequisites, allow the port to be overridden, and remove test-only volumes
+during cleanup. Verify the documented runner twice consecutively.
+
 ## Completion gates
 
 For every slice:
@@ -132,6 +141,7 @@ Final gates:
 poetry run pytest --no-cov tests/unit
 poetry run pytest --no-cov tests/integration
 poetry run pytest
+./scripts/run_live_redis_tests.sh
 ```
 
 The work is complete only when each finding is represented by a dedicated commit,

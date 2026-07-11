@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import AsyncIterator
 
@@ -56,7 +57,10 @@ def _live_redis_env(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPEYARD_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("SCRAPEYARD_STORAGE_RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setenv("SCRAPEYARD_ADAPTIVE_DIR", str(tmp_path / "adaptive"))
-    monkeypatch.setenv("SCRAPEYARD_REDIS_DSN", "redis://127.0.0.1:56379/15")
+    monkeypatch.setenv(
+        "SCRAPEYARD_REDIS_DSN",
+        os.environ.get("SCRAPEYARD_REDIS_DSN", "redis://127.0.0.1:56379/15"),
+    )
     monkeypatch.setenv("SCRAPEYARD_QUEUE_NAME", queue_name)
 
     _clear_singletons()
@@ -105,5 +109,11 @@ async def live_app() -> AsyncIterator:
 async def client(live_app) -> AsyncIterator[AsyncClient]:
     """HTTP client against the ASGI app using the live Redis-backed pool."""
     transport = ASGITransport(app=live_app)
-    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+    api_keys = sorted(get_settings().parsed_api_keys())
+    headers = {"X-API-Key": api_keys[0]} if api_keys else None
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=headers,
+    ) as async_client:
         yield async_client
