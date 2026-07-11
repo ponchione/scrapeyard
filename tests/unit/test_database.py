@@ -84,6 +84,11 @@ async def test_init_db_creates_tables(tmp_path):
         )
         row = await cursor.fetchone()
         assert row is not None
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_results_meta_project_run'"
+        )
+        assert await cursor.fetchone() is not None
 
 
 async def test_init_db_idempotent(tmp_path):
@@ -116,7 +121,12 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "010",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
-    assert [row[0] for row in histories["results_meta.db"]] == ["003", "006", "008"]
+    assert [row[0] for row in histories["results_meta.db"]] == [
+        "003",
+        "006",
+        "008",
+        "011",
+    ]
     async with get_db("jobs.db") as db:
         cursor = await db.execute(
             "SELECT migration_id, filename, applied_at "
@@ -167,7 +177,7 @@ async def test_init_db_rejects_ledger_gap(tmp_path):
 def test_load_migrations_rejects_unassigned_file(tmp_path):
     sql_dir = tmp_path / "sql"
     shutil.copytree(_resolve_sql_dir(), sql_dir)
-    (sql_dir / "011_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
+    (sql_dir / "999_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="assignment mismatch"):
         _load_migrations(sql_dir)

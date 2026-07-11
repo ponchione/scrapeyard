@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 
 import scrapeyard.storage.result_store as result_store_module
-from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.database import get_db, init_db, reset_db
 from scrapeyard.storage.result_store import LocalResultStore
 
 
@@ -409,6 +409,20 @@ async def test_metadata_appearing_after_scan_prevents_orphan_removal(store):
 
     assert report.metadata_race_candidates_skipped == 1
     assert run_dir.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_metadata_race_lookup_uses_project_run_index(store):
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            """EXPLAIN QUERY PLAN
+               SELECT file_path FROM results_meta
+               WHERE project = ? AND run_id = ?""",
+            ("test-project", "run-indexed"),
+        )
+        plan = " ".join(str(row[3]) for row in await cursor.fetchall())
+
+    assert "idx_results_meta_project_run" in plan
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "003_create_results_meta.sql",
         "006_add_results_meta_indexes.sql",
         "008_results_meta_unique_job_run.sql",
+        "011_add_results_artifact_lookup_index.sql",
     ),
 }
 _MIGRATION_FILE_RE = re.compile(r"^(?P<id>[0-9]{3})_[a-z0-9_]+\.sql$")
@@ -210,6 +211,8 @@ async def _migration_is_reflected(
         )
     if migration_id == "010":
         return await _columns_include(db, "job_runs", {"webhook_reconciled_at"})
+    if migration_id == "011":
+        return await _index_exists(db, "idx_results_meta_project_run")
     return False
 
 

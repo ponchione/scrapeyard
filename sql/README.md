@@ -39,3 +39,4 @@ objects are verified.
 | `008_results_meta_unique_job_run.sql` | Deduplicate and enforce one metadata row per job/run. |
 | `009_create_webhook_outbox.sql` | Durable webhook outbox and operational indexes. |
 | `010_add_terminal_reconciliation_marker.sql` | Bound startup terminal-intent reconciliation to unresolved runs. |
+| `011_add_results_artifact_lookup_index.sql` | Narrow destructive artifact ownership rechecks by project and run. |

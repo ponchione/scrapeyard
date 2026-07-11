@@ -52,15 +52,15 @@ Safety requirements:
 
 ## Slice 3: indexed artifact-ownership rechecks
 
-Persist a canonical artifact identity in `results_meta` and index it. Replace the
-per-candidate full-table metadata scan immediately before destructive orphan
-removal with an indexed existence query.
+Index the existing `(project, run_id)` artifact identity in `results_meta`.
+Replace the per-candidate full-table metadata scan immediately before destructive
+orphan removal with a narrowed lookup, then retain exact path normalization over
+the small candidate set.
 
 Safety requirements:
 
-- Backfill only identities that can be proven contained and canonical; ambiguous
-  legacy paths remain protected by the conservative scan fallback.
-- Store-created metadata always receives the canonical identity atomically.
+- Existing and legacy metadata rows participate without a backfill or format
+  change.
 - The final metadata check remains immediately before the active-run recheck and
   removal. Database errors continue to skip deletion.
 - Symlink, path-depth, grace-period, and active-run protections remain unchanged.
