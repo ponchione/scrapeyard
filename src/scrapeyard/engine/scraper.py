@@ -167,7 +167,6 @@ async def _fetch_basic_with_safe_redirects(
         response_url = getattr(response, "url", None)
         base_url = response_url if isinstance(response_url, str) and response_url else current_url
         current_url = urljoin(base_url, location)
-        await _assert_fetch_url(current_url, require_resolved_dns=require_resolved_dns)
         redirects.append(current_url)
     raise FetchError(310, debug={**debug, "redirects": redirects})
 

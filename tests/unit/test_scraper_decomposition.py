@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,7 +13,7 @@ from scrapeyard.engine.adaptive_diagnostics import (
     missing_adaptive_selectors,
 )
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
-from scrapeyard.engine.scraper import _fetch_page
+from scrapeyard.engine.scraper import _fetch_basic_with_safe_redirects, _fetch_page
 from scrapeyard.engine.url_guard import UnsafeURLError
 
 
@@ -118,6 +119,43 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
     assert seen_urls == ["https://example.com", "https://example.com/next"]
     assert outcome.debug["redirects"] == ["https://example.com/next"]
     assert outcome.debug["final_url"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_basic_redirect_validates_each_requested_url_once(monkeypatch):
+    responses = iter(
+        [
+            SimpleNamespace(
+                status=302,
+                url="https://example.com/start",
+                headers={"Location": "/next"},
+            ),
+            SimpleNamespace(
+                status=200,
+                url="https://example.com/next",
+                headers={},
+            ),
+        ]
+    )
+
+    async def fetch_response(*_args, **_kwargs):
+        return next(responses)
+
+    validate = AsyncMock()
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch_response)
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", validate)
+
+    await _fetch_basic_with_safe_redirects(
+        object(),
+        "https://example.com/start",
+        {},
+        {},
+    )
+
+    assert [call.args[0] for call in validate.await_args_list] == [
+        "https://example.com/start",
+        "https://example.com/next",
+    ]
 
 
 @pytest.mark.asyncio
