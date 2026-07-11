@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from scrapeyard.storage.database import (
     _load_migrations,
     _resolve_sql_dir,
     close_db,
+    db_transaction,
     get_db,
     init_db,
 )
@@ -129,8 +131,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
     ]
     async with get_db("jobs.db") as db:
         cursor = await db.execute(
-            "SELECT migration_id, filename, applied_at "
-            "FROM schema_migrations ORDER BY migration_id"
+            "SELECT migration_id, filename, applied_at FROM schema_migrations ORDER BY migration_id"
         )
         assert [tuple(row) for row in await cursor.fetchall()] == histories["jobs.db"]
 
@@ -230,6 +231,58 @@ async def test_failed_migration_rolls_back_schema_and_ledger(tmp_path):
         assert (await cursor.fetchone())[0] == 0
 
 
+async def test_db_transaction_commits_on_success(tmp_path):
+    async with aiosqlite.connect(tmp_path / "transaction.db") as db:
+        await db.execute("CREATE TABLE values_table (value TEXT)")
+        async with db_transaction(db):
+            await db.execute("INSERT INTO values_table VALUES ('committed')")
+
+        cursor = await db.execute("SELECT value FROM values_table")
+        assert (await cursor.fetchone())[0] == "committed"
+        assert not db.in_transaction
+
+
+async def test_db_transaction_rolls_back_on_exception(tmp_path):
+    async with aiosqlite.connect(tmp_path / "transaction.db") as db:
+        await db.execute("CREATE TABLE values_table (value TEXT)")
+        await db.commit()
+        with pytest.raises(RuntimeError, match="failure"):
+            async with db_transaction(db):
+                await db.execute("INSERT INTO values_table VALUES ('rolled-back')")
+                raise RuntimeError("failure")
+
+        cursor = await db.execute("SELECT COUNT(*) FROM values_table")
+        assert (await cursor.fetchone())[0] == 0
+        assert not db.in_transaction
+
+
+async def test_db_transaction_rolls_back_on_cancellation(tmp_path):
+    async with aiosqlite.connect(tmp_path / "transaction.db") as db:
+        await db.execute("CREATE TABLE values_table (value TEXT)")
+        await db.commit()
+        with pytest.raises(asyncio.CancelledError):
+            async with db_transaction(db, immediate=True):
+                await db.execute("INSERT INTO values_table VALUES ('cancelled')")
+                raise asyncio.CancelledError
+
+        cursor = await db.execute("SELECT COUNT(*) FROM values_table")
+        assert (await cursor.fetchone())[0] == 0
+        assert not db.in_transaction
+
+
+async def test_db_transaction_accepts_explicit_early_rollback(tmp_path):
+    async with aiosqlite.connect(tmp_path / "transaction.db") as db:
+        await db.execute("CREATE TABLE values_table (value TEXT)")
+        await db.commit()
+        async with db_transaction(db, immediate=True):
+            await db.execute("INSERT INTO values_table VALUES ('discarded')")
+            await db.rollback()
+
+        cursor = await db.execute("SELECT COUNT(*) FROM values_table")
+        assert (await cursor.fetchone())[0] == 0
+        assert not db.in_transaction
+
+
 async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_path):
     db_dir = tmp_path / "db"
     db_dir.mkdir()
@@ -275,9 +328,7 @@ async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_pat
         job_columns = [row[1] for row in await cursor.fetchall()]
         cursor = await db.execute("PRAGMA table_info(job_runs)")
         columns = [row[1] for row in await cursor.fetchall()]
-        cursor = await db.execute(
-            "SELECT heartbeat_at FROM job_runs WHERE run_id = 'old-run'"
-        )
+        cursor = await db.execute("SELECT heartbeat_at FROM job_runs WHERE run_id = 'old-run'")
         row = await cursor.fetchone()
 
     assert columns.count("heartbeat_at") == 1
