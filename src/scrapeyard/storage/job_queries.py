@@ -11,12 +11,20 @@ def build_list_jobs_with_stats_query(
     offset: int,
 ) -> tuple[str, list[object]]:
     job_cols = select_columns(JOB_COLUMNS, table_alias="j")
+    stats_source = "    FROM job_runs r "
+    params: list[object] = []
+    if project is not None:
+        stats_source += (
+            "    JOIN jobs filtered_jobs ON filtered_jobs.job_id = r.job_id "
+            "    WHERE filtered_jobs.project = ? "
+        )
+        params.append(project)
     sql = (
         "WITH job_stats AS ("
-        "    SELECT job_id, COUNT(run_id) AS run_count, "
-        "           MAX(started_at) AS last_run_at "
-        "    FROM job_runs "
-        "    GROUP BY job_id"
+        "    SELECT r.job_id, COUNT(r.run_id) AS run_count, "
+        "           MAX(r.started_at) AS last_run_at "
+        + stats_source
+        + "    GROUP BY r.job_id"
         ") "
         f"SELECT {job_cols}, "
         "COALESCE(s.run_count, 0) AS run_count, "
@@ -24,7 +32,6 @@ def build_list_jobs_with_stats_query(
         "FROM jobs j "
         "LEFT JOIN job_stats s ON j.job_id = s.job_id"
     )
-    params: list[object] = []
     if project is not None:
         sql += " WHERE j.project = ?"
         params.append(project)
