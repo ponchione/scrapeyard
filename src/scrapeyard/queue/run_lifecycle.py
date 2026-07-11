@@ -13,7 +13,7 @@ from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.protocols import JobStore, ResultStore
 from scrapeyard.storage.types import RunOwnershipError
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
-from scrapeyard.webhook.dispatcher import WebhookDispatcher
+from scrapeyard.webhook.dispatcher import WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ async def save_run_result(
 
 async def dispatch_webhook(
     *,
-    webhook_dispatcher: WebhookDispatcher | None,
+    webhook_dispatcher: WebhookNotifier | None,
     config: Any,
     delivery: WebhookDeliveryCreate | None,
 ) -> None:

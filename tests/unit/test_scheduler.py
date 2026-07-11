@@ -354,7 +354,6 @@ async def test_trigger_job_enqueues_queued_job():
         queued_at=NOW,
         stale_before=None,
     )
-    job_store.update_job_status.assert_not_awaited()
     pool.enqueue.assert_awaited_once()
 
 
@@ -374,7 +373,6 @@ async def test_trigger_job_marks_owned_queued_run_failed_when_enqueue_fails():
 
     pool.enqueue.assert_awaited_once()
     job_store.fail_queued_run.assert_awaited_once_with("job-1", "run-new", NOW)
-    job_store.update_job_status.assert_not_awaited()
 
 
 async def test_register_job_disabled_pauses():

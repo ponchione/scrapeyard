@@ -28,7 +28,6 @@ def _first_logged_error(error_store: AsyncMock):
 async def test_validation_warn_keeps_data_and_completes(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     result = TargetResult(url="http://a.com", status="success", data=[{"title": ""}])
 
@@ -62,7 +61,6 @@ async def test_validation_warn_keeps_data_and_completes(mock_stores):
 async def test_validation_skip_discards_invalid_target_but_keeps_job_complete(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     invalid = TargetResult(url="http://a.com", status="success", data=[{"title": ""}])
     valid = TargetResult(url="http://b.com", status="success", data=[{"title": "ok"}])
@@ -98,7 +96,6 @@ async def test_validation_skip_discards_invalid_target_but_keeps_job_complete(mo
 async def test_validation_fail_marks_target_failed(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     invalid = TargetResult(url="http://a.com", status="success", data=[{"title": ""}])
 
@@ -137,7 +134,6 @@ async def test_validation_fail_marks_target_failed(mock_stores):
 async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     invalid = TargetResult(url="http://a.com", status="success", data=[{"title": ""}])
     valid = TargetResult(url="http://a.com", status="success", data=[{"title": "ok"}])
@@ -173,7 +169,6 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
 async def test_required_price_keeps_map_listing_after_validation(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     map_priced = TargetResult(
         url="http://a.com",
@@ -211,7 +206,6 @@ async def test_required_price_keeps_map_listing_after_validation(mock_stores):
 async def test_worker_scopes_adaptive_state_by_project(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job_store.get_job = AsyncMock(return_value=make_job())
-    job_store.update_job_status = AsyncMock()
 
     result = TargetResult(url="http://a.com", status="success", data=[{"title": "ok"}])
 

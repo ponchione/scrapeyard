@@ -41,7 +41,6 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
     )
 
     job_store.fail_owned_run.assert_not_awaited()
-    job_store.update_job_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -86,7 +85,6 @@ async def test_scrape_task_skips_completed_duplicate_run():
         rate_limiter=LocalDomainRateLimiter(),
     )
 
-    job_store.update_job_status.assert_not_called()
     result_store.save_result.assert_not_called()
     error_store.log_errors.assert_not_called()
 
@@ -113,7 +111,6 @@ async def test_scrape_task_skips_recent_running_duplicate():
         rate_limiter=LocalDomainRateLimiter(),
     )
 
-    job_store.update_job_status.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -176,7 +173,6 @@ async def test_scrape_task_discards_result_when_finalization_loses_ownership():
     )
     job_store.finalize_owned_run.assert_awaited_once()
     job_store.fail_owned_run.assert_not_awaited()
-    job_store.update_job_status.assert_not_awaited()
     webhook_dispatcher.submit.assert_not_awaited()
 
 
@@ -206,7 +202,6 @@ async def test_scrape_task_never_reclaims_running_job_inside_worker():
 
     job_store.claim_run.assert_not_awaited()
     job_store.recover_stale_run.assert_not_awaited()
-    job_store.update_job_status.assert_not_awaited()
     result_store.save_result.assert_not_awaited()
 
 
@@ -217,7 +212,6 @@ async def test_scrape_task_batches_multiple_target_errors():
     job_store.get_job.return_value = job
     job_store.queue_run.return_value = True
     job_store.claim_run.return_value = True
-    job_store.update_job_status = AsyncMock()
 
     error_store = AsyncMock()
 
@@ -273,7 +267,6 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
     job_store.get_job.return_value = job
     job_store.queue_run.return_value = True
     job_store.claim_run.return_value = True
-    job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
     error_store = AsyncMock()
@@ -356,7 +349,6 @@ async def test_unexpected_target_exception_redacts_url_userinfo():
     job_store.get_job.return_value = job
     job_store.queue_run.return_value = True
     job_store.claim_run.return_value = True
-    job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
     error_store = AsyncMock()
@@ -402,7 +394,6 @@ async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
     job_store.get_job.return_value = job
     job_store.queue_run.return_value = True
     job_store.claim_run.return_value = True
-    job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
     error_store = AsyncMock()
@@ -469,7 +460,6 @@ async def test_target_task_cancellation_still_propagates():
     job_store.get_job.return_value = job
     job_store.queue_run.return_value = True
     job_store.claim_run.return_value = True
-    job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
     error_store = AsyncMock()
@@ -570,7 +560,6 @@ async def test_sustained_heartbeat_failure_cancels_targets_without_stale_mutatio
     assert job_store.heartbeat_run.await_count >= 3
     job_store.finalize_owned_run.assert_not_awaited()
     job_store.fail_owned_run.assert_not_awaited()
-    job_store.update_job_status.assert_not_awaited()
     webhook_dispatcher.submit.assert_not_awaited()
     result_store.delete_result.assert_awaited_once_with(
         job.job_id,

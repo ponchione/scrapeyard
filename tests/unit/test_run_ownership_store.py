@@ -104,8 +104,11 @@ async def test_heartbeat_rejects_terminal_and_superseded_runs(
 
     await _save_queued(store, job_id="superseded", run_id="run-old")
     await _claim(store, job_id="superseded", run_id="run-old")
-    job = await store.get_job("superseded")
-    await store.update_job_status(job.model_copy(update={"current_run_id": "run-new"}))
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE jobs SET current_run_id = 'run-new' WHERE job_id = 'superseded'"
+        )
+        await db.commit()
     with pytest.raises(RunOwnershipError):
         await store.heartbeat_run("superseded", "run-old", NOW + timedelta(seconds=30))
 

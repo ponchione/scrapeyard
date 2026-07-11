@@ -5,9 +5,8 @@ from __future__ import annotations
 import pytest
 
 from tests.integration.conftest import poll_until_ready
-from scrapeyard.api.dependencies import get_job_store
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import JobStatus
+from scrapeyard.storage.database import get_db
 
 
 def _adhoc_yaml() -> str:
@@ -214,9 +213,9 @@ async def test_results_status_comes_from_persisted_run_metadata(client, monkeypa
     )
     run_id = results_resp.json()["run_id"]
 
-    job_store = get_job_store()
-    job = await job_store.get_job(job_id)
-    await job_store.update_job_status(job.model_copy(update={"status": JobStatus.failed}))
+    async with get_db("jobs.db") as db:
+        await db.execute("UPDATE jobs SET status = 'failed' WHERE job_id = ?", (job_id,))
+        await db.commit()
 
     by_run = await client.get(f"/results/{job_id}?latest=false&run_id={run_id}")
     assert by_run.status_code == 200

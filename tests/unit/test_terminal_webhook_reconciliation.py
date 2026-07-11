@@ -18,6 +18,7 @@ from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import ResultMetadata
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
+    WebhookFailureReason,
     WebhookDeliveryStatus,
 )
 from scrapeyard.webhook.payload import deterministic_delivery_id
@@ -178,9 +179,10 @@ async def test_reconciliation_leaves_existing_delivery_state_unchanged(
             attempts=2,
         )
     elif persistent_status is WebhookDeliveryStatus.failed:
-        await outbox.mark_permanent_failure(
+        await outbox.mark_failed(
             delivery_id,
-            attempted_at=NOW + timedelta(minutes=2),
+            failed_at=NOW + timedelta(minutes=2),
+            reason=WebhookFailureReason.non_retryable_failure,
             last_error="HTTP 400",
             attempts=3,
         )

@@ -86,11 +86,6 @@ class SQLiteJobStore:
         raise RunOwnershipError(operation, job_id, run_id)
 
     @staticmethod
-    def _raise_if_missing_job(cursor: aiosqlite.Cursor, job_id: str) -> None:
-        if cursor.rowcount == 0:
-            raise KeyError(f"Job not found: {job_id!r}")
-
-    @staticmethod
     def _validate_terminal_delivery(
         delivery: WebhookDeliveryCreate,
         *,
@@ -134,15 +129,6 @@ class SQLiteJobStore:
         if cursor.rowcount != 1:
             raise RuntimeError("Terminal webhook reconciliation lost run ownership")
 
-    async def _execute_job_update(
-        self,
-        sql: str,
-        params: Sequence[object],
-        job_id: str,
-    ) -> None:
-        cursor = await self._execute_write(sql, params)
-        self._raise_if_missing_job(cursor, job_id)
-
     async def save_job(self, job: Job) -> str:
         async with get_db("jobs.db") as db, db_transaction(db):
             try:
@@ -176,63 +162,6 @@ class SQLiteJobStore:
                     raise DuplicateJobError(job.project, job.name) from exc
                 raise
         return job.job_id
-
-    async def update_job(self, job: Job) -> None:
-        await self._execute_job_update(
-            """UPDATE jobs SET project=?, name=?, status=?,
-               config_yaml=?, created_at=?, updated_at=?,
-               schedule_cron=?, schedule_enabled=?,
-               current_run_id=?, deletion_requested_at=?,
-               delete_results_on_delete=?
-               WHERE job_id=?""",
-            (
-                job.project,
-                job.name,
-                job.status.value,
-                job.config_yaml,
-                fmt_dt(job.created_at),
-                fmt_dt(job.updated_at),
-                job.schedule_cron,
-                int(job.schedule_enabled),
-                job.current_run_id,
-                fmt_dt(job.deletion_requested_at),
-                (
-                    None
-                    if job.delete_results_on_delete is None
-                    else int(job.delete_results_on_delete)
-                ),
-                job.job_id,
-            ),
-            job.job_id,
-        )
-
-    async def update_job_status(self, job: Job) -> None:
-        await self._execute_job_update(
-            """UPDATE jobs SET status=?, updated_at=?,
-               current_run_id=?
-               WHERE job_id=?""",
-            (
-                job.status.value,
-                fmt_dt(job.updated_at),
-                job.current_run_id,
-                job.job_id,
-            ),
-            job.job_id,
-        )
-
-    async def update_job_schedule_state(self, job: Job) -> None:
-        await self._execute_job_update(
-            """UPDATE jobs SET schedule_cron=?, schedule_enabled=?,
-               updated_at=?
-               WHERE job_id=?""",
-            (
-                job.schedule_cron,
-                int(job.schedule_enabled),
-                fmt_dt(job.updated_at),
-                job.job_id,
-            ),
-            job.job_id,
-        )
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
@@ -535,18 +464,6 @@ class SQLiteJobStore:
                 DeletionFinalizationAction.deleted,
                 job_id,
             )
-
-    async def list_jobs(self, project: str | None = None) -> list[Job]:
-        async with get_db("jobs.db") as db:
-            if project is not None:
-                cursor = await db.execute(
-                    f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs WHERE project=?",
-                    (project,),
-                )
-            else:
-                cursor = await db.execute(f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs")
-            rows = cast(list[Mapping[str, object]], await cursor.fetchall())
-        return [row_to_job(row) for row in rows]
 
     async def get_job_runs(self, job_id: str, limit: int = 10) -> list[JobRun]:
         """Return the last N runs for a job, newest first."""

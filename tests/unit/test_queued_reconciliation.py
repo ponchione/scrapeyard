@@ -13,7 +13,7 @@ from scrapeyard.queue.reconciliation import (
     QueuedReconciliationError,
     reconcile_stale_queued_jobs,
 )
-from scrapeyard.storage.database import init_db
+from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import StaleQueuedJob
 
@@ -90,8 +90,11 @@ async def test_stale_queued_query_ignores_fresh_and_unowned_rows(tmp_path) -> No
         queued_at=NOW - timedelta(seconds=TIMEOUT - 1),
     )
     await _save_stale_job(store, job_id="unowned", run_id="run-temporary")
-    unowned = await store.get_job("unowned")
-    await store.update_job_status(unowned.model_copy(update={"current_run_id": None}))
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE jobs SET current_run_id = NULL WHERE job_id = 'unowned'"
+        )
+        await db.commit()
 
     rows = await store.list_stale_queued_jobs(
         NOW - timedelta(seconds=TIMEOUT)

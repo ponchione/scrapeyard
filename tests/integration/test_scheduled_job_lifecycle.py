@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from scrapeyard.api.dependencies import get_job_store, get_scheduler, get_worker_pool
-from scrapeyard.models.job import JobStatus
 from scrapeyard.scheduler.cron import SchedulerService
 
 
@@ -136,8 +137,8 @@ async def test_scheduler_assigns_distinct_run_ids_per_completed_trigger(client, 
     job_id = response.json()["job_id"]
 
     await scheduler._trigger_job(job_id)
-    job = await get_job_store().get_job(job_id)
-    await get_job_store().update_job_status(job.model_copy(update={"status": JobStatus.complete}))
+    assert run_ids[0] is not None
+    assert await get_job_store().fail_queued_run(job_id, run_ids[0], datetime.now(timezone.utc))
     await scheduler._trigger_job(job_id)
 
     assert len(run_ids) == 2

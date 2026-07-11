@@ -553,7 +553,6 @@ class TestRunCrashHandling:
         job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
              patch("scrapeyard.queue.worker.get_settings") as mock_settings:
@@ -584,7 +583,6 @@ class TestRunCrashHandling:
         job = make_job()
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
         job_store.fail_owned_run.side_effect = RuntimeError("DB is dead")
 
         with patch("scrapeyard.queue.worker.load_config", side_effect=RuntimeError("boom")), \
@@ -615,7 +613,6 @@ class TestRunCrashHandling:
 
         await handle_crash("job-1", "old-run", job_store)
 
-        job_store.update_job_status.assert_not_awaited()
         job_store.fail_owned_run.assert_awaited_once()
         assert job_store.fail_owned_run.await_args.args[:2] == ("job-1", "old-run")
 
@@ -635,7 +632,6 @@ class TestErrorLoggingWithRunId:
         job = make_job(current_run_id="run-err-tag")
         job_store = AsyncMock()
         job_store.get_job.return_value = job
-        job_store.update_job_status = AsyncMock()
 
         error_store = AsyncMock()
         logged_errors: list[ErrorRecord] = []

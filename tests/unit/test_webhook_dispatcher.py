@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -244,25 +244,6 @@ class MemoryWebhookOutboxStore:
         )
         return True
 
-    async def mark_permanent_failure(
-        self,
-        delivery_id: str,
-        *,
-        attempted_at: datetime,
-        last_error: str,
-        reason: WebhookFailureReason = WebhookFailureReason.non_retryable_failure,
-        expected_attempts: int | None = None,
-        attempts: int = 1,
-    ) -> bool:
-        return await self.mark_failed(
-            delivery_id,
-            failed_at=attempted_at,
-            reason=reason,
-            last_error=last_error,
-            expected_attempts=expected_attempts,
-            attempts=attempts,
-        )
-
     async def mark_failed(
         self,
         delivery_id: str,
@@ -320,122 +301,12 @@ async def _wait_until(condition) -> None:
 # ---------------------------------------------------------------------------
 
 
-class TestDispatchSuccess:
-    @pytest.mark.asyncio
-    async def test_success_on_first_attempt(self) -> None:
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=3)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await dispatcher.dispatch(cfg, {"key": "val"})
-        client.post.assert_awaited_once()
-        mock_sleep.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_success_after_transient_5xx(self) -> None:
-        """Retry on 503, succeed on second attempt."""
-        client = AsyncMock()
-        client.post = AsyncMock(
-            side_effect=[_err_response(503), _ok_response(200)],
-        )
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=3)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock):
-            await dispatcher.dispatch(cfg, {})
-        assert client.post.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_success_after_timeout_exception(self) -> None:
-        """Retry on httpx.TimeoutException, succeed on second attempt."""
-        client = AsyncMock()
-        client.post = AsyncMock(
-            side_effect=[httpx.TimeoutException("timed out"), _ok_response(200)],
-        )
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=2)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock):
-            await dispatcher.dispatch(cfg, {})
-        assert client.post.await_count == 2
-
-
-class TestDispatchRetryExhaustion:
-    @pytest.mark.asyncio
-    async def test_all_attempts_fail(self) -> None:
-        """After max_retries, dispatch gives up (no exception raised)."""
-        client = AsyncMock()
-        client.post = AsyncMock(
-            side_effect=httpx.ConnectError("refused"),
-        )
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=2)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await dispatcher.dispatch(cfg, {})
-        # 1 initial + 2 retries = 3 attempts.
-        assert client.post.await_count == 3
-        # Sleep called between each retry (2 times).
-        assert mock_sleep.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_all_5xx_exhausted(self) -> None:
-        """Server errors exhaust all retries."""
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_err_response(500))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=1)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock):
-            await dispatcher.dispatch(cfg, {})
-        assert client.post.await_count == 2  # 1 + 1 retry
-
-    @pytest.mark.asyncio
-    async def test_http_error_redacts_url_userinfo_in_last_error(self) -> None:
-        client = AsyncMock()
-        client.post = AsyncMock(
-            side_effect=httpx.ConnectError("failed https://user:pass@example.com/hook")
-        )
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
-
-        result = await dispatcher.dispatch(
-            _webhook_config("https://user:pass@example.com/hook"),
-            {},
-        )
-
-        assert result.last_error is not None
-        assert "user:pass" not in result.last_error
-        assert result.last_error == "Transport failure: ConnectError"
-
-
-class TestNonRetryableStatus:
-    @pytest.mark.asyncio
-    async def test_4xx_not_retried(self) -> None:
-        """Client errors (4xx except 429) are permanent — no retry."""
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_err_response(404))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=3)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await dispatcher.dispatch(cfg, {})
-        client.post.assert_awaited_once()
-        mock_sleep.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_429_is_retried(self) -> None:
-        """429 Too Many Requests is retryable."""
-        client = AsyncMock()
-        client.post = AsyncMock(
-            side_effect=[_err_response(429), _ok_response(200)],
-        )
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=2)
-        cfg = _webhook_config()
-        with patch("scrapeyard.webhook.dispatcher.asyncio.sleep", new_callable=AsyncMock):
-            await dispatcher.dispatch(cfg, {})
-        assert client.post.await_count == 2
-
+class TestSendOnce:
     @pytest.mark.asyncio
     async def test_send_once_blocks_non_public_persisted_urls(self) -> None:
         client = AsyncMock()
         client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client)
 
         result = await dispatcher.send_once(
             WebhookRequestConfig(
@@ -454,7 +325,7 @@ class TestNonRetryableStatus:
     async def test_send_once_disables_http_redirect_following(self) -> None:
         client = AsyncMock()
         client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client)
 
         result = await dispatcher.send_once(_webhook_config(), {})
 
@@ -485,7 +356,7 @@ class TestBackoffDelay:
         assert HttpWebhookDispatcher._is_retryable_status(200) is False
 
 
-class TestSubmitAndShutdown:
+class TestNotifyAndShutdown:
     @pytest.mark.asyncio
     async def test_notify_wakes_without_recreating_durable_intent(self) -> None:
         outbox = AsyncMock()
@@ -496,50 +367,6 @@ class TestSubmitAndShutdown:
 
         assert dispatcher._wake_event.is_set()
         outbox.enqueue_delivery.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_submit_creates_tracked_task(self) -> None:
-        outbox = MemoryWebhookOutboxStore()
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(
-            client_factory=lambda: client,
-            max_retries=0,
-            outbox_store=outbox,
-        )
-        cfg = _webhook_config()
-        await dispatcher.submit(cfg, _payload())
-        # Let the task run.
-        await asyncio.sleep(0.05)
-        assert dispatcher.pending_tasks == 0
-        assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
-
-    @pytest.mark.asyncio
-    async def test_submit_rejected_during_shutdown(self) -> None:
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client, max_retries=0)
-        await dispatcher.shutdown(timeout=1.0)
-        # After shutdown, submit should be silently skipped.
-        await dispatcher.submit(_webhook_config(), {})
-        client.post.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_startup_re_enables_submit(self) -> None:
-        outbox = MemoryWebhookOutboxStore()
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
-        dispatcher = HttpWebhookDispatcher(
-            client_factory=lambda: client,
-            max_retries=0,
-            outbox_store=outbox,
-        )
-        await dispatcher.shutdown(timeout=1.0)
-        await dispatcher.startup()
-        await dispatcher.submit(_webhook_config(), _payload())
-        await asyncio.sleep(0.05)
-        client.post.assert_awaited_once()
-
 
 class TestDurableOutboxDispatch:
     @pytest.mark.asyncio
@@ -555,11 +382,15 @@ class TestDurableOutboxDispatch:
         client.post = AsyncMock(side_effect=_post)
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
-            max_retries=0,
             outbox_store=outbox,
         )
 
-        await dispatcher.submit(_webhook_config(), _payload())
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="delivery-1",
+            created_at=datetime.now(timezone.utc),
+        )
+        await dispatcher.startup()
 
         persisted = outbox.deliveries["delivery-1"]
         assert persisted.status is WebhookDeliveryStatus.pending
@@ -594,7 +425,6 @@ class TestDurableOutboxDispatch:
         client.post = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
-            max_retries=0,
             outbox_store=outbox,
         )
 
@@ -612,12 +442,16 @@ class TestDurableOutboxDispatch:
         client.post = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
-            max_retries=0,
             backoff_base=60.0,
             outbox_store=outbox,
         )
 
-        await dispatcher.submit(_webhook_config(), _payload())
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="delivery-1",
+            created_at=datetime.now(timezone.utc),
+        )
+        await dispatcher.startup()
         await _wait_until(
             lambda: outbox.deliveries["delivery-1"].last_error is not None
         )
@@ -637,11 +471,15 @@ class TestDurableOutboxDispatch:
         client.post = AsyncMock(return_value=_err_response(404))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
-            max_retries=0,
             outbox_store=outbox,
         )
 
-        await dispatcher.submit(_webhook_config(), _payload())
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="delivery-1",
+            created_at=datetime.now(timezone.utc),
+        )
+        await dispatcher.startup()
         await _wait_until(
             lambda: outbox.deliveries["delivery-1"].status
             is WebhookDeliveryStatus.failed
@@ -676,7 +514,6 @@ class TestDurableOutboxDispatch:
         client.post = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
-            max_retries=0,
             outbox_store=outbox,
         )
 
@@ -1307,7 +1144,7 @@ class TestBoundedCoordinator:
         assert set(outbox.due_limits) == {7}
 
     @pytest.mark.asyncio
-    async def test_duplicate_submit_does_not_dispatch_concurrently(self) -> None:
+    async def test_duplicate_durable_intent_does_not_dispatch_concurrently(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         release = asyncio.Event()
         active = 0
@@ -1331,9 +1168,18 @@ class TestBoundedCoordinator:
         )
 
         await asyncio.gather(
-            dispatcher.submit(_webhook_config(), _payload("same")),
-            dispatcher.submit(_webhook_config(), _payload("same")),
+            _enqueue_memory_delivery(
+                outbox,
+                delivery_id="same",
+                created_at=datetime.now(timezone.utc),
+            ),
+            _enqueue_memory_delivery(
+                outbox,
+                delivery_id="same",
+                created_at=datetime.now(timezone.utc),
+            ),
         )
+        await dispatcher.startup()
         await _wait_until(lambda: active == 1)
         assert max_active == 1
         release.set()
@@ -1358,7 +1204,12 @@ class TestBoundedCoordinator:
             dispatch_batch_size=1,
             max_delivery_attempts=3,
         )
-        await first.submit(_webhook_config(), _payload("shutdown"))
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="shutdown",
+            created_at=datetime.now(timezone.utc),
+        )
+        await first.startup()
         await asyncio.wait_for(started.wait(), timeout=1)
 
         await first.shutdown(timeout=0.01)

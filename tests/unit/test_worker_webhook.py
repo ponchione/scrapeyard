@@ -25,7 +25,6 @@ async def test_webhook_dispatched_on_complete(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
     webhook_config = WebhookConfig(url="https://hooks.example.com/callback")
@@ -65,7 +64,6 @@ async def test_no_webhook_when_not_configured(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
 
@@ -98,7 +96,6 @@ async def test_no_webhook_when_dispatcher_is_none(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     webhook_config = WebhookConfig(url="https://hooks.example.com/callback")
 
@@ -132,7 +129,6 @@ async def test_webhook_status_not_in_on_list(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     webhook_dispatcher = AsyncMock()
     # Only fire on "failed", but job will complete
@@ -170,7 +166,6 @@ async def test_webhook_fires_with_save_meta_on_failed_results(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
 
     # Worker always calls save_result, even on failure.  Configure
     # the mock so webhook payload assertions can check real values.
@@ -218,7 +213,6 @@ async def test_webhook_notify_failure_does_not_fail_successful_job(mock_stores):
     job_store, result_store, error_store, circuit_breaker = mock_stores
     job = make_job()
     job_store.get_job = AsyncMock(return_value=job)
-    job_store.update_job_status = AsyncMock()
     result_store.save_result.return_value = MagicMock(
         run_id="run-1", file_path="/tmp/results/run-1", record_count=1,
     )
