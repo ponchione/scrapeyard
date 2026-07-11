@@ -646,13 +646,17 @@ class LocalResultStore:
             identity.run_id,
         )
 
-    async def _metadata_references(self, path: Path) -> bool:
+    async def _metadata_references(self, candidate: _RemovalCandidate) -> bool:
         async with get_db("results_meta.db") as db:
-            cursor = await db.execute("SELECT file_path FROM results_meta")
+            cursor = await db.execute(
+                """SELECT file_path FROM results_meta
+                   WHERE project = ? AND run_id = ?""",
+                (candidate.identity.project, candidate.identity.run_id),
+            )
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
         for row in rows:
             try:
-                if self._checked_result_dir(str(row["file_path"])) == path:
+                if self._checked_result_dir(str(row["file_path"])) == candidate.path:
                     return True
             except (OSError, ValueError):
                 continue
@@ -755,7 +759,7 @@ class LocalResultStore:
             state.directories_would_remove += 1
             if dry_run:
                 continue
-            if await self._metadata_references(candidate.path):
+            if await self._metadata_references(candidate):
                 state.metadata_race_candidates_skipped += 1
                 continue
             if await active_or_failed(candidate, "recheck_active_run"):
