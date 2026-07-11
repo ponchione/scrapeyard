@@ -142,6 +142,40 @@ async def test_delete_expired_offloads_directory_removal(store):
 
 
 @pytest.mark.asyncio
+async def test_delete_expired_chunks_metadata_ids(store, monkeypatch):
+    run_ids: list[str] = []
+    for index in range(5):
+        meta = await store.save_result(
+            f"job-chunk-{index}",
+            {"index": index},
+            run_id=f"run-chunk-{index}",
+        )
+        run_ids.append(meta.run_id)
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    async with get_db("results_meta.db") as db:
+        await db.execute("UPDATE results_meta SET created_at = ?", (old_date,))
+        await db.commit()
+
+    monkeypatch.setattr(result_store_module, "_DELETE_ID_BATCH_SIZE", 2)
+    statements: list[str] = []
+    async with get_db("results_meta.db") as db:
+        await db.set_trace_callback(statements.append)
+
+    assert await store.delete_expired(30) == 5
+
+    delete_statements = [
+        statement
+        for statement in statements
+        if statement.startswith("DELETE FROM results_meta WHERE id IN")
+    ]
+    assert len(delete_statements) == 3
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM results_meta")
+        assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
 async def test_prune_excess_per_job_removes_oldest_runs(store):
     from scrapeyard.storage.database import get_db
 
