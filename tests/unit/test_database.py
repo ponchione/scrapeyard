@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import aiosqlite
 import pytest
 
-from scrapeyard.storage.database import close_db, get_db, init_db
+from scrapeyard.storage.database import (
+    Migration,
+    _apply_migration,
+    _load_migrations,
+    _resolve_sql_dir,
+    close_db,
+    get_db,
+    init_db,
+)
 
 
 def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
@@ -81,6 +90,127 @@ async def test_init_db_idempotent(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
     await init_db(str(db_dir))
+
+
+async def test_init_db_records_ordered_migration_history_once(tmp_path):
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+
+    histories: dict[str, list[tuple[str, str, str]]] = {}
+    for db_name in ("jobs.db", "errors.db", "results_meta.db"):
+        async with get_db(db_name) as db:
+            cursor = await db.execute(
+                "SELECT migration_id, filename, applied_at "
+                "FROM schema_migrations ORDER BY migration_id"
+            )
+            histories[db_name] = [tuple(row) for row in await cursor.fetchall()]
+
+    await init_db(str(db_dir))
+
+    assert [row[0] for row in histories["jobs.db"]] == ["001", "004", "005", "009"]
+    assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
+    assert [row[0] for row in histories["results_meta.db"]] == ["003", "006", "008"]
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute(
+            "SELECT migration_id, filename, applied_at "
+            "FROM schema_migrations ORDER BY migration_id"
+        )
+        assert [tuple(row) for row in await cursor.fetchall()] == histories["jobs.db"]
+
+
+async def test_init_db_rejects_checksum_drift(tmp_path):
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE schema_migrations SET checksum = 'changed' WHERE migration_id = '001'"
+        )
+        await db.commit()
+
+    with pytest.raises(RuntimeError, match="checksum drift"):
+        await init_db(str(db_dir))
+
+
+async def test_init_db_rejects_wrong_database_assignment(tmp_path):
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            """INSERT INTO schema_migrations
+               (migration_id, filename, checksum, applied_at)
+               VALUES ('002', '002_create_errors.sql', 'checksum', 'now')"""
+        )
+        await db.commit()
+
+    with pytest.raises(RuntimeError, match="wrong database"):
+        await init_db(str(db_dir))
+
+
+async def test_init_db_rejects_ledger_gap(tmp_path):
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    async with get_db("jobs.db") as db:
+        await db.execute("DELETE FROM schema_migrations WHERE migration_id = '001'")
+        await db.commit()
+
+    with pytest.raises(RuntimeError, match="ledger gap"):
+        await init_db(str(db_dir))
+
+
+def test_load_migrations_rejects_unassigned_file(tmp_path):
+    sql_dir = tmp_path / "sql"
+    shutil.copytree(_resolve_sql_dir(), sql_dir)
+    (sql_dir / "010_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="assignment mismatch"):
+        _load_migrations(sql_dir)
+
+
+def test_load_migrations_rejects_numeric_gap(tmp_path, monkeypatch):
+    import scrapeyard.storage.database as mod
+
+    sql_dir = tmp_path / "sql"
+    sql_dir.mkdir()
+    (sql_dir / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+    (sql_dir / "003_third.sql").write_text("SELECT 3;", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "_DB_MIGRATIONS",
+        {"jobs.db": ("001_first.sql", "003_third.sql")},
+    )
+
+    with pytest.raises(RuntimeError, match="numeric gap"):
+        mod._load_migrations(sql_dir)
+
+
+async def test_failed_migration_rolls_back_schema_and_ledger(tmp_path):
+    db_path = tmp_path / "failed.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """CREATE TABLE schema_migrations (
+                   migration_id TEXT PRIMARY KEY,
+                   filename TEXT NOT NULL UNIQUE,
+                   checksum TEXT NOT NULL,
+                   applied_at TEXT NOT NULL
+               )"""
+        )
+        await db.commit()
+        migration = Migration(
+            migration_id="010",
+            filename="010_broken.sql",
+            sql="CREATE TABLE partial_change (id INTEGER); INVALID SQL;",
+            checksum="checksum",
+        )
+
+        with pytest.raises(aiosqlite.OperationalError):
+            await _apply_migration(db, migration)
+
+        cursor = await db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='partial_change'"
+        )
+        assert await cursor.fetchone() is None
+        cursor = await db.execute("SELECT COUNT(*) FROM schema_migrations")
+        assert (await cursor.fetchone())[0] == 0
 
 
 async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_path):
