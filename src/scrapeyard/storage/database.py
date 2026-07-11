@@ -194,9 +194,9 @@ async def _migration_is_reflected(
             db, "idx_job_runs_job_started"
         )
     if migration_id == "006":
-        return await _index_exists(
-            db, "idx_results_meta_job_created"
-        ) and await _index_exists(db, "idx_results_meta_job_run")
+        return await _index_exists(db, "idx_results_meta_job_created") and await _index_exists(
+            db, "idx_results_meta_job_run"
+        )
     if migration_id == "007":
         return await _index_exists(db, "idx_errors_job_timestamp") and await _index_exists(
             db, "idx_errors_project_timestamp"
@@ -294,8 +294,7 @@ async def _migrate_database(
     await _ensure_migration_table(db)
 
     cursor = await db.execute(
-        f"SELECT migration_id, filename, checksum FROM {_MIGRATION_TABLE} "
-        "ORDER BY migration_id"
+        f"SELECT migration_id, filename, checksum FROM {_MIGRATION_TABLE} ORDER BY migration_id"
     )
     rows = await cursor.fetchall()
     expected_by_id = {migration.migration_id: migration for migration in migrations}
@@ -320,7 +319,7 @@ async def _migrate_database(
     if recorded_ids != expected_ids[: len(recorded_ids)]:
         raise RuntimeError(
             f"Migration ledger gap in {db_name}: recorded={recorded_ids} "
-            f"expected_prefix={expected_ids[:len(recorded_ids)]}"
+            f"expected_prefix={expected_ids[: len(recorded_ids)]}"
         )
 
     for migration in migrations[len(recorded_ids) :]:
@@ -348,6 +347,30 @@ async def _apply_connection_pragmas(db: aiosqlite.Connection) -> None:
         await db.execute(pragma)
 
 
+@asynccontextmanager
+async def db_transaction(
+    db: aiosqlite.Connection,
+    *,
+    immediate: bool = False,
+) -> AsyncIterator[None]:
+    """Commit one explicit transaction or roll it back on any cancellation/fault.
+
+    Callers may deliberately roll back a compare-and-set no-op before leaving the
+    context. In that case there is no active transaction left to commit.
+    """
+
+    await db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        yield
+    except BaseException:
+        if db.in_transaction:
+            await db.rollback()
+        raise
+    else:
+        if db.in_transaction:
+            await db.commit()
+
+
 async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
     """Add the item-03 lease column to databases created before heartbeats.
 
@@ -360,9 +383,7 @@ async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
     columns = {row[1] for row in await cursor.fetchall()}
     if "heartbeat_at" not in columns:
         await db.execute("ALTER TABLE job_runs ADD COLUMN heartbeat_at TEXT")
-        await db.execute(
-            "UPDATE job_runs SET heartbeat_at = started_at WHERE heartbeat_at IS NULL"
-        )
+        await db.execute("UPDATE job_runs SET heartbeat_at = started_at WHERE heartbeat_at IS NULL")
 
 
 async def _ensure_webhook_outbox_item06_columns(db: aiosqlite.Connection) -> None:
@@ -381,9 +402,7 @@ async def _ensure_webhook_outbox_item06_columns(db: aiosqlite.Connection) -> Non
     }
     for column, declaration in additions.items():
         if column not in columns:
-            await db.execute(
-                f"ALTER TABLE webhook_deliveries ADD COLUMN {column} {declaration}"
-            )
+            await db.execute(f"ALTER TABLE webhook_deliveries ADD COLUMN {column} {declaration}")
 
     await db.execute(
         """UPDATE webhook_deliveries
@@ -413,9 +432,7 @@ async def _ensure_jobs_item07_columns(db: aiosqlite.Connection) -> None:
     }
     for column, declaration in additions.items():
         if column not in columns:
-            await db.execute(
-                f"ALTER TABLE jobs ADD COLUMN {column} {declaration}"
-            )
+            await db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {declaration}")
     cursor = await db.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'webhook_deliveries'"
     )

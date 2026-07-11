@@ -21,7 +21,7 @@ from scrapeyard.common.dt import parse_dt
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import safe_join
 from scrapeyard.common.time import utc_now
-from scrapeyard.storage.database import get_db
+from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -106,17 +106,13 @@ class _ReconciliationState:
             corrupt_result_files=self.corrupt_result_files,
             unreadable_result_files=self.unreadable_result_files,
             unsafe_metadata_paths=self.unsafe_metadata_paths,
-            filesystem_run_directories_inspected=(
-                self.filesystem_run_directories_inspected
-            ),
+            filesystem_run_directories_inspected=(self.filesystem_run_directories_inspected),
             malformed_entries_ignored=self.malformed_entries_ignored,
             orphan_candidates=self.orphan_candidates,
             recent_candidates_skipped=self.recent_candidates_skipped,
             active_run_candidates_skipped=self.active_run_candidates_skipped,
             metadata_race_candidates_skipped=self.metadata_race_candidates_skipped,
-            active_run_race_candidates_skipped=(
-                self.active_run_race_candidates_skipped
-            ),
+            active_run_race_candidates_skipped=(self.active_run_race_candidates_skipped),
             stale_temporary_candidates=self.stale_temporary_candidates,
             directories_would_remove=self.directories_would_remove,
             files_would_remove=self.files_would_remove,
@@ -152,9 +148,7 @@ class LocalResultStore:
     def _checked_result_dir(self, file_path: str) -> Path:
         path = Path(file_path)
         if ".." in path.parts:
-            raise ValueError(
-                f"Unsafe result path outside results_dir: {file_path!r}"
-            )
+            raise ValueError(f"Unsafe result path outside results_dir: {file_path!r}")
         root = self._results_dir.resolve(strict=False)
         resolved = Path(os.path.abspath(path))
         try:
@@ -174,8 +168,7 @@ class LocalResultStore:
                 continue
             if stat.S_ISLNK(mode):
                 raise ValueError(
-                    "Unsafe symlinked result path may resolve outside results_dir: "
-                    f"{file_path!r}"
+                    f"Unsafe symlinked result path may resolve outside results_dir: {file_path!r}"
                 )
         return resolved
 
@@ -271,30 +264,25 @@ class LocalResultStore:
             if budget is not None:
                 budget.check_deadline()
 
-            async with get_db("results_meta.db") as db:
-                try:
-                    # Single atomic statement — the UNIQUE index on (job_id, run_id)
-                    # lets INSERT OR REPLACE handle the upsert without a separate DELETE.
-                    await db.execute(
-                        """INSERT OR REPLACE INTO results_meta
+            async with get_db("results_meta.db") as db, db_transaction(db):
+                # Single atomic statement — the UNIQUE index on (job_id, run_id)
+                # lets INSERT OR REPLACE handle the upsert without a separate DELETE.
+                await db.execute(
+                    """INSERT OR REPLACE INTO results_meta
                            (job_id, project, run_id, status, record_count,
                             file_path, created_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            job_id,
-                            project,
-                            run_id,
-                            status,
-                            record_count,
-                            str(run_dir),
-                            utc_now().isoformat(),
-                        ),
-                    )
-                    await db.commit()
-                    metadata_committed = True
-                except BaseException:
-                    await db.rollback()
-                    raise
+                    (
+                        job_id,
+                        project,
+                        run_id,
+                        status,
+                        record_count,
+                        str(run_dir),
+                        utc_now().isoformat(),
+                    ),
+                )
+                metadata_committed = True
             if budget is not None:
                 budget.check_deadline()
         except BaseException:
@@ -311,7 +299,9 @@ class LocalResultStore:
         )
 
     async def get_result(
-        self, job_id: str, run_id: str | None = None,
+        self,
+        job_id: str,
+        run_id: str | None = None,
     ) -> ResultPayload:
         sql, params = build_result_lookup_query(job_id, run_id)
 
@@ -321,8 +311,7 @@ class LocalResultStore:
 
         if row is None:
             raise KeyError(
-                f"No results found for job {job_id!r}"
-                + (f" run {run_id!r}" if run_id else "")
+                f"No results found for job {job_id!r}" + (f" run {run_id!r}" if run_id else "")
             )
 
         result_run_id = row["run_id"]
@@ -496,9 +485,7 @@ class LocalResultStore:
     ) -> list[tuple[str, Path, os.stat_result]]:
         """List one directory through a non-following descriptor."""
 
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
-            os, "O_NOFOLLOW", 0
-        )
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(directory, flags)
         try:
             with os.scandir(descriptor) as entries:
@@ -564,9 +551,7 @@ class LocalResultStore:
 
         for project_name, project_path, project_stat in project_entries:
             try:
-                if not stat.S_ISDIR(project_stat.st_mode) or stat.S_ISLNK(
-                    project_stat.st_mode
-                ):
+                if not stat.S_ISDIR(project_stat.st_mode) or stat.S_ISLNK(project_stat.st_mode):
                     state.malformed_entries_ignored += 1
                     continue
                 job_entries = self._directory_entries(project_path)
@@ -580,33 +565,23 @@ class LocalResultStore:
             for job_name, job_path, job_stat in job_entries:
                 project_job = f"{project_name[:80]}/{job_name[:80]}"
                 try:
-                    if not stat.S_ISDIR(job_stat.st_mode) or stat.S_ISLNK(
-                        job_stat.st_mode
-                    ):
+                    if not stat.S_ISDIR(job_stat.st_mode) or stat.S_ISLNK(job_stat.st_mode):
                         state.malformed_entries_ignored += 1
                         continue
                     run_entries = self._directory_entries(job_path)
                 except OSError as exc:
                     state.operation_failures.append(
-                        ReconciliationOperationFailure(
-                            "scan_job", project_job, type(exc).__name__
-                        )
+                        ReconciliationOperationFailure("scan_job", project_job, type(exc).__name__)
                     )
                     continue
                 for run_name, run_path, run_stat in run_entries:
-                    identity = _RunIdentity(
-                        project_name, job_name, run_name
-                    )
+                    identity = _RunIdentity(project_name, job_name, run_name)
                     try:
-                        if not stat.S_ISDIR(run_stat.st_mode) or stat.S_ISLNK(
-                            run_stat.st_mode
-                        ):
+                        if not stat.S_ISDIR(run_stat.st_mode) or stat.S_ISLNK(run_stat.st_mode):
                             state.malformed_entries_ignored += 1
                             continue
                         run_dir = self._checked_result_dir(str(run_path))
-                        total_bytes, newest_mtime, temporary_files = (
-                            self._tree_snapshot(run_dir)
-                        )
+                        total_bytes, newest_mtime, temporary_files = self._tree_snapshot(run_dir)
                     except (OSError, ValueError) as exc:
                         state.operation_failures.append(
                             ReconciliationOperationFailure(
@@ -623,9 +598,7 @@ class LocalResultStore:
                             state.recent_candidates_skipped += 1
                         else:
                             state.orphan_candidates += 1
-                            run_candidates.append(
-                                _RemovalCandidate(identity, run_dir, total_bytes)
-                            )
+                            run_candidates.append(_RemovalCandidate(identity, run_dir, total_bytes))
                     for temp_path, temp_size, temp_mtime in temporary_files:
                         if temp_mtime >= cutoff_timestamp or run_is_recent:
                             state.recent_candidates_skipped += 1

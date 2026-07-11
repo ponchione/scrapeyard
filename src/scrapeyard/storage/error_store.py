@@ -15,7 +15,7 @@ from scrapeyard.models.job import (
     ErrorRecord,
     ErrorType,
 )
-from scrapeyard.storage.database import get_db
+from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.error_queries import build_query_errors_query
 
 logger = logging.getLogger(__name__)
@@ -76,9 +76,7 @@ def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
             None if error_type is ErrorType.budget_exceeded else _loads_selectors_matched(selectors)
         ),
         budget=(
-            _loads_budget_details(selectors)
-            if error_type is ErrorType.budget_exceeded
-            else None
+            _loads_budget_details(selectors) if error_type is ErrorType.budget_exceeded else None
         ),
         action_taken=ActionTaken(cast(str, row["action_taken"])),
         resolved=bool(row["resolved"]),
@@ -121,22 +119,16 @@ class SQLiteErrorStore:
             )
             for error in errors
         ]
-        async with get_db("errors.db") as db:
-            try:
-                await db.executemany(
-                    """INSERT INTO errors
+        async with get_db("errors.db") as db, db_transaction(db):
+            await db.executemany(
+                """INSERT INTO errors
                        (job_id, run_id, project, target_url, attempt,
                         timestamp, error_type, http_status, fetcher_used,
                         error_message, selectors_matched, action_taken,
                         resolved)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    rows,
-                )
-                await db.commit()
-            except BaseException:
-                if db.in_transaction:
-                    await db.rollback()
-                raise
+                rows,
+            )
 
     async def query_errors(
         self,
@@ -162,6 +154,5 @@ class SQLiteErrorStore:
 
     async def delete_errors_for_job(self, job_id: str) -> None:
         """Delete all error records for a job."""
-        async with get_db("errors.db") as db:
+        async with get_db("errors.db") as db, db_transaction(db):
             await db.execute("DELETE FROM errors WHERE job_id=?", (job_id,))
-            await db.commit()
