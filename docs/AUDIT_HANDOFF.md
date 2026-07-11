@@ -21,6 +21,7 @@ independent, reviewable slices:
 | `70519a1` | Chunk result-metadata deletion below SQLite variable limits. |
 | `13220a4` | Remove obsolete and unsafe alternate lifecycle APIs. |
 | `d02bdf9` | Scope run-stat aggregation before project-filtered job listing. |
+| `7fbb084` | Enforce and prove use of the covering run-stat index. |
 | `65f0656` | Validate each basic-fetch redirect target once before request. |
 | `cc3506a` | Align integration assertions with bounded reconciliation behavior. |
 | `31e2d96` | Repair and harden the authenticated live-Redis verification lane. |
@@ -62,14 +63,14 @@ poetry run ruff check src tests
 poetry run mypy src
   Success: no issues found in 77 source files.
 
-poetry run pytest tests/unit
-  1,036 passed.
+poetry run pytest --no-cov tests/unit
+  1,037 passed.
 
 poetry run pytest --no-cov tests/integration
   59 passed.
 
 poetry run pytest
-  1,095 passed, 8 skipped, 89.37% coverage.
+  1,096 passed, 8 skipped, 89.37% coverage.
 
 ./scripts/run_live_redis_tests.sh
   8 passed on two consecutive default-port runs.
