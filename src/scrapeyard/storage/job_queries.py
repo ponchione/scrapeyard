@@ -11,7 +11,7 @@ def build_list_jobs_with_stats_query(
     offset: int,
 ) -> tuple[str, list[object]]:
     job_cols = select_columns(JOB_COLUMNS, table_alias="j")
-    stats_source = "    FROM job_runs r "
+    stats_source = "    FROM job_runs r INDEXED BY idx_job_runs_job_started "
     params: list[object] = []
     if project is not None:
         stats_source += (
