@@ -49,6 +49,7 @@ from scrapeyard.storage.types import (
 
 logger = logging.getLogger(__name__)
 _RESULT_RUN_DIR_DEPTH = 3
+_DELETE_ID_BATCH_SIZE = 500
 _ATOMIC_TEMP_PATTERN = re.compile(
     r"^\.(?:results\.json|dynamic-main\.png|stealthy-main\.png)\."
     r"[1-9][0-9]*\.[0-9a-f]{32}\.tmp$"
@@ -182,6 +183,20 @@ class LocalResultStore:
                 logger.warning("Skipping unsafe result directory during cleanup: %r", file_path)
         return paths
 
+    @staticmethod
+    async def _delete_metadata_ids(
+        db: Any,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> None:
+        ids = [row["id"] for row in rows]
+        for start in range(0, len(ids), _DELETE_ID_BATCH_SIZE):
+            batch = ids[start : start + _DELETE_ID_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            await db.execute(
+                f"DELETE FROM results_meta WHERE id IN ({placeholders})",
+                batch,
+            )
+
     async def _delete_by_ids(
         self,
         db: Any,
@@ -190,12 +205,7 @@ class LocalResultStore:
         if not rows:
             return 0
 
-        ids = [row["id"] for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        await db.execute(
-            f"DELETE FROM results_meta WHERE id IN ({placeholders})",
-            ids,
-        )
+        await self._delete_metadata_ids(db, rows)
         await db.commit()
         # Delete files after metadata so a crash leaves orphaned files
         # (recoverable) rather than orphaned metadata rows pointing to
@@ -219,12 +229,7 @@ class LocalResultStore:
             return 0
         paths = [self._checked_result_dir(str(row["file_path"])) for row in rows]
         await cleanup_safe_to_thread(remove_directories, paths)
-        ids = [row["id"] for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        await db.execute(
-            f"DELETE FROM results_meta WHERE id IN ({placeholders})",
-            ids,
-        )
+        await self._delete_metadata_ids(db, rows)
         await db.commit()
         return len(rows)
 
