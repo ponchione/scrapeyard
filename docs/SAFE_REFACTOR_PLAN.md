@@ -129,8 +129,8 @@ git diff --check
 Final gates:
 
 ```text
-poetry run pytest tests/unit
-poetry run pytest tests/integration
+poetry run pytest --no-cov tests/unit
+poetry run pytest --no-cov tests/integration
 poetry run pytest
 ```
 

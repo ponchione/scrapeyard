@@ -192,8 +192,8 @@ async def test_retention_cleanup_preserves_reconciliation_dedup_evidence(
     )
     await asyncio.sleep(0.05)
 
-    assert first.existing == 1
-    assert second.existing == 1
+    assert first.inspected == 0
+    assert second.inspected == 0
     assert len(dispatched_payloads) == 1
     async with get_db("jobs.db") as db:
         row = await (
