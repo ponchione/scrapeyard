@@ -8,6 +8,7 @@ import pytest
 
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.job_queries import build_list_jobs_with_stats_query
 from scrapeyard.storage.job_store import (
     DuplicateJobError,
     SQLiteJobStore,
@@ -98,6 +99,17 @@ async def test_result_run_active_lookup_protects_exact_queued_or_running_owner(s
     assert not await store.result_run_is_active(
         "acme", "scrape-prices", "run-queued"
     )
+
+
+async def test_project_stats_query_uses_project_and_run_indexes(store):
+    sql, params = build_list_jobs_with_stats_query("acme", limit=10, offset=0)
+
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+        plan = " ".join(str(row[3]) for row in await cursor.fetchall())
+
+    assert "idx_jobs_project" in plan
+    assert "idx_job_runs_job_started" in plan
 
 
 async def test_save_and_get_preserves_disabled_schedule(store):
