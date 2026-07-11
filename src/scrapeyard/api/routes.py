@@ -27,6 +27,11 @@ from scrapeyard.api.response_utils import (
     raise_json_error,
 )
 from scrapeyard.api.scrape_submission import submit_scrape_job
+from scrapeyard.api.job_lifecycle import (
+    JobLifecycleRequestError,
+    cancel_current_job,
+    delete_reserved_job,
+)
 from scrapeyard.api.serializers import (
     serialize_error_record,
     serialize_job_created,
@@ -251,15 +256,41 @@ async def delete_job(
     result_store: ResultStore = Depends(get_result_store),
     error_store: ErrorStore = Depends(get_error_store),
     scheduler: SchedulerService = Depends(get_scheduler),
+    worker_pool: WorkerPool = Depends(get_worker_pool),
 ) -> Response:
-    """Delete a job by ID."""
-    await _get_job_or_404(job_store, job_id)
+    """Reserve or resume safe deletion of a terminal/cancelled job."""
+    try:
+        await delete_reserved_job(
+            job_id,
+            delete_results=delete_results,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            worker_pool=worker_pool,
+            scheduler=scheduler,
+        )
+    except JobLifecycleRequestError as exc:
+        raise_json_error(exc.status_code, exc.message)
+    return no_content_response()
 
-    scheduler.remove_job(job_id)
-    if delete_results:
-        await result_store.delete_results(job_id)
-    await error_store.delete_errors_for_job(job_id)
-    await job_store.delete_job(job_id)
+
+@router.post("/jobs/{job_id}/cancel", status_code=204)
+async def cancel_job(
+    job_id: str,
+    job_store: JobStore = Depends(get_job_store),
+    worker_pool: WorkerPool = Depends(get_worker_pool),
+    scheduler: SchedulerService = Depends(get_scheduler),
+) -> Response:
+    """Cancel the current queued/running delivery and wait for quiescence."""
+    try:
+        await cancel_current_job(
+            job_id,
+            job_store=job_store,
+            worker_pool=worker_pool,
+            scheduler=scheduler,
+        )
+    except JobLifecycleRequestError as exc:
+        raise_json_error(exc.status_code, exc.message)
     return no_content_response()
 
 
@@ -272,17 +303,33 @@ async def get_results(
     result_store: ResultStore = Depends(get_result_store),
 ) -> Any:
     """Get results for a job."""
-    job = await _get_job_or_404(job_store, job_id)
-
-    if run_id is None:
-        if not latest:
-            raise_json_error(400, "Provide run_id when latest=false")
-        if job.status in (JobStatus.queued, JobStatus.running):
-            return _queued_scrape_response(job_id, status=job.status.value, poll_url=f"/jobs/{job_id}")
+    if run_id is None and not latest:
+        raise_json_error(400, "Provide run_id when latest=false")
 
     try:
-        payload = await result_store.get_result(job_id, run_id=run_id)
+        job = await job_store.get_job(job_id)
     except KeyError:
+        job = None
+
+    if (
+        run_id is None
+        and job is not None
+        and job.status in (JobStatus.queued, JobStatus.running)
+    ):
+        return _queued_scrape_response(
+            job_id,
+            status=job.status.value,
+            poll_url=f"/jobs/{job_id}",
+        )
+
+    result_run_id = (
+        run_id
+        if run_id is not None
+        else (None if job is None else job.current_run_id)
+    )
+    try:
+        payload = await result_store.get_result(job_id, run_id=result_run_id)
+    except (KeyError, FileNotFoundError):
         raise_json_error(404, f"No results found for job {job_id!r}")
 
     return serialize_results_payload(

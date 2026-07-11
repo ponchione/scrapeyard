@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
@@ -265,3 +267,109 @@ async def test_paginate_target_supports_xpath_next_selector():
     fetch_page.assert_awaited_once()
     assert fetch_page.await_args.args[2] == "https://example.com/page-2"
     assert result.pages_scraped == 2
+
+
+@pytest.mark.asyncio
+async def test_paginate_target_enforces_aggregate_record_budget_across_pages():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}, {"title": "second"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    budget = RunBudget(
+        max_duration_seconds=60,
+        max_fetched_bytes=1000,
+        max_extracted_records=3,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1000,
+    )
+    await budget.consume_extracted_records(2)
+    fetch_page = AsyncMock(
+        return_value=FetchOutcome(
+            page=_Page([]),
+            debug={"final_url": "https://example.com/page-2"},
+        )
+    )
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await paginate_target(
+            page=_Page([_Element("/page-2")]),
+            target=target,
+            result=result,
+            fetch_target_page=fetch_page,
+            extract_page_data=MagicMock(
+                return_value=[{"title": "third"}, {"title": "fourth"}]
+            ),
+            retry_handler=MagicMock(spec=RetryConfig),
+            fetcher_cls=object(),
+            adaptive=False,
+            retryable_status={500},
+            adaptive_dir="/tmp/adaptive",
+            proxy_url=None,
+            artifacts_dir=None,
+            budget=budget,
+        )
+
+    assert exc_info.value.limit_name is BudgetLimitName.extracted_records
+    assert exc_info.value.observed_amount == 4
+    assert result.data == [{"title": "first"}, {"title": "second"}]
+    assert fetch_page.await_args.args[-1] is budget
+
+
+@pytest.mark.asyncio
+async def test_paginated_fetch_uses_one_overall_deadline():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+    budget = RunBudget(
+        max_duration_seconds=0.01,
+        max_fetched_bytes=1000,
+        max_extracted_records=10,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1000,
+    )
+
+    async def blocked_fetch(*args):
+        passed_budget = args[-1]
+        await passed_budget.wait_for(asyncio.Event().wait())
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await paginate_target(
+            page=_Page([_Element("/page-2")]),
+            target=target,
+            result=result,
+            fetch_target_page=blocked_fetch,
+            extract_page_data=MagicMock(),
+            retry_handler=MagicMock(spec=RetryConfig),
+            fetcher_cls=object(),
+            adaptive=False,
+            retryable_status=set(),
+            adaptive_dir="/tmp/adaptive",
+            proxy_url=None,
+            artifacts_dir=None,
+            budget=budget,
+        )
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds

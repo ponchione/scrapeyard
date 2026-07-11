@@ -42,6 +42,14 @@ def test_completed_at_defaults_to_none():
     assert run.completed_at is None
 
 
+def test_heartbeat_at_defaults_to_utc_now():
+    before = datetime.now(timezone.utc)
+    run = _make_job_run()
+    after = datetime.now(timezone.utc)
+    assert before <= run.heartbeat_at <= after
+    assert run.heartbeat_at.tzinfo is not None
+
+
 def test_record_count_defaults_to_none():
     run = _make_job_run()
     assert run.record_count is None

@@ -60,4 +60,4 @@ EXPOSE 8420
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:8420/health >/dev/null || exit 1
 
-CMD ["sh", "-lc", "mkdir -p /data/db /data/results /data/adaptive /data/logs \"$XDG_CACHE_HOME\" && chown -R scrapeyard:scrapeyard /app /data \"$XDG_CACHE_HOME\" && chown root:root \"$CHROME_DEVEL_SANDBOX\" && chmod 4755 \"$CHROME_DEVEL_SANDBOX\" && exec su scrapeyard -s /bin/sh -c 'uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420'"]
+CMD ["sh", "-lc", "mkdir -p /data/db /data/results /data/adaptive /data/logs \"$XDG_CACHE_HOME\" && chown -R scrapeyard:scrapeyard /app /data \"$XDG_CACHE_HOME\" && chown root:root \"$CHROME_DEVEL_SANDBOX\" && chmod 4755 \"$CHROME_DEVEL_SANDBOX\" && exec setpriv --reuid=scrapeyard --regid=scrapeyard --init-groups uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420"]

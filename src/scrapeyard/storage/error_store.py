@@ -8,7 +8,13 @@ from collections.abc import Mapping
 from typing import cast
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
-from scrapeyard.models.job import ActionTaken, ErrorFilters, ErrorRecord, ErrorType
+from scrapeyard.models.job import (
+    ActionTaken,
+    BudgetErrorDetails,
+    ErrorFilters,
+    ErrorRecord,
+    ErrorType,
+)
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.error_queries import build_query_errors_query
 
@@ -38,11 +44,23 @@ def _loads_selectors_matched(value: str | None) -> dict[str, int] | None:
     return selectors
 
 
+def _loads_budget_details(value: str | None) -> BudgetErrorDetails | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+        return BudgetErrorDetails.model_validate(parsed)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Ignoring malformed budget details JSON in error row: %s", exc)
+        return None
+
+
 def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
     selectors = cast(str | None, row["selectors_matched"])
     timestamp = parse_dt(cast(str | None, row["timestamp"]))
     if timestamp is None:
         raise ValueError("Error row is missing timestamp")
+    error_type = ErrorType(cast(str, row["error_type"]))
     return ErrorRecord(
         job_id=cast(str, row["job_id"]),
         run_id=cast(str, row["run_id"]),
@@ -50,11 +68,18 @@ def _row_to_error(row: Mapping[str, object]) -> ErrorRecord:
         target_url=cast(str, row["target_url"]),
         attempt=cast(int, row["attempt"]),
         timestamp=timestamp,
-        error_type=ErrorType(cast(str, row["error_type"])),
+        error_type=error_type,
         http_status=cast(int | None, row["http_status"]),
         fetcher_used=cast(str, row["fetcher_used"]),
         error_message=cast(str | None, row["error_message"]),
-        selectors_matched=_loads_selectors_matched(selectors),
+        selectors_matched=(
+            None if error_type is ErrorType.budget_exceeded else _loads_selectors_matched(selectors)
+        ),
+        budget=(
+            _loads_budget_details(selectors)
+            if error_type is ErrorType.budget_exceeded
+            else None
+        ),
         action_taken=ActionTaken(cast(str, row["action_taken"])),
         resolved=bool(row["resolved"]),
     )
@@ -82,25 +107,36 @@ class SQLiteErrorStore:
                 error.http_status,
                 error.fetcher_used,
                 error.error_message,
-                json.dumps(error.selectors_matched)
-                if error.selectors_matched is not None
-                else None,
+                (
+                    json.dumps(error.budget.model_dump(mode="json"))
+                    if error.budget is not None
+                    else (
+                        json.dumps(error.selectors_matched)
+                        if error.selectors_matched is not None
+                        else None
+                    )
+                ),
                 error.action_taken.value,
                 int(error.resolved),
             )
             for error in errors
         ]
         async with get_db("errors.db") as db:
-            await db.executemany(
-                """INSERT INTO errors
-                   (job_id, run_id, project, target_url, attempt,
-                    timestamp, error_type, http_status, fetcher_used,
-                    error_message, selectors_matched, action_taken,
-                    resolved)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            await db.commit()
+            try:
+                await db.executemany(
+                    """INSERT INTO errors
+                       (job_id, run_id, project, target_url, attempt,
+                        timestamp, error_type, http_status, fetcher_used,
+                        error_message, selectors_matched, action_taken,
+                        resolved)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                await db.commit()
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
 
     async def query_errors(
         self,

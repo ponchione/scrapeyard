@@ -6,13 +6,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.config.schema import FailStrategy
+from scrapeyard.config.schema import FailStrategy, FetcherType, WebhookConfig
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
-from scrapeyard.queue.run_lifecycle import finalize_run
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.worker import scrape_task
-from tests.unit.worker_helpers import SIMPLE_YAML, make_config_mock, make_job, make_target
+from scrapeyard.storage.types import RunOwnershipError
+from tests.unit.worker_helpers import (
+    SIMPLE_YAML,
+    finalized_status,
+    make_config_mock,
+    make_job,
+    make_settings_mock,
+    make_target,
+)
 
 
 @pytest.mark.asyncio
@@ -21,13 +29,6 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
-
-    updated_jobs = []
-
-    async def capture_update(j):
-        updated_jobs.append(j)
-
-    job_store.update_job_status.side_effect = capture_update
 
     await scrape_task(
         job.job_id,
@@ -39,8 +40,8 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
         rate_limiter=LocalDomainRateLimiter(),
     )
 
-    assert len(updated_jobs) > 0
-    assert updated_jobs[-1].status == JobStatus.failed
+    job_store.fail_owned_run.assert_not_awaited()
+    job_store.update_job_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -116,14 +117,21 @@ async def test_scrape_task_skips_recent_running_duplicate():
 
 
 @pytest.mark.asyncio
-async def test_scrape_task_skips_result_persistence_when_run_becomes_superseded():
+async def test_scrape_task_discards_result_when_finalization_loses_ownership():
     initial_job = make_job(job_id="test-job-1", name="crash-test", current_run_id="run-1")
-    superseded_job = initial_job.model_copy(update={"current_run_id": "run-2"})
     job_store = AsyncMock()
-    job_store.get_job.side_effect = [initial_job, superseded_job]
+    job_store.get_job.return_value = initial_job
+    job_store.claim_run.return_value = True
+    job_store.finalize_owned_run.side_effect = RunOwnershipError(
+        "finalize",
+        initial_job.job_id,
+        "run-1",
+    )
     result_store = AsyncMock()
     error_store = AsyncMock()
+    error_store.count_errors_for_run.return_value = 0
     circuit_breaker = MagicMock()
+    webhook_dispatcher = AsyncMock()
 
     success_result = TargetResult(
         url="http://example.com",
@@ -134,12 +142,7 @@ async def test_scrape_task_skips_result_persistence_when_run_becomes_superseded(
     with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=success_result)), \
          patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            storage_results_dir="/tmp/results",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
         mock_load.return_value = MagicMock(
             project="test",
             name="crash-test",
@@ -150,7 +153,7 @@ async def test_scrape_task_skips_result_persistence_when_run_becomes_superseded(
             retry=MagicMock(),
             validation=MagicMock(required_fields=[], min_results=0, on_empty="warn"),
             output=MagicMock(group_by="target"),
-            webhook=None,
+            webhook=WebhookConfig(url="https://hooks.example.com/callback"),
             proxy=None,
         )
 
@@ -163,15 +166,22 @@ async def test_scrape_task_skips_result_persistence_when_run_becomes_superseded(
             error_store=error_store,
             circuit_breaker=circuit_breaker,
             rate_limiter=LocalDomainRateLimiter(),
+            webhook_dispatcher=webhook_dispatcher,
         )
 
-    result_store.save_result.assert_not_called()
-    job_store.finalize_run.assert_not_called()
-    job_store.update_job_status.assert_called_once()
+    result_store.save_result.assert_awaited_once()
+    result_store.delete_result.assert_awaited_once_with(
+        initial_job.job_id,
+        "run-1",
+    )
+    job_store.finalize_owned_run.assert_awaited_once()
+    job_store.fail_owned_run.assert_not_awaited()
+    job_store.update_job_status.assert_not_awaited()
+    webhook_dispatcher.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_scrape_task_reclaims_stale_running_job():
+async def test_scrape_task_never_reclaims_running_job_inside_worker():
     stale_job = make_job(job_id="test-job-1", name="crash-test", status=JobStatus.running).model_copy(
         update={
             "current_run_id": "run-3",
@@ -179,14 +189,8 @@ async def test_scrape_task_reclaims_stale_running_job():
         }
     )
     job_store = AsyncMock()
-    job_store.get_job.side_effect = [stale_job, stale_job, stale_job]
-
-    updated_jobs = []
-
-    async def capture_update(job):
-        updated_jobs.append(job)
-
-    job_store.update_job_status.side_effect = capture_update
+    job_store.get_job.return_value = stale_job
+    result_store = AsyncMock()
 
     with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=MagicMock(status="failed", data=[], errors=["boom"], pages_scraped=0, error_type=None, http_status=None, error_detail="boom"))):
         await scrape_task(
@@ -194,14 +198,16 @@ async def test_scrape_task_reclaims_stale_running_job():
             "project: test\nname: x\ntarget:\n  url: http://x\n  selectors:\n    t: h1",
             run_id="run-3",
             job_store=job_store,
-            result_store=AsyncMock(),
+            result_store=result_store,
             error_store=AsyncMock(),
             circuit_breaker=MagicMock(),
             rate_limiter=LocalDomainRateLimiter(),
         )
 
-    assert updated_jobs
-    assert updated_jobs[0].status == JobStatus.running
+    job_store.claim_run.assert_not_awaited()
+    job_store.recover_stale_run.assert_not_awaited()
+    job_store.update_job_status.assert_not_awaited()
+    result_store.save_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -209,6 +215,8 @@ async def test_scrape_task_batches_multiple_target_errors():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.queue_run.return_value = True
+    job_store.claim_run.return_value = True
     job_store.update_job_status = AsyncMock()
 
     error_store = AsyncMock()
@@ -225,11 +233,7 @@ async def test_scrape_task_batches_multiple_target_errors():
     with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=fail_result)), \
          patch("scrapeyard.queue.worker.load_config") as mock_load, \
          patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
         cfg = mock_load.return_value
         cfg.project = "test"
         cfg.name = "crash-test"
@@ -267,6 +271,8 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.queue_run.return_value = True
+    job_store.claim_run.return_value = True
     job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
@@ -300,12 +306,7 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
         patch("scrapeyard.queue.worker.load_config", return_value=cfg),
         patch("scrapeyard.queue.worker.get_settings") as mock_settings,
     ):
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            storage_results_dir="/tmp/results",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
 
         await scrape_task(
             job.job_id,
@@ -336,8 +337,7 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
     assert bad_target_summary["error_type"] is not None
     assert bad_target_summary["errors"] == ["RuntimeError: browser closed"]
 
-    final_update = job_store.update_job_status.call_args_list[-1][0][0]
-    assert final_update.status == JobStatus.partial
+    assert finalized_status(job_store) == JobStatus.partial
 
     error_store.log_errors.assert_awaited_once()
     logged_errors = error_store.log_errors.call_args.args[0]
@@ -354,6 +354,8 @@ async def test_unexpected_target_exception_redacts_url_userinfo():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.queue_run.return_value = True
+    job_store.claim_run.return_value = True
     job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
@@ -371,12 +373,7 @@ async def test_unexpected_target_exception_redacts_url_userinfo():
         patch("scrapeyard.queue.worker.load_config", return_value=cfg),
         patch("scrapeyard.queue.worker.get_settings") as mock_settings,
     ):
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            storage_results_dir="/tmp/results",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
 
         await scrape_task(
             job.job_id,
@@ -403,6 +400,8 @@ async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.queue_run.return_value = True
+    job_store.claim_run.return_value = True
     job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
@@ -436,12 +435,7 @@ async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
         patch("scrapeyard.queue.worker.load_config", return_value=cfg),
         patch("scrapeyard.queue.worker.get_settings") as mock_settings,
     ):
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            storage_results_dir="/tmp/results",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
 
         await scrape_task(
             job.job_id,
@@ -465,8 +459,7 @@ async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
     # per-target result details.
     assert result_store.save_result.call_args.kwargs["record_count"] == 0
 
-    final_update = job_store.update_job_status.call_args_list[-1][0][0]
-    assert final_update.status == JobStatus.failed
+    assert finalized_status(job_store) == JobStatus.failed
 
 
 @pytest.mark.asyncio
@@ -474,6 +467,8 @@ async def test_target_task_cancellation_still_propagates():
     job = make_job(job_id="test-job-1", name="crash-test")
     job_store = AsyncMock()
     job_store.get_job.return_value = job
+    job_store.queue_run.return_value = True
+    job_store.claim_run.return_value = True
     job_store.update_job_status = AsyncMock()
 
     result_store = AsyncMock()
@@ -494,12 +489,7 @@ async def test_target_task_cancellation_still_propagates():
         patch("scrapeyard.queue.worker.load_config", return_value=cfg),
         patch("scrapeyard.queue.worker.get_settings") as mock_settings,
     ):
-        mock_settings.return_value = MagicMock(
-            adaptive_dir="/tmp/adaptive",
-            storage_results_dir="/tmp/results",
-            workers_running_lease_seconds=300,
-            proxy_url="",
-        )
+        mock_settings.return_value = make_settings_mock()
 
         with pytest.raises(asyncio.CancelledError):
             await scrape_task(
@@ -513,60 +503,82 @@ async def test_target_task_cancellation_still_propagates():
             )
 
     result_store.save_result.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# D2: finalize_run cross-DB error handling
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_finalize_run_skips_when_no_run_id():
-    """finalize_run is a no-op when run_id is None."""
-    job_store = AsyncMock()
-    error_store = AsyncMock()
-    await finalize_run(None, JobStatus.complete, 5, job_store, error_store)
-    error_store.count_errors_for_run.assert_not_called()
-    job_store.finalize_run.assert_not_called()
+    assert not any(
+        task.get_name().startswith("scrapeyard-heartbeat-") and not task.done()
+        for task in asyncio.all_tasks()
+    )
 
 
 @pytest.mark.asyncio
-async def test_finalize_run_happy_path():
-    """Normal finalization calls count_errors then finalize_run."""
+async def test_sustained_heartbeat_failure_cancels_targets_without_stale_mutation():
+    job = make_job(
+        job_id="job-lease-loss",
+        name="lease-loss",
+        current_run_id="run-lease-loss",
+    )
     job_store = AsyncMock()
+    job_store.get_job.return_value = job
+    job_store.claim_run.return_value = True
+    job_store.heartbeat_run.side_effect = OSError("database unavailable")
+    result_store = AsyncMock()
     error_store = AsyncMock()
-    error_store.count_errors_for_run.return_value = 3
-    await finalize_run("run-1", JobStatus.complete, 10, job_store, error_store)
-    error_store.count_errors_for_run.assert_awaited_once_with("run-1")
-    job_store.finalize_run.assert_awaited_once_with("run-1", "complete", 10, 3)
+    limiter = BrowserExecutionLimiter(1)
+    target_started = asyncio.Event()
+    target = MagicMock(
+        url="https://browser.example",
+        fetcher=FetcherType.dynamic,
+        proxy=None,
+    )
+    config = make_config_mock(
+        targets=[target],
+        webhook=WebhookConfig(url="https://hooks.example.com/callback"),
+    )
+    webhook_dispatcher = AsyncMock()
 
+    async def _block_target(*_args, **_kwargs):
+        target_started.set()
+        await asyncio.Event().wait()
 
-@pytest.mark.asyncio
-async def test_finalize_run_falls_back_to_fail_run_on_error():
-    """If finalize_run raises, finalize_run falls back to fail_run."""
-    job_store = AsyncMock()
-    job_store.finalize_run.side_effect = RuntimeError("DB write failed")
-    error_store = AsyncMock()
-    error_store.count_errors_for_run.return_value = 0
+    with (
+        patch("scrapeyard.queue.worker.load_config", return_value=config),
+        patch("scrapeyard.queue.worker.scrape_target", side_effect=_block_target),
+        patch(
+            "scrapeyard.queue.worker.get_settings",
+            return_value=make_settings_mock(
+                workers_heartbeat_interval_seconds=0.01,
+                workers_running_heartbeat_timeout_seconds=0.03,
+            ),
+        ),
+    ):
+        task = asyncio.create_task(
+            scrape_task(
+                job.job_id,
+                SIMPLE_YAML,
+                run_id="run-lease-loss",
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
+                browser_limiter=limiter,
+                webhook_dispatcher=webhook_dispatcher,
+            )
+        )
+        await asyncio.wait_for(target_started.wait(), timeout=1)
+        await asyncio.wait_for(task, timeout=1)
 
-    # Should not raise — catches internally.
-    await finalize_run("run-2", JobStatus.complete, 5, job_store, error_store)
-
-    job_store.finalize_run.assert_awaited_once()
-    job_store.fail_run.assert_awaited_once_with("run-2")
-
-
-@pytest.mark.asyncio
-async def test_finalize_run_survives_both_failures():
-    """If both finalize_run and fail_run raise, finalize_run still doesn't crash."""
-    job_store = AsyncMock()
-    job_store.finalize_run.side_effect = RuntimeError("DB write failed")
-    job_store.fail_run.side_effect = RuntimeError("Fallback also failed")
-    error_store = AsyncMock()
-    error_store.count_errors_for_run.return_value = 0
-
-    # Must not raise.
-    await finalize_run("run-3", JobStatus.partial, 2, job_store, error_store)
-
-    job_store.finalize_run.assert_awaited_once()
-    job_store.fail_run.assert_awaited_once_with("run-3")
+    assert job_store.heartbeat_run.await_count >= 3
+    job_store.finalize_owned_run.assert_not_awaited()
+    job_store.fail_owned_run.assert_not_awaited()
+    job_store.update_job_status.assert_not_awaited()
+    webhook_dispatcher.submit.assert_not_awaited()
+    result_store.delete_result.assert_awaited_once_with(
+        job.job_id,
+        "run-lease-loss",
+    )
+    assert limiter.active == 0
+    assert not any(
+        pending.get_name().startswith("scrapeyard-heartbeat-")
+        and not pending.done()
+        for pending in asyncio.all_tasks()
+    )

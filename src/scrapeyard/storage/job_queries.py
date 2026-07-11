@@ -47,5 +47,6 @@ PROJECT_SUMMARY_QUERY = (
 
 SCHEDULED_JOBS_QUERY = (
     "SELECT job_id, schedule_cron, schedule_enabled "
-    "FROM jobs WHERE schedule_cron IS NOT NULL"
+    "FROM jobs WHERE schedule_cron IS NOT NULL "
+    "AND status NOT IN ('cancelled', 'deleting')"
 )

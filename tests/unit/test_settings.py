@@ -50,9 +50,33 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.workers_redis_connect_timeout_seconds == 10.0
 
+    def test_worker_lease_defaults_are_explicit_and_independent(self):
+        settings = ServiceSettings()
+        assert settings.workers_cancellation_grace_seconds == 10.0
+        assert settings.workers_queued_claim_timeout_seconds == 300
+        assert settings.workers_running_heartbeat_timeout_seconds == 600
+        assert settings.workers_heartbeat_interval_seconds == 30
+
+    def test_aggregate_run_budget_defaults(self):
+        settings = ServiceSettings()
+        assert settings.run_max_duration_seconds == 900.0
+        assert settings.run_max_fetched_bytes == 104857600
+        assert settings.run_max_extracted_records == 100000
+        assert settings.run_max_serialized_result_bytes == 52428800
+        assert settings.run_max_browser_debug_bytes == 26214400
+
     def test_scheduler_jitter_max_seconds_default(self):
         settings = ServiceSettings()
         assert settings.scheduler_jitter_max_seconds == 120
+
+    def test_webhook_retry_and_retention_defaults(self):
+        settings = ServiceSettings()
+        assert settings.webhook_max_delivery_attempts == 5
+        assert settings.webhook_max_delivery_age_seconds == 86400
+        assert settings.webhook_dispatch_concurrency == 4
+        assert settings.webhook_dispatch_batch_size == 100
+        assert settings.webhook_delivered_retention_days == 7
+        assert settings.webhook_failed_retention_days == 30
 
     def test_admin_read_default_limit_default(self):
         settings = ServiceSettings()
@@ -81,6 +105,11 @@ class TestServiceSettingsDefaults:
     def test_storage_max_results_per_job_default(self):
         settings = ServiceSettings()
         assert settings.storage_max_results_per_job == 100
+
+    def test_storage_reconciliation_defaults(self):
+        settings = ServiceSettings()
+        assert settings.storage_orphan_grace_seconds == 86400
+        assert settings.storage_reconciliation_dry_run is True
 
     def test_db_dir_default(self, monkeypatch):
         settings = self._make_clean_settings(monkeypatch)
@@ -125,6 +154,20 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
         assert settings.storage_results_dir == "/tmp/results"
 
+    def test_reads_storage_reconciliation_settings(self):
+        values = {
+            "SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS": "3600",
+            "SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN": "false",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.storage_orphan_grace_seconds == 3600
+        assert settings.storage_reconciliation_dry_run is False
+
+    def test_rejects_non_positive_storage_orphan_grace(self):
+        with pytest.raises(ValidationError):
+            ServiceSettings(storage_orphan_grace_seconds=0)
+
     def test_reads_admin_read_default_limit(self):
         with patch.dict(os.environ, {"SCRAPEYARD_ADMIN_READ_DEFAULT_LIMIT": "25"}):
             settings = ServiceSettings()
@@ -159,6 +202,54 @@ class TestServiceSettingsFromEnv:
         with patch.dict(os.environ, {"SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS": "7.0"}):
             settings = ServiceSettings()
         assert settings.workers_redis_connect_timeout_seconds == 7.0
+
+    def test_reads_worker_lease_settings(self):
+        values = {
+            "SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS": "7.5",
+            "SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS": "45",
+            "SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS": "180",
+            "SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS": "20",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.workers_cancellation_grace_seconds == 7.5
+        assert settings.workers_queued_claim_timeout_seconds == 45
+        assert settings.workers_running_heartbeat_timeout_seconds == 180
+        assert settings.workers_heartbeat_interval_seconds == 20
+
+    def test_reads_aggregate_run_budgets(self):
+        values = {
+            "SCRAPEYARD_RUN_MAX_DURATION_SECONDS": "45.5",
+            "SCRAPEYARD_RUN_MAX_FETCHED_BYTES": "123456",
+            "SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS": "321",
+            "SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES": "8192",
+            "SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES": "4096",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.run_max_duration_seconds == 45.5
+        assert settings.run_max_fetched_bytes == 123456
+        assert settings.run_max_extracted_records == 321
+        assert settings.run_max_serialized_result_bytes == 8192
+        assert settings.run_max_browser_debug_bytes == 4096
+
+    def test_reads_webhook_retry_and_retention_settings(self):
+        values = {
+            "SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS": "7",
+            "SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS": "7200",
+            "SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY": "3",
+            "SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE": "25",
+            "SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS": "2",
+            "SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS": "14",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.webhook_max_delivery_attempts == 7
+        assert settings.webhook_max_delivery_age_seconds == 7200
+        assert settings.webhook_dispatch_concurrency == 3
+        assert settings.webhook_dispatch_batch_size == 25
+        assert settings.webhook_delivered_retention_days == 2
+        assert settings.webhook_failed_retention_days == 14
 
     def test_reads_circuit_breaker_cooldown_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS": "600"}):
@@ -268,6 +359,88 @@ def test_admin_read_default_limit_cannot_exceed_max(monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_ADMIN_READ_MAX_LIMIT", "25")
 
     with pytest.raises(ValidationError, match="admin_read_default_limit"):
+        ServiceSettings()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS",
+        "WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS",
+        "WORKERS_HEARTBEAT_INTERVAL_SECONDS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_worker_lease_settings_reject_non_positive_values(
+    monkeypatch,
+    name,
+    value,
+):
+    monkeypatch.setenv(f"SCRAPEYARD_{name}", value)
+
+    with pytest.raises(ValidationError):
+        ServiceSettings()
+
+
+def test_heartbeat_interval_must_be_safely_shorter_than_running_timeout(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS", "31")
+
+    with pytest.raises(ValidationError, match="one third"):
+        ServiceSettings()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WEBHOOK_MAX_DELIVERY_ATTEMPTS",
+        "WEBHOOK_MAX_DELIVERY_AGE_SECONDS",
+        "WEBHOOK_DISPATCH_CONCURRENCY",
+        "WEBHOOK_DISPATCH_BATCH_SIZE",
+        "WEBHOOK_DELIVERED_RETENTION_DAYS",
+        "WEBHOOK_FAILED_RETENTION_DAYS",
+    ],
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_webhook_retry_settings_reject_non_positive_values(monkeypatch, name, value):
+    monkeypatch.setenv(f"SCRAPEYARD_{name}", value)
+
+    with pytest.raises(ValidationError):
+        ServiceSettings()
+
+
+def test_webhook_batch_size_must_cover_dispatch_concurrency(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY", "5")
+    monkeypatch.setenv("SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE", "4")
+
+    with pytest.raises(ValidationError, match="batch_size"):
+        ServiceSettings()
+
+
+def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):
+    get_settings.cache_clear()
+    assert get_settings().workers_queued_claim_timeout_seconds == 300
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS", "12")
+    get_settings.cache_clear()
+
+    assert get_settings().workers_queued_claim_timeout_seconds == 12
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("RUN_MAX_DURATION_SECONDS", "0"),
+        ("RUN_MAX_DURATION_SECONDS", "-1"),
+        ("RUN_MAX_FETCHED_BYTES", "0"),
+        ("RUN_MAX_EXTRACTED_RECORDS", "0"),
+        ("RUN_MAX_SERIALIZED_RESULT_BYTES", "4095"),
+        ("RUN_MAX_BROWSER_DEBUG_BYTES", "0"),
+    ],
+)
+def test_aggregate_run_budgets_reject_nonsensical_values(monkeypatch, name, value):
+    monkeypatch.setenv(f"SCRAPEYARD_{name}", value)
+
+    with pytest.raises(ValidationError):
         ServiceSettings()
 
 

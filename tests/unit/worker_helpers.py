@@ -7,7 +7,7 @@ constant that were previously copy-pasted across 6+ worker test modules.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from scrapeyard.config.schema import FailStrategy
 from scrapeyard.models.job import Job, JobStatus
@@ -95,6 +95,30 @@ def make_config_mock(
     cfg.webhook = webhook
     cfg.proxy = None
     return cfg
+
+
+def make_settings_mock(**overrides: Any) -> MagicMock:
+    """Create service settings with concrete worker lease and budget values."""
+    values: dict[str, Any] = {
+        "adaptive_dir": "/tmp/adaptive",
+        "storage_results_dir": "/tmp/results",
+        "proxy_url": "",
+        "browser_debug_enabled": False,
+        "workers_heartbeat_interval_seconds": 30,
+        "workers_running_heartbeat_timeout_seconds": 600,
+        "run_max_duration_seconds": 60,
+        "run_max_fetched_bytes": 1_000_000,
+        "run_max_extracted_records": 10_000,
+        "run_max_serialized_result_bytes": 1_000_000,
+        "run_max_browser_debug_bytes": 1_000_000,
+    }
+    values.update(overrides)
+    return MagicMock(**values)
+
+
+def finalized_status(job_store: AsyncMock) -> JobStatus:
+    """Return the terminal status passed to the ownership-aware finalizer."""
+    return JobStatus(job_store.finalize_owned_run.await_args.args[2])
 
 
 SIMPLE_YAML = (

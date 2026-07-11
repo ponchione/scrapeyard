@@ -14,7 +14,8 @@ def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
     assert 'useradd --create-home --home-dir /home/scrapeyard --shell /bin/bash scrapeyard' in dockerfile
     assert "chown root:root /ms-playwright/chromium-1169/chrome-linux/chrome_sandbox" in dockerfile
     assert "chmod 4755 /ms-playwright/chromium-1169/chrome-linux/chrome_sandbox" in dockerfile
-    assert "exec su scrapeyard -s /bin/sh -c 'uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420'" in dockerfile
+    assert "exec setpriv --reuid=scrapeyard --regid=scrapeyard --init-groups uvicorn" in dockerfile
+    assert "exec su scrapeyard" not in dockerfile
 
 
 def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
@@ -22,6 +23,13 @@ def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
 
     assert 'security_opt:' in compose
     assert 'seccomp:unconfined' in compose
+
+
+def test_docker_compose_publishes_http_for_peer_containers() -> None:
+    compose = Path("docker-compose.yml").read_text()
+
+    assert '"0.0.0.0:8420:8420"' in compose
+    assert '"127.0.0.1:8420:8420"' not in compose
 
 
 def test_dockerignore_excludes_local_env_files_from_build_context() -> None:
@@ -35,6 +43,8 @@ def test_dockerignore_excludes_local_env_files_from_build_context() -> None:
 def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
     readme = Path("README.md").read_text()
 
+    assert "host.docker.internal:8420" in readme
+    assert "0.0.0.0:8420:8420" in readme
     assert "rebrowser Chromium" in readme
     assert "browser.stealth: true" in readme
     assert "docker compose up -d --build --force-recreate scrapeyard" in readme

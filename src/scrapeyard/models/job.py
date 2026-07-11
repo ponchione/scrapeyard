@@ -19,6 +19,8 @@ class JobStatus(str, Enum):
     complete = "complete"
     partial = "partial"
     failed = "failed"
+    cancelled = "cancelled"
+    deleting = "deleting"
 
 
 class ErrorType(str, Enum):
@@ -39,6 +41,7 @@ class ErrorType(str, Enum):
     network_error = "network_error"
     browser_error = "browser_error"
     timeout = "timeout"
+    budget_exceeded = "budget_exceeded"
 
 
 class ActionTaken(str, Enum):
@@ -66,6 +69,14 @@ class Job(BaseModel):
     current_run_id: Optional[str] = Field(
         default=None, description="Current queued or active run identifier"
     )
+    deletion_requested_at: Optional[datetime] = Field(
+        default=None,
+        description="UTC time at which resumable deletion was reserved",
+    )
+    delete_results_on_delete: Optional[bool] = Field(
+        default=None,
+        description="Immutable result-retention policy for a deleting job",
+    )
 
 
 class JobRun(BaseModel):
@@ -83,9 +94,21 @@ class JobRun(BaseModel):
         ..., description="SHA-256 of the config YAML used for this run"
     )
     started_at: datetime = Field(default_factory=utc_now)
+    heartbeat_at: datetime = Field(
+        default_factory=utc_now,
+        description="Last persisted UTC heartbeat while the run owns execution",
+    )
     completed_at: Optional[datetime] = None
     record_count: Optional[int] = None
     error_count: int = Field(default=0)
+
+
+class BudgetErrorDetails(BaseModel):
+    """Machine-readable context for a run-level budget failure."""
+
+    limit_name: str
+    configured_limit: int | float
+    observed_amount: int | float
 
 
 class ErrorRecord(BaseModel):
@@ -102,6 +125,7 @@ class ErrorRecord(BaseModel):
     fetcher_used: str
     error_message: Optional[str] = None
     selectors_matched: Optional[dict[str, int]] = None
+    budget: Optional[BudgetErrorDetails] = None
     action_taken: ActionTaken
     resolved: bool = False
 

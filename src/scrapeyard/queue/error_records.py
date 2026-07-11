@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
-from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
+from scrapeyard.models.job import ActionTaken, BudgetErrorDetails, ErrorRecord, ErrorType
 
 
 def validation_error_type(result: TargetResult) -> ErrorType:
@@ -34,6 +34,7 @@ def build_error_record(
     fetcher_used: str,
     action: ActionTaken,
     error_message: str | None = None,
+    budget: BudgetErrorDetails | None = None,
 ) -> ErrorRecord:
     """Build a structured error record for deferred persistence."""
     return ErrorRecord(
@@ -46,6 +47,7 @@ def build_error_record(
         http_status=http_status,
         fetcher_used=fetcher_used,
         error_message=redact_userinfo_in_text(error_message) if error_message is not None else None,
+        budget=budget,
         action_taken=action,
     )
 

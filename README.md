@@ -98,6 +98,13 @@ The Compose setup starts Scrapeyard and Redis, mounts persistent data at
 `/data`, and expects `SCRAPEYARD_API_KEYS` from the shell or a local `.env`
 file.
 
+Scrapeyard listens on `0.0.0.0` inside the container, and the bundled Compose
+file publishes `0.0.0.0:8420:8420`. That keeps `http://127.0.0.1:8420`
+working from the host and allows containers in another local Compose stack to
+reach `http://host.docker.internal:8420`. Keep that port limited to trusted
+local or private networks. If only host-local tools should reach Scrapeyard,
+override the port binding with `127.0.0.1:8420:8420`.
+
 When browser-runtime dependencies change, rebuild the app container:
 
 ```bash
@@ -121,11 +128,42 @@ needs namespace syscalls that Docker's default seccomp profile may block.
 | `POST` | `/jobs` | Register a scheduled job |
 | `GET` | `/jobs` | List jobs |
 | `GET` | `/jobs/{job_id}` | Read job details and run state |
+| `POST` | `/jobs/{job_id}/cancel` | Cancel the current queued/running delivery and wait for quiescence |
 | `DELETE` | `/jobs/{job_id}` | Delete a job |
 | `GET` | `/results/{job_id}` | Read stored results |
 | `GET` | `/errors` | Query stored errors |
 
 Non-health endpoints require `X-API-Key` when `SCRAPEYARD_API_KEYS` is set.
+Cancellation and deletion are separate, idempotent state transitions. Active
+jobs must be cancelled before deletion; preserved results remain readable after
+the job/YAML is removed. See
+[docs/JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md) for exact response codes, Redis
+failure behavior, retention policy, and crash-retry boundaries.
+
+### Queue priority
+
+`execution.priority` is real queue ordering, not a timing hint. With the
+default `SCRAPEYARD_QUEUE_NAME=scrapeyard`, accepted deliveries wait in
+`scrapeyard:priority:high`, `scrapeyard:priority:normal`, or
+`scrapeyard:priority:low`. One embedded arq Worker executes admitted work from
+the existing `scrapeyard` queue, so `SCRAPEYARD_WORKERS_MAX_CONCURRENT` remains
+a global handler limit and browser permits remain process-wide.
+
+Admission is work-conserving weighted round robin with the repeating fair-turn
+cycle `high, high, high, high, normal, normal, low`. The current fair turn is
+preferred; when it is empty, the highest non-empty priority runs. With all
+three queues continuously backlogged, normal receives two of every seven
+admissions and low receives one. A waiting lower-priority delivery is selected
+within at most seven further admission decisions (at most six other starts),
+after work already admitted or running. There is no wall-clock bound because
+running jobs are never preempted. Deliveries are FIFO within one priority.
+
+Ad-hoc, scheduled, and startup-recovered deliveries all use this routing. The
+first enqueue of a `run_id` wins across all queues; a duplicate cannot change
+its priority or create another executable delivery. `/health` reports
+`workers.queue_depths` for the three priority intake queues. These counts
+include waiting and deferred sorted-set members, but exclude work already
+admitted to the base queue and work in progress.
 
 ## Example Config
 
@@ -248,6 +286,24 @@ Common job fields:
 | `output` | Result grouping |
 | `webhook` | Completion notification target |
 
+Terminal webhook intent is durable before a run is reported complete. Each
+logical event uses a stable `whv1_<sha256>` delivery ID derived only from its
+job ID, run ID, and event, and the same ID is sent to the receiver for
+deduplication. HTTP delivery remains asynchronous and at-least-once; startup
+repairs a missing terminal intent and replays pending rows without resetting
+already delivered or permanently failed deliveries. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the transaction and cross-database
+consistency boundaries.
+
+The six-hour cleanup pass applies normal result retention first, then validates
+metadata-backed artifacts and reconciles stale filesystem orphans and known
+atomic-write temporary files. Reconciliation is dry-run by default. A
+metadata row remains authoritative even after its parent job is deleted with
+`delete_results=false`; missing, unsafe, unreadable, or corrupt `results.json`
+files are reported as storage failures and are not repaired or deleted. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#result-artifact-reconciliation) before
+enabling destructive reconciliation.
+
 ## Settings
 
 All service settings use the `SCRAPEYARD_` prefix. The most commonly changed
@@ -257,19 +313,59 @@ settings are:
 | --- | --- | --- |
 | `SCRAPEYARD_API_KEYS` | empty | Comma-separated API key allow-list |
 | `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection for `arq` |
-| `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Redis queue name |
+| `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Result artifact directory |
+| `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` | `86400` | Minimum artifact age before orphan/temp removal eligibility |
+| `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` | `true` | Report eligible orphan/temp removals without changing files |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive state directory |
 | `SCRAPEYARD_LOG_DIR` | `/data/logs` | Log directory |
 | `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | Max wait for sync scrape responses |
 | `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS` | `0.5` | Sync response polling interval |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |
-| `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser jobs |
+| `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |
+| `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait for cancellation |
+| `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` | `300` | Age after which an unclaimed queued delivery may be replaced |
+| `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` | `600` | Time since the last persisted run heartbeat before recovery is allowed |
+| `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
+| `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
+| `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate reliably measured basic-response bytes |
+| `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
+| `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Exact maximum UTF-8 bytes for persisted result JSON |
+| `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
+| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
+| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
+| `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
+| `SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE` | `100` | Maximum due rows loaded into one bounded dispatch batch |
+| `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS` | `7` | Full delivered-row inspection window before secret scrubbing |
+| `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS` | `30` | Full failed-row inspection window before secret scrubbing |
 | `SCRAPEYARD_MAX_REQUEST_BYTES` | `262144` | Max request body size |
 
 See [src/scrapeyard/common/settings.py](src/scrapeyard/common/settings.py) for
 the full settings surface.
+
+Run duration, fetched-byte, record, and serialized-result budget violations
+always finish the run as `failed`, regardless of `execution.fail_strategy`.
+The job, run, compact failure result, and a `budget_exceeded` error remain
+queryable. Structured error details include `limit_name`, `configured_limit`,
+and `observed_amount`. Exact-boundary payloads are accepted; the first
+over-limit reservation stops remaining target work.
+
+Fetched bytes are measured from actual response-body bytes on the `basic`
+fetch path, including redirects and retry responses. Scrapling's browser APIs
+do not expose reliable aggregate network-transfer totals, so `dynamic` and
+`stealthy` traffic is not included in this counter. Browser diagnostics have a
+separate budget: excerpts are truncated or omitted and screenshots are omitted
+before writing when they do not fit. These diagnostic omissions do not fail an
+otherwise successful run.
+
+Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
+Retries stop at the configured total-attempt or persisted-age boundary, honor
+safe `Retry-After` values for 429/503 responses, and retain inspectable failed
+rows. After the delivered/failed retention window, secret-bearing columns are
+scrubbed in place while the deterministic identity and terminal status remain
+as reconciliation deduplication evidence. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+for exact boundaries, dead-letter reasons, restart semantics, and limitations.
 
 ## Testing
 

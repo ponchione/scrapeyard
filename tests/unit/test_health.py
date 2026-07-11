@@ -49,6 +49,10 @@ def _all_probes_ok(monkeypatch) -> None:
     monkeypatch.setattr("scrapeyard.main.probe_redis", _ok_async)
     monkeypatch.setattr("scrapeyard.main.probe_sqlite", _ok_async)
     monkeypatch.setattr("scrapeyard.main.probe_disk", _ok_sync)
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.WorkerPool.queue_depths",
+        AsyncMock(return_value={"high": 2, "normal": 3, "low": 5}),
+    )
 
 
 @pytest.mark.asyncio
@@ -99,11 +103,38 @@ async def test_health_response_shape(monkeypatch):
     assert "active_tasks" in workers
     assert "max_browsers" in workers
     assert "active_browsers" in workers
+    assert workers["queue_depths"] == {"high": 2, "normal": 3, "low": 5}
     assert "projects" in data
     assert isinstance(data["projects"], dict)
     assert "dependencies" in data
     for key in ("redis", "sqlite", "disk"):
         assert key in data["dependencies"]
+
+
+@pytest.mark.asyncio
+async def test_health_queue_depth_failure_is_stable_and_marks_redis_unhealthy(
+    monkeypatch,
+):
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.WorkerPool.queue_depths",
+        AsyncMock(side_effect=ConnectionError("depth unavailable")),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["workers"]["queue_depths"] == {
+        "high": None,
+        "normal": None,
+        "low": None,
+    }
+    assert response.json()["dependencies"]["redis"] == {
+        "ok": False,
+        "detail": "redis queue depth probe failed: depth unavailable",
+    }
 
 
 @pytest.mark.asyncio

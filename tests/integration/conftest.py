@@ -23,6 +23,11 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.main import app
 from scrapeyard.queue.worker import scrape_task
+from scrapeyard.queue.cancellation import (
+    QueueCancellationOutcome,
+    QueueDeliveryState,
+    RunCancellationResult,
+)
 from scrapeyard.storage.database import close_db, init_db
 
 
@@ -72,6 +77,7 @@ async def test_app(monkeypatch):
     circuit_breaker = get_circuit_breaker()
     webhook_dispatcher = get_webhook_dispatcher()
     background_tasks: set[asyncio.Task[None]] = set()
+    tasks_by_run_id: dict[str, asyncio.Task[None]] = {}
 
     async def _fake_start() -> None:
         return None
@@ -83,6 +89,7 @@ async def test_app(monkeypatch):
                     task.cancel()
             await asyncio.gather(*background_tasks, return_exceptions=True)
             background_tasks.clear()
+        tasks_by_run_id.clear()
 
     async def _fake_enqueue(
         job_id: str,
@@ -105,16 +112,56 @@ async def test_app(monkeypatch):
                 error_store=error_store,
                 circuit_breaker=circuit_breaker,
                 rate_limiter=LocalDomainRateLimiter(),
+                browser_limiter=pool.browser_limiter,
                 webhook_dispatcher=webhook_dispatcher,
             )
         )
         background_tasks.add(task)
+        if run_id is not None:
+            tasks_by_run_id[run_id] = task
         task.add_done_callback(background_tasks.discard)
         return _FakeQueuedJob(task)
+
+    async def _fake_cancel_run(run_id: str) -> RunCancellationResult:
+        task = tasks_by_run_id.get(run_id)
+        if task is None:
+            return RunCancellationResult(
+                run_id,
+                QueueCancellationOutcome.missing,
+                QueueDeliveryState.missing,
+                QueueDeliveryState.missing,
+            )
+        if task.done():
+            return RunCancellationResult(
+                run_id,
+                QueueCancellationOutcome.complete,
+                QueueDeliveryState.complete,
+                QueueDeliveryState.complete,
+            )
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return RunCancellationResult(
+            run_id,
+            QueueCancellationOutcome.in_progress_cancelled,
+            QueueDeliveryState.in_progress,
+            QueueDeliveryState.complete,
+        )
+
+    async def _fake_inspect_delivery(run_id: str) -> QueueDeliveryState:
+        task = tasks_by_run_id.get(run_id)
+        if task is None:
+            return QueueDeliveryState.missing
+        return (
+            QueueDeliveryState.complete
+            if task.done()
+            else QueueDeliveryState.in_progress
+        )
 
     monkeypatch.setattr(pool, "start", _fake_start)
     monkeypatch.setattr(pool, "stop", _fake_stop)
     monkeypatch.setattr(pool, "enqueue", _fake_enqueue)
+    monkeypatch.setattr(pool, "cancel_run", _fake_cancel_run)
+    monkeypatch.setattr(pool, "inspect_delivery", _fake_inspect_delivery)
 
     scheduler = get_scheduler()
     await pool.start()

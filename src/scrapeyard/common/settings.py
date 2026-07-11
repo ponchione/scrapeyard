@@ -23,8 +23,17 @@ class ServiceSettings(BaseSettings):
     sync_poll_delay_seconds: float = Field(default=0.5, gt=0)
     basic_fetch_timeout_seconds: float = Field(default=30.0, gt=0)
     workers_shutdown_grace_seconds: int = Field(default=30, ge=0)
-    workers_running_lease_seconds: int = Field(default=300, gt=0)
+    workers_cancellation_grace_seconds: float = Field(default=10.0, gt=0)
+    workers_queued_claim_timeout_seconds: int = Field(default=300, gt=0)
+    workers_running_heartbeat_timeout_seconds: int = Field(default=600, gt=0)
+    workers_heartbeat_interval_seconds: int = Field(default=30, gt=0)
     workers_redis_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    run_max_duration_seconds: float = Field(default=900.0, gt=0)
+    run_max_fetched_bytes: int = Field(default=104857600, ge=1)
+    run_max_extracted_records: int = Field(default=100000, ge=1)
+    run_max_serialized_result_bytes: int = Field(default=52428800, ge=4096)
+    run_max_browser_debug_bytes: int = Field(default=26214400, ge=1)
 
     redis_dsn: str = "redis://redis:6379/0"
     queue_name: str = "scrapeyard"
@@ -37,10 +46,19 @@ class ServiceSettings(BaseSettings):
 
     scheduler_jitter_max_seconds: int = Field(default=120, ge=0)
 
+    webhook_max_delivery_attempts: int = Field(default=5, ge=1)
+    webhook_max_delivery_age_seconds: int = Field(default=86400, ge=1)
+    webhook_dispatch_concurrency: int = Field(default=4, ge=1)
+    webhook_dispatch_batch_size: int = Field(default=100, ge=1)
+    webhook_delivered_retention_days: int = Field(default=7, ge=1)
+    webhook_failed_retention_days: int = Field(default=30, ge=1)
+
     storage_retention_days: int = Field(default=30, ge=0)
     db_dir: str = "/data/db"
     storage_results_dir: str = "/data/results"
     storage_max_results_per_job: int = Field(default=100, ge=0)
+    storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
+    storage_reconciliation_dry_run: bool = True
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False
@@ -69,6 +87,19 @@ class ServiceSettings(BaseSettings):
     def _validate_read_limits(self) -> ServiceSettings:
         if self.admin_read_default_limit > self.admin_read_max_limit:
             raise ValueError("admin_read_default_limit must be <= admin_read_max_limit")
+        if (
+            self.workers_heartbeat_interval_seconds * 3
+            > self.workers_running_heartbeat_timeout_seconds
+        ):
+            raise ValueError(
+                "workers_heartbeat_interval_seconds must be no more than one third "
+                "of workers_running_heartbeat_timeout_seconds"
+            )
+        if self.webhook_dispatch_batch_size < self.webhook_dispatch_concurrency:
+            raise ValueError(
+                "webhook_dispatch_batch_size must be >= "
+                "webhook_dispatch_concurrency"
+            )
         return self
 
     def parsed_api_keys(self) -> set[str]:

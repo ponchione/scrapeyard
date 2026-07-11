@@ -138,7 +138,10 @@ async def test_submit_scrape_job_removes_job_when_enqueue_fails():
         )
 
     saved_job = job_store.save_job.call_args.args[0]
-    job_store.delete_job.assert_awaited_once_with(saved_job.job_id)
+    job_store.rollback_queued_submission.assert_awaited_once_with(
+        saved_job.job_id,
+        saved_job.current_run_id,
+    )
 
 
 @pytest.mark.asyncio

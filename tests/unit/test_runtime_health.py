@@ -47,6 +47,8 @@ async def test_load_project_summary_uses_store_summary_by_project():
                 "complete": 1,
                 "partial": 0,
                 "failed": 0,
+                "cancelled": 0,
+                "deleting": 0,
             },
         }
     }

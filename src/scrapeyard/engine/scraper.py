@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
+from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
@@ -35,6 +36,10 @@ from scrapeyard.engine.selectors import (
     select_items_strict,
 )
 from scrapeyard.models.job import ErrorType
+from scrapeyard.queue.cancellation import (
+    CancellationCheckpoint,
+    cancellation_checkpoint,
+)
 from scrapeyard.engine.url_guard import assert_public_url, redact_userinfo_in_text
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -46,6 +51,8 @@ class ScrapeContext:
     retry_handler: RetryHandler
     retryable_status: set[int]
     adaptive_dir: str
+    budget: RunBudget | None
+    cancellation_guard: CancellationCheckpoint | None
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,8 @@ async def _fetch_basic_with_safe_redirects(
     debug: dict[str, Any],
     *,
     require_resolved_dns: bool = False,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> Any:
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
@@ -138,6 +147,16 @@ async def _fetch_basic_with_safe_redirects(
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
         await _assert_fetch_url(current_url, require_resolved_dns=require_resolved_dns)
         response = await fetch_basic_response(fetcher_cls, current_url, call_kwargs)
+        await cancellation_checkpoint(
+            cancellation_guard,
+            "after_fetch",
+        )
+        if budget is not None:
+            body = getattr(response, "body", None)
+            if isinstance(body, (bytes, bytearray, memoryview)):
+                await budget.consume_fetched_bytes(len(body))
+            else:
+                budget.check_deadline()
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
             if redirects:
                 debug["redirects"] = redirects
@@ -199,6 +218,8 @@ async def _fetch_page(
     adaptive_dir: str,
     proxy_url: str | None = None,
     artifacts_dir: str | None = None,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> FetchOutcome:
     """Fetch a single page using the appropriate Scrapling method."""
     call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
@@ -206,7 +227,11 @@ async def _fetch_page(
     require_resolved_dns = _requires_verified_dns(target, fetcher_type, proxy_url)
 
     if fetcher_type == FetcherType.basic:
-        call_kwargs.setdefault("timeout", get_settings().basic_fetch_timeout_seconds)
+        fetch_timeout = get_settings().basic_fetch_timeout_seconds
+        if budget is not None:
+            budget.check_deadline()
+            fetch_timeout = min(fetch_timeout, max(budget.remaining_seconds, 0.001))
+        call_kwargs.setdefault("timeout", fetch_timeout)
         if proxy_url is not None:
             call_kwargs["proxy"] = proxy_url
         response = await _fetch_basic_with_safe_redirects(
@@ -215,6 +240,8 @@ async def _fetch_page(
             call_kwargs,
             debug,
             require_resolved_dns=require_resolved_dns,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
         )
     else:
         await _assert_fetch_url(url, require_resolved_dns=require_resolved_dns)
@@ -227,6 +254,11 @@ async def _fetch_page(
             call_kwargs,
             artifacts_dir,
             require_resolved_dns=require_resolved_dns,
+            budget=budget,
+        )
+        await cancellation_checkpoint(
+            cancellation_guard,
+            "after_fetch",
         )
         debug.update(capture)
 
@@ -249,6 +281,8 @@ async def _fetch_target_page(
     adaptive_dir: str,
     proxy_url: str | None,
     artifacts_dir: str | None,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> FetchOutcome:
     return await retry_handler.execute(
         _fetch_page,
@@ -261,6 +295,8 @@ async def _fetch_target_page(
         adaptive_dir,
         proxy_url,
         artifacts_dir,
+        budget,
+        cancellation_guard,
     )
 
 
@@ -268,14 +304,22 @@ def _prepare_scrape_context(
     target: TargetConfig,
     retry: RetryConfig,
     adaptive_dir: str | None,
+    budget: RunBudget | None,
+    cancellation_guard: CancellationCheckpoint | None,
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
     Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
     return ScrapeContext(
         fetcher_cls=_get_fetcher(target.fetcher),
-        retry_handler=RetryHandler(retry),
+        retry_handler=RetryHandler(
+            retry,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+        ),
         retryable_status=set(retry.retryable_status),
         adaptive_dir=resolved_adaptive_dir,
+        budget=budget,
+        cancellation_guard=cancellation_guard,
     )
 
 
@@ -298,12 +342,20 @@ async def _scrape_first_page(
         context.adaptive_dir,
         proxy_url,
         artifacts_dir,
+        context.budget,
+        context.cancellation_guard,
+    )
+    await cancellation_checkpoint(
+        context.cancellation_guard,
+        "after_first_page_fetch",
     )
     result.debug = outcome.debug
     result.debug.update(_selector_debug(outcome.page, target))
     page_data = _extract_page_data(outcome.page, target)
     if adaptive:
         log_adaptive_selector_gap(target, page_data)
+    if context.budget is not None:
+        await context.budget.consume_extracted_records(len(page_data))
     result.data.extend(page_data)
     result.pages_scraped = 1
     return ScrapePageResult(page=outcome.page, debug=outcome.debug, page_data=page_data)
@@ -332,6 +384,8 @@ async def _scrape_paginated_pages(
         adaptive_dir=context.adaptive_dir,
         proxy_url=proxy_url,
         artifacts_dir=artifacts_dir,
+        budget=context.budget,
+        cancellation_guard=context.cancellation_guard,
     )
 
 
@@ -385,10 +439,18 @@ async def scrape_target(
     adaptive_dir: str | None = None,
     proxy_url: str | None = None,
     artifacts_dir: str | None = None,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
-    context = _prepare_scrape_context(target, retry, adaptive_dir)
+    context = _prepare_scrape_context(
+        target,
+        retry,
+        adaptive_dir,
+        budget,
+        cancellation_guard,
+    )
 
     try:
         first_page = await _scrape_first_page(
@@ -409,6 +471,8 @@ async def scrape_target(
             artifacts_dir=artifacts_dir,
         )
         _finalize_target_success(result, target)
+    except BudgetExceeded:
+        raise
     except SelectorExecutionError as exc:
         _handle_selector_execution_failure(result, target, exc)
     except Exception as exc:

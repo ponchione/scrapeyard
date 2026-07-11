@@ -7,6 +7,7 @@ import pytest
 from scrapeyard.storage.filesystem import (
     ensure_directory,
     read_json_file,
+    read_json_file_no_follow,
     remove_directories,
     write_json_file,
 )
@@ -92,6 +93,18 @@ def test_read_json_missing_file_raises(tmp_path):
     missing = tmp_path / "no_such_file.json"
     with pytest.raises(FileNotFoundError):
         read_json_file(missing)
+
+
+def test_read_json_no_follow_rejects_symlink(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text('{"keep": true}', encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+
+    with pytest.raises(OSError):
+        read_json_file_no_follow(link)
+
+    assert target.read_text(encoding="utf-8") == '{"keep": true}'
 
 
 def test_remove_directories_removes_existing(tmp_path):

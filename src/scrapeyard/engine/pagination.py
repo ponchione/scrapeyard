@@ -6,10 +6,15 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import TargetResult
 from scrapeyard.engine.selectors import select_elements_strict
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+from scrapeyard.queue.cancellation import (
+    CancellationCheckpoint,
+    cancellation_checkpoint,
+)
 
 FetchTargetPageCallable = Callable[..., Awaitable[Any]]
 ExtractPageDataCallable = Callable[[Any, TargetConfig], list[dict[str, Any]]]
@@ -75,6 +80,8 @@ async def paginate_target(
     adaptive_dir: str,
     proxy_url: str | None,
     artifacts_dir: str | None,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> None:
     if target.pagination is None:
         return
@@ -83,6 +90,12 @@ async def paginate_target(
     seen_urls = {pagination_url_key(current_url)}
     next_selector = target.pagination.next
     for _ in range(target.pagination.max_pages - 1):
+        await cancellation_checkpoint(
+            cancellation_guard,
+            "before_pagination_page",
+        )
+        if budget is not None:
+            budget.check_deadline()
         next_links = select_elements_strict(
             page,
             next_selector,
@@ -98,7 +111,7 @@ async def paginate_target(
         if pagination_url_key(next_url) in seen_urls:
             break
 
-        next_outcome = await fetch_target_page(
+        fetch_args = (
             retry_handler,
             fetcher_cls,
             next_url,
@@ -109,6 +122,20 @@ async def paginate_target(
             proxy_url,
             artifacts_dir,
         )
+        if budget is None and cancellation_guard is None:
+            next_outcome = await fetch_target_page(*fetch_args)
+        elif cancellation_guard is None:
+            next_outcome = await fetch_target_page(*fetch_args, budget)
+        else:
+            next_outcome = await fetch_target_page(
+                *fetch_args,
+                budget,
+                cancellation_guard,
+            )
+        await cancellation_checkpoint(
+            cancellation_guard,
+            "after_pagination_fetch",
+        )
         final_url = next_outcome.debug.get("final_url") or next_url
         final_key = pagination_url_key(final_url)
         if final_key in seen_urls:
@@ -116,5 +143,12 @@ async def paginate_target(
         seen_urls.add(final_key)
         page = next_outcome.page
         current_url = final_url
-        result.data.extend(extract_page_data(page, target))
+        page_data = extract_page_data(page, target)
+        if budget is not None:
+            await budget.consume_extracted_records(len(page_data))
+        result.data.extend(page_data)
         result.pages_scraped += 1
+        await cancellation_checkpoint(
+            cancellation_guard,
+            "after_pagination_page",
+        )

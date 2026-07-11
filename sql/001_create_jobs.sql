@@ -9,5 +9,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     schedule_cron    TEXT,
     schedule_enabled INTEGER NOT NULL DEFAULT 1,
     current_run_id   TEXT,
+    deletion_requested_at TEXT,
+    delete_results_on_delete INTEGER,
     UNIQUE (project, name)
 );

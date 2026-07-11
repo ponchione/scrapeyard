@@ -81,6 +81,86 @@ async def test_scrape_lifecycle_eventually_returns_results(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_long_running_scrape_persists_multiple_heartbeats(client, monkeypatch):
+    settings = get_settings()
+    original_interval = settings.workers_heartbeat_interval_seconds
+    original_timeout = settings.workers_running_heartbeat_timeout_seconds
+
+    async def _slow_scrape_target(*_args, **_kwargs):
+        await asyncio.sleep(2.2)
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Long running"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _slow_scrape_target)
+    settings.workers_heartbeat_interval_seconds = 1
+    settings.workers_running_heartbeat_timeout_seconds = 3
+    try:
+        response = await client.post(
+            "/scrape",
+            content=_async_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        await poll_until_ready(
+            lambda: client.get(f"/results/{job_id}"),
+            lambda result: result.status_code == 200,
+            timeout_seconds=5,
+            failure_message="Timed out waiting for long-running heartbeat scrape",
+        )
+        runs = await get_job_store().get_job_runs(job_id)
+    finally:
+        settings.workers_heartbeat_interval_seconds = original_interval
+        settings.workers_running_heartbeat_timeout_seconds = original_timeout
+
+    assert len(runs) == 1
+    assert (runs[0].heartbeat_at - runs[0].started_at).total_seconds() >= 1.5
+
+
+@pytest.mark.asyncio
+async def test_latest_results_are_pinned_to_current_run_not_newest_stale_metadata(client):
+    job_store = get_job_store()
+    result_store = get_result_store()
+    job = Job(
+        job_id="job-artifact-race",
+        project="integ",
+        name="artifact-race",
+        status=JobStatus.complete,
+        config_yaml="target: https://example.com",
+        current_run_id="run-current",
+    )
+    await job_store.save_job(job)
+    await result_store.save_result(
+        job.job_id,
+        {"results": [{"title": "current"}]},
+        run_id="run-current",
+        status="complete",
+        record_count=1,
+    )
+    await result_store.save_result(
+        job.job_id,
+        {"results": [{"title": "stale"}]},
+        run_id="run-stale",
+        status="complete",
+        record_count=1,
+    )
+
+    latest = await client.get(f"/results/{job.job_id}")
+    historical = await client.get(f"/results/{job.job_id}?run_id=run-stale")
+
+    assert latest.status_code == 200
+    assert latest.json()["run_id"] == "run-current"
+    assert latest.json()["results"] == {"results": [{"title": "current"}]}
+    assert historical.status_code == 200
+    assert historical.json()["run_id"] == "run-stale"
+
+
+@pytest.mark.asyncio
 async def test_results_run_id_returns_historical_result_while_latest_is_running(client):
     job_store = get_job_store()
     result_store = get_result_store()
@@ -307,3 +387,69 @@ async def test_sync_scrape_returns_202_when_timeout_expires(client, monkeypatch)
     assert payload["poll_url"].startswith("/results/")
     assert observed["timeout"] == 0
     assert observed["poll_delay"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_oversized_result_fails_terminally_and_remains_queryable(
+    client,
+    monkeypatch,
+):
+    from scrapeyard.common.settings import ServiceSettings
+
+    settings = ServiceSettings(run_max_serialized_result_bytes=4096)
+    monkeypatch.setattr("scrapeyard.queue.worker.get_settings", lambda: settings)
+
+    async def _oversized_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"payload": "x" * 10000}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr(
+        "scrapeyard.queue.worker.scrape_target",
+        _oversized_scrape_target,
+    )
+    config = """
+project: integration
+name: oversized-budget
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+execution:
+  mode: sync
+"""
+
+    submitted = await client.post(
+        "/scrape",
+        content=config,
+        headers={"Content-Type": "application/x-yaml"},
+    )
+
+    assert submitted.status_code == 200
+    submission = submitted.json()
+    assert submission["status"] == "failed"
+    job_id = submission["job_id"]
+    assert submission["results"]["budget_error"]["limit_name"] == (
+        "serialized_result_bytes"
+    )
+
+    job_response = await client.get(f"/jobs/{job_id}")
+    assert job_response.status_code == 200
+    job = job_response.json()
+    assert job["status"] == "failed"
+    assert job["runs"][0]["status"] == "failed"
+    assert job["runs"][0]["record_count"] == 0
+
+    errors_response = await client.get(f"/errors?job_id={job_id}")
+    assert errors_response.status_code == 200
+    errors = errors_response.json()
+    assert errors[0]["error_type"] == "budget_exceeded"
+    assert errors[0]["budget"]["configured_limit"] == 4096
+    assert errors[0]["budget"]["observed_amount"] > 4096
+
+    results_response = await client.get(f"/results/{job_id}")
+    assert results_response.status_code == 200
+    assert results_response.json()["status"] == "failed"

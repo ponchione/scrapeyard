@@ -11,6 +11,8 @@ JOB_COLUMNS = (
     "schedule_cron",
     "schedule_enabled",
     "current_run_id",
+    "deletion_requested_at",
+    "delete_results_on_delete",
 )
 
 JOB_RUN_COLUMNS = (
@@ -20,6 +22,7 @@ JOB_RUN_COLUMNS = (
     "trigger",
     "config_hash",
     "started_at",
+    "heartbeat_at",
     "completed_at",
     "record_count",
     "error_count",

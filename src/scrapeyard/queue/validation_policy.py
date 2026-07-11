@@ -6,6 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
@@ -16,6 +17,10 @@ from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import (
     TargetErrorRecorder,
     validation_error_type,
+)
+from scrapeyard.queue.cancellation import (
+    CancellationCheckpoint,
+    cancellation_checkpoint,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,8 @@ async def apply_validation(
     scrape: ScrapeCallable,
     proxy_url: str | None = None,
     attempt: int = 1,
+    budget: RunBudget | None = None,
+    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> TargetResult:
     """Validate a successful result; retry once on validation failure."""
     if not result.is_success:
@@ -68,6 +75,10 @@ async def apply_validation(
         redact_userinfo_in_url(target_cfg.url),
         validation.message,
     )
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "before_validation_retry",
+    )
     return await _retry_after_validation_failure(
         target_cfg=target_cfg,
         domain=domain,
@@ -80,6 +91,8 @@ async def apply_validation(
         validator=validator,
         scrape=scrape,
         proxy_url=proxy_url,
+        budget=budget,
+        cancellation_guard=cancellation_guard,
     )
 
 
@@ -138,8 +151,23 @@ async def _retry_after_validation_failure(
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None,
+    budget: RunBudget | None,
+    cancellation_guard: CancellationCheckpoint | None,
 ) -> TargetResult:
-    await rate_limiter.acquire(domain, config.execution.domain_rate_limit)
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "before_validation_rate_limit_wait",
+    )
+    if budget is None:
+        acquire = rate_limiter.acquire(domain, config.execution.domain_rate_limit)
+        await acquire
+    else:
+        acquire = rate_limiter.acquire(domain, config.execution.domain_rate_limit)
+        await budget.wait_for(acquire)
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "after_validation_rate_limit_wait",
+    )
     retry_result = await scrape(
         target_cfg,
         adaptive,
@@ -147,6 +175,12 @@ async def _retry_after_validation_failure(
         adaptive_dir=adaptive_dir,
         proxy_url=proxy_url,
         artifacts_dir=_build_retry_artifacts_dir(run_artifacts_dir, domain),
+        budget=budget,
+        cancellation_guard=cancellation_guard,
+    )
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "after_validation_retry",
     )
     if not retry_result.is_success:
         logger.info("Recording failure for domain %s after validation retry", domain)

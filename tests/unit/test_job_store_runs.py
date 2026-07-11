@@ -39,16 +39,18 @@ async def _insert_run(
     completed_at: str | None = None,
     record_count: int | None = None,
     error_count: int = 0,
+    heartbeat_at: str | None = None,
 ) -> None:
+    heartbeat_at = heartbeat_at or started_at
     async with get_db("jobs.db") as db:
         await db.execute(
             "INSERT INTO job_runs "
             "(run_id, job_id, status, trigger, config_hash, "
-            "started_at, completed_at, record_count, error_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "started_at, heartbeat_at, completed_at, record_count, error_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id, job_id, status, trigger, config_hash,
-                started_at, completed_at, record_count, error_count,
+                started_at, heartbeat_at, completed_at, record_count, error_count,
             ),
         )
         await db.commit()
@@ -313,7 +315,7 @@ async def test_recover_stale_running_jobs_fails_stale_run_and_matching_job(store
 
     recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
 
-    assert recovered == 1
+    assert [item.job_id for item in recovered] == ["j-stale"]
     stale_job = await store.get_job("j-stale")
     fresh_job = await store.get_job("j-fresh")
     assert stale_job.status == JobStatus.failed
@@ -326,6 +328,53 @@ async def test_recover_stale_running_jobs_fails_stale_run_and_matching_job(store
     assert stale_run.status == JobStatus.failed
     assert stale_run.completed_at == recovered_at
     assert fresh_run.status == JobStatus.running
+
+
+async def test_recovery_uses_run_heartbeat_not_parent_job_timestamp(store):
+    cutoff = datetime(2026, 3, 10, 12, 0, 0)
+    recovered_at = datetime(2026, 3, 10, 12, 5, 0)
+    await store.save_job(
+        _make_job(
+            job_id="j-fresh-heartbeat",
+            name="fresh-heartbeat",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 10, 0, 0),
+            current_run_id="r-fresh-heartbeat",
+        )
+    )
+    await store.save_job(
+        _make_job(
+            job_id="j-stale-heartbeat",
+            name="stale-heartbeat",
+            status=JobStatus.running,
+            updated_at=datetime(2026, 3, 10, 12, 30, 0),
+            current_run_id="r-stale-heartbeat",
+        )
+    )
+    await _insert_run(
+        "r-fresh-heartbeat",
+        "j-fresh-heartbeat",
+        "running",
+        "scheduled",
+        "aaa",
+        "2026-03-10T10:00:00",
+        heartbeat_at="2026-03-10T12:01:00",
+    )
+    await _insert_run(
+        "r-stale-heartbeat",
+        "j-stale-heartbeat",
+        "running",
+        "scheduled",
+        "bbb",
+        "2026-03-10T11:00:00",
+        heartbeat_at="2026-03-10T11:59:00",
+    )
+
+    recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
+
+    assert [item.job_id for item in recovered] == ["j-stale-heartbeat"]
+    assert (await store.get_job("j-fresh-heartbeat")).status == JobStatus.running
+    assert (await store.get_job("j-stale-heartbeat")).status == JobStatus.failed
 
 
 async def test_recover_stale_running_jobs_fails_running_job_without_matching_run(store):
@@ -352,12 +401,15 @@ async def test_recover_stale_running_jobs_fails_running_job_without_matching_run
 
     recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
 
-    assert recovered == 1
+    assert {item.job_id for item in recovered} == {
+        "j-missing-run",
+        "j-recent-missing-run",
+    }
     stale_job = await store.get_job("j-missing-run")
     recent_job = await store.get_job("j-recent-missing-run")
     assert stale_job.status == JobStatus.failed
     assert stale_job.updated_at == recovered_at
-    assert recent_job.status == JobStatus.running
+    assert recent_job.status == JobStatus.failed
 
 
 async def test_recover_stale_running_jobs_uses_terminal_run_status(store):
@@ -383,7 +435,7 @@ async def test_recover_stale_running_jobs_uses_terminal_run_status(store):
 
     recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
 
-    assert recovered == 1
+    assert [item.job_id for item in recovered] == ["j-finalized"]
     job = await store.get_job("j-finalized")
     assert job.status == JobStatus.partial
     assert job.updated_at == recovered_at
