@@ -21,6 +21,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "004_create_job_runs.sql",
         "005_add_indexes.sql",
         "009_create_webhook_outbox.sql",
+        "010_add_terminal_reconciliation_marker.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -207,6 +208,8 @@ async def _migration_is_reflected(
             "webhook_deliveries",
             {"failed_at", "failure_reason", "scrubbed_at"},
         )
+    if migration_id == "010":
+        return await _columns_include(db, "job_runs", {"webhook_reconciled_at"})
     return False
 
 

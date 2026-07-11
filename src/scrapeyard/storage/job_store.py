@@ -118,6 +118,30 @@ class SQLiteJobStore:
                 "Terminal webhook delivery does not match the owned job/run/status"
             )
 
+    @staticmethod
+    async def _mark_terminal_webhook_reconciled(
+        db: aiosqlite.Connection,
+        candidate: TerminalWebhookCandidate,
+    ) -> None:
+        reconciled_at = candidate.completed_at or candidate.heartbeat_at
+        cursor = await db.execute(
+            """UPDATE job_runs
+               SET webhook_reconciled_at = COALESCE(webhook_reconciled_at, ?)
+               WHERE job_id = ?
+                 AND run_id = ?
+                 AND status = ?
+                 AND config_hash = ?""",
+            (
+                fmt_dt(reconciled_at),
+                candidate.job_id,
+                candidate.run_id,
+                candidate.status.value,
+                candidate.config_hash,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Terminal webhook reconciliation lost run ownership")
+
     async def _execute_job_update(
         self,
         sql: str,
@@ -720,7 +744,8 @@ class SQLiteJobStore:
                 cursor = await db.execute(
                     """UPDATE job_runs
                        SET status = ?, completed_at = ?,
-                           record_count = ?, error_count = ?
+                           record_count = ?, error_count = ?,
+                           webhook_reconciled_at = ?
                        WHERE job_id = ?
                          AND run_id = ?
                          AND status = 'running'
@@ -730,6 +755,7 @@ class SQLiteJobStore:
                         completed_text,
                         record_count,
                         error_count,
+                        completed_text,
                         job_id,
                         run_id,
                         cutoff_text,
@@ -828,7 +854,13 @@ class SQLiteJobStore:
                     self._raise_ownership("fail", job_id, run_id)
 
                 heartbeat_clause = ""
-                params: list[object] = [failed_text, error_count, job_id, run_id]
+                params: list[object] = [
+                    failed_text,
+                    error_count,
+                    failed_text,
+                    job_id,
+                    run_id,
+                ]
                 if heartbeat_cutoff is not None:
                     heartbeat_clause = " AND heartbeat_at > ?"
                     params.append(fmt_dt(heartbeat_cutoff))
@@ -836,7 +868,7 @@ class SQLiteJobStore:
                     """UPDATE job_runs
                        SET status = 'failed', completed_at = ?,
                            record_count = COALESCE(record_count, 0),
-                           error_count = ?
+                           error_count = ?, webhook_reconciled_at = ?
                        WHERE job_id = ?
                          AND run_id = ?
                          AND status = 'running'"""
@@ -925,6 +957,13 @@ class SQLiteJobStore:
                      )
                    WHERE job_runs.status IN ('complete', 'partial', 'failed')
                      AND jobs.status != 'deleting'
+                     AND (
+                         job_runs.webhook_reconciled_at IS NULL
+                         OR (
+                             jobs.status = 'running'
+                             AND jobs.current_run_id = job_runs.run_id
+                         )
+                     )
                    ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at) ASC,
                             job_runs.job_id ASC,
                             job_runs.run_id ASC"""
@@ -1042,6 +1081,7 @@ class SQLiteJobStore:
                 )
                 existing = await cursor.fetchone()
                 if existing is not None:
+                    await self._mark_terminal_webhook_reconciled(db, candidate)
                     await db.commit()
                     return TerminalIntentReconcileResult(
                         TerminalIntentAction.existing,
@@ -1050,6 +1090,7 @@ class SQLiteJobStore:
                     )
 
                 if webhook_delivery is None:
+                    await self._mark_terminal_webhook_reconciled(db, candidate)
                     await db.commit()
                     return TerminalIntentReconcileResult(
                         TerminalIntentAction.not_required,
@@ -1084,6 +1125,7 @@ class SQLiteJobStore:
                         raise RuntimeError(
                             "Deterministic webhook delivery ID collided with another event"
                         )
+                await self._mark_terminal_webhook_reconciled(db, candidate)
                 await db.commit()
                 return TerminalIntentReconcileResult(
                     (
