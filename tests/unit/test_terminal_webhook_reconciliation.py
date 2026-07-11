@@ -93,6 +93,13 @@ async def _terminal_without_intent(
         NOW + timedelta(minutes=1),
         NOW - timedelta(seconds=1),
     )
+    # Simulate a pre-marker terminal row or a crash-recovered run whose terminal
+    # webhook decision was not committed atomically.
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = 'run-1'"
+        )
+        await db.commit()
 
 
 def _result_store(metadata: ResultMetadata | None = None) -> AsyncMock:
@@ -132,7 +139,7 @@ async def test_startup_repairs_missing_intent_and_is_idempotent(
     )
     delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
     assert first.repaired == 1
-    assert second.existing == 1
+    assert second.inspected == 0
     assert delivery is not None
     assert delivery.payload["delivery_id"] == delivery_id
     assert delivery.payload["result_path"] == metadata.file_path
@@ -185,7 +192,7 @@ async def test_reconciliation_leaves_existing_delivery_state_unchanged(
     )
     after = await outbox.get_delivery(delivery_id)
 
-    assert summary.existing == 1
+    assert summary.inspected == 0
     assert before is not None and after is not None
     assert after.status is persistent_status
     assert after.attempts == before.attempts

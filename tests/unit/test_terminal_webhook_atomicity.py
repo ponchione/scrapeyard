@@ -115,6 +115,7 @@ async def test_finalization_atomically_creates_one_required_intent(
     assert persisted is not None
     assert persisted.delivery_id == persisted.payload["delivery_id"]
     assert persisted.delivery_id == delivery.delivery_id
+    assert await store.list_terminal_webhook_candidates() == []
 
     with pytest.raises(RunOwnershipError):
         await store.finalize_owned_run(
@@ -154,6 +155,7 @@ async def test_non_applicable_terminal_status_creates_no_intent(
     )
 
     assert await SQLiteWebhookOutboxStore().list_pending() == []
+    assert await store.list_terminal_webhook_candidates() == []
 
 
 async def test_ownership_loss_mutates_neither_terminal_state_nor_intent(
@@ -239,6 +241,7 @@ async def test_conditional_crash_failure_persists_failed_intent_atomically(
     assert run.record_count == 0
     assert run.error_count == 3
     assert persisted is not None and persisted.event == "job.failed"
+    assert await store.list_terminal_webhook_candidates() == []
 
 
 async def test_repair_rechecks_terminal_snapshot_before_inserting_intent(
@@ -255,6 +258,11 @@ async def test_repair_rechecks_terminal_snapshot_before_inserting_intent(
         NOW + timedelta(minutes=1),
         NOW - timedelta(seconds=1),
     )
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = 'run-1'"
+        )
+        await db.commit()
     candidate = (await store.list_terminal_webhook_candidates())[0]
     delivery = _delivery(config_yaml)
     assert delivery is not None

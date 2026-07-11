@@ -64,6 +64,7 @@ async def test_init_db_creates_tables(tmp_path):
         run_columns = {column[1]: column for column in await cursor.fetchall()}
         assert "heartbeat_at" in run_columns
         assert run_columns["heartbeat_at"][3] == 1
+        assert "webhook_reconciled_at" in run_columns
         cursor = await db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
         )
@@ -107,7 +108,13 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
 
     await init_db(str(db_dir))
 
-    assert [row[0] for row in histories["jobs.db"]] == ["001", "004", "005", "009"]
+    assert [row[0] for row in histories["jobs.db"]] == [
+        "001",
+        "004",
+        "005",
+        "009",
+        "010",
+    ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == ["003", "006", "008"]
     async with get_db("jobs.db") as db:
@@ -160,7 +167,7 @@ async def test_init_db_rejects_ledger_gap(tmp_path):
 def test_load_migrations_rejects_unassigned_file(tmp_path):
     sql_dir = tmp_path / "sql"
     shutil.copytree(_resolve_sql_dir(), sql_dir)
-    (sql_dir / "010_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
+    (sql_dir / "011_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="assignment mismatch"):
         _load_migrations(sql_dir)
