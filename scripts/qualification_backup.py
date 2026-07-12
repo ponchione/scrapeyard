@@ -97,7 +97,7 @@ def create_backup(data_root: Path, output: Path, *, quiesced: bool) -> dict[str,
         manifest = {
             "format": FORMAT,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_data_root": str(data_root),
+            "source_data_root": str(data_root.resolve()),
             "snapshot_order": list(SNAPSHOT_ORDER),
             "required_databases": list(DATABASES),
             "files": entries,
@@ -137,7 +137,17 @@ def _safe_manifest_path(value: object) -> PurePosixPath:
     return path
 
 
-def _sqlite_contract(payload: Path) -> dict[str, int]:
+def _source_data_root(manifest: dict[str, Any]) -> Path:
+    raw_root = manifest.get("source_data_root")
+    if not isinstance(raw_root, str) or not raw_root:
+        raise BackupError("backup source data root is missing or invalid")
+    root = PurePosixPath(raw_root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise BackupError("backup source data root must be an absolute safe path")
+    return Path(*root.parts)
+
+
+def _sqlite_contract(payload: Path, *, source_data_root: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     for database in DATABASES:
         path = payload / "db" / database
@@ -174,7 +184,11 @@ def _sqlite_contract(payload: Path) -> dict[str, int]:
             # Results can intentionally outlive deleted job/run metadata when
             # DELETE /jobs/{id}?delete_results=false is used. In that state the
             # result metadata and artifact remain the authoritative retained copy.
-            relative = _artifact_relative_path(str(file_path), "results")
+            relative = _artifact_relative_path(
+                str(file_path),
+                "results",
+                data_root=source_data_root,
+            )
             if not (payload / "results" / relative / "results.json").is_file():
                 raise BackupError(f"result artifact is missing for {job_id}/{run_id}")
     with sqlite3.connect(f"file:{errors_db}?mode=ro&immutable=1", uri=True) as errors:
@@ -184,20 +198,28 @@ def _sqlite_contract(payload: Path) -> dict[str, int]:
     return counts
 
 
-def _artifact_relative_path(file_path: str, directory: str) -> Path:
+def _artifact_relative_path(
+    file_path: str,
+    directory: str,
+    *,
+    data_root: Path,
+) -> Path:
     pure = PurePosixPath(file_path)
-    marker = f"/{directory}/"
-    normalized = pure.as_posix()
-    if marker not in normalized:
-        raise BackupError(f"metadata path is outside /data/{directory}: {file_path!r}")
-    relative = PurePosixPath(normalized.split(marker, 1)[1])
-    if ".." in relative.parts or not relative.parts:
+    expected_root = PurePosixPath(data_root.as_posix()) / directory
+    try:
+        relative = pure.relative_to(expected_root)
+    except ValueError as exc:
+        raise BackupError(
+            f"metadata path is outside {expected_root}: {file_path!r}"
+        ) from exc
+    if pure.is_absolute() is False or ".." in relative.parts or not relative.parts:
         raise BackupError(f"unsafe metadata artifact path: {file_path!r}")
     return Path(*relative.parts)
 
 
 def validate_backup(backup: Path) -> dict[str, Any]:
     manifest = load_manifest(backup)
+    source_data_root = _source_data_root(manifest)
     payload = backup / "payload"
     if not payload.is_dir():
         raise BackupError("backup payload directory is missing")
@@ -226,39 +248,57 @@ def validate_backup(backup: Path) -> dict[str, Any]:
             raise BackupError(f"backup size mismatch: {relative}")
         if entry.get("sha256") != sha256(path):
             raise BackupError(f"backup checksum mismatch: {relative}")
-    manifest["row_counts"] = _sqlite_contract(payload)
+    manifest["row_counts"] = _sqlite_contract(
+        payload,
+        source_data_root=source_data_root,
+    )
     return manifest
 
 
 def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
     manifest = validate_backup(backup)
+    source_data_root = _source_data_root(manifest)
     data_root.mkdir(parents=True, exist_ok=True)
     existing = list(data_root.iterdir())
     allowed_empty = {"db", "results", "adaptive", "logs"}
     if any(
         child.name not in allowed_empty
+        or child.is_symlink()
         or not child.is_dir()
         or any(child.iterdir())
         for child in existing
     ):
         raise BackupError(f"restore destination is not empty: {data_root}")
-    # A fresh production image initializes these empty mount points before the
-    # named volume is first used. Remove only the payload destinations so the
-    # staged directories can be atomically installed; preserve empty logs.
-    for name in ("db", "results", "adaptive"):
-        path = data_root / name
-        if path.exists():
-            path.rmdir()
     stage = data_root / f".restore-{os.getpid()}"
     if stage.exists():
         raise BackupError(f"restore staging path already exists: {stage}")
+    installed: list[Path] = []
+    original_modes: dict[str, int] = {}
     try:
         shutil.copytree(backup / "payload", stage)
+        _sqlite_contract(stage, source_data_root=source_data_root)
+        # A fresh production image initializes these empty mount points before
+        # the named volume is first used. Preserve their modes for rollback and
+        # keep empty logs in place.
+        for name in ("db", "results", "adaptive"):
+            path = data_root / name
+            if path.exists():
+                original_modes[name] = path.stat().st_mode & 0o7777
+                path.rmdir()
         for child in stage.iterdir():
-            os.replace(child, data_root / child.name)
+            destination = data_root / child.name
+            os.replace(child, destination)
+            installed.append(destination)
         stage.rmdir()
-        _sqlite_contract(data_root)
+        _sqlite_contract(data_root, source_data_root=source_data_root)
     except BaseException:
+        for destination in reversed(installed):
+            shutil.rmtree(destination, ignore_errors=True)
+        for name, mode in original_modes.items():
+            path = data_root / name
+            if not path.exists():
+                path.mkdir(mode=mode)
+                path.chmod(mode)
         shutil.rmtree(stage, ignore_errors=True)
         raise
     return manifest

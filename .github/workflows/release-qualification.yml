@@ -11,12 +11,8 @@ on:
       - pyproject.toml
       - scripts/qualification_backup.py
       - scripts/run_release_qualification.sh
-      - src/scrapeyard/api/**
-      - src/scrapeyard/common/**
-      - src/scrapeyard/queue/**
-      - src/scrapeyard/scheduler/**
-      - src/scrapeyard/storage/**
-      - src/scrapeyard/webhook/**
+      - sql/**
+      - src/scrapeyard/**
       - tests/qualification/**
       - tests/smoke/**
       - .github/workflows/release-qualification.yml
