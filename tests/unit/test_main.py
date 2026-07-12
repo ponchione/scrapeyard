@@ -279,6 +279,37 @@ async def test_shutdown_zero_grace_still_cancels_and_closes_everything(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_shutdown_deadline_bounds_cancellation_resistant_database(monkeypatch):
+    app = FastAPI()
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+
+    async def close_database() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
+    monkeypatch.setattr(main_module, "close_db", close_database)
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+
+    with pytest.raises(RuntimeError, match="database"):
+        await main_module._shutdown_runtime_services(
+            app,
+            shutdown_grace_seconds=0.005,
+        )
+
+    assert loop.time() - before < 0.1
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+    release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_lifespan_rejects_second_instance_before_database_start(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(

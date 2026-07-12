@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Awaitable, Protocol, cast
@@ -16,6 +15,7 @@ from arq.utils import timestamp_ms
 from arq.worker import Worker, func
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import (
     QueueCancellationOutcome,
@@ -298,34 +298,52 @@ class WorkerPool:
             if timeout is None
             else max(0.0, timeout)
         )
+        deadline = MonotonicDeadline(grace_seconds)
+        drain_timed_out = False
+        unresolved_phases: list[str] = []
         pending = [
             task for task in self._worker.tasks.values()
             if not task.done()
         ]
         if pending:
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True),
-                    timeout=grace_seconds,
+                await deadline.run(
+                    asyncio.gather(*pending, return_exceptions=True)
                 )
             except asyncio.TimeoutError:
+                drain_timed_out = True
                 for task in pending:
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
 
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
         if self._runner_task is not None:
-            with suppress(asyncio.CancelledError):
-                await self._runner_task
+            try:
+                await deadline.run(self._runner_task)
+            except AwaitableCancelled:
+                pass
+            except asyncio.TimeoutError:
+                unresolved_phases.append("runner")
 
-        await self._worker.close()
+        try:
+            await deadline.run(self._worker.close())
+        except asyncio.TimeoutError:
+            unresolved_phases.append("redis_close")
 
         self._redis = None
         self._worker = None
         self._runner_task = None
         self._started = False
+        if drain_timed_out:
+            logger.info(
+                "Worker shutdown grace expired; active jobs were cancelled"
+            )
+        if unresolved_phases:
+            raise asyncio.TimeoutError(
+                "Worker shutdown deadline exceeded in phase(s): "
+                + ", ".join(unresolved_phases)
+            )
 
     async def enqueue(
         self,

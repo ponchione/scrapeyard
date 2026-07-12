@@ -41,6 +41,7 @@ from scrapeyard.api.response_models import (
 )
 from scrapeyard.api.response_utils import error_content
 from scrapeyard.common.logging import setup_logging
+from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
@@ -157,12 +158,12 @@ async def _shutdown_runtime_services(
     *,
     shutdown_grace_seconds: float,
 ) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.0, shutdown_grace_seconds)
+    deadline = MonotonicDeadline(shutdown_grace_seconds)
     failures: list[tuple[str, Exception]] = []
 
     def remaining() -> float:
-        return max(0.0, deadline - loop.time())
+        value = deadline.remaining
+        return 0.0 if value is None else value
 
     def record_failure(phase: str, exc: Exception) -> None:
         failures.append((phase, exc))
@@ -171,21 +172,12 @@ async def _shutdown_runtime_services(
     cleanup_task = getattr(app.state, "cleanup_task", None)
     if cleanup_task is not None:
         cleanup_task.cancel()
-        cleanup_future = asyncio.ensure_future(cleanup_task)
         try:
-            cleanup_timeout = remaining()
-            if cleanup_timeout > 0:
-                await asyncio.wait_for(
-                    asyncio.shield(cleanup_future),
-                    timeout=cleanup_timeout,
-                )
-            else:
-                await asyncio.sleep(0)
-                if cleanup_future.done():
-                    await cleanup_future
-        except asyncio.CancelledError:
-            if not cleanup_future.done():
-                raise
+            await deadline.run(cleanup_task)
+        except AwaitableCancelled:
+            pass
+        except asyncio.TimeoutError as exc:
+            record_failure("cleanup", exc)
         except Exception as exc:
             record_failure("cleanup", exc)
     scheduler = getattr(app.state, "scheduler", None)
@@ -205,7 +197,7 @@ async def _shutdown_runtime_services(
     except Exception as exc:
         record_failure("webhook", exc)
     try:
-        await close_db()
+        await deadline.run(close_db())
     except Exception as exc:
         record_failure("database", exc)
     if failures:
