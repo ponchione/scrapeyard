@@ -15,6 +15,7 @@ from typing import Any, Protocol
 import httpx
 
 from scrapeyard.common.time import utc_now
+from scrapeyard.common.async_tools import MonotonicDeadline
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import UnsafeURLError, resolve_public_url
 from scrapeyard.runtime.metrics import RETRIES, WEBHOOK_DELIVERIES, mark_last_success
@@ -411,10 +412,17 @@ class HttpWebhookDispatcher:
         self._accepting_tasks = False
         self._stopping = True
         self._wake_event.set()
+        deadline = MonotonicDeadline(timeout)
+        unresolved_phases: list[str] = []
         coordinator = self._coordinator_task
         if coordinator is not None and not coordinator.done():
             coordinator.cancel()
-            await asyncio.gather(coordinator, return_exceptions=True)
+            try:
+                await deadline.run(
+                    asyncio.gather(coordinator, return_exceptions=True)
+                )
+            except asyncio.TimeoutError:
+                unresolved_phases.append("coordinator")
 
         queue = self._queue
         queued_at_start = 0 if queue is None else queue.qsize()
@@ -425,7 +433,7 @@ class HttpWebhookDispatcher:
                 if timeout is None:
                     await queue.join()
                 else:
-                    await asyncio.wait_for(queue.join(), timeout=timeout)
+                    await deadline.run(queue.join())
             except asyncio.TimeoutError:
                 timed_out = True
 
@@ -435,7 +443,15 @@ class HttpWebhookDispatcher:
                 cancelled += 1
                 task.cancel()
         if self._worker_tasks:
-            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            try:
+                await deadline.run(
+                    asyncio.gather(*self._worker_tasks, return_exceptions=True)
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Webhook worker cancellation did not acknowledge before "
+                    "the shutdown deadline"
+                )
 
         remaining = (0 if queue is None else queue.qsize()) + len(self._active_ids)
         logger.info(
@@ -459,11 +475,22 @@ class HttpWebhookDispatcher:
         self._queue = None
         self._started = False
 
-        async with self._client_lock:
-            client = self._client
-            self._client = None
-        if client is not None:
-            await client.aclose()
+        async def _close_client() -> None:
+            async with self._client_lock:
+                client = self._client
+                self._client = None
+            if client is not None:
+                await client.aclose()
+
+        try:
+            await deadline.run(_close_client())
+        except asyncio.TimeoutError:
+            unresolved_phases.append("http_client")
+        if unresolved_phases:
+            raise asyncio.TimeoutError(
+                "Webhook shutdown deadline exceeded in phase(s): "
+                + ", ".join(unresolved_phases)
+            )
 
     async def _get_client(self) -> httpx.AsyncClient:
         async with self._client_lock:

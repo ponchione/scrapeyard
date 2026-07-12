@@ -19,19 +19,6 @@ from scrapeyard.queue.pool import (
 from scrapeyard.queue.priority import WeightedPriorityPolicy
 
 
-class _FakeWorkerTask:
-    def __init__(self, done: bool = False) -> None:
-        self._done = done
-        self.cancelled = False
-
-    def done(self) -> bool:
-        return self._done
-
-    def cancel(self) -> None:
-        self.cancelled = True
-        self._done = True
-
-
 def _make_pool(**overrides: Any) -> WorkerPool:
     defaults: dict[str, Any] = {
         "max_concurrent": 4,
@@ -326,7 +313,8 @@ async def test_stop_waits_for_pending_tasks_and_closes_worker(monkeypatch):
 @pytest.mark.asyncio
 async def test_stop_cancels_pending_tasks_after_timeout(monkeypatch):
     pool = _make_pool()
-    pending = _FakeWorkerTask()
+    pending = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
     close_calls = 0
 
     async def _close() -> None:
@@ -345,24 +333,12 @@ async def test_stop_cancels_pending_tasks_after_timeout(monkeypatch):
     pool._runner_task = runner_task
     monkeypatch.setattr(
         "scrapeyard.queue.pool.get_settings",
-        lambda: MagicMock(workers_shutdown_grace_seconds=1),
+        lambda: MagicMock(workers_shutdown_grace_seconds=0.001),
     )
-
-    async def _timeout(awaitable, *_args, **_kwargs):
-        close = getattr(awaitable, "close", None)
-        if callable(close):
-            close()
-        raise asyncio.TimeoutError
-
-    async def _gather(*_args, **_kwargs):
-        return [None]
-
-    monkeypatch.setattr("scrapeyard.queue.pool.asyncio.wait_for", _timeout)
-    monkeypatch.setattr("scrapeyard.queue.pool.asyncio.gather", _gather)
 
     await pool.stop()
 
-    assert pending.cancelled is True
+    assert pending.cancelled()
     assert close_calls == 1
 
 
