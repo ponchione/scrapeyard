@@ -37,7 +37,7 @@ _PRICE_RANGE_RE = re.compile(
 
 def enrich_item_detection(
     item_data: dict[str, Any],
-    element: Any,
+    element: object,
     map_config: MapDetectionConfig | None,
     stock_config: StockDetectionConfig | None,
 ) -> None:
@@ -54,7 +54,7 @@ def enrich_item_detection(
 
 def detect_pricing_visibility(
     item_data: dict[str, Any],
-    element: Any,
+    element: object,
     config: MapDetectionConfig | None,
 ) -> tuple[PricingVisibility, str | None]:
     """Classify a listing's pricing visibility.
@@ -122,7 +122,7 @@ _STOCK_PRIORITY = [
 
 def detect_stock_status(
     item_data: dict[str, Any],
-    element: Any,
+    element: object,
     config: StockDetectionConfig | None,
 ) -> StockStatus:
     """Classify a listing's stock status.
@@ -173,7 +173,7 @@ def _stock_text_patterns_match(item_text: str, patterns: StockPatternConfig) -> 
 
 def _stock_patterns_match(
     item_text: str,
-    element: Any,
+    element: object,
     patterns: StockPatternConfig,
 ) -> bool:
     """Return True if any text pattern or CSS selector in *patterns* matches."""
@@ -214,7 +214,7 @@ def _match_map_text_patterns(item_text: str, patterns: list[str]) -> tuple[bool,
     return False, None
 
 
-def _match_map_css_selectors(element: Any, selectors: list[str]) -> tuple[bool, str | None]:
+def _match_map_css_selectors(element: object, selectors: list[str]) -> tuple[bool, str | None]:
     for selector in selectors:
         hits = _css_select(element, selector)
         if not hits:
@@ -228,7 +228,7 @@ def _match_map_price_value(price_raw: Any, patterns: list[str]) -> bool:
     return any(pattern == price_str for pattern in patterns)
 
 
-def _first_non_empty_element_text(elements: list[Any]) -> str | None:
+def _first_non_empty_element_text(elements: list[object]) -> str | None:
     for element in elements:
         element_text = _get_element_text(element)
         if element_text:
@@ -249,7 +249,7 @@ def _extract_display_text(full_text: str, pattern: str) -> str:
     return full_text[idx : idx + len(pattern)]
 
 
-def _get_element_text(element: Any) -> str:
+def _get_element_text(element: object) -> str:
     """Get text content from a Scrapling element."""
     if element is None:
         return ""
@@ -265,7 +265,7 @@ def _get_element_text(element: Any) -> str:
     return _clean_element_text(getattr(element, "text", None))
 
 
-def _clean_element_text(value: Any) -> str:
+def _clean_element_text(value: object) -> str:
     """Clean Scrapling element text: strip whitespace, filter 'None' literals."""
     if not isinstance(value, str):
         return ""
@@ -303,13 +303,13 @@ def _normalize_matchable_text(value: Any) -> str:
     return ""
 
 
-def _css_select(element: Any, selector: str) -> list[Any]:
+def _css_select(element: object, selector: str) -> list[object]:
     """Run a CSS selector on an element, returning matched children."""
     css_fn = getattr(element, "css", None)
     if css_fn is None:
         return []
     try:
-        return cast(list[Any], css_fn(selector))
+        return cast(list[object], css_fn(selector))
     except Exception as exc:
         logger.debug(
             "Suppressing detection CSS selector failure for %s: %s",

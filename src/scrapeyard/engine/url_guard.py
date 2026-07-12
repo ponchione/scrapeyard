@@ -7,6 +7,7 @@ import logging
 import re
 import socket
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus, unquote_plus, urlparse, urlunparse
 
@@ -20,6 +21,15 @@ logger = logging.getLogger(__name__)
 
 class UnsafeURLError(ValueError):
     """Raised when a URL points at a non-public address."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPublicURL:
+    """A URL whose network connection is pinned to one validated public IP."""
+
+    connect_url: str
+    host_header: str
+    sni_hostname: str
 
 
 _DISALLOWED_HOSTS: frozenset[str] = frozenset(
@@ -70,6 +80,7 @@ _SENSITIVE_KEY_PARTS = (
     "signature",
     "session",
 )
+_SECRET_CONTAINER_KEYS = frozenset({"headers", "extraheaders"})
 
 _IPV4_EMBEDDING_PREFIXES = (
     ipaddress.IPv6Network("64:ff9b::/96"),
@@ -230,6 +241,70 @@ def assert_public_url(
             )
 
 
+def resolve_public_url(url: str) -> ResolvedPublicURL:
+    """Resolve once and return connection parameters pinned to a public IP.
+
+    The original hostname is retained for HTTP Host and TLS SNI, while the
+    socket destination uses the address validated here. This closes the DNS
+    rebinding window for direct HTTP clients.
+    """
+    assert_public_url(url, resolve_dns=False)
+    parsed = urlparse(url)
+    original_host = parsed.hostname
+    if original_host is None:  # Covered by assert_public_url; keeps typing honest.
+        raise UnsafeURLError("URL has no hostname")
+    canonical_host = _canonical_hostname(original_host)
+
+    literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None
+    try:
+        literal = ipaddress.ip_address(canonical_host)
+    except ValueError:
+        literal = _legacy_ipv4_address(canonical_host)
+
+    if literal is None:
+        try:
+            infos = socket.getaddrinfo(canonical_host, parsed.port, type=socket.SOCK_STREAM)
+        except (socket.gaierror, UnicodeError) as exc:
+            raise UnsafeURLError(
+                f"Hostname {canonical_host!r} could not be resolved"
+            ) from exc
+        addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+        seen: set[str] = set()
+        for *_head, sockaddr in infos:
+            try:
+                address = ipaddress.ip_address(str(sockaddr[0]))
+            except ValueError:
+                continue
+            if str(address) in seen:
+                continue
+            seen.add(str(address))
+            if _ip_is_blocked(address):
+                raise UnsafeURLError(
+                    f"Hostname {canonical_host!r} resolves to non-public address {address}"
+                )
+            addresses.append(address)
+        if not addresses:
+            raise UnsafeURLError(f"Hostname {canonical_host!r} resolved to no usable address")
+        literal = addresses[0]
+
+    ip_authority = f"[{literal}]" if isinstance(literal, ipaddress.IPv6Address) else str(literal)
+    if parsed.port is not None:
+        ip_authority = f"{ip_authority}:{parsed.port}"
+    userinfo = ""
+    if "@" in parsed.netloc:
+        userinfo = f"{parsed.netloc.rsplit('@', 1)[0]}@"
+    connect_url = urlunparse(parsed._replace(netloc=f"{userinfo}{ip_authority}"))
+
+    host_authority = (
+        f"[{canonical_host}]"
+        if ":" in canonical_host
+        else canonical_host
+    )
+    if parsed.port is not None:
+        host_authority = f"{host_authority}:{parsed.port}"
+    return ResolvedPublicURL(connect_url, host_authority, canonical_host)
+
+
 def redact_userinfo_in_text(text: str) -> str:
     """Strip userinfo and sensitive query values from URLs embedded in *text*.
 
@@ -251,10 +326,16 @@ def _is_sensitive_key(key: str) -> bool:
 def redact_sensitive_mapping(value: Any) -> Any:
     """Recursively redact common secret-bearing keys in JSON-like values."""
     if isinstance(value, Mapping):
-        return {
-            key: _REDACTED_VALUE if _is_sensitive_key(str(key)) else redact_sensitive_mapping(item)
-            for key, item in value.items()
-        }
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "").replace("_", "")
+            if _is_sensitive_key(str(key)):
+                redacted[key] = _REDACTED_VALUE
+            elif normalized in _SECRET_CONTAINER_KEYS and isinstance(item, Mapping):
+                redacted[key] = {header: _REDACTED_VALUE for header in item}
+            else:
+                redacted[key] = redact_sensitive_mapping(item)
+        return redacted
     if isinstance(value, list):
         return [redact_sensitive_mapping(item) for item in value]
     if isinstance(value, str):

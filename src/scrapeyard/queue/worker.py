@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
@@ -51,6 +53,12 @@ from scrapeyard.queue.target_execution import (
     resolve_target_runtime_context,
 )
 from scrapeyard.queue.validation_policy import apply_validation
+from scrapeyard.runtime.metrics import (
+    OUTPUT_BYTES,
+    active_target,
+    observe_run,
+    observe_target,
+)
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.types import RunOwnershipError, SaveResultMeta
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
@@ -124,6 +132,9 @@ async def scrape_task(
     context: JobExecutionContext | None = None
     heartbeat: RunHeartbeat | None = None
     active_run_id = run_id
+    metric_claimed = False
+    metric_status = "ignored"
+    metric_started = time.monotonic()
     try:
         context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
         if context is None:
@@ -140,6 +151,8 @@ async def scrape_task(
         )
         if not claimed:
             return
+        metric_claimed = True
+        qualification_checkpoint("after_claim_run_creation")
         heartbeat = RunHeartbeat(
             job_store=job_store,
             job_id=job_id,
@@ -178,7 +191,9 @@ async def scrape_task(
             error_store=error_store,
             webhook_dispatcher=webhook_dispatcher,
         )
+        metric_status = persisted.final_status.value
     except BudgetExceeded as exc:
+        metric_status = "failed"
         if context is None:
             logger.error(
                 "Run budget exceeded before context load job_id=%s run_id=%s "
@@ -210,6 +225,7 @@ async def scrape_task(
             heartbeat=heartbeat,
         )
     except asyncio.CancelledError:
+        metric_status = "cancelled"
         lease_lost = heartbeat is not None and heartbeat.ownership_lost
         if heartbeat is not None:
             await heartbeat.stop()
@@ -262,6 +278,7 @@ async def scrape_task(
             await recovery
         raise
     except (RunHeartbeatLeaseLost, RunOwnershipError) as exc:
+        metric_status = "ignored"
         if heartbeat is not None:
             await heartbeat.stop()
         logger.info(
@@ -272,6 +289,7 @@ async def scrape_task(
         )
         await _discard_unowned_result(result_store, job_id, active_run_id)
     except Exception as exc:
+        metric_status = "failed"
         if heartbeat is not None:
             await heartbeat.stop()
         logger.error(
@@ -292,6 +310,12 @@ async def scrape_task(
     finally:
         if heartbeat is not None:
             await heartbeat.stop()
+        if metric_claimed:
+            observe_run(
+                status=metric_status,
+                trigger=trigger,
+                duration_seconds=time.monotonic() - metric_started,
+            )
 
 
 def _heartbeat_cutoff(context: JobExecutionContext | None) -> datetime | None:
@@ -518,6 +542,8 @@ async def _persist_job_results(
         record_count=len(flat_data),
         budget=context.budget,
     )
+    if isinstance(save_meta.serialized_bytes, int | float):
+        OUTPUT_BYTES.inc(save_meta.serialized_bytes)
     await context.activity.checkpoint("after_result_persistence")
     return PersistedJobResult(
         final_status=final_status,
@@ -553,6 +579,7 @@ async def _finalize_job_execution(
         completed_at=completed_at,
     )
     try:
+        qualification_checkpoint("during_run_finalization")
         await job_store.finalize_owned_run(
             job_id,
             run_id,
@@ -577,6 +604,7 @@ async def _finalize_job_execution(
         await _discard_unowned_result(result_store, job_id, run_id)
         return
 
+    qualification_checkpoint("after_terminal_state_before_delivery_ack")
     await dispatch_webhook(
         webhook_dispatcher=webhook_dispatcher,
         config=context.config,
@@ -778,6 +806,8 @@ async def _process_all_targets(
     async def _process_one(index: int, target_cfg: TargetConfig) -> TargetResult:
         pending_errors: list[ErrorRecord] = []
         cancelled = False
+        target_result: TargetResult | None = None
+        target_started = 0.0
         try:
             await context.activity.checkpoint("before_target_start")
             if index > 0 and config.execution.delay_between > 0:
@@ -786,16 +816,34 @@ async def _process_all_targets(
             async with sem:
                 await context.activity.checkpoint("before_target_fetch")
                 context.budget.check_deadline()
-                return await _fetch_and_validate_target(
-                    target_cfg=target_cfg,
-                    context=target_context,
-                    pending_errors=pending_errors,
-                )
+                target_started = time.monotonic()
+                with active_target():
+                    target_result = await _fetch_and_validate_target(
+                        target_cfg=target_cfg,
+                        context=target_context,
+                        pending_errors=pending_errors,
+                    )
+                return target_result
         except asyncio.CancelledError:
             cancelled = True
             pending_errors.clear()
             raise
         finally:
+            if target_started:
+                observe_target(
+                    status=(
+                        "cancelled"
+                        if cancelled
+                        else (
+                            "failed"
+                            if target_result is None
+                            else target_result.status_value
+                        )
+                    ),
+                    fetcher=target_cfg.fetcher.value,
+                    duration_seconds=time.monotonic() - target_started,
+                    records=0 if target_result is None else len(target_result.data),
+                )
             if not cancelled:
                 await _flush_errors(
                     error_store,
@@ -847,6 +895,7 @@ async def _fetch_and_validate_target(
 
     log_target_fetch(target_cfg, runtime)
     try:
+        qualification_checkpoint("during_target_execution")
         if target_cfg.fetcher in (FetcherType.dynamic, FetcherType.stealthy):
             if context.browser_limiter is None:
                 return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
@@ -962,10 +1011,13 @@ def _collect_result_payload(all_results: list[TargetResult]) -> tuple[list[dict[
 
 
 def _target_result_details(result: TargetResult) -> dict[str, Any]:
+    debug = redact_sensitive_mapping(result.debug) if result.debug is not None else None
+    if isinstance(debug, dict):
+        debug["screenshot_path"] = None
     return {
         "status": result.status_value,
         "count": len(result.data),
-        "debug": redact_sensitive_mapping(result.debug) if result.debug is not None else None,
+        "debug": debug,
         "error_type": result.error_type.value if result.error_type else None,
         "error_detail": (
             redact_userinfo_in_text(result.error_detail)

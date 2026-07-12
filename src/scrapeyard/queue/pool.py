@@ -7,7 +7,7 @@ import logging
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Awaitable, cast, Protocol
+from typing import Any, Awaitable, Protocol, cast
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.constants import in_progress_key_prefix, job_key_prefix, result_key_prefix
@@ -19,7 +19,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import (
     QueueCancellationOutcome,
-    QueueDeliveryState,
+    QueueDeliveryState as QueueDeliveryState,
     RunCancellationResult,
 )
 from scrapeyard.queue.memory import get_process_rss_mb
@@ -103,7 +103,7 @@ class _PriorityJobHandle:
         timeout: float | None = None,
         *,
         poll_delay: float = 0.5,
-    ) -> Any:
+    ) -> object:
         started = monotonic()
         while True:
             snapshot = await self._pool._delivery_snapshot(self._run_id)
@@ -112,11 +112,14 @@ class _PriorityJobHandle:
                     raise RuntimeError("Redis disconnected while waiting for queue result")
                 # Result keys are global to the arq job identity; queue name is
                 # irrelevant once the result exists.
-                return await Job(
-                    self._run_id,
-                    redis=self._pool.redis,
-                    _queue_name=self._pool._queue_name,
-                ).result(timeout=0, poll_delay=poll_delay)
+                return cast(
+                    object,
+                    await Job(
+                        self._run_id,
+                        redis=self._pool.redis,
+                        _queue_name=self._pool._queue_name,
+                    ).result(timeout=0, poll_delay=poll_delay),
+                )
             if snapshot.state is QueueDeliveryState.missing:
                 raise ResultNotFound(
                     "Not waiting for job result because the delivery is not in "
@@ -175,7 +178,21 @@ class QueueJobHandle(Protocol):
         timeout: float | None = None,
         *,
         poll_delay: float = 0.5,
-    ) -> Any: ...
+    ) -> object: ...
+
+
+class QueueTaskHandler(Protocol):
+    """Typed first-party callback invoked by the arq adapter."""
+
+    async def __call__(
+        self,
+        job_id: str,
+        config_yaml: str,
+        *,
+        run_id: str | None = None,
+        trigger: str = "adhoc",
+        browser_limiter: BrowserExecutionLimiter,
+    ) -> None: ...
 
 
 class WorkerPool:
@@ -188,8 +205,9 @@ class WorkerPool:
         memory_limit_mb: int,
         redis_settings: RedisSettings,
         queue_name: str,
-        task_handler: Any = None,
+        task_handler: QueueTaskHandler | None = None,
         cancellation_grace_seconds: float = 10.0,
+        job_timeout_seconds: float = 300.0,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._max_browsers = max_browsers
@@ -203,6 +221,7 @@ class WorkerPool:
         )
         self._task_handler = task_handler
         self._cancellation_grace_seconds = cancellation_grace_seconds
+        self._job_timeout_seconds = job_timeout_seconds
 
         self._browser_limiter = BrowserExecutionLimiter(max_browsers)
         self._redis: ArqRedis | None = None
@@ -254,6 +273,7 @@ class WorkerPool:
             priority_queues=self._priority_queues,
             handle_signals=False,
             max_jobs=self._max_concurrent,
+            job_timeout=self._job_timeout_seconds,
             keep_result=_KEEP_RESULT_SECONDS,
             retry_jobs=False,
             allow_abort_jobs=True,
@@ -422,6 +442,33 @@ class WorkerPool:
                 pipe.zcard(self._priority_queues[priority])
             depths = await pipe.execute()
         return dict(zip(PRIORITIES, (int(depth) for depth in depths), strict=True))
+
+    async def queue_operational_snapshot(self) -> dict[str, tuple[int, float]]:
+        """Return fixed-priority depth and oldest age without scanning Redis."""
+
+        if self._redis is None:
+            raise RuntimeError(
+                "WorkerPool.queue_operational_snapshot() requires an active Redis connection"
+            )
+        now_ms = timestamp_ms()
+        async with self._redis.pipeline(transaction=True) as pipe:
+            for priority in PRIORITIES:
+                queue_name = self._priority_queues[priority]
+                pipe.zcard(queue_name)
+                pipe.zrange(queue_name, 0, 0, withscores=True)
+            values = await pipe.execute()
+
+        snapshot: dict[str, tuple[int, float]] = {}
+        for index, priority in enumerate(PRIORITIES):
+            depth = int(values[index * 2])
+            oldest = values[index * 2 + 1]
+            age_seconds = (
+                0.0
+                if not oldest
+                else max(0.0, (now_ms - float(oldest[0][1])) / 1000.0)
+            )
+            snapshot[priority] = (depth, age_seconds)
+        return snapshot
 
     async def _move_to_execution_queue(self, run_id: str, source_queue: str) -> bool:
         if self._redis is None:
@@ -635,6 +682,12 @@ class WorkerPool:
         """Return the active Redis pool, if the worker pool is started."""
         return self._redis
 
+    async def ping(self) -> None:
+        """Verify the queue's Redis adapter is connected and responsive."""
+        if self._redis is None:
+            raise RuntimeError("redis pool not connected")
+        await self._redis.ping()
+
     @property
     def active_tasks(self) -> int:
         return self._active_tasks
@@ -655,6 +708,34 @@ class WorkerPool:
     @property
     def max_browsers(self) -> int:
         return self._max_browsers
+
+    @property
+    def background_ok(self) -> bool:
+        """Whether the embedded arq runner is present and still executing."""
+
+        return (
+            self._started
+            and self._runner_task is not None
+            and not self._runner_task.done()
+        )
+
+    @property
+    def background_detail(self) -> str | None:
+        task = self._runner_task
+        if not self._started:
+            return "worker pool not started"
+        if task is None:
+            return "worker runner task missing"
+        if task.cancelled():
+            return "worker runner task stopped"
+        if task.done():
+            exception = task.exception()
+            return (
+                "worker runner task stopped"
+                if exception is None
+                else f"worker runner task failed: {type(exception).__name__}"
+            )
+        return None
 
     async def _run_job(
         self,

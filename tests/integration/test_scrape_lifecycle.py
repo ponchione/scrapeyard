@@ -268,10 +268,12 @@ async def test_failed_scrape_results_still_expose_target_debug(client, monkeypat
         failure_message="Timed out waiting for failed-run results payload",
     )
 
-    payload = results_response.json()["results"]
+    payload = results_response.json()
     assert payload["status"] == "failed"
     assert payload["targets"][0]["debug"]["classification"] == "selector_miss"
-    assert payload["results"]["example.com"]["debug"]["final_url"] == "https://example.com/catalog"
+    assert payload["results"]["example.com"]["debug"]["final_url"] == (
+        "https://example.com/catalog"
+    )
 
 
 @pytest.mark.asyncio
@@ -432,7 +434,7 @@ execution:
     submission = submitted.json()
     assert submission["status"] == "failed"
     job_id = submission["job_id"]
-    assert submission["results"]["budget_error"]["limit_name"] == (
+    assert submission["budget_error"]["limit_name"] == (
         "serialized_result_bytes"
     )
 

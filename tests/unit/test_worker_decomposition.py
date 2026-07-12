@@ -219,6 +219,25 @@ async def test_browser_permit_recovers_after_target_exception():
 
 
 @pytest.mark.asyncio
+async def test_target_metric_classifies_pre_result_exception_as_failed():
+    limiter = BrowserExecutionLimiter(1)
+    target = _concurrent_target("https://failing.example", FetcherType.basic)
+    context = _job_execution_context([target])
+
+    with (
+        patch(
+            "scrapeyard.queue.worker._fetch_and_validate_target",
+            side_effect=RuntimeError("failed before result"),
+        ),
+        patch("scrapeyard.queue.worker.observe_target") as observe,
+        pytest.raises(RuntimeError, match="failed before result"),
+    ):
+        await _run_targets(context, limiter, job_id="failure-metric")
+
+    assert observe.call_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_browser_permit_recovers_after_target_cancellation():
     limiter = BrowserExecutionLimiter(1)
     target = _concurrent_target("https://cancelled.example", FetcherType.stealthy)
@@ -439,7 +458,11 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
         error_detail="redirected to https://user:pass@example.com/private",
         debug={
             "final_url": "https://user:pass@example.com/private",
-            "headers": {"Authorization": "Bearer secret"},
+            "headers": {
+                "Authorization": "Bearer secret",
+                "X-Shop-Auth": "opaque-secret",
+            },
+            "screenshot_path": "/data/artifacts/job/run/dynamic-main.png",
         },
     )
 
@@ -457,6 +480,8 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     assert payload["targets"][0]["errors"] == ["failed at https://example.com/private"]
     assert payload["targets"][0]["debug"]["final_url"] == "https://example.com/private"
     assert payload["targets"][0]["debug"]["headers"]["Authorization"] == "<redacted>"
+    assert payload["targets"][0]["debug"]["headers"]["X-Shop-Auth"] == "<redacted>"
+    assert payload["targets"][0]["debug"]["screenshot_path"] is None
     assert payload["results"] == [{"sku": "a1", "_source": "example.com:8443"}]
 
 

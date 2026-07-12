@@ -15,6 +15,7 @@ import aiosqlite
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import get_db
+from scrapeyard.storage.secret_envelope import protect_text, reveal_text
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +153,19 @@ async def insert_webhook_delivery(
             delivery.job_id,
             delivery.run_id,
             delivery.event,
-            delivery.url,
-            _dumps_json(delivery.headers),
+            protect_text(
+                delivery.url,
+                purpose=f"webhook.url:{delivery.delivery_id}",
+            ),
+            protect_text(
+                _dumps_json(delivery.headers),
+                purpose=f"webhook.headers_json:{delivery.delivery_id}",
+            ),
             delivery.timeout_seconds,
-            _dumps_json(delivery.payload),
+            protect_text(
+                _dumps_json(delivery.payload),
+                purpose=f"webhook.payload_json:{delivery.delivery_id}",
+            ),
             fmt_dt(delivery.next_attempt_at),
             fmt_dt(created_at),
             fmt_dt(created_at),
@@ -192,16 +202,30 @@ def _as_utc(value: datetime) -> datetime:
 def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
     """Decode a SQLite row into a webhook delivery model."""
 
+    delivery_id = str(row["delivery_id"])
     reason_value = row["failure_reason"]
     return WebhookDelivery(
-        delivery_id=str(row["delivery_id"]),
+        delivery_id=delivery_id,
         job_id=str(row["job_id"]),
         run_id=None if row["run_id"] is None else str(row["run_id"]),
         event=str(row["event"]),
-        url=str(row["url"]),
-        headers=_loads_headers(str(row["headers_json"])),
+        url=reveal_text(
+            str(row["url"]),
+            purpose=f"webhook.url:{delivery_id}",
+        ),
+        headers=_loads_headers(
+            reveal_text(
+                str(row["headers_json"]),
+                purpose=f"webhook.headers_json:{delivery_id}",
+            )
+        ),
         timeout_seconds=float(row["timeout_seconds"]),
-        payload=_loads_dict(str(row["payload_json"])),
+        payload=_loads_dict(
+            reveal_text(
+                str(row["payload_json"]),
+                purpose=f"webhook.payload_json:{delivery_id}",
+            )
+        ),
         status=WebhookDeliveryStatus(str(row["status"])),
         attempts=int(row["attempts"]),
         next_attempt_at=_require_dt(
@@ -216,7 +240,14 @@ def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
             if reason_value is None
             else WebhookFailureReason(str(reason_value))
         ),
-        last_error=None if row["last_error"] is None else str(row["last_error"]),
+        last_error=(
+            None
+            if row["last_error"] is None
+            else reveal_text(
+                str(row["last_error"]),
+                purpose=f"webhook.last_error:{delivery_id}",
+            )
+        ),
         scrubbed_at=parse_dt(cast(str | None, row["scrubbed_at"])),
         created_at=_require_dt(cast(str | None, row["created_at"]), "created_at"),
         updated_at=_require_dt(cast(str | None, row["updated_at"]), "updated_at"),
@@ -479,7 +510,10 @@ class SQLiteWebhookOutboxStore:
         ]
         params: list[object] = [
             fmt_dt(next_attempt_at),
-            last_error,
+            protect_text(
+                last_error,
+                purpose=f"webhook.last_error:{delivery_id}",
+            ),
             fmt_dt(attempted_at),
         ]
         if expected_attempts is None:
@@ -514,7 +548,14 @@ class SQLiteWebhookOutboxStore:
         params: list[object] = [
             fmt_dt(failed_at),
             reason.value,
-            last_error,
+            (
+                None
+                if last_error is None
+                else protect_text(
+                    last_error,
+                    purpose=f"webhook.last_error:{delivery_id}",
+                )
+            ),
             fmt_dt(failed_at),
         ]
         if expected_attempts is None and attempts:

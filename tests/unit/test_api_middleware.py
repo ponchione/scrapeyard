@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
@@ -66,10 +68,16 @@ def _auth_app(*, keys: set[str] | None = None) -> FastAPI:
     app = FastAPI()
 
     @app.get("/protected")
-    async def protected() -> dict[str, bool]:
-        return {"ok": True}
+    async def protected(request: Request) -> dict[str, object]:
+        return {
+            "ok": True,
+            "caller_identity": getattr(request.state, "caller_identity", None),
+        }
 
-    app.add_middleware(APIKeyAuthMiddleware, keys=keys or {"secret"})
+    app.add_middleware(
+        APIKeyAuthMiddleware,
+        keys={"secret"} if keys is None else keys,
+    )
     return app
 
 
@@ -85,7 +93,12 @@ async def test_rate_limit_rejects_after_configured_requests_and_sets_retry_after
         response = await client.get("/limited")
 
     assert response.status_code == 429
-    assert response.json() == {"error": "Rate limit exceeded"}
+    assert response.json() == {
+        "error": "Rate limit exceeded",
+        "code": "rate_limited",
+        "status_code": 429,
+        "details": [],
+    }
     assert response.headers["retry-after"] == "10"
 
 
@@ -176,7 +189,61 @@ async def test_auth_rejects_duplicate_api_key_headers() -> None:
         response = await client.get("/protected", headers=duplicate_headers)
 
     assert response.status_code == 400
-    assert response.json() == {"error": "Invalid X-API-Key"}
+    assert response.json() == {
+        "error": "Invalid X-API-Key",
+        "code": "bad_request",
+        "status_code": 400,
+        "details": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_auth_attaches_api_key_digest_identity_without_plaintext() -> None:
+    transport = ASGITransport(app=_auth_app(keys={"secret"}))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/protected", headers={"X-API-Key": "secret"})
+
+    assert response.status_code == 200
+    assert response.json()["caller_identity"] == (
+        "legacy-sha256:" + hashlib.sha256(b"secret").hexdigest()
+    )
+    assert "secret" not in response.json()["caller_identity"]
+
+
+@pytest.mark.asyncio
+async def test_auth_disabled_attaches_shared_unauthenticated_identity() -> None:
+    transport = ASGITransport(app=_auth_app(keys=set()))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/protected")
+
+    assert response.status_code == 200
+    assert response.json()["caller_identity"] == "local-development"
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_monitoring_counts_duplicate_and_invalid_headers(caplog) -> None:
+    middleware = APIKeyAuthMiddleware(_auth_app(keys=set()), keys={"valid-secret"})
+    transport = ASGITransport(app=middleware)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        invalid = await client.get(
+            "/protected",
+            headers={"X-API-Key": "invalid-secret"},
+        )
+        duplicate = await client.get(
+            "/protected",
+            headers=[("X-API-Key", "valid-secret"), ("X-API-Key", "valid-secret")],
+        )
+
+    assert invalid.status_code == 401
+    assert duplicate.status_code == 400
+    assert middleware.failed_auth_attempts == 2
+    assert "reason=invalid" in caplog.text
+    assert "reason=duplicate_header" in caplog.text
+    assert "invalid-secret" not in caplog.text
+    assert "valid-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -200,7 +267,12 @@ async def test_size_limit_rejects_declared_oversized_body() -> None:
         response = await client.post("/echo", content=b"abcd")
 
     assert response.status_code == 413
-    assert response.json() == {"error": "Request body too large"}
+    assert response.json() == {
+        "error": "Request body too large",
+        "code": "request_too_large",
+        "status_code": 413,
+        "details": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -312,4 +384,9 @@ async def test_size_limit_rejects_streaming_oversized_body() -> None:
         response = await client.post("/echo", content=chunks())
 
     assert response.status_code == 413
-    assert response.json() == {"error": "Request body too large"}
+    assert response.json() == {
+        "error": "Request body too large",
+        "code": "request_too_large",
+        "status_code": 413,
+        "details": [],
+    }

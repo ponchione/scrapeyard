@@ -16,7 +16,8 @@ import httpx
 
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+from scrapeyard.engine.url_guard import UnsafeURLError, resolve_public_url
+from scrapeyard.runtime.metrics import RETRIES, WEBHOOK_DELIVERIES, mark_last_success
 from scrapeyard.storage.protocols import WebhookOutboxStore
 from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookFailureReason
 
@@ -144,6 +145,41 @@ class HttpWebhookDispatcher:
     def dispatch_concurrency(self) -> int:
         return self._dispatch_concurrency
 
+    @property
+    def background_ok(self) -> bool:
+        """Whether the coordinator and fixed worker set are all running."""
+
+        if self._outbox_store is None:
+            return True
+        expected = self._dispatch_concurrency + 1
+        tasks = [*self._worker_tasks]
+        if self._coordinator_task is not None:
+            tasks.append(self._coordinator_task)
+        return self._started and len(tasks) == expected and all(
+            not task.done() for task in tasks
+        )
+
+    @property
+    def background_detail(self) -> str | None:
+        if self.background_ok:
+            return None
+        if not self._started:
+            return "webhook dispatcher not started"
+        tasks = [*self._worker_tasks]
+        if self._coordinator_task is not None:
+            tasks.append(self._coordinator_task)
+        for task in tasks:
+            if task.cancelled():
+                return "webhook background task stopped"
+            if task.done():
+                exception = task.exception()
+                return (
+                    "webhook background task stopped"
+                    if exception is None
+                    else f"webhook background task failed: {type(exception).__name__}"
+                )
+        return "webhook background task set incomplete"
+
     async def startup(self) -> None:
         """Start one coordinator and a fixed number of durable workers."""
 
@@ -258,14 +294,17 @@ class HttpWebhookDispatcher:
         url = str(config.url)
         start = time.monotonic()
         try:
-            await asyncio.to_thread(assert_public_url, url)
+            resolved = await asyncio.to_thread(resolve_public_url, url)
             client = await self._get_client()
+            headers = dict(config.headers)
+            headers["Host"] = resolved.host_header
             response = await client.post(
-                url,
+                resolved.connect_url,
                 json=payload,
-                headers=config.headers,
+                headers=headers,
                 timeout=config.timeout,
                 follow_redirects=False,
+                extensions={"sni_hostname": resolved.sni_hostname},
             )
             elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -656,6 +695,8 @@ class HttpWebhookDispatcher:
             result.status.value,
             reason_code,
         )
+        WEBHOOK_DELIVERIES.labels(result.status.value).inc()
+        mark_last_success("webhook")
 
         if result.status is WebhookDispatchStatus.delivered:
             await self._outbox_store.mark_delivered(
@@ -717,6 +758,7 @@ class HttpWebhookDispatcher:
             last_error=result.last_error or "Retryable webhook delivery failure",
             expected_attempts=reserved.attempts,
         )
+        RETRIES.labels("webhook", "scheduled").inc()
         logger.info(
             "Webhook retry scheduled delivery_id=%s job_id=%s run_id=%s "
             "event=%s attempt_count=%s max_attempts=%s "

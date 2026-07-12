@@ -20,6 +20,7 @@ from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.dt import parse_dt
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import safe_join
+from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.filesystem import (
@@ -266,6 +267,7 @@ class LocalResultStore:
         metadata_committed = False
         try:
             await cleanup_safe_to_thread(write_bytes_file, path, payload)
+            qualification_checkpoint("after_result_artifact_write")
             if budget is not None:
                 budget.check_deadline()
 

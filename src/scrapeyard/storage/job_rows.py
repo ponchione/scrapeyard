@@ -8,6 +8,7 @@ from typing import cast
 
 from scrapeyard.common.dt import parse_dt
 from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.storage.secret_envelope import reveal_text
 
 
 RowMapping = Mapping[str, object]
@@ -24,15 +25,23 @@ def row_to_job(row: RowMapping) -> Job:
     created_at = parse_dt(cast(str | None, row["created_at"]))
     if created_at is None:
         raise ValueError("Job row is missing created_at")
+    job_id = cast(str, row["job_id"])
     return Job(
-        job_id=cast(str, row["job_id"]),
+        job_id=job_id,
         project=cast(str, row["project"]),
         name=cast(str, row["name"]),
         status=JobStatus(cast(str, row["status"])),
-        config_yaml=cast(str, row["config_yaml"]),
+        config_yaml=reveal_text(
+            cast(str, row["config_yaml"]),
+            purpose=f"jobs.config_yaml:{job_id}",
+        ),
         created_at=created_at,
         updated_at=parse_dt(cast(str | None, row["updated_at"])),
         schedule_cron=cast(str | None, row["schedule_cron"]),
+        schedule_timezone=cast(
+            str,
+            _optional_row_value(row, "schedule_timezone") or "UTC",
+        ),
         schedule_enabled=bool(row["schedule_enabled"]),
         current_run_id=cast(str | None, row["current_run_id"]),
         deletion_requested_at=parse_dt(
@@ -80,5 +89,10 @@ def row_to_project_summary(row: RowMapping) -> tuple[str, str, int]:
     return cast(str, row["project"]), cast(str, row["status"]), cast(int, row["count"])
 
 
-def row_to_schedule_state(row: RowMapping) -> tuple[str, str, bool]:
-    return cast(str, row["job_id"]), cast(str, row["schedule_cron"]), bool(row["schedule_enabled"])
+def row_to_schedule_state(row: RowMapping) -> tuple[str, str, str, bool]:
+    return (
+        cast(str, row["job_id"]),
+        cast(str, row["schedule_cron"]),
+        cast(str, row["schedule_timezone"]),
+        bool(row["schedule_enabled"]),
+    )

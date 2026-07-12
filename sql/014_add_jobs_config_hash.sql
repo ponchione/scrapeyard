@@ -1,0 +1,1 @@
+ALTER TABLE jobs ADD COLUMN config_hash TEXT NOT NULL DEFAULT '';

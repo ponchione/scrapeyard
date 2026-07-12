@@ -8,11 +8,25 @@ from datetime import datetime, timedelta
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
-from scrapeyard.storage.protocols import ResultStore, WebhookOutboxStore
+from scrapeyard.runtime.metrics import (
+    CLEANUP_BYTES,
+    CLEANUP_ITEMS,
+    CLEANUP_RUNS,
+    mark_last_success,
+)
+from scrapeyard.storage.protocols import JobStore, ResultStore, WebhookOutboxStore
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INTERVAL_HOURS = 6
+
+
+class CleanupIncompleteError(RuntimeError):
+    """Raised after independent cleanup phases run when one or more failed."""
+
+    def __init__(self, phases: list[str]) -> None:
+        self.phases = tuple(phases)
+        super().__init__(f"cleanup phases failed: {', '.join(phases)}")
 
 
 async def run_cleanup(
@@ -25,15 +39,22 @@ async def run_cleanup(
     webhook_cleanup_batch_size: int = 100,
     orphan_grace_seconds: int = 86400,
     reconciliation_dry_run: bool = True,
+    job_store: JobStore | None = None,
+    idempotency_cleanup_batch_size: int = 1000,
     *,
     now: datetime | None = None,
 ) -> None:
     """Clean result artifacts and scrub bounded terminal webhook secrets."""
+    failed_phases: list[str] = []
     deleted = await result_store.delete_expired(retention_days)
+    if deleted:
+        CLEANUP_ITEMS.labels("expired_results").inc(deleted)
     if deleted:
         logger.info("Cleanup removed %d expired result(s)", deleted)
 
     pruned = await result_store.prune_excess_per_job(max_results_per_job)
+    if pruned:
+        CLEANUP_ITEMS.labels("excess_results").inc(pruned)
     if pruned:
         logger.info("Cleanup pruned %d excess result(s) across jobs", pruned)
 
@@ -46,12 +67,21 @@ async def run_cleanup(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        failed_phases.append("artifact_reconciliation")
         logger.error(
             "Result artifact reconciliation failed error_type=%s "
             "recovery_action=retry_next_cleanup_pass",
             type(exc).__name__,
         )
     else:
+        if reconciliation.directories_removed:
+            CLEANUP_ITEMS.labels("artifact_directories").inc(
+                reconciliation.directories_removed
+            )
+        if reconciliation.files_removed:
+            CLEANUP_ITEMS.labels("artifact_files").inc(reconciliation.files_removed)
+        if reconciliation.removed_bytes:
+            CLEANUP_BYTES.inc(reconciliation.removed_bytes)
         logger.info(
             "Result artifact reconciliation complete dry_run=%s "
             "metadata_rows_inspected=%s valid_artifacts=%s "
@@ -109,7 +139,35 @@ async def run_cleanup(
             or "none",
         )
 
+    observed_at = now or utc_now()
+    if job_store is not None:
+        try:
+            idempotency_deleted = await job_store.delete_expired_idempotency_records(
+                observed_at,
+                limit=idempotency_cleanup_batch_size,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failed_phases.append("idempotency_retention")
+            logger.error(
+                "Idempotency retention cleanup failed error_type=%s "
+                "recovery_action=retry_next_cleanup_pass",
+                type(exc).__name__,
+            )
+        else:
+            if idempotency_deleted:
+                CLEANUP_ITEMS.labels("idempotency_records").inc(idempotency_deleted)
+            logger.info(
+                "Idempotency retention cleanup complete deleted_count=%s "
+                "batch_limit=%s",
+                idempotency_deleted,
+                idempotency_cleanup_batch_size,
+            )
+
     if webhook_outbox_store is None:
+        if failed_phases:
+            raise CleanupIncompleteError(failed_phases)
         return
     if (
         webhook_delivered_retention_days is None
@@ -117,7 +175,6 @@ async def run_cleanup(
     ):
         raise ValueError("Webhook retention windows are required for outbox cleanup")
 
-    observed_at = now or utc_now()
     try:
         summary = await webhook_outbox_store.scrub_terminal_deliveries(
             delivered_before=observed_at
@@ -126,28 +183,39 @@ async def run_cleanup(
             scrubbed_at=observed_at,
             limit=webhook_cleanup_batch_size,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
+        failed_phases.append("webhook_retention")
         logger.error(
             "Webhook retention cleanup failed error_type=%s "
             "recovery_action=retry_next_cleanup_pass",
             type(exc).__name__,
         )
-        return
-    logger.info(
-        "Webhook retention cleanup complete delivered_scrubbed_count=%s "
-        "failed_scrubbed_count=%s batch_limit=%s "
-        "recovery_action=retain_terminal_tombstones",
-        summary.delivered_scrubbed,
-        summary.failed_scrubbed,
-        webhook_cleanup_batch_size,
-    )
+    else:
+        logger.info(
+            "Webhook retention cleanup complete delivered_scrubbed_count=%s "
+            "failed_scrubbed_count=%s batch_limit=%s "
+            "recovery_action=retain_terminal_tombstones",
+            summary.delivered_scrubbed,
+            summary.failed_scrubbed,
+            webhook_cleanup_batch_size,
+        )
+        scrubbed = summary.delivered_scrubbed + summary.failed_scrubbed
+        if scrubbed:
+            CLEANUP_ITEMS.labels("webhook_secrets").inc(scrubbed)
+
+    if failed_phases:
+        raise CleanupIncompleteError(failed_phases)
 
 
 def start_cleanup_loop(
     result_store: ResultStore,
     webhook_outbox_store: WebhookOutboxStore | None = None,
     interval_hours: float = _DEFAULT_INTERVAL_HOURS,
-) -> asyncio.Task:
+    *,
+    job_store: JobStore | None = None,
+) -> asyncio.Task[None]:
     """Spawn a background task that periodically runs cleanup.
 
     Reads settings from :func:`get_settings` on each iteration and delegates all
@@ -168,6 +236,10 @@ def start_cleanup_loop(
                         reconciliation_dry_run=(
                             settings.storage_reconciliation_dry_run
                         ),
+                        job_store=job_store,
+                        idempotency_cleanup_batch_size=(
+                            settings.idempotency_cleanup_batch_size
+                        ) if job_store is not None else 1000,
                     )
                 else:
                     await run_cleanup(
@@ -188,11 +260,19 @@ def start_cleanup_loop(
                         reconciliation_dry_run=(
                             settings.storage_reconciliation_dry_run
                         ),
+                        job_store=job_store,
+                        idempotency_cleanup_batch_size=(
+                            settings.idempotency_cleanup_batch_size
+                        ) if job_store is not None else 1000,
                     )
             except asyncio.CancelledError:
                 raise
             except Exception:
+                CLEANUP_RUNS.labels("failed").inc()
                 logger.exception("Error during result cleanup")
+            else:
+                CLEANUP_RUNS.labels("success").inc()
+                mark_last_success("cleanup")
             await asyncio.sleep(interval_hours * 3600)
 
     return asyncio.create_task(_loop(), name="result-cleanup")

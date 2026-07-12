@@ -40,3 +40,6 @@ objects are verified.
 | `009_create_webhook_outbox.sql` | Durable webhook outbox and operational indexes. |
 | `010_add_terminal_reconciliation_marker.sql` | Bound startup terminal-intent reconciliation to unresolved runs. |
 | `011_add_results_artifact_lookup_index.sql` | Narrow destructive artifact ownership rechecks by project and run. |
+| `012_create_scrape_idempotency.sql` | Caller-scoped, expiring ad-hoc submission deduplication records. |
+| `013_add_schedule_timezone.sql` | Persist explicit IANA timezone semantics for scheduled jobs. |
+| `014_add_jobs_config_hash.sql` | Preserve plaintext-free config compare-and-set semantics. |

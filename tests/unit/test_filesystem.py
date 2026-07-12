@@ -73,6 +73,25 @@ def test_write_json_file_uses_unique_temp_paths(tmp_path, monkeypatch):
     assert read_json_file(filepath) == {"value": 2}
 
 
+def test_write_json_file_fsyncs_file_and_parent_directory(tmp_path, monkeypatch):
+    filepath = tmp_path / "data.json"
+    fsynced: list[int] = []
+
+    from scrapeyard.storage import filesystem
+
+    real_fsync = filesystem.os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        fsynced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(filesystem.os, "fsync", recording_fsync)
+
+    write_json_file(filepath, {"durable": True})
+
+    assert len(fsynced) == 2
+
+
 def test_write_json_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypatch):
     filepath = tmp_path / "data.json"
 

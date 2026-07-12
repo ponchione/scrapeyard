@@ -57,18 +57,18 @@ def parse_transform(raw: str) -> Callable[[str], str]:
         return str.upper
     elif name == "prepend":
         prefix = _require_arg(name, raw, args)
-        return lambda s, p=prefix: p + s  # type: ignore[misc]
+        return lambda s: prefix + s
     elif name == "append":
         suffix = _require_arg(name, raw, args)
-        return lambda s, sf=suffix: s + sf  # type: ignore[misc]
+        return lambda s: s + suffix
     elif name == "replace":
         if len(args) < 2:
             raise ValueError(f"replace requires old and new, got '{raw}'")
         old, new = args[0], args[1]
-        return lambda s, o=old, n=new: s.replace(o, n)  # type: ignore[misc]
+        return lambda s: s.replace(old, new)
     elif name == "remove":
         needle = _require_arg(name, raw, args)
-        return lambda s, n=needle: s.replace(n, "")  # type: ignore[misc]
+        return lambda s: s.replace(needle, "")
     elif name == "strip_prefix":
         prefix = _require_arg(name, raw, args)
 
@@ -97,13 +97,13 @@ def parse_transform(raw: str) -> Callable[[str], str]:
         return _extract
     elif name == "default":
         fallback = _require_arg(name, raw, args)
-        return lambda s, fb=fallback: s if s.strip() else fb  # type: ignore[misc]
+        return lambda s: s if s.strip() else fallback
     elif name == "regex":
         if len(args) < 2:
             raise ValueError(f"regex requires pattern and replacement, got '{raw}'")
         pattern, replacement = args[0], args[1]
         compiled = re.compile(pattern)
-        return lambda s, c=compiled, r=replacement: c.sub(r, s)  # type: ignore[misc]
+        return lambda s: compiled.sub(replacement, s)
     elif name == "join":
         raise ValueError(
             f"'join' is a list-level operation not supported as a per-value transform. "

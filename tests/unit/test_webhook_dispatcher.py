@@ -8,11 +8,13 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import pytest
 
 from scrapeyard.config.schema import WebhookConfig
+from scrapeyard.engine.url_guard import ResolvedPublicURL, resolve_public_url
 from scrapeyard.storage.webhook_outbox import (
     WebhookDelivery,
     WebhookDeliveryCreate,
@@ -31,6 +33,24 @@ from scrapeyard.webhook.dispatcher import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _pin_test_webhook_hosts(monkeypatch) -> None:
+    """Keep fake .example hosts deterministic while retaining literal-IP guards."""
+
+    def _resolve(url: str) -> ResolvedPublicURL:
+        parsed = urlparse(url)
+        if parsed.hostname and parsed.hostname.endswith(".example.com") or parsed.hostname == "example.com":
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            return ResolvedPublicURL(
+                urlunparse(parsed._replace(netloc=f"93.184.216.34{port}")),
+                f"{parsed.hostname}{port}",
+                parsed.hostname,
+            )
+        return resolve_public_url(url)
+
+    monkeypatch.setattr("scrapeyard.webhook.dispatcher.resolve_public_url", _resolve)
 
 
 def _webhook_config(url: str = "https://example.com/hook") -> WebhookConfig:
@@ -331,6 +351,11 @@ class TestSendOnce:
 
         assert result.status is WebhookDispatchStatus.delivered
         assert client.post.await_args.kwargs["follow_redirects"] is False
+        assert client.post.await_args.args[0] == "https://93.184.216.34/hook"
+        assert client.post.await_args.kwargs["headers"]["Host"] == "example.com"
+        assert client.post.await_args.kwargs["extensions"] == {
+            "sni_hostname": "example.com"
+        }
 
 
 class TestBackoffDelay:

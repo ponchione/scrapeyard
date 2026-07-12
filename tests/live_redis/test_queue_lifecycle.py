@@ -80,6 +80,22 @@ target:
 """
 
 
+def _scheduled_scrape_yaml() -> str:
+    return """
+project: live-redis
+name: manual-schedule
+schedule:
+  cron: "0 9 * * *"
+  timezone: "America/New_York"
+  enabled: false
+target:
+  url: https://example.com
+  fetcher: basic
+  selectors:
+    title: h1
+"""
+
+
 async def _await_terminal_status(client, job_id: str) -> str:
     for _ in range(60):
         response = await client.get(f"/jobs/{job_id}")
@@ -89,6 +105,81 @@ async def _await_terminal_status(client, job_id: str) -> str:
             return status
         await asyncio.sleep(0.05)
     pytest.fail(f"Timed out waiting for terminal job status for {job_id}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_concurrent_idempotent_submissions_enqueue_one_real_redis_run(
+    client,
+    monkeypatch,
+):
+    pool = get_worker_pool()
+    assert pool._worker is not None
+    original_enqueue = pool.enqueue
+    enqueue_calls = 0
+
+    async def _counted_enqueue(*args, **kwargs):
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        return await original_enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "enqueue", _counted_enqueue)
+    pool._worker.allow_pick_jobs = False
+    try:
+        responses = await asyncio.gather(
+            *(
+                client.post(
+                    "/scrape",
+                    content=_async_scrape_yaml(),
+                    headers={
+                        "content-type": "application/x-yaml",
+                        "Idempotency-Key": "live-concurrent-key",
+                    },
+                )
+                for _ in range(20)
+            )
+        )
+        payloads = [response.json() for response in responses]
+        assert {response.status_code for response in responses} == {202}
+        assert len({payload["job_id"] for payload in payloads}) == 1
+        assert len({payload["run_id"] for payload in payloads}) == 1
+        assert enqueue_calls == 1
+        assert await pool.queue_depths() == {"high": 0, "normal": 1, "low": 0}
+    finally:
+        pool._worker.allow_pick_jobs = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_manual_scheduled_trigger_uses_real_redis_and_explicit_trigger(
+    client,
+    monkeypatch,
+):
+    async def _success(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "manual"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _success)
+    created = await client.post(
+        "/jobs",
+        content=_scheduled_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["job_id"]
+
+    triggered = await client.post(f"/jobs/{job_id}/trigger")
+    assert triggered.status_code == 202
+    assert triggered.json()["trigger"] == "manual"
+    await _await_terminal_status(client, job_id)
+    detail = await client.get(f"/jobs/{job_id}")
+    assert detail.status_code == 200
+    assert detail.json()["runs"][0]["trigger"] == "manual"
+    assert detail.json()["runs"][0]["config_hash"] == triggered.json()["config_hash"]
 
 
 @pytest.mark.asyncio

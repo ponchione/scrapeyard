@@ -14,11 +14,80 @@ from collections.abc import Callable, Iterable
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from scrapeyard.api.response_utils import error_content
+from scrapeyard.api.auth import (
+    APICredential,
+    AuthenticatedCaller,
+    LOCAL_DEVELOPMENT_CALLER,
+    PUBLIC_CALLER,
+    authenticate_api_key,
+    parse_api_credentials,
+)
+from scrapeyard.runtime.metrics import observe_api_request
+
 logger = logging.getLogger(__name__)
+
+
+class MetricsMiddleware:
+    """Record bounded HTTP metrics using route templates, never raw paths."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = time.perf_counter()
+        status_code = 500
+
+        async def measured_send(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, measured_send)
+        finally:
+            route = scope.get("route")
+            route_label = getattr(route, "path", None)
+            if not isinstance(route_label, str):
+                path = scope.get("path")
+                route_label = (
+                    path
+                    if path in {"/health", "/health/live", "/health/ready", "/metrics"}
+                    else "unmatched"
+                )
+            observe_api_request(
+                str(scope.get("method", "OTHER")),
+                route_label,
+                status_code,
+                time.perf_counter() - started,
+            )
 
 
 class _RequestBodyTooLarge(Exception):
     """Internal signal raised when a streaming request exceeds the body cap."""
+
+
+class APIVersionHeaderMiddleware:
+    """Advertise the stable unversioned-path contract on every HTTP response."""
+
+    def __init__(self, app: ASGIApp, version: str = "1") -> None:
+        self.app = app
+        self.version = version.encode("ascii")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def versioned_send(message: Message) -> None:
+            if scope["type"] == "http" and message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-scrapeyard-api-version", self.version))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, versioned_send)
 
 
 class RateLimitMiddleware:
@@ -176,43 +245,110 @@ class APIKeyAuthMiddleware:
     def __init__(
         self,
         app: ASGIApp,
-        keys: set[str],
+        keys: set[str] | None = None,
+        credentials: tuple[APICredential, ...] | None = None,
         exempt_paths: Iterable[str] = (),
     ) -> None:
         self.app = app
-        self.keys = set(keys)
+        self.credentials = (
+            parse_api_credentials("", legacy_keys=set(keys or ()))
+            if credentials is None
+            else tuple(credentials)
+        )
         self.exempt_paths = set(exempt_paths)
         self._warned_open = False
+        self.failed_auth_attempts = 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        if not self.keys:
+        if not self.credentials:
             if not self._warned_open:
                 self._warned_open = True
                 logger.warning(
-                    "API key auth is disabled (SCRAPEYARD_API_KEYS is empty); "
-                    "all endpoints are unauthenticated"
+                    "API authentication is disabled (no named or legacy credentials); "
+                    "local-development caller has all scopes"
                 )
-            await self.app(scope, receive, send)
+            _set_caller(scope, LOCAL_DEVELOPMENT_CALLER)
+            await self._call_with_audit(scope, receive, send, LOCAL_DEVELOPMENT_CALLER)
             return
 
         if scope.get("path") in self.exempt_paths:
-            await self.app(scope, receive, send)
+            _set_caller(scope, PUBLIC_CALLER)
+            await self._call_with_audit(scope, receive, send, PUBLIC_CALLER)
             return
 
         try:
             provided = _header_value(scope.get("headers", []), b"x-api-key")
         except ValueError:
+            self._record_auth_failure(scope, reason="duplicate_header")
             await _reject(scope, send, 400, "Invalid X-API-Key")
             return
-        if provided is None or not _api_key_is_valid(provided.decode("latin-1"), self.keys):
+        caller = (
+            None
+            if provided is None
+            else authenticate_api_key(
+                provided.decode("latin-1"),
+                self.credentials,
+            )
+        )
+        if caller is None:
+            self._record_auth_failure(
+                scope,
+                reason="missing" if provided is None else "invalid",
+            )
             await _reject(scope, send, 401, "Missing or invalid API key")
             return
 
-        await self.app(scope, receive, send)
+        _set_caller(scope, caller)
+        await self._call_with_audit(scope, receive, send, caller)
+
+    def _record_auth_failure(self, scope: Scope, *, reason: str) -> None:
+        self.failed_auth_attempts += 1
+        logger.warning(
+            "API authentication failed reason=%s method=%s path=%s "
+            "failure_count=%s",
+            reason,
+            scope.get("method", "unknown"),
+            scope.get("path", "unknown"),
+            self.failed_auth_attempts,
+        )
+
+    async def _call_with_audit(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        caller: AuthenticatedCaller,
+    ) -> None:
+        status_code = 500
+
+        async def audit_send(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, audit_send)
+        finally:
+            logger.info(
+                "API request caller_id=%s credential_name=%s method=%s path=%s "
+                "status_code=%s",
+                caller.identity,
+                caller.credential_name or "none",
+                scope.get("method", "unknown"),
+                scope.get("path", "unknown"),
+                status_code,
+            )
+
+
+def _set_caller(scope: Scope, caller: AuthenticatedCaller) -> None:
+    state = scope.setdefault("state", {})
+    state["caller"] = caller
+    state["caller_identity"] = caller.identity
 
 
 def _header_value(headers: Iterable[tuple[bytes, bytes]], name: bytes) -> bytes | None:
@@ -251,7 +387,11 @@ async def _reject(
     *,
     headers: dict[str, str] | None = None,
 ) -> None:
-    response = JSONResponse(status_code=status_code, content={"error": message}, headers=headers)
+    response = JSONResponse(
+        status_code=status_code,
+        content=error_content(status_code, message),
+        headers=headers,
+    )
     await response(scope, _noop_receive, send)
 
 

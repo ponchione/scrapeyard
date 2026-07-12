@@ -17,7 +17,8 @@ class ScrapeyardSafeLoader(yaml.SafeLoader):
     """SafeLoader variant that rejects YAML aliases."""
 
     def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(AliasEvent):
+        # PyYAML's parser methods remain untyped in types-PyYAML.
+        if self.check_event(AliasEvent):  # type: ignore[no-untyped-call]
             raise yaml.YAMLError("YAML aliases are not supported")
         return super().compose_node(parent, index)
 
@@ -29,7 +30,8 @@ def _construct_mapping_without_duplicates(
 ) -> dict[Any, Any]:
     seen: set[Any] = set()
     for key_node, _value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
+        # This is the narrow adapter boundary around PyYAML's untyped constructor.
+        key = loader.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
         try:
             if key in seen:
                 raise yaml.YAMLError("Duplicate YAML key")
@@ -47,7 +49,10 @@ ScrapeyardSafeLoader.yaml_implicit_resolvers = {
     ]
     for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
-ScrapeyardSafeLoader.add_implicit_resolver(_BOOL_TAG, _YAML_1_2_BOOL_RE, list("tTfF"))
+# types-PyYAML does not type the resolver registration API.
+ScrapeyardSafeLoader.add_implicit_resolver(  # type: ignore[no-untyped-call]
+    _BOOL_TAG, _YAML_1_2_BOOL_RE, list("tTfF")
+)
 
 ScrapeyardSafeLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,

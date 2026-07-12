@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_path_part
+from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import ScrapeConfig, TargetConfig
 from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
@@ -37,7 +37,7 @@ def resolve_target_runtime_context(
     *,
     target_cfg: TargetConfig,
     config: ScrapeConfig,
-    settings: Any,
+    settings: ServiceSettings,
     run_artifacts_dir: str | None,
 ) -> TargetRuntimeContext:
     domain = url_host_label(target_cfg.url)

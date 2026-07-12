@@ -44,17 +44,17 @@ class SelectorExecutionError(Exception):
         }
 
 
-def select_items_strict(page: Any, item_selector: SelectorValue) -> list[Any]:
+def select_items_strict(page: object, item_selector: SelectorValue) -> list[object]:
     return select_elements_strict(page, item_selector, operation="select_items")
 
 
 def select_elements_strict(
-    scope: Any,
+    scope: object,
     selector: SelectorValue,
     *,
     operation: str,
     field_name: str | None = None,
-) -> list[Any]:
+) -> list[object]:
     query, sel_type, _ = _unpack_selector(selector)
     return _select_elements(
         scope,
@@ -66,7 +66,7 @@ def select_elements_strict(
 
 
 def count_selector_matches_strict(
-    scope: Any,
+    scope: object,
     selector: SelectorValue,
     *,
     field_name: str | None = None,
@@ -83,14 +83,14 @@ def count_selector_matches_strict(
     )
 
 
-def extract_selectors_strict(page: Any, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
+def extract_selectors_strict(page: object, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name, selector in selectors.items():
         result[name] = _extract_selector_value(page, selector, field_name=name)
     return result
 
 
-def _extract_selector_value(page: Any, selector: SelectorValue, *, field_name: str) -> Any:
+def _extract_selector_value(page: object, selector: SelectorValue, *, field_name: str) -> Any:
     query, sel_type, transform_str = _unpack_selector(selector)
     texts = [
         _element_text(element)
@@ -127,24 +127,23 @@ def _unpack_selector(selector: SelectorValue) -> tuple[str, SelectorType, str | 
         return selector, SelectorType.css, None
     if isinstance(selector, SelectorLong):
         return selector.query, selector.type, selector.transform
-    # dict form (from YAML parsing before Pydantic validation)
-    return selector.query, selector.type, selector.transform  # type: ignore[union-attr]
+    return selector.query, selector.type, selector.transform
 
 
 def _select_elements(
-    scope: Any,
+    scope: object,
     query: str,
     selector_type: SelectorType,
     *,
     operation: str,
     field_name: str | None = None,
-) -> list[Any]:
+) -> list[object]:
     """Select elements from a page or item scope using CSS or XPath."""
     select_fn = getattr(scope, "xpath" if selector_type == SelectorType.xpath else "css", None)
     if select_fn is None:
         return []
     try:
-        return cast(list[Any], select_fn(query))
+        return cast(list[object], select_fn(query))
     except Exception as exc:
         raise SelectorExecutionError(
             operation=operation,
@@ -155,7 +154,7 @@ def _select_elements(
         ) from exc
 
 
-def _element_text(element: Any) -> str:
+def _element_text(element: object) -> str:
     """Extract text from a Scrapling element."""
     if element is None:
         return ""
@@ -174,14 +173,14 @@ def _element_text(element: Any) -> str:
     return direct_text
 
 
-def _text_attr(element: Any) -> str:
+def _text_attr(element: object) -> str:
     text = getattr(element, "text", None)
     if callable(text):
         text = text()
     return _coerce_text(text)
 
 
-def _coerce_text(value: Any) -> str:
+def _coerce_text(value: object) -> str:
     if isinstance(value, str):
         return value
     if value is None:

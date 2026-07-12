@@ -9,6 +9,7 @@ JOB_COLUMNS = (
     "created_at",
     "updated_at",
     "schedule_cron",
+    "schedule_timezone",
     "schedule_enabled",
     "current_run_id",
     "deletion_requested_at",

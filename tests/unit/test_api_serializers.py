@@ -44,6 +44,7 @@ def test_serialize_job_summary_includes_run_stats_and_schedule_fields():
         "created_at": created_at.isoformat(),
         "updated_at": updated_at.isoformat(),
         "schedule_cron": "*/5 * * * *",
+        "schedule_timezone": "UTC",
         "schedule_enabled": False,
         "run_count": 7,
         "last_run_at": last_run_at.isoformat(),
