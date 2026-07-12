@@ -36,14 +36,16 @@ _FORBIDDEN_CUSTOM_HEADERS = frozenset(
 _ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS = frozenset(
     {
         "custom_fonts_only",
-        "fingerprint",
         "fonts",
         "locale",
-        "screen",
-        "webgl_config",
         "window",
     }
 )
+_BROWSER_LOCALE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+_MAX_BROWSER_FONTS = 64
+_MAX_BROWSER_FONT_NAME_CHARS = 128
+_MAX_BROWSER_LOCALES = 16
+_MAX_BROWSER_WINDOW_DIMENSION = 16_384
 
 MAX_BROWSER_ACTIONS = 50
 MAX_BROWSER_ACTION_REPEAT = 50
@@ -233,9 +235,7 @@ class SelectorLong(StrictConfigModel):
         steps = value.split("|")
         limit = transform_pipeline_limit()
         if len(steps) > limit:
-            raise ValueError(
-                f"Selector transform pipeline exceeds {limit} steps"
-            )
+            raise ValueError(f"Selector transform pipeline exceeds {limit} steps")
         for step in steps:
             step = step.strip()
             if not step:
@@ -308,7 +308,9 @@ class BrowserActionConfig(StrictConfigModel):
     """One browser action to run after page load and before extraction."""
 
     type: BrowserActionType
-    selector: str | None = Field(default=None, description="CSS selector used by click/wait actions")
+    selector: str | None = Field(
+        default=None, description="CSS selector used by click/wait actions"
+    )
     optional: bool = Field(
         default=False,
         description="Continue when this action cannot be completed",
@@ -352,11 +354,15 @@ class BrowserActionConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_action_requirements(self) -> BrowserActionConfig:
-        if self.type in {
-            BrowserActionType.click,
-            BrowserActionType.wait_for_selector,
-            BrowserActionType.repeat_click,
-        } and not self.selector:
+        if (
+            self.type
+            in {
+                BrowserActionType.click,
+                BrowserActionType.wait_for_selector,
+                BrowserActionType.repeat_click,
+            }
+            and not self.selector
+        ):
             raise ValueError(f"{self.type.value} action requires 'selector'")
         if self.type == BrowserActionType.wait_ms and self.wait_ms is None:
             raise ValueError("wait_ms action requires 'wait_ms'")
@@ -474,14 +480,75 @@ class BrowserConfig(StrictConfigModel):
 
     @field_validator("additional_arguments")
     @classmethod
-    def _reject_managed_additional_arguments(cls, value: dict[str, object]) -> dict[str, object]:
+    def _validate_additional_arguments(
+        cls,
+        value: dict[str, object],
+    ) -> dict[str, object]:
         unsupported = sorted(
-            key for key in value if key.lower() not in _ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS
+            key for key in value if key not in _ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS
         )
         if unsupported:
             raise ValueError(
                 "browser.additional_arguments contains unsupported or unsafe option(s): "
                 + ", ".join(unsupported)
+            )
+
+        locale = value.get("locale")
+        if locale is not None:
+            locales = locale if isinstance(locale, list) else [locale]
+            if not locales or len(locales) > _MAX_BROWSER_LOCALES:
+                raise ValueError(
+                    "browser.additional_arguments.locale must contain between "
+                    f"1 and {_MAX_BROWSER_LOCALES} locale tags"
+                )
+            if any(
+                not isinstance(item, str) or not _BROWSER_LOCALE_RE.fullmatch(item)
+                for item in locales
+            ):
+                raise ValueError(
+                    "browser.additional_arguments.locale must be a locale tag "
+                    "or a list of locale tags"
+                )
+
+        fonts = value.get("fonts")
+        if fonts is not None:
+            if not isinstance(fonts, list) or len(fonts) > _MAX_BROWSER_FONTS:
+                raise ValueError(
+                    "browser.additional_arguments.fonts must be a list of at "
+                    f"most {_MAX_BROWSER_FONTS} font names"
+                )
+            if any(
+                not isinstance(font, str)
+                or not font.strip()
+                or len(font) > _MAX_BROWSER_FONT_NAME_CHARS
+                or any(ord(char) < 32 for char in font)
+                for font in fonts
+            ):
+                raise ValueError("browser.additional_arguments.fonts contains an invalid font name")
+
+        custom_fonts_only = value.get("custom_fonts_only")
+        if custom_fonts_only is not None and not isinstance(custom_fonts_only, bool):
+            raise ValueError("browser.additional_arguments.custom_fonts_only must be a boolean")
+        if custom_fonts_only is True and not fonts:
+            raise ValueError(
+                "browser.additional_arguments.custom_fonts_only requires at least one font"
+            )
+
+        window = value.get("window")
+        if window is not None and (
+            not isinstance(window, list)
+            or len(window) != 2
+            or any(
+                isinstance(dimension, bool)
+                or not isinstance(dimension, int)
+                or not 1 <= dimension <= _MAX_BROWSER_WINDOW_DIMENSION
+                for dimension in window
+            )
+        ):
+            raise ValueError(
+                "browser.additional_arguments.window must be a two-item "
+                "list of positive integer dimensions no greater than "
+                f"{_MAX_BROWSER_WINDOW_DIMENSION}"
             )
         return value
 
@@ -696,9 +763,7 @@ class WebhookConfig(StrictConfigModel):
         default_factory=lambda: [WebhookStatus.complete, WebhookStatus.partial],
         description="Job statuses that trigger the webhook",
     )
-    headers: dict[str, str] = Field(
-        default_factory=dict, description="Custom HTTP headers"
-    )
+    headers: dict[str, str] = Field(default_factory=dict, description="Custom HTTP headers")
     timeout: int = Field(
         default=10,
         gt=0,

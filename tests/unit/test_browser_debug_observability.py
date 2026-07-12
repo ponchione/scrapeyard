@@ -200,7 +200,7 @@ def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
                 "Authorization": "Bearer secret",
                 "X-Test": "visible",
             },
-            "additional_arguments": {"fingerprint": {"api_token": "secret"}},
+            "additional_arguments": {"locale": "en-US"},
         },
     )
 
@@ -210,9 +210,7 @@ def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
         "Authorization": "<redacted>",
         "X-Test": "<redacted>",
     }
-    assert debug["browser_settings"]["additional_arguments"] == {
-        "fingerprint": {"api_token": "<redacted>"}
-    }
+    assert debug["browser_settings"]["additional_arguments"] == {"locale": "en-US"}
 
 
 @pytest.mark.asyncio
@@ -326,7 +324,9 @@ async def test_optional_repeat_click_stops_without_raising_when_button_disappear
 
 
 @pytest.mark.asyncio
-async def test_fetch_browser_response_raises_required_action_failures_swallowed_by_fetcher() -> None:
+async def test_fetch_browser_response_raises_required_action_failures_swallowed_by_fetcher() -> (
+    None
+):
     target = TargetConfig(
         url="https://example.com",
         fetcher=FetcherType.dynamic,

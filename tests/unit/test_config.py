@@ -45,6 +45,7 @@ from scrapeyard.config.schema import (
 
 # --- Helpers ---
 
+
 def _target_dict(**overrides) -> dict:
     base = {"url": "https://example.com", "selectors": {"title": "h1"}}
     base.update(overrides)
@@ -115,9 +116,7 @@ class TestScrapeConfigValidation:
             ScrapeConfig(**data)
 
     def test_schedule_defaults_to_utc_and_accepts_iana_timezone(self):
-        defaulted = ScrapeConfig(
-            **_tier1_config(schedule={"cron": "0 9 * * *", "enabled": True})
-        )
+        defaulted = ScrapeConfig(**_tier1_config(schedule={"cron": "0 9 * * *", "enabled": True}))
         explicit = ScrapeConfig(
             **_tier1_config(
                 schedule={
@@ -200,9 +199,7 @@ target:
         with pytest.raises(ValidationError, match="extra_forbidden"):
             ScrapeConfig(
                 **_tier1_config(
-                    target=_target_dict(
-                        selectors={"title": {"query": "h1", "unknown": True}}
-                    )
+                    target=_target_dict(selectors={"title": {"query": "h1", "unknown": True}})
                 )
             )
 
@@ -295,9 +292,7 @@ class TestResolvedTargets:
     def test_browser_action_missing_required_selector_raises(self):
         with pytest.raises(ValidationError, match="requires 'selector'"):
             ScrapeConfig(
-                **_tier1_config(
-                    target=_target_dict(browser={"actions": [{"type": "click"}]})
-                )
+                **_tier1_config(target=_target_dict(browser={"actions": [{"type": "click"}]}))
             )
 
     def test_browser_cdp_url_rejects_local_destinations(self):
@@ -340,15 +335,50 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="unsupported or unsafe"):
             BrowserConfig(additional_arguments={option: "attacker-controlled"})
 
-    def test_browser_additional_arguments_accepts_fingerprint_controls(self):
+    def test_browser_additional_arguments_accepts_yaml_safe_controls(self):
         config = BrowserConfig(
             additional_arguments={
-                "locale": "en-US",
-                "screen": {"width": 1280, "height": 720},
+                "locale": ["en-US", "en"],
+                "fonts": ["Arial", "Noto Sans"],
+                "custom_fonts_only": True,
+                "window": [1280, 720],
             }
         )
 
-        assert config.additional_arguments["locale"] == "en-US"
+        assert config.additional_arguments["window"] == [1280, 720]
+
+    @pytest.mark.parametrize(
+        "option",
+        ["fingerprint", "screen", "webgl_config", "Locale"],
+    )
+    def test_browser_additional_arguments_rejects_non_yaml_or_mixed_case_options(
+        self,
+        option,
+    ):
+        with pytest.raises(ValidationError, match="unsupported or unsafe"):
+            BrowserConfig(additional_arguments={option: {}})
+
+    @pytest.mark.parametrize(
+        "arguments, message",
+        [
+            ({"locale": 42}, "locale tag"),
+            ({"locale": []}, "between 1 and"),
+            ({"fonts": "Arial"}, "must be a list"),
+            ({"fonts": [""]}, "invalid font name"),
+            ({"custom_fonts_only": "yes"}, "must be a boolean"),
+            ({"custom_fonts_only": True}, "requires at least one font"),
+            ({"window": [1280]}, "two-item list"),
+            ({"window": [True, 720]}, "positive integer dimensions"),
+            ({"window": [1280, 20_000]}, "positive integer dimensions"),
+        ],
+    )
+    def test_browser_additional_arguments_validates_values(
+        self,
+        arguments,
+        message,
+    ):
+        with pytest.raises(ValidationError, match=message):
+            BrowserConfig(additional_arguments=arguments)
 
     def test_long_form_selector_transform_is_validated_at_config_load(self):
         with pytest.raises(ValidationError, match="Invalid selector transform"):
@@ -430,7 +460,9 @@ class TestResolvedTargets:
             model(**kwargs)
 
     def test_targets_rejects_unbounded_target_lists(self):
-        targets = [_target_dict(url=f"https://example.com/{idx}") for idx in range(MAX_TARGETS_PER_JOB + 1)]
+        targets = [
+            _target_dict(url=f"https://example.com/{idx}") for idx in range(MAX_TARGETS_PER_JOB + 1)
+        ]
 
         with pytest.raises(ValidationError):
             ScrapeConfig(**_tier1_config(target=None, targets=targets))
@@ -915,11 +947,7 @@ class TestProxyConfig:
         assert config.target.proxy.url == "http://user:pass@gate.example.com:7777"
 
     def test_target_with_direct_proxy_parses(self):
-        config = ScrapeConfig(
-            **_tier1_config(
-                target=_target_dict(proxy={"url": "direct"})
-            )
-        )
+        config = ScrapeConfig(**_tier1_config(target=_target_dict(proxy={"url": "direct"})))
         assert config.target.proxy.url == "direct"
 
     def test_proxy_url_is_trimmed(self):
@@ -1003,9 +1031,7 @@ class TestMapDetectionConfig:
         assert config.target.map_detection is None
 
     def test_map_detection_empty_lists_default(self):
-        config = ScrapeConfig(
-            **_tier1_config(target=_target_dict(map_detection={}))
-        )
+        config = ScrapeConfig(**_tier1_config(target=_target_dict(map_detection={})))
         assert config.target.map_detection is not None
         assert config.target.map_detection.text_patterns == []
         assert config.target.map_detection.css_selectors == []
