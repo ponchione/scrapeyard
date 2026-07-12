@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import subprocess
@@ -10,13 +11,20 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from scripts.qualification_backup import BackupError, create_backup, restore_backup, validate_backup
+from scripts.qualification_backup import (
+    REQUIRED_MIGRATION_FILES,
+    BackupError,
+    create_backup,
+    restore_backup,
+    validate_backup,
+)
 from scrapeyard.common.qualification import (
     QUALIFICATION_CRASH_POINTS,
     QUALIFICATION_SENTINEL_CONTENT,
     qualification_checkpoint,
 )
 from scrapeyard.common.settings import ServiceSettings
+from scrapeyard.storage.database import _DB_MIGRATIONS
 from tests.qualification.run_qualification import (
     CRASH_EXPECTATIONS,
     Thresholds,
@@ -38,35 +46,73 @@ def _minimal_data(root: Path) -> None:
     (result_dir / "results.json").write_text('{"known":"value"}\n', encoding="utf-8")
     (adaptive_dir / "selectors.json").write_text('{"selector":"h1"}\n', encoding="utf-8")
 
+    for database, migrations in _DB_MIGRATIONS.items():
+        with sqlite3.connect(db_dir / database) as db:
+            assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+            db.execute(
+                """CREATE TABLE schema_migrations (
+                       migration_id TEXT PRIMARY KEY,
+                       filename TEXT NOT NULL UNIQUE,
+                       checksum TEXT NOT NULL,
+                       applied_at TEXT NOT NULL
+                   )"""
+            )
+            for filename in migrations:
+                sql = Path("sql", filename).read_text(encoding="utf-8")
+                db.executescript(sql)
+                db.execute(
+                    """INSERT INTO schema_migrations
+                           (migration_id, filename, checksum, applied_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        filename.split("_", 1)[0],
+                        filename,
+                        hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                        "2026-07-12T00:00:00+00:00",
+                    ),
+                )
+
     with sqlite3.connect(db_dir / "jobs.db") as db:
-        db.executescript(
-            """
-            CREATE TABLE jobs (job_id TEXT PRIMARY KEY);
-            CREATE TABLE job_runs (run_id TEXT PRIMARY KEY, job_id TEXT NOT NULL);
-            CREATE TABLE webhook_deliveries (delivery_id TEXT PRIMARY KEY);
-            CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY);
-            INSERT INTO jobs VALUES ('job-1');
-            INSERT INTO job_runs VALUES ('run-1', 'job-1');
-            INSERT INTO webhook_deliveries VALUES ('delivery-1');
-            """
-        )
-    with sqlite3.connect(db_dir / "errors.db") as db:
-        db.executescript(
-            """
-            CREATE TABLE errors (job_id TEXT, run_id TEXT);
-            CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY);
-            INSERT INTO errors VALUES ('job-1', 'run-1');
-            """
-        )
-    with sqlite3.connect(db_dir / "results_meta.db") as db:
-        db.executescript(
-            """
-            CREATE TABLE results_meta (job_id TEXT, run_id TEXT, file_path TEXT);
-            CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY);
-            """
+        db.execute(
+            """INSERT INTO jobs
+                   (job_id, project, name, status, config_yaml, created_at)
+               VALUES ('job-1', 'project', 'job', 'complete', '{}',
+                       '2026-07-12T00:00:00+00:00')"""
         )
         db.execute(
-            "INSERT INTO results_meta VALUES (?, ?, ?)",
+            """INSERT INTO job_runs
+                   (run_id, job_id, status, trigger, config_hash, started_at,
+                    heartbeat_at, completed_at)
+               VALUES ('run-1', 'job-1', 'complete', 'adhoc', 'hash',
+                       '2026-07-12T00:00:00+00:00',
+                       '2026-07-12T00:00:00+00:00',
+                       '2026-07-12T00:00:00+00:00')"""
+        )
+        db.execute(
+            """INSERT INTO webhook_deliveries
+                   (delivery_id, job_id, run_id, event, url, payload_json,
+                    next_attempt_at, created_at, updated_at)
+               VALUES ('delivery-1', 'job-1', 'run-1', 'job.complete',
+                       'https://example.com/hook', '{}',
+                       '2026-07-12T00:00:00+00:00',
+                       '2026-07-12T00:00:00+00:00',
+                       '2026-07-12T00:00:00+00:00')"""
+        )
+    with sqlite3.connect(db_dir / "errors.db") as db:
+        db.execute(
+            """INSERT INTO errors
+                   (job_id, run_id, project, target_url, attempt, timestamp,
+                    error_type, fetcher_used, action_taken)
+               VALUES ('job-1', 'run-1', 'project', 'https://example.com', 1,
+                       '2026-07-12T00:00:00+00:00', 'fetch_error', 'basic', 'fail')"""
+        )
+    with sqlite3.connect(db_dir / "results_meta.db") as db:
+        db.execute(
+            """INSERT INTO results_meta
+                   (job_id, project, run_id, status, record_count, file_path,
+                    created_at)
+               VALUES (?, 'project', ?, 'complete', 1, ?,
+                       '2026-07-12T00:00:00+00:00')""",
             (
                 "job-1",
                 "run-1",
@@ -104,6 +150,10 @@ def test_qualification_checkpoints_are_complete_disabled_and_sentinel_guarded(
     (tmp_path / "release-after_enqueue_before_claim").touch()
     qualification_checkpoint("after_enqueue_before_claim")
     assert (tmp_path / "reached-after_enqueue_before_claim").is_file()
+
+
+def test_backup_contract_tracks_every_runtime_database_migration() -> None:
+    assert REQUIRED_MIGRATION_FILES == _DB_MIGRATIONS
 
 
 def test_qualification_settings_reject_silent_or_unknown_activation() -> None:
@@ -184,6 +234,38 @@ def test_backup_rejects_result_metadata_outside_declared_data_root(
         )
 
     with pytest.raises(BackupError, match="metadata path is outside"):
+        create_backup(data, tmp_path / "backup", quiesced=True)
+
+    assert not (tmp_path / "backup").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("DROP TABLE scrape_idempotency", "missing tables"),
+        ("DROP INDEX idx_scrape_idempotency_expires", "missing indexes"),
+        ("ALTER TABLE jobs DROP COLUMN current_trigger", "missing columns"),
+        (
+            "DELETE FROM schema_migrations WHERE migration_id = '012'",
+            "migration ledger is incomplete",
+        ),
+        (
+            "UPDATE schema_migrations SET checksum = 'corrupt' WHERE migration_id = '012'",
+            "migration ledger is incomplete",
+        ),
+    ],
+)
+def test_backup_rejects_incomplete_current_database_contract(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    data = tmp_path / "data"
+    _minimal_data(data)
+    with sqlite3.connect(data / "db/jobs.db") as db:
+        db.execute(mutation)
+
+    with pytest.raises(BackupError, match=message):
         create_backup(data, tmp_path / "backup", quiesced=True)
 
     assert not (tmp_path / "backup").exists()

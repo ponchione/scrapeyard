@@ -27,9 +27,169 @@ SNAPSHOT_ORDER = (
     "write and verify manifest",
 )
 REQUIRED_TABLES = {
-    "jobs.db": {"jobs", "job_runs", "webhook_deliveries", "schema_migrations"},
+    "jobs.db": {
+        "jobs",
+        "job_runs",
+        "scrape_idempotency",
+        "webhook_deliveries",
+        "schema_migrations",
+    },
     "errors.db": {"errors", "schema_migrations"},
     "results_meta.db": {"results_meta", "schema_migrations"},
+}
+REQUIRED_MIGRATION_FILES = {
+    "jobs.db": (
+        "001_create_jobs.sql",
+        "004_create_job_runs.sql",
+        "005_add_indexes.sql",
+        "009_create_webhook_outbox.sql",
+        "010_add_terminal_reconciliation_marker.sql",
+        "012_create_scrape_idempotency.sql",
+        "013_add_schedule_timezone.sql",
+        "014_add_jobs_config_hash.sql",
+        "015_add_jobs_current_trigger.sql",
+    ),
+    "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
+    "results_meta.db": (
+        "003_create_results_meta.sql",
+        "006_add_results_meta_indexes.sql",
+        "008_results_meta_unique_job_run.sql",
+        "011_add_results_artifact_lookup_index.sql",
+    ),
+}
+_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+REQUIRED_COLUMNS = {
+    "jobs.db": {
+        "schema_migrations": {"migration_id", "filename", "checksum", "applied_at"},
+        "jobs": {
+            "job_id",
+            "project",
+            "name",
+            "status",
+            "config_yaml",
+            "created_at",
+            "updated_at",
+            "schedule_cron",
+            "schedule_enabled",
+            "current_run_id",
+            "deletion_requested_at",
+            "delete_results_on_delete",
+            "schedule_timezone",
+            "config_hash",
+            "current_trigger",
+        },
+        "job_runs": {
+            "run_id",
+            "job_id",
+            "status",
+            "trigger",
+            "config_hash",
+            "started_at",
+            "heartbeat_at",
+            "completed_at",
+            "record_count",
+            "error_count",
+            "webhook_reconciled_at",
+        },
+        "scrape_idempotency": {
+            "caller_scope",
+            "key_digest",
+            "request_hash",
+            "job_id",
+            "run_id",
+            "response_mode",
+            "created_at",
+            "expires_at",
+        },
+        "webhook_deliveries": {
+            "delivery_id",
+            "job_id",
+            "run_id",
+            "event",
+            "url",
+            "headers_json",
+            "timeout_seconds",
+            "payload_json",
+            "status",
+            "attempts",
+            "next_attempt_at",
+            "last_attempt_at",
+            "delivered_at",
+            "failed_at",
+            "failure_reason",
+            "last_error",
+            "scrubbed_at",
+            "created_at",
+            "updated_at",
+        },
+    },
+    "errors.db": {
+        "schema_migrations": {"migration_id", "filename", "checksum", "applied_at"},
+        "errors": {
+            "id",
+            "job_id",
+            "run_id",
+            "project",
+            "target_url",
+            "attempt",
+            "timestamp",
+            "error_type",
+            "http_status",
+            "fetcher_used",
+            "error_message",
+            "selectors_matched",
+            "action_taken",
+            "resolved",
+        },
+    },
+    "results_meta.db": {
+        "schema_migrations": {"migration_id", "filename", "checksum", "applied_at"},
+        "results_meta": {
+            "id",
+            "job_id",
+            "project",
+            "run_id",
+            "status",
+            "record_count",
+            "file_path",
+            "created_at",
+        },
+    },
+}
+REQUIRED_INDEXES = {
+    "jobs.db": {
+        "idx_jobs_project",
+        "idx_job_runs_job_id",
+        "idx_job_runs_started_at",
+        "idx_job_runs_job_started",
+        "idx_job_runs_terminal_reconciliation",
+        "idx_scrape_idempotency_expires",
+        "idx_webhook_deliveries_due",
+        "idx_webhook_deliveries_created",
+        "idx_webhook_deliveries_job_run",
+        "idx_webhook_deliveries_job_status",
+    },
+    "errors.db": {
+        "idx_errors_project",
+        "idx_errors_job_id",
+        "idx_errors_run_id",
+        "idx_errors_timestamp",
+        "idx_errors_job_timestamp",
+        "idx_errors_project_timestamp",
+    },
+    "results_meta.db": {
+        "idx_results_meta_job_id",
+        "idx_results_meta_project",
+        "idx_results_meta_created_at",
+        "idx_results_meta_job_created",
+        "idx_results_meta_job_run",
+        "idx_results_meta_project_run",
+    },
+}
+REQUIRED_UNIQUE_INDEXES = {
+    "jobs.db": set(),
+    "errors.db": set(),
+    "results_meta.db": {"idx_results_meta_job_run"},
 }
 
 
@@ -164,6 +324,58 @@ def _sqlite_contract(payload: Path, *, source_data_root: Path) -> dict[str, int]
             missing = REQUIRED_TABLES[database] - tables
             if missing:
                 raise BackupError(f"{database} is missing tables: {sorted(missing)}")
+            ledger = tuple(
+                (str(row[0]), str(row[1]), str(row[2]))
+                for row in db.execute(
+                    """SELECT migration_id, filename, checksum
+                       FROM schema_migrations ORDER BY migration_id"""
+                )
+            )
+            expected_ledger = tuple(
+                (
+                    filename.split("_", 1)[0],
+                    filename,
+                    sha256(_SQL_DIR / filename),
+                )
+                for filename in REQUIRED_MIGRATION_FILES[database]
+            )
+            if ledger != expected_ledger:
+                raise BackupError(
+                    f"{database} migration ledger is incomplete, reordered, or drifted"
+                )
+            for table, required_columns in REQUIRED_COLUMNS[database].items():
+                columns = {
+                    str(row[1])
+                    for row in db.execute(f"PRAGMA table_info({table})")
+                }
+                missing_columns = required_columns - columns
+                if missing_columns:
+                    raise BackupError(
+                        f"{database}:{table} is missing columns: "
+                        f"{sorted(missing_columns)}"
+                    )
+            indexes = {
+                str(row[0])
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+            missing_indexes = REQUIRED_INDEXES[database] - indexes
+            if missing_indexes:
+                raise BackupError(
+                    f"{database} is missing indexes: {sorted(missing_indexes)}"
+                )
+            for index in REQUIRED_UNIQUE_INDEXES[database]:
+                index_row = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                    (index,),
+                ).fetchone()
+                if index_row is None or "CREATE UNIQUE INDEX" not in str(
+                    index_row[0]
+                ).upper():
+                    raise BackupError(
+                        f"{database} index is not unique as required: {index}"
+                    )
             for table in REQUIRED_TABLES[database] - {"schema_migrations"}:
                 counts[f"{database}:{table}"] = int(
                     db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -245,6 +457,13 @@ def _relocate_result_metadata(
             "UPDATE results_meta SET file_path = ? WHERE rowid = ?",
             relocated,
         )
+        db.commit()
+        # Snapshot databases inherit the service's persistent WAL mode. Make
+        # relocation visible to the immutable validation pass, which correctly
+        # ignores sidecars, and leave no restore-only WAL state to install.
+        checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint is not None and int(checkpoint[0]) != 0:
+            raise BackupError(f"result metadata WAL checkpoint was busy: {checkpoint}")
 
 
 def validate_backup(backup: Path) -> dict[str, Any]:
