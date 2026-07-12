@@ -45,6 +45,7 @@ _BROWSER_LOCALE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 _MAX_BROWSER_FONTS = 64
 _MAX_BROWSER_FONT_NAME_CHARS = 128
 _MAX_BROWSER_LOCALES = 16
+_MAX_BROWSER_LOCALE_CHARS = 64
 _MAX_BROWSER_WINDOW_DIMENSION = 16_384
 
 MAX_BROWSER_ACTIONS = 50
@@ -502,7 +503,9 @@ class BrowserConfig(StrictConfigModel):
                     f"1 and {_MAX_BROWSER_LOCALES} locale tags"
                 )
             if any(
-                not isinstance(item, str) or not _BROWSER_LOCALE_RE.fullmatch(item)
+                not isinstance(item, str)
+                or len(item) > _MAX_BROWSER_LOCALE_CHARS
+                or not _BROWSER_LOCALE_RE.fullmatch(item)
                 for item in locales
             ):
                 raise ValueError(

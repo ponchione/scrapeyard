@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
 from collections.abc import Callable
 
@@ -104,7 +105,7 @@ def _bounded_regex_replace(
 
     limit = _transform_value_limit()
     _checked_utf8_size(value, limit=limit)
-    parts: list[str] = []
+    output = io.StringIO()
     output_bytes = 0
     last_end = 0
     try:
@@ -116,7 +117,8 @@ def _bounded_regex_replace(
             )
             if output_bytes > limit:
                 _raise_output_limit(output_bytes, limit)
-            parts.extend((unchanged, expanded))
+            output.write(unchanged)
+            output.write(expanded)
             last_end = match.end()
     except TimeoutError as exc:
         raise TransformTimeoutError("Regex replacement transform timed out") from exc
@@ -124,8 +126,8 @@ def _bounded_regex_replace(
     output_bytes += len(tail.encode("utf-8"))
     if output_bytes > limit:
         _raise_output_limit(output_bytes, limit)
-    parts.append(tail)
-    return "".join(parts)
+    output.write(tail)
+    return output.getvalue()
 
 
 def _compile_regex(pattern: str) -> regex.Pattern[str]:

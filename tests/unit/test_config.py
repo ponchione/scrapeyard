@@ -363,6 +363,7 @@ class TestResolvedTargets:
         [
             ({"locale": 42}, "locale tag"),
             ({"locale": []}, "between 1 and"),
+            ({"locale": "en-" + ("a" * 65)}, "locale tag"),
             ({"fonts": "Arial"}, "must be a list"),
             ({"fonts": [""]}, "invalid font name"),
             ({"custom_fonts_only": "yes"}, "must be a boolean"),
