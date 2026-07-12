@@ -53,8 +53,7 @@ async def run_cleanup(
     except Exception as exc:
         failed_phases.append("expired_result_retention")
         logger.error(
-            "Expired result cleanup failed error_type=%s "
-            "recovery_action=retry_next_cleanup_pass",
+            "Expired result cleanup failed error_type=%s recovery_action=retry_next_cleanup_pass",
             type(exc).__name__,
         )
     else:
@@ -69,8 +68,7 @@ async def run_cleanup(
     except Exception as exc:
         failed_phases.append("per_job_result_retention")
         logger.error(
-            "Per-job result cleanup failed error_type=%s "
-            "recovery_action=retry_next_cleanup_pass",
+            "Per-job result cleanup failed error_type=%s recovery_action=retry_next_cleanup_pass",
             type(exc).__name__,
         )
     else:
@@ -94,10 +92,16 @@ async def run_cleanup(
             type(exc).__name__,
         )
     else:
-        if reconciliation.directories_removed:
-            CLEANUP_ITEMS.labels("artifact_directories").inc(
-                reconciliation.directories_removed
+        if reconciliation.operation_failures:
+            failed_phases.append("artifact_reconciliation")
+            logger.error(
+                "Result artifact reconciliation completed with operation "
+                "failures failure_count=%s recovery_action="
+                "retry_failures_next_cleanup_pass",
+                len(reconciliation.operation_failures),
             )
+        if reconciliation.directories_removed:
+            CLEANUP_ITEMS.labels("artifact_directories").inc(reconciliation.directories_removed)
         if reconciliation.files_removed:
             CLEANUP_ITEMS.labels("artifact_files").inc(reconciliation.files_removed)
         if reconciliation.removed_bytes:
@@ -148,14 +152,7 @@ async def run_cleanup(
                 )
             )
             or "none",
-            ",".join(
-                sorted(
-                    {
-                        failure.error_type
-                        for failure in reconciliation.operation_failures
-                    }
-                )
-            )
+            ",".join(sorted({failure.error_type for failure in reconciliation.operation_failures}))
             or "none",
         )
 
@@ -179,8 +176,7 @@ async def run_cleanup(
             if idempotency_deleted:
                 CLEANUP_ITEMS.labels("idempotency_records").inc(idempotency_deleted)
             logger.info(
-                "Idempotency retention cleanup complete deleted_count=%s "
-                "batch_limit=%s",
+                "Idempotency retention cleanup complete deleted_count=%s batch_limit=%s",
                 idempotency_deleted,
                 idempotency_cleanup_batch_size,
             )
@@ -189,16 +185,12 @@ async def run_cleanup(
         if failed_phases:
             raise CleanupIncompleteError(failed_phases)
         return
-    if (
-        webhook_delivered_retention_days is None
-        or webhook_failed_retention_days is None
-    ):
+    if webhook_delivered_retention_days is None or webhook_failed_retention_days is None:
         raise ValueError("Webhook retention windows are required for outbox cleanup")
 
     try:
         summary = await webhook_outbox_store.scrub_terminal_deliveries(
-            delivered_before=observed_at
-            - timedelta(days=webhook_delivered_retention_days),
+            delivered_before=observed_at - timedelta(days=webhook_delivered_retention_days),
             failed_before=observed_at - timedelta(days=webhook_failed_retention_days),
             scrubbed_at=observed_at,
             limit=webhook_cleanup_batch_size,
@@ -243,6 +235,7 @@ def start_cleanup_loop(
 
     Returns the :class:`asyncio.Task` so the caller can cancel it on shutdown.
     """
+
     async def _loop() -> None:
         while True:
             try:
@@ -253,13 +246,11 @@ def start_cleanup_loop(
                         retention_days=settings.storage_retention_days,
                         max_results_per_job=settings.storage_max_results_per_job,
                         orphan_grace_seconds=settings.storage_orphan_grace_seconds,
-                        reconciliation_dry_run=(
-                            settings.storage_reconciliation_dry_run
-                        ),
+                        reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
                         job_store=job_store,
-                        idempotency_cleanup_batch_size=(
-                            settings.idempotency_cleanup_batch_size
-                        ) if job_store is not None else 1000,
+                        idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
+                        if job_store is not None
+                        else 1000,
                     )
                 else:
                     await run_cleanup(
@@ -270,20 +261,14 @@ def start_cleanup_loop(
                         webhook_delivered_retention_days=(
                             settings.webhook_delivered_retention_days
                         ),
-                        webhook_failed_retention_days=(
-                            settings.webhook_failed_retention_days
-                        ),
-                        webhook_cleanup_batch_size=(
-                            settings.webhook_dispatch_batch_size
-                        ),
+                        webhook_failed_retention_days=(settings.webhook_failed_retention_days),
+                        webhook_cleanup_batch_size=(settings.webhook_dispatch_batch_size),
                         orphan_grace_seconds=settings.storage_orphan_grace_seconds,
-                        reconciliation_dry_run=(
-                            settings.storage_reconciliation_dry_run
-                        ),
+                        reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
                         job_store=job_store,
-                        idempotency_cleanup_batch_size=(
-                            settings.idempotency_cleanup_batch_size
-                        ) if job_store is not None else 1000,
+                        idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
+                        if job_store is not None
+                        else 1000,
                     )
             except asyncio.CancelledError:
                 raise

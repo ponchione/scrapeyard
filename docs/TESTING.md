@@ -440,9 +440,12 @@ The manifest format is `scrapeyard-backup-v1`. It records this exact order,
 the three required database names, and every payload file's relative path,
 byte count, and SHA-256. Logs and Redis persistence are excluded. Validation
 rejects a missing/extra file, duplicate or unsafe path, checksum/size drift,
-missing database/table, failed `PRAGMA integrity_check`, a result/error without
-its job/run, and result metadata without `results.json`. Read-only immutable
-validation prevents WAL/SHM side effects from becoming undeclared files.
+missing database/table/column/index, a migration-ledger filename or checksum
+that differs from the packaged SQL, failed `PRAGMA integrity_check`, a
+result/error without its job/run, and result metadata without `results.json`.
+This includes the idempotency table and its unique live-key index. Read-only
+immutable validation prevents WAL/SHM side effects from becoming undeclared
+files.
 
 Restore accepts only a truly empty target or the four empty mount points that
 Docker initializes from the production image (`db`, `results`, `adaptive`, and
@@ -456,6 +459,11 @@ and result, a known failed job/run and its error rows, a disabled schedule's
 persisted metadata, a durable webhook-outbox row, plus exact controlled
 adaptive metadata bytes. The temporary backup is never a diagnostic artifact
 and is deleted by success, failure, and signal traps.
+
+When the restored data root differs from the source root, result metadata is
+rewritten in an explicit transaction and the inherited WAL is checkpointed and
+truncated before immutable validation. The installed database therefore never
+depends on an undeclared restore-only WAL sidecar for relocated paths.
 
 Manual operational form, after performing the same quiescing order, is:
 
