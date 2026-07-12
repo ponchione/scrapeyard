@@ -447,7 +447,8 @@ validation prevents WAL/SHM side effects from becoming undeclared files.
 Restore accepts only a truly empty target or the four empty mount points that
 Docker initializes from the production image (`db`, `results`, `adaptive`, and
 `logs`). It stages on the destination volume, restores `db`, `results`, and
-`adaptive`, validates again, and refuses any unknown/non-empty target. The
+`adaptive`, rewrites absolute result metadata paths for the fresh data root,
+validates again, and refuses any unknown/non-empty target. The
 qualification runner deletes the original named volumes, creates a fresh
 deployment and Redis volume, restores the temporary set, and starts the normal
 image. It compares exact pre/post API payloads for a known successful job/run
