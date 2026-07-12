@@ -46,17 +46,37 @@ async def run_cleanup(
 ) -> None:
     """Clean result artifacts and scrub bounded terminal webhook secrets."""
     failed_phases: list[str] = []
-    deleted = await result_store.delete_expired(retention_days)
-    if deleted:
-        CLEANUP_ITEMS.labels("expired_results").inc(deleted)
-    if deleted:
-        logger.info("Cleanup removed %d expired result(s)", deleted)
+    try:
+        deleted = await result_store.delete_expired(retention_days)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        failed_phases.append("expired_result_retention")
+        logger.error(
+            "Expired result cleanup failed error_type=%s "
+            "recovery_action=retry_next_cleanup_pass",
+            type(exc).__name__,
+        )
+    else:
+        if deleted:
+            CLEANUP_ITEMS.labels("expired_results").inc(deleted)
+            logger.info("Cleanup removed %d expired result(s)", deleted)
 
-    pruned = await result_store.prune_excess_per_job(max_results_per_job)
-    if pruned:
-        CLEANUP_ITEMS.labels("excess_results").inc(pruned)
-    if pruned:
-        logger.info("Cleanup pruned %d excess result(s) across jobs", pruned)
+    try:
+        pruned = await result_store.prune_excess_per_job(max_results_per_job)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        failed_phases.append("per_job_result_retention")
+        logger.error(
+            "Per-job result cleanup failed error_type=%s "
+            "recovery_action=retry_next_cleanup_pass",
+            type(exc).__name__,
+        )
+    else:
+        if pruned:
+            CLEANUP_ITEMS.labels("excess_results").inc(pruned)
+            logger.info("Cleanup pruned %d excess result(s) across jobs", pruned)
 
     try:
         reconciliation = await result_store.reconcile_artifacts(

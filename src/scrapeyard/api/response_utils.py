@@ -15,6 +15,7 @@ _STATUS_ERROR_CODES = {
     401: "authentication_required",
     403: "forbidden",
     404: "not_found",
+    405: "method_not_allowed",
     409: "conflict",
     413: "request_too_large",
     415: "unsupported_media_type",
@@ -22,6 +23,7 @@ _STATUS_ERROR_CODES = {
     429: "rate_limited",
     500: "internal_server_error",
     503: "service_unavailable",
+    504: "gateway_timeout",
 }
 
 

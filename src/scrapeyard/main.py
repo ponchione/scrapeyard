@@ -10,9 +10,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException
 
 from scrapeyard import __version__
 from scrapeyard.api.dependencies import (
