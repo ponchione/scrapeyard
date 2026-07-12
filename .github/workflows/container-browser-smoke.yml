@@ -1,0 +1,70 @@
+name: Container and browser smoke
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-compose.yml
+      - docker-compose.smoke.yml
+      - security/apparmor/**
+      - security/seccomp/**
+      - security/install-chromium-apparmor-profile.sh
+      - security/install-docker-egress-policy.sh
+      - scripts/container-entrypoint.sh
+      - poetry.lock
+      - pyproject.toml
+      - scripts/run_container_browser_smoke.sh
+      - src/scrapeyard/api/**
+      - src/scrapeyard/common/**
+      - src/scrapeyard/config/**
+      - src/scrapeyard/engine/**
+      - src/scrapeyard/main.py
+      - src/scrapeyard/queue/**
+      - src/scrapeyard/runtime/**
+      - src/scrapeyard/scheduler/**
+      - src/scrapeyard/storage/**
+      - src/scrapeyard/webhook/**
+      - tests/smoke/**
+      - tests/unit/test_container_browser_smoke.py
+      - .github/workflows/container-browser-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-browser-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-container-smoke:
+    name: Production image / real browsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCRAPEYARD_SMOKE_PROJECT: scrapeyard-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      SCRAPEYARD_SMOKE_API_PORT: "18420"
+      SCRAPEYARD_SMOKE_FIXTURE_PORT: "18080"
+      SCRAPEYARD_SMOKE_BUILD_TIMEOUT: "2700"
+      SCRAPEYARD_SMOKE_START_TIMEOUT: "240"
+      SCRAPEYARD_SMOKE_JOB_TIMEOUT: "180"
+      SCRAPEYARD_SMOKE_DIAGNOSTICS_DIR: artifacts/container-browser-smoke
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Show Docker runner capacity
+        run: |
+          docker version
+          docker compose version
+          df -h . /var/lib/docker || true
+          free -h
+      - name: Build the production image and run real browser smoke tests
+        run: ./scripts/run_container_browser_smoke.sh --no-cache
+      - name: Upload focused smoke diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-browser-smoke-diagnostics
+          path: artifacts/container-browser-smoke/
+          if-no-files-found: warn
+          retention-days: 7

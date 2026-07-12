@@ -5,7 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-export SCRAPEYARD_API_KEYS="${SCRAPEYARD_API_KEYS:-live-redis-test-key}"
+if [[ -z "${SCRAPEYARD_API_CREDENTIALS:-}" ]]; then
+  export SCRAPEYARD_API_CREDENTIALS='{"live-redis":{"secret":"live-redis-test-key-0000","scopes":["submit","read","schedule-admin","delete","health-detail"]}}'
+fi
+if [[ -z "${SCRAPEYARD_ENCRYPTION_KEYS:-}" ]]; then
+  export SCRAPEYARD_ENCRYPTION_KEYS='{"live-test-v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}'
+fi
+export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID="${SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID:-live-test-v1}"
 export SCRAPEYARD_TEST_REDIS_PORT="${SCRAPEYARD_TEST_REDIS_PORT:-56379}"
 
 case "$SCRAPEYARD_TEST_REDIS_PORT" in

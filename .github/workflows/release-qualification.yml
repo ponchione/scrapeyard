@@ -1,0 +1,98 @@
+name: Recovery, restore, load, and soak qualification
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-compose.yml
+      - docker-compose.smoke.yml
+      - docker-compose.qualification.yml
+      - poetry.lock
+      - pyproject.toml
+      - scripts/qualification_backup.py
+      - scripts/run_release_qualification.sh
+      - src/scrapeyard/api/**
+      - src/scrapeyard/common/**
+      - src/scrapeyard/queue/**
+      - src/scrapeyard/scheduler/**
+      - src/scrapeyard/storage/**
+      - src/scrapeyard/webhook/**
+      - tests/qualification/**
+      - tests/smoke/**
+      - .github/workflows/release-qualification.yml
+  schedule:
+    - cron: "41 7 * * 6"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Qualification profile
+        required: true
+        default: full
+        type: choice
+        options:
+          - quick
+          - full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quick-recovery-restore:
+    name: Quick recovery and restore / production runtime
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'quick')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+      SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release-qualification-quick
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Show intended-host capacity
+        run: |
+          docker version
+          docker compose version
+          free -h
+          df -h . /var/lib/docker || true
+      - name: Run bounded recovery, restore, load, and soak profile
+        run: ./scripts/run_release_qualification.sh --profile quick --no-cache
+      - name: Upload bounded qualification report and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-qualification-quick-${{ github.run_attempt }}
+          path: artifacts/release-qualification-quick/
+          if-no-files-found: warn
+          retention-days: 7
+
+  full-load-soak:
+    name: Full load and soak / production runtime
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+      SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release-qualification-full
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Show intended-host capacity
+        run: |
+          docker version
+          docker compose version
+          free -h
+          df -h . /var/lib/docker || true
+      - name: Run full pre-release recovery, restore, load, and soak profile
+        run: ./scripts/run_release_qualification.sh --profile full --no-cache
+      - name: Upload bounded qualification report and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-qualification-full-${{ github.run_attempt }}
+          path: artifacts/release-qualification-full/
+          if-no-files-found: warn
+          retention-days: 7

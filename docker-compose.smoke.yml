@@ -1,0 +1,90 @@
+services:
+  redis:
+    restart: "no"
+    networks:
+      - backend
+
+  fixture:
+    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
+    command: ["python", "/srv/fixture_site.py", "--host", "0.0.0.0", "--port", "8080"]
+    restart: "no"
+    init: true
+    volumes:
+      - ./tests/smoke/fixture_site.py:/srv/fixture_site.py:ro
+    ports:
+      - "127.0.0.1:${SCRAPEYARD_SMOKE_FIXTURE_PORT:-18080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    networks:
+      fixture-control:
+      fixture-public:
+        ipv4_address: 203.66.81.242
+      fixture-private:
+        ipv4_address: 10.77.14.2
+
+  scrapeyard:
+    restart: "no"
+    extra_hosts:
+      - "fixture.public.test=203.66.81.242"
+      - "fixture.private.test=10.77.14.2"
+    ports:
+      - "127.0.0.1:${SCRAPEYARD_SMOKE_API_PORT:-18420}:8420"
+    depends_on:
+      redis:
+        condition: service_healthy
+      fixture:
+        condition: service_healthy
+    environment:
+      SCRAPEYARD_SYNC_TIMEOUT_SECONDS: "5"
+      SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS: "20"
+      SCRAPEYARD_WORKERS_MAX_CONCURRENT: "2"
+      SCRAPEYARD_WORKERS_MAX_BROWSERS: "1"
+      SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB: "4096"
+      SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS: "30"
+      SCRAPEYARD_RUN_MAX_DURATION_SECONDS: "120"
+      SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES: "8388608"
+      SCRAPEYARD_BROWSER_DEBUG_ENABLED: "true"
+      SCRAPEYARD_RATE_LIMIT_REQUESTS: "0"
+      SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS: "0"
+      SCRAPEYARD_STORAGE_RETENTION_DAYS: "1"
+      SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN: "true"
+      SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB: "10"
+      SCRAPEYARD_LOG_LEVEL: "INFO"
+    networks:
+      backend:
+      fixture-public:
+        ipv4_address: 203.66.81.243
+
+  peer:
+    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
+    command: ["sh", "-c", "sleep 3600"]
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777
+    networks:
+      - backend
+
+networks:
+  fixture-control:
+  fixture-public:
+    internal: true
+    ipam:
+      config:
+        - subnet: 203.66.81.240/28
+  fixture-private:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.77.14.0/29
