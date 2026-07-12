@@ -13,6 +13,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+### Fixed
+- Restricted readiness project summaries to each monitoring credential's
+  authorized projects.
+- Persisted accepted run trigger provenance across queued-delivery recovery,
+  including upgrade-safe claiming for legacy queued runs.
+- Classified terminal ownership loss as an ignored run instead of successful
+  execution.
+- Tightened backup artifact path validation and made partial restore installs
+  rollback cleanly for a safe retry.
+- Closed release-qualification path-filter gaps and corrected targeted-test and
+  readiness-status documentation.
+
 ## 0.6.0 — 2026-07-12
 
 **Production hardening, durable operations, and API v1 release.**

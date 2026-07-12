@@ -329,12 +329,16 @@ Useful targeted lanes:
 
 ```bash
 poetry run pytest tests/unit
-poetry run pytest tests/integration
-poetry run pytest tests/live_redis
+poetry run pytest --no-cov tests/integration
+poetry run pytest --no-cov tests/live_redis
 ```
 
 The integration tests monkeypatch the worker pool so jobs still exercise the
 queue-facing app contract without requiring Redis for the default test suite.
+Focused integration and live-service lanes disable the repository-wide coverage
+floor because they intentionally execute only a subset of production modules;
+the full `poetry run pytest` gate remains responsible for enforcing 80% branch
+coverage.
 
 ## Recovery, restore, load, and soak release qualification
 

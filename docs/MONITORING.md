@@ -52,9 +52,9 @@ grow.
 database (`jobs.db`, `errors.db`, and `results_meta.db`), disk, and a one-byte
 atomic create/read/remove operation in the result directory. It also fails when
 the worker runner, APScheduler, cleanup task, or webhook coordinator/worker set
-has stopped or failed. Disk saturation can return a degraded `200`; any failed
-required dependency or background task returns `503`. Liveness never performs
-these operations.
+has stopped or failed. Exhausted worker capacity returns a degraded `200`;
+insufficient free disk or any other failed required dependency/background task
+returns `503`. Liveness never performs these operations.
 
 Tune the bounded probes with:
 
