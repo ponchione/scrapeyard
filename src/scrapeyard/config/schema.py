@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from scrapeyard.common.paths import safe_path_part
-from scrapeyard.config.transforms import parse_transform
+from scrapeyard.config.transforms import parse_transform, transform_pipeline_limit
 from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
@@ -230,7 +230,13 @@ class SelectorLong(StrictConfigModel):
     def _validate_transform_pipeline(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        for step in value.split("|"):
+        steps = value.split("|")
+        limit = transform_pipeline_limit()
+        if len(steps) > limit:
+            raise ValueError(
+                f"Selector transform pipeline exceeds {limit} steps"
+            )
+        for step in steps:
             step = step.strip()
             if not step:
                 raise ValueError("Selector transform steps must not be blank")

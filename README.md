@@ -391,6 +391,8 @@ settings are:
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
 | `SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS` | `0.1` | Per-operation deadline for selector regex transforms |
 | `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` | `2048` | Maximum UTF-8 size of a selector regex pattern |
+| `SCRAPEYARD_TRANSFORM_MAX_PIPELINE_STEPS` | `32` | Maximum transforms in one selector pipeline |
+| `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` | `1048576` | Maximum UTF-8 bytes for each intermediate selector value |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |

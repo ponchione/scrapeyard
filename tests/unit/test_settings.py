@@ -69,6 +69,8 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.transform_regex_timeout_seconds == 0.1
         assert settings.transform_regex_max_pattern_bytes == 2048
+        assert settings.transform_max_pipeline_steps == 32
+        assert settings.transform_max_value_bytes == 1048576
 
     def test_scheduler_jitter_max_seconds_default(self):
         settings = ServiceSettings()
@@ -242,11 +244,15 @@ class TestServiceSettingsFromEnv:
         values = {
             "SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS": "0.25",
             "SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES": "1024",
+            "SCRAPEYARD_TRANSFORM_MAX_PIPELINE_STEPS": "12",
+            "SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES": "65536",
         }
         with patch.dict(os.environ, values):
             settings = ServiceSettings()
         assert settings.transform_regex_timeout_seconds == 0.25
         assert settings.transform_regex_max_pattern_bytes == 1024
+        assert settings.transform_max_pipeline_steps == 12
+        assert settings.transform_max_value_bytes == 65536
 
     def test_reads_webhook_retry_and_retention_settings(self):
         values = {
@@ -452,6 +458,8 @@ def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):
         ("RUN_MAX_BROWSER_DEBUG_BYTES", "0"),
         ("TRANSFORM_REGEX_TIMEOUT_SECONDS", "0"),
         ("TRANSFORM_REGEX_MAX_PATTERN_BYTES", "0"),
+        ("TRANSFORM_MAX_PIPELINE_STEPS", "0"),
+        ("TRANSFORM_MAX_VALUE_BYTES", "1023"),
     ],
 )
 def test_aggregate_run_budgets_reject_nonsensical_values(monkeypatch, name, value):
