@@ -1,0 +1,7 @@
+# Explicit local-development ingress. The production base file publishes no
+# host port; this override binds loopback unless the operator opts into a wider
+# address deliberately.
+services:
+  scrapeyard:
+    ports:
+      - "${SCRAPEYARD_BIND_ADDRESS:-127.0.0.1}:${SCRAPEYARD_PORT:-8420}:8420"

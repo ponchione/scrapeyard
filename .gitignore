@@ -19,6 +19,8 @@ htmlcov/
 .idea/
 .vscode/
 /work-orders
+.artifacts/
+artifacts/
 .worktrees/
 
 .claude

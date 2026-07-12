@@ -13,6 +13,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+## 0.6.0 — 2026-07-12
+
+**Production hardening, durable operations, and API v1 release.**
+
 ### Added
 - Selector transform helpers for common cleanup chains:
   `collapse_whitespace`, `remove`, `strip_prefix`, `strip_suffix`, `extract`,
@@ -21,10 +25,38 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - Browser action configs for dynamic/stealthy targets: `click`,
   `wait_for_selector`, `wait_ms`, `scroll`, and bounded `repeat_click`.
 - Example configs for consent-banner scrolling and load-more product grids.
+- A documented API v1 response contract, named/scoped API credentials,
+  idempotent scrape submission, schedule timezones and mutation endpoints,
+  Prometheus metrics, readiness probes, and bounded admin pagination.
+- Envelope encryption and rotation for persisted proxy, browser-header, and
+  webhook secrets.
+- Durable webhook retry/outbox processing with attempt and age limits.
+- Release qualification, backup/restore validation, live-Redis tests, real
+  browser/container smoke tests, dependency auditing, SBOM, and image scanning.
+- Run budgets, cancellation/ownership checkpoints, stale-run reconciliation,
+  artifact reconciliation, and single-instance filesystem/database guards.
 
 ### Changed
 - Template and README now document browser actions, typed pagination, and
   practical transform chains.
+- Production containers now use digest-pinned images/assets, a dated Debian
+  snapshot, hash-checked Python dependency exports, a read-only non-root
+  runtime, browser sandbox profiles, and deployment-scoped egress policy.
+- Synchronous scrape requests continue through the durable queue/worker path
+  and now have explicit queued, replayed, missing-artifact, and error outcomes.
+- Result and error APIs redact all configured header values, URL credentials,
+  sensitive query values, and internal artifact paths.
+
+### Fixed
+- Closed DNS-rebinding windows for direct basic fetches and webhooks by pinning
+  validated public IP connections while retaining Host and TLS SNI.
+- Removed the duplicate HTTP preflight that changed browser request semantics
+  and double-counted fetched bytes.
+- Preserved intentionally retained results in backup validation after job
+  deletion, and fsynced artifact directories after atomic replacement.
+- Corrected cleanup and target outcome metrics so partial cleanup failures and
+  pre-result exceptions cannot be reported as successes or cancellations.
+- Standardized unexpected API failures on the safe, versioned JSON envelope.
 
 ---
 

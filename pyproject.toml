@@ -1,24 +1,28 @@
-[tool.poetry]
+[project]
 name = "scrapeyard"
-version = "0.5.1"
+version = "0.6.0"
 description = "Config-driven web scraping microservice built on Scrapling"
 authors = []
 readme = "README.md"
+requires-python = ">=3.10,<4.0"
+dependencies = [
+    "fastapi>=0.136.1,<0.137.0",
+    "uvicorn[standard]>=0.34.0,<0.35.0",
+    "scrapling>=0.2,<0.3",
+    "arq>=0.26,<0.27",
+    "apscheduler>=3.10,<4.0",
+    "pyyaml>=6.0,<7.0",
+    "aiosqlite>=0.20,<0.21",
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.14.2,<3.0.0",
+    "httpx>=0.28,<0.29",
+    "cryptography>=48.0.1,<49.0.0",
+    "prometheus-client>=0.22.1,<0.23.0",
+]
+
+[tool.poetry]
 packages = [{include = "scrapeyard", from = "src"}]
 include = [{path = "sql/*.sql", format = ["sdist", "wheel"]}]
-
-[tool.poetry.dependencies]
-python = ">=3.10,<4.0"
-fastapi = "^0.136.1"
-uvicorn = {version = "^0.34.0", extras = ["standard"]}
-scrapling = "^0.2"
-arq = "^0.26"
-apscheduler = "^3.10"
-pyyaml = "^6.0"
-aiosqlite = "^0.20"
-pydantic = "^2.0"
-pydantic-settings = "^2.0"
-httpx = "^0.28"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
@@ -55,22 +59,8 @@ ignore = ["E501", "I001", "UP035", "UP038", "SIM105", "SIM110"]
 
 [tool.mypy]
 python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-# Start strict on well-typed modules, expand incrementally.
-# Run: poetry run mypy src/scrapeyard/models src/scrapeyard/config src/scrapeyard/common src/scrapeyard/api src/scrapeyard/storage
-
-[[tool.mypy.overrides]]
-module = [
-    "scrapeyard.models.*",
-    "scrapeyard.config.*",
-    "scrapeyard.common.*",
-    "scrapeyard.api.*",
-    "scrapeyard.storage.*",
-]
-disallow_untyped_defs = true
-check_untyped_defs = true
+strict = true
+# Full first-party production scope: poetry run mypy src/scrapeyard
 
 [[tool.mypy.overrides]]
 module = [

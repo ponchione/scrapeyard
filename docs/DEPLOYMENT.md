@@ -10,31 +10,53 @@ assumption at the network layer.
 - Redis is private to Scrapeyard and is not exposed outside the internal
   runtime network.
 - Scrapeyard stores `/data` on persistent storage.
+- Scrapeyard runs exactly one application process and one replica. Keep
+  Uvicorn/Gunicorn workers and orchestrator replicas at `1`; use
+  `SCRAPEYARD_WORKERS_MAX_CONCURRENT` for in-process scrape concurrency.
 - Browser scraping egress is controlled by the host, orchestrator, proxy
   gateway, or firewall policy.
+
+## Single-instance guard
+
+Before opening SQLite or starting the embedded worker pool and scheduler, the
+process acquires `SCRAPEYARD_DB_DIR/.scrapeyard-instance.lock`. A second process
+sharing `/data/db` exits immediately with an actionable owner PID/host message.
+The persistent file is not a PID-file validity check: ownership is a kernel
+advisory lock, so normal shutdown and crashes both release it and stale file
+contents are safely overwritten on restart. The backing volume must preserve
+Linux `flock(2)` semantics.
+
+The image entrypoint and application lifespan also reject common
+`WEB_CONCURRENCY`, Uvicorn, and Gunicorn configurations above one process.
+`docker-compose.yml` fixes both `--workers 1` and `deploy.replicas: 1`. Do not
+override those settings or scale the service. To run a truly isolated second
+deployment, give it separate `/data` storage, Redis logical database, and queue
+name; partial sharing is unsupported.
+
+The ownership table and the architectural work required for future API,
+scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
 
 ## Ingress
 
 - Do not make `8420` reachable from untrusted networks.
-- The container process listens on `0.0.0.0:8420`. The bundled local Docker
-  Compose file publishes the host port on `0.0.0.0:8420` so Eyebox containers
-  in another local Compose stack can fetch `http://host.docker.internal:8420`.
-  Use this only on trusted local or private hosts with firewall rules limiting
-  ingress.
-- If only host-local tools should reach Scrapeyard, override the Compose bind:
+- The production `docker-compose.yml` exposes no host port. The explicit
+  `docker-compose.local.yml` override binds `127.0.0.1:8420` by default:
 
-  ```yaml
-  ports:
-    - "127.0.0.1:8420:8420"
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
   ```
+
+  A wider `SCRAPEYARD_BIND_ADDRESS=0.0.0.0` is an explicit local-development
+  choice and requires host firewall restrictions.
 
 - For a shared deployment with Eyebox, prefer a private service network over a
   host port. If Eyebox shares Scrapeyard's Compose network, use
   `http://scrapeyard:8420` instead of `host.docker.internal`. If a reverse proxy
-  is used, restrict the proxy route to Eyebox and keep `/health` available only
-  to internal monitoring.
-- Always set `SCRAPEYARD_API_KEYS`; the app permits unauthenticated requests
-  only when this value is empty for local development.
+  is used, restrict the proxy route to Eyebox. Public `/health` and
+  `/health/live` reveal only process liveness; protect `/health/ready` for
+  internal monitoring.
+- Always set `SCRAPEYARD_API_CREDENTIALS`; when no named or legacy credentials
+  exist, the warned `local-development` caller receives all scopes.
 
 ## Egress
 
@@ -55,6 +77,76 @@ Scrapeyard egress only to that gateway plus Redis. That is the strongest
 deployment boundary because browser runtimes and DNS behavior stay outside the
 application trust boundary.
 
+The checked-in `security/install-docker-egress-policy.sh` is an enforceable
+Docker-host example. It installs a deployment-specific, bridge-and-source-scoped
+`DOCKER-USER` chain for the fixed production app address, permits Redis and operator-declared proxy CIDRs,
+then rejects loopback, metadata/link-local, private, carrier-grade NAT,
+benchmark, multicast, and reserved destinations. Because filtering occurs on
+the connected destination IP, a public hostname rebound to a private address is
+still rejected. Review it with the host network owner, then run as root:
+
+```bash
+NETWORK_ID=$(docker network inspect --format '{{.Id}}' scrapeyard_backend)
+sudo SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}" \
+  SCRAPEYARD_EGRESS_POLICY_ID=prod \
+  SCRAPEYARD_EGRESS_ALLOW_CIDRS=203.0.113.10/32 \
+  security/install-docker-egress-policy.sh install
+# Remove during decommissioning:
+sudo SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}" \
+  SCRAPEYARD_EGRESS_POLICY_ID=prod \
+  security/install-docker-egress-policy.sh remove
+```
+
+Treat this connected-IP policy (or an equivalent orchestrator/proxy policy) as
+mandatory for untrusted scrape submissions. Application URL checks and pinned
+direct HTTP/webhook connections provide defense in depth, but browser and proxy
+runtimes still require the network boundary to close DNS-rebinding races.
+
+Kubernetes deployments should express the same allow-before-deny policy with a
+CNI that supports egress CIDR rules; default Kubernetes `NetworkPolicy` cannot
+select arbitrary public destinations while excluding every rebinding target.
+
+## Container privilege and filesystem boundary
+
+The image is built for Linux `amd64` and runs directly as UID/GID `10001`.
+Chromium uses unprivileged user namespaces, so the image contains no privileged
+setuid helper and startup performs no root repair. Before starting Compose,
+load the path-independent host profile:
+
+```bash
+sudo security/install-chromium-apparmor-profile.sh install
+```
+
+The profile is Moby's normal container boundary plus the single `userns`
+permission. Compose also applies Playwright 1.58.0's pinned seccomp allowlist,
+enables no-new-privileges, drops every capability, and retains only
+`SYS_CHROOT` in the bounding set for Chromium after it enters its user
+namespace. The application process has no permitted or effective capabilities.
+Do not replace either policy with `unconfined`. `/data`, bounded `/tmp`, `/run`,
+home cache/config and Camoufox state tmpfs, and `/dev/shm` are the only writable
+areas.
+
+Fresh named volumes inherit UID 10001 from the image. Migrate an older or host
+bind-mounted data directory while the application is stopped:
+
+```bash
+docker run --rm --user 0 -v scrapeyard_scrapeyard-data:/data \
+  redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08 \
+  sh -c 'chown -R 10001:10001 /data && find /data -type d -exec chmod 0750 {} +'
+```
+
+Startup fails with exit code 78 and an actionable message if ownership is
+wrong; it never recursively changes a mounted volume. CPU, memory, PIDs,
+open-files, shared memory, and temporary-filesystem sizes are bounded in
+Compose. Update the pinned digests and browser checksums intentionally and run
+the container smoke plus security scan before promotion.
+
+Remove the host profile only after all Scrapeyard containers have stopped:
+
+```bash
+sudo security/install-chromium-apparmor-profile.sh remove
+```
+
 ## Secrets
 
 - Generate API keys with a high-entropy value:
@@ -63,12 +155,55 @@ application trust boundary.
   openssl rand -hex 32
   ```
 
-- Store `SCRAPEYARD_API_KEYS` in the deployment secret store, not in source
-  control.
-- Rotate the key with Eyebox credentials. During rotation, set both old and new
-  keys as a comma-separated list, deploy Eyebox with the new key, then remove
-  the old key.
+- Store `SCRAPEYARD_API_CREDENTIALS` in the deployment secret store, not in
+  source control. It is a JSON object keyed by credential name:
+
+  ```json
+  {
+    "eyebox-old": {
+      "identity": "eyebox",
+      "secret": "high-entropy-old-secret",
+      "scopes": ["submit", "read"],
+      "projects": ["catalog"]
+    },
+    "eyebox-new": {
+      "identity": "eyebox",
+      "secret": "high-entropy-new-secret",
+      "scopes": ["submit", "read"],
+      "projects": ["catalog"]
+    }
+  }
+  ```
+
+- `identity` is stable audit/idempotency attribution. During rotation, deploy
+  old and new named credentials with the same identity, move clients to the
+  new secret, then remove and restart without the old entry. Authentication
+  compares every configured secret in constant time before selecting a match.
+- Available scopes are `submit`, `read`, `schedule-admin`, `delete`, and
+  `health-detail`. An optional non-empty `projects` list limits route and data
+  access to those namespaces. Project-scoped list/error queries must include a
+  permitted `project` filter.
+- `SCRAPEYARD_API_KEYS` remains a deprecated, full-admin restart-time migration
+  bridge. It produces digest-based legacy identities and should not be used for
+  new deployments.
+- Failed authentication is counted per process and logged with reason, method,
+  and path. Successful request audit logs include stable identity and
+  credential name. Neither path logs the supplied secret.
 - Treat proxy URLs, webhook headers, and browser extra headers as secrets.
+
+Persisted config and webhook retry state require the versioned encryption
+keyring described in [SECRET_STORAGE.md](SECRET_STORAGE.md). Store key material
+separately from database backups, test restore/decryption, and follow the
+overlap/re-encryption procedure before retiring a key. Prefer
+`${SCRAPEYARD_SECRET_*}` references in YAML so reusable values are resolved at
+execution instead of embedded in stored config.
+
+Use the cheap public `/health/live` endpoint only for process liveness. Route
+traffic only after the authenticated `/health/ready` endpoint succeeds; it
+checks Redis, every SQLite database, artifact storage read/write, disk space,
+and every required background task with short timeouts. Scrape the authenticated
+Prometheus `/metrics` endpoint and apply the saturation/backlog/disk alerts in
+[MONITORING.md](MONITORING.md).
 
 ## Persistence And Backups
 
@@ -116,6 +251,10 @@ Set limits to match host capacity:
 - `SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE` (default `100`, and no smaller than concurrency)
 - `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS` (default `7`)
 - `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS` (default `30`)
+- `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` (default `128`)
+- `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` (default `24`)
+- `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` (default `1000`)
+- `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` (default `60`)
 - `SCRAPEYARD_STORAGE_RETENTION_DAYS`
 - `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB`
 - `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` (default `86400`)
@@ -129,6 +268,42 @@ persisted `heartbeat_at` is authoritative and the scheduler may recover it only
 after `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` without a
 successful refresh. The heartbeat interval must be no more than one third of
 the running timeout.
+
+### Scheduled-job lifecycle and timezones
+
+Every schedule has an explicit IANA `timezone`; omitted values default to
+`UTC`. Cron fields are interpreted as wall time in that zone and the timezone
+is persisted and returned by job APIs. With APScheduler 3 semantics, a spring
+forward wall time that does not exist resolves to the corresponding next real
+instant (for example New York `02:30` fires at `03:30` on the transition day),
+while a repeated fall-back wall time fires once in each fold. Jitter is applied
+after cron selection.
+
+The in-process scheduler uses `coalesce=true`, `max_instances=1`, and the
+bounded `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS`. Multiple due occurrences
+caused by a short event-loop stall coalesce to one fire if it is still within
+that grace. Because the scheduler store is deliberately reconstructed from
+SQLite rather than persisted separately, process downtime is not backfilled:
+restart registers each job at its next future wall-time occurrence. Clock/DST
+selection follows the zone rules above.
+
+`PUT /jobs/{job_id}` replaces the complete YAML and schedule for future runs;
+it returns the SHA-256 `config_hash` that subsequent runs will record. An
+already queued or running delivery makes update return `409`, so accepted work
+never changes configuration underneath itself. The `(project, name)` unique
+constraint remains authoritative. `POST .../pause` and `.../resume` persist
+state and re-register the local scheduler, and therefore survive restart;
+pause affects future fires, not a run already accepted. `POST .../trigger`
+works even while cron is paused, returns `202` with `trigger=manual`, `run_id`,
+and the exact config hash, and returns `409` when a run is already queued or
+active.
+
+Database mutation precedes local scheduler registration in one event-loop
+turn. If registration fails, the API compare-and-set restores the prior
+database snapshot and re-registers it; a failed create removes its never-run
+row. Failure to regain exact ownership is logged at critical severity and
+returns `503` with an explicit operator-reconciliation action instead of
+silently accepting divergent state.
 
 Operational cancellation and deletion semantics, including fail-closed Redis
 inspection, resumable `deleting` reservations, result preservation, webhook
@@ -193,13 +368,13 @@ capacity accounting retain the service's single-process/single-instance
 assumption; running multiple Scrapeyard instances would multiply capacity and
 would not provide one shared fairness cursor.
 
-`/health` exposes `workers.queue_depths` with the exact keys `high`, `normal`,
+`/health/ready` exposes `workers.queue_depths` with the exact keys `high`, `normal`,
 and `low`. Each value is a direct `ZCARD` of its known intake queue and includes
 waiting/deferred members, including an orphaned member until reconciliation,
 but excludes admitted base-queue and in-progress work. `active_tasks` remains
 the separate running-handler count. If Redis cannot provide these bounded
 depth reads, all three values are `null`, the Redis dependency is unhealthy,
-and `/health` returns 503.
+and `/health/ready` returns 503.
 
 Heartbeat writes are serialized per run. One write failure does not abandon a run:
 the worker retries on the next monotonic interval and logs only job/run
@@ -255,6 +430,33 @@ truncated captures are described in the result diagnostics without failing the
 run. Result JSON is measured using the exact compact UTF-8 representation and
 is written by temporary file plus atomic replacement before metadata commit.
 
+### Ad-hoc submission idempotency
+
+`POST /scrape` optionally accepts one `Idempotency-Key` header of 1–128 visible
+ASCII bytes. `jobs.db` stores only its SHA-256 digest, scoped by the validated
+API-key digest. When API authentication is disabled, the scope is the single
+literal `local-development` identity; local clients must therefore coordinate key
+uniqueness. The raw YAML SHA-256, job ID, run ID, derived sync/async response
+mode, creation time, and expiry are inserted in the same immediate SQLite
+transaction as the job. A matching retry cannot enqueue again; different YAML
+returns `409`.
+
+Async submissions preserve their original `202` acceptance contract. Sync
+retries wait on the persisted job up to the normal sync timeout and return
+`200` when terminal, otherwise `202` with the current persisted status. Every
+replay has `Idempotency-Replayed: true`, and both accepted response forms
+include the original `job_id` and `run_id`. Omitting the header retains
+non-idempotent behavior.
+
+Records expire after `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` (24 hours by
+default). The first reuse after expiry removes that caller/key record lazily
+and creates a new submission. The cleanup loop additionally deletes at most
+`SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` expired rows each pass. Job deletion
+and failed-enqueue rollback remove associated records by foreign-key cascade.
+A crash after the SQLite transaction but before Redis acceptance leaves the
+persisted queued run for the existing stale-queue reconciler; a retry never
+risks a second enqueue merely to close that cross-system window.
+
 ### Result artifact reconciliation
 
 `results_meta` is authoritative for retained result ownership. A valid row's
@@ -266,7 +468,8 @@ its metadata and artifact authoritative and eligible for normal age/per-job
 retention, not orphan removal.
 
 The periodic cleanup order is expired-result retention, per-job result
-pruning, artifact reconciliation, then webhook tombstone scrubbing. Retention
+pruning, artifact reconciliation, expired submission-idempotency deletion,
+then webhook tombstone scrubbing. Retention
 remains metadata-first, so a crash leaves a recoverable filesystem orphan.
 Explicit job deletion remains filesystem-first and retryable. Running
 reconciliation after retention avoids diagnosing directories the same pass is
@@ -483,20 +686,11 @@ operating assumption.
 
 ## Monitoring
 
-Monitor:
-
-- `/health` status and dependency details
-- priority intake depth from `/health` (`workers.queue_depths`); compare it with
-  `active_tasks` because admitted/running work is intentionally excluded
-- container restart count and OOM kills
-- disk free space on `/data`
-- Redis availability
-- worker saturation from `/health`
-- job statuses: failed and partial rates
-- webhook outbox failures
-- scrape error types and target-domain failure concentration
-
-Alert on low disk space before SQLite or result writes fail.
+Use a least-privilege `health-detail` credential for `/health/ready` and
+`/metrics`. The complete signal inventory, bounded-label contract, scrape
+configuration, and suggested saturation/backlog/disk/background-task alerts
+are in [MONITORING.md](MONITORING.md). Also monitor container restarts, OOM
+kills, volume inode exhaustion, and host/network policy outside the process.
 
 ## Preflight Checks
 
@@ -514,7 +708,7 @@ docker run --rm --add-host=host.docker.internal:host-gateway curlimages/curl \
   -fsS http://host.docker.internal:8420/health
 ```
 
-Unauthenticated non-health requests should fail when `SCRAPEYARD_API_KEYS` is
+Unauthenticated protected requests should fail when `SCRAPEYARD_API_CREDENTIALS` is
 set:
 
 ```bash
@@ -527,6 +721,14 @@ Authenticated requests should work from Eyebox's network path:
 curl -fsS \
   -H "X-API-Key: $SCRAPEYARD_API_KEY" \
   http://127.0.0.1:8420/jobs
+```
+
+Detailed monitoring requires its own least-privilege credential:
+
+```bash
+curl -fsS \
+  -H "X-API-Key: $SCRAPEYARD_MONITOR_API_KEY" \
+  http://127.0.0.1:8420/health/ready
 ```
 
 Private target URLs should be rejected by config validation:
@@ -552,7 +754,7 @@ The expected response is `422` with an unsafe URL validation error.
 
 ## Go/No-Go Checklist
 
-- `SCRAPEYARD_API_KEYS` is set and known only to Eyebox and operators.
+- `SCRAPEYARD_API_CREDENTIALS` is set, least-privileged, and stored as a secret.
 - Scrapeyard HTTP is reachable only from Eyebox and internal monitoring.
 - Redis is not exposed outside the private runtime network.
 - Egress policy blocks metadata and private/internal networks.

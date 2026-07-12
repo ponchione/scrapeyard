@@ -64,12 +64,17 @@ to writable directories:
 
 ```bash
 export SCRAPEYARD_API_KEY="$(openssl rand -hex 32)"
-export SCRAPEYARD_API_KEYS="$SCRAPEYARD_API_KEY"
+printf -v SCRAPEYARD_API_CREDENTIALS \
+  '{"local-admin":{"identity":"local-admin","secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail"]}}' \
+  "$SCRAPEYARD_API_KEY"
+export SCRAPEYARD_API_CREDENTIALS
+export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID=local-v1
+export SCRAPEYARD_ENCRYPTION_KEYS="{\"local-v1\":\"$(openssl rand -base64 32 | tr -d '\n')\"}"
 export SCRAPEYARD_DB_DIR=/tmp/scrapeyard/db
 export SCRAPEYARD_STORAGE_RESULTS_DIR=/tmp/scrapeyard/results
 export SCRAPEYARD_ADAPTIVE_DIR=/tmp/scrapeyard/adaptive
 export SCRAPEYARD_LOG_DIR=/tmp/scrapeyard/logs
-poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420
+poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420 --workers 1
 ```
 
 Check health:
@@ -84,56 +89,97 @@ Start the full local stack:
 
 ```bash
 export SCRAPEYARD_API_KEY="$(openssl rand -hex 32)"
-export SCRAPEYARD_API_KEYS="$SCRAPEYARD_API_KEY"
-docker compose up -d --build
+printf -v SCRAPEYARD_API_CREDENTIALS \
+  '{"local-admin":{"identity":"local-admin","secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail"]}}' \
+  "$SCRAPEYARD_API_KEY"
+export SCRAPEYARD_API_CREDENTIALS
+export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID=local-v1
+export SCRAPEYARD_ENCRYPTION_KEYS="{\"local-v1\":\"$(openssl rand -base64 32 | tr -d '\n')\"}"
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
 
 Stop it:
 
 ```bash
-docker compose down
+docker compose -f docker-compose.yml -f docker-compose.local.yml down
 ```
 
 The Compose setup starts Scrapeyard and Redis, mounts persistent data at
-`/data`, and expects `SCRAPEYARD_API_KEYS` from the shell or a local `.env`
+`/data`, and expects `SCRAPEYARD_API_CREDENTIALS` from the shell or a local `.env`
 file.
 
-Scrapeyard listens on `0.0.0.0` inside the container, and the bundled Compose
-file publishes `0.0.0.0:8420:8420`. That keeps `http://127.0.0.1:8420`
-working from the host and allows containers in another local Compose stack to
-reach `http://host.docker.internal:8420`. Keep that port limited to trusted
-local or private networks. If only host-local tools should reach Scrapeyard,
-override the port binding with `127.0.0.1:8420:8420`.
+The production base Compose file exposes no host port. The explicit local
+override publishes `127.0.0.1:8420` by default. Set
+`SCRAPEYARD_BIND_ADDRESS=0.0.0.0` only on a trusted, firewalled development
+host when peer containers must use the host gateway; a shared private Docker
+network is preferred.
+
+Load the repository's restrictive Chromium AppArmor profile once per host
+before starting Compose (and remove it during decommissioning):
+
+```bash
+sudo security/install-chromium-apparmor-profile.sh install
+```
 
 When browser-runtime dependencies change, rebuild the app container:
 
 ```bash
-docker compose up -d --build --force-recreate scrapeyard
+docker compose -f docker-compose.yml -f docker-compose.local.yml \
+  up -d --build --force-recreate scrapeyard
 ```
 
 The image installs Playwright Chromium for standard `fetcher: dynamic` jobs,
 rebrowser Chromium for `fetcher: dynamic` with `browser.stealth: true`, and
-Camoufox assets for `fetcher: stealthy`. The container refreshes mounted
-volume ownership on startup, restores Chromium sandbox permissions, and then
-runs the app as a non-root user. The local Compose file sets
-`security_opt: [seccomp:unconfined]` because the rebrowser Chromium sandbox
-needs namespace syscalls that Docker's default seccomp profile may block.
+Camoufox assets for `fetcher: stealthy`. Browser versions, revisions, base
+images, and the Camoufox archive checksum are pinned. The image starts directly
+as the non-root UID/GID 10001 with a Chromium-specific seccomp/AppArmor policy
+and no-new-privileges. Chromium uses unprivileged user namespaces; there is no
+setuid helper or startup root repair. The root filesystem is read-only, the
+process has no effective capabilities, and only `SYS_CHROOT` remains in the
+bounding set for Chromium's namespace sandbox. Only `/data` plus bounded tmpfs
+mounts are writable. Existing volumes need the one-time ownership migration in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## API
 
+The typed v1 response/error contract, result compatibility mode, versioning
+policy, and pagination headers are documented in
+[docs/API.md](docs/API.md). Every response advertises
+`X-Scrapeyard-API-Version: 1`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Service health and runtime probes |
+| `GET` | `/health`, `/health/live` | Minimal public process liveness |
+| `GET` | `/health/ready` | Protected dependency/capacity readiness |
+| `GET` | `/metrics` | Protected Prometheus operational metrics |
 | `POST` | `/scrape` | Submit an ad hoc scrape |
 | `POST` | `/jobs` | Register a scheduled job |
+| `PUT` | `/jobs/{job_id}` | Replace future-run config and schedule |
 | `GET` | `/jobs` | List jobs |
 | `GET` | `/jobs/{job_id}` | Read job details and run state |
+| `POST` | `/jobs/{job_id}/pause` | Pause future cron fires |
+| `POST` | `/jobs/{job_id}/resume` | Resume future cron fires |
+| `POST` | `/jobs/{job_id}/trigger` | Queue a manual run using the current config version |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel the current queued/running delivery and wait for quiescence |
 | `DELETE` | `/jobs/{job_id}` | Delete a job |
 | `GET` | `/results/{job_id}` | Read stored results |
 | `GET` | `/errors` | Query stored errors |
 
-Non-health endpoints require `X-API-Key` when `SCRAPEYARD_API_KEYS` is set.
+Protected endpoints require `X-API-Key` when `SCRAPEYARD_API_CREDENTIALS` is
+set. Named credentials declare `submit`, `read`, `schedule-admin`, `delete`,
+and/or `health-detail` scopes and may be restricted to project names.
+`POST /scrape` accepts an optional `Idempotency-Key` containing 1–128 visible
+ASCII bytes. For 24 hours by default, retrying byte-identical YAML with the
+same authenticated caller and key returns the original `job_id` and `run_id`
+without another enqueue. Async submissions and sync requests that are still
+active return `202`; a completed sync submission returns `200`. Replays include
+`Idempotency-Replayed: true`. Reusing a live key with different YAML returns
+`409`. When authentication is disabled, all requests share one explicit
+`local-development` idempotency scope, so keys must be unique across all local
+clients. Omit the header to retain the original create-on-every-request
+behavior. Only SHA-256 key/API-key digests are persisted; plaintext keys are
+not logged.
+
 Cancellation and deletion are separate, idempotent state transitions. Active
 jobs must be cancelled before deletion; preserved results remain readable after
 the job/YAML is removed. See
@@ -160,7 +206,7 @@ running jobs are never preempted. Deliveries are FIFO within one priority.
 
 Ad-hoc, scheduled, and startup-recovered deliveries all use this routing. The
 first enqueue of a `run_id` wins across all queues; a duplicate cannot change
-its priority or create another executable delivery. `/health` reports
+its priority or create another executable delivery. `/health/ready` reports
 `workers.queue_depths` for the three priority intake queues. These counts
 include waiting and deferred sorted-set members, but exclude work already
 admitted to the base queue and work in progress.
@@ -183,6 +229,7 @@ Submit it:
 ```bash
 curl -sS \
   -H "X-API-Key: $SCRAPEYARD_API_KEY" \
+  -H "Idempotency-Key: $(openssl rand -hex 16)" \
   -H "Content-Type: application/x-yaml" \
   --data-binary @examples/basic-scrape.yaml \
   http://127.0.0.1:8420/scrape
@@ -311,7 +358,12 @@ settings are:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCRAPEYARD_API_KEYS` | empty | Comma-separated API key allow-list |
+| `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
+| `SCRAPEYARD_API_KEYS` | empty | Deprecated full-admin migration allow-list; remove after converting to named credentials |
+| `SCRAPEYARD_ENCRYPTION_KEYS` | empty | JSON key-ID to base64 32-byte AES key map for persisted secrets |
+| `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Key ID used for new writes and startup rotation |
+| `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
+| `SCRAPEYARD_METRICS_REFRESH_INTERVAL_SECONDS` | `5` | Minimum interval between durable Prometheus gauge refreshes |
 | `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection for `arq` |
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
@@ -322,6 +374,10 @@ settings are:
 | `SCRAPEYARD_LOG_DIR` | `/data/logs` | Log directory |
 | `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | Max wait for sync scrape responses |
 | `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS` | `0.5` | Sync response polling interval |
+| `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` | `128` | Maximum visible-ASCII idempotency key length |
+| `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` | `24` | Caller/key replay and conflict window |
+| `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` | `1000` | Maximum expired key records removed per cleanup pass |
+| `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` | `60` | Maximum lateness for one coalesced in-process cron fire |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |
 | `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait for cancellation |
@@ -390,13 +446,16 @@ See [docs/TESTING.md](docs/TESTING.md) for the testing lanes.
 
 ## Deployment Notes
 
-- Set `SCRAPEYARD_API_KEYS` before exposing non-health endpoints.
+- Set `SCRAPEYARD_API_CREDENTIALS` before exposing protected endpoints.
 - Keep port `8420` private. Scrapeyard is designed to be consumed by Eyebox or
   another trusted internal service, not exposed as a public API.
 - Use persistent storage for `/data` and Redis append-only data.
 - Treat the current service as single-instance. The queue is Redis-backed, but
   SQLite stores and local result artifacts are not a horizontally scaled
-  deployment model.
+  deployment model. A second process sharing `SCRAPEYARD_DB_DIR` is rejected
+  by the kernel-backed instance lock, and multi-worker server settings fail
+  startup. See [docs/SCALING.md](docs/SCALING.md) for state ownership and the
+  future service-split boundary.
 - Store secrets in environment variables or an orchestrator secret store.
 - Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before promoting a runtime
   environment.

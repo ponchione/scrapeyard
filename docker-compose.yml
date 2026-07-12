@@ -1,7 +1,16 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
+    user: redis
     command: ["redis-server", "--appendonly", "yes"]
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    pids_limit: 128
+    cpus: "1.0"
+    mem_limit: 512m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777
     volumes:
       - redis-data:/data
     healthcheck:
@@ -10,16 +19,43 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    networks:
+      backend:
+        ipv4_address: 172.30.0.249
 
   scrapeyard:
     build: .
-    ports:
-      - "0.0.0.0:8420:8420"
+    command: ["uvicorn", "scrapeyard.main:app", "--host", "0.0.0.0", "--port", "8420", "--workers", "1"]
+    deploy:
+      replicas: 1
+    init: true
+    expose: ["8420"]
     depends_on:
       redis:
         condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["SYS_CHROOT"]
     security_opt:
-      - seccomp:unconfined
+      - "no-new-privileges:true"
+      - "apparmor:scrapeyard-chromium"
+      - "seccomp:./security/seccomp/chromium.json"
+    pids_limit: 512
+    cpus: "4.0"
+    mem_limit: 4g
+    shm_size: 1g
+    stop_grace_period: 40s
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=512m,mode=1777
+      - /run:rw,nosuid,nodev,noexec,size=16m,mode=0755
+      - /home/scrapeyard/.cache:rw,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=0700
+      - /home/scrapeyard/.config:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+      - /home/scrapeyard/.local:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
+      - /home/scrapeyard/.camoufox:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=0700
     volumes:
       - scrapeyard-data:/data
     healthcheck:
@@ -29,7 +65,9 @@ services:
       start_period: 30s
       retries: 3
     environment:
-      SCRAPEYARD_API_KEYS: "${SCRAPEYARD_API_KEYS:?set SCRAPEYARD_API_KEYS before running docker compose}"
+      SCRAPEYARD_API_CREDENTIALS: "${SCRAPEYARD_API_CREDENTIALS:?set SCRAPEYARD_API_CREDENTIALS before running docker compose}"
+      SCRAPEYARD_ENCRYPTION_KEYS: "${SCRAPEYARD_ENCRYPTION_KEYS:?set SCRAPEYARD_ENCRYPTION_KEYS before running docker compose}"
+      SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID: "${SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID:?set SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID before running docker compose}"
       # Queue
       SCRAPEYARD_REDIS_DSN: "redis://redis:6379/0"
       SCRAPEYARD_QUEUE_NAME: "scrapeyard"
@@ -63,6 +101,7 @@ services:
       SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB: "100"
       SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS: "86400"
       SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN: "true"
+      SCRAPEYARD_STORAGE_CLEANUP_INTERVAL_SECONDS: "21600"
       # Data directories
       SCRAPEYARD_DB_DIR: "/data/db"
       SCRAPEYARD_ADAPTIVE_DIR: "/data/adaptive"
@@ -71,7 +110,17 @@ services:
       SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES: "3"
       SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS: "300"
     restart: unless-stopped
+    networks:
+      backend:
+        ipv4_address: 172.30.0.250
 
 volumes:
   redis-data:
   scrapeyard-data:
+
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.0/25
