@@ -33,7 +33,17 @@ _FORBIDDEN_CUSTOM_HEADERS = frozenset(
         "upgrade",
     }
 )
-_FORBIDDEN_BROWSER_ADDITIONAL_ARGUMENTS = frozenset({"addons", "proxy"})
+_ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS = frozenset(
+    {
+        "custom_fonts_only",
+        "fingerprint",
+        "fonts",
+        "locale",
+        "screen",
+        "webgl_config",
+        "window",
+    }
+)
 
 MAX_BROWSER_ACTIONS = 50
 MAX_BROWSER_ACTION_REPEAT = 50
@@ -459,13 +469,13 @@ class BrowserConfig(StrictConfigModel):
     @field_validator("additional_arguments")
     @classmethod
     def _reject_managed_additional_arguments(cls, value: dict[str, object]) -> dict[str, object]:
-        forbidden = sorted(
-            key for key in value if key.lower() in _FORBIDDEN_BROWSER_ADDITIONAL_ARGUMENTS
+        unsupported = sorted(
+            key for key in value if key.lower() not in _ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS
         )
-        if forbidden:
+        if unsupported:
             raise ValueError(
-                "browser.additional_arguments must not override managed option(s): "
-                + ", ".join(forbidden)
+                "browser.additional_arguments contains unsupported or unsafe option(s): "
+                + ", ".join(unsupported)
             )
         return value
 

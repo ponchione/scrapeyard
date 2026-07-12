@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -323,9 +324,31 @@ class TestResolvedTargets:
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
 
-    def test_browser_additional_arguments_rejects_proxy_override(self):
-        with pytest.raises(ValidationError, match="managed option"):
-            BrowserConfig(additional_arguments={"proxy": "http://127.0.0.1:8080"})
+    @pytest.mark.parametrize(
+        "option",
+        [
+            "addons",
+            "args",
+            "env",
+            "executable_path",
+            "ignore_default_args",
+            "persistent_context",
+            "proxy",
+        ],
+    )
+    def test_browser_additional_arguments_rejects_process_controls(self, option):
+        with pytest.raises(ValidationError, match="unsupported or unsafe"):
+            BrowserConfig(additional_arguments={option: "attacker-controlled"})
+
+    def test_browser_additional_arguments_accepts_fingerprint_controls(self):
+        config = BrowserConfig(
+            additional_arguments={
+                "locale": "en-US",
+                "screen": {"width": 1280, "height": 720},
+            }
+        )
+
+        assert config.additional_arguments["locale"] == "en-US"
 
     def test_long_form_selector_transform_is_validated_at_config_load(self):
         with pytest.raises(ValidationError, match="Invalid selector transform"):
@@ -466,6 +489,31 @@ class TestParseTransform:
     def test_regex(self):
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"
+
+    def test_regex_rejects_oversized_patterns(self, monkeypatch):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(
+                transform_regex_max_pattern_bytes=4,
+                transform_regex_timeout_seconds=0.1,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="exceeds 4 UTF-8 bytes"):
+            parse_transform("regex:12345:x")
+
+    def test_regex_times_out_catastrophic_backtracking(self, monkeypatch):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(
+                transform_regex_max_pattern_bytes=2048,
+                transform_regex_timeout_seconds=0.001,
+            ),
+        )
+        fn = parse_transform("regex:(a|aa)+$:x")
+
+        with pytest.raises(ValueError, match="timed out"):
+            fn("a" * 20_000 + "!")
 
     def test_remove(self):
         fn = parse_transform("remove:$")
