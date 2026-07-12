@@ -187,7 +187,9 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     cleanup_task.cancel.assert_called_once()
     scheduler.shutdown.assert_called_once()
     pool.stop.assert_awaited_once()
-    main_module.close_webhook_dispatcher.assert_awaited_once_with(timeout=7)
+    worker_timeout = pool.stop.await_args.kwargs["timeout"]
+    webhook_timeout = main_module.close_webhook_dispatcher.await_args.kwargs["timeout"]
+    assert 0 <= webhook_timeout <= worker_timeout <= 7
     main_module.close_db.assert_awaited_once()
     assert app.state.instance_lock is None
 
@@ -201,6 +203,79 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     )
     restarted_lock.acquire()
     restarted_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_attempts_every_phase_after_independent_failures(monkeypatch):
+    app = FastAPI()
+    cleanup_task = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+    scheduler = SimpleNamespace(shutdown=MagicMock(side_effect=RuntimeError("scheduler")))
+    worker = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("worker")))
+    app.state.cleanup_task = cleanup_task
+    app.state.scheduler = scheduler
+    app.state.worker_pool = worker
+    close_webhook = AsyncMock(side_effect=RuntimeError("webhook"))
+    close_database = AsyncMock(side_effect=RuntimeError("database"))
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    with pytest.raises(
+        RuntimeError,
+        match="scheduler, worker, webhook, database",
+    ):
+        await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=1)
+
+    assert cleanup_task.cancelled()
+    scheduler.shutdown.assert_called_once_with()
+    worker.stop.assert_awaited_once()
+    close_webhook.assert_awaited_once()
+    close_database.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_passes_remaining_shared_budget_to_later_phases(monkeypatch):
+    app = FastAPI()
+    cleanup_task = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+    observed: dict[str, float] = {}
+
+    async def stop_worker(*, timeout: float) -> None:
+        observed["worker"] = timeout
+        await asyncio.sleep(0.02)
+
+    async def close_webhook(*, timeout: float) -> None:
+        observed["webhook"] = timeout
+
+    app.state.cleanup_task = cleanup_task
+    app.state.worker_pool = SimpleNamespace(stop=stop_worker)
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", AsyncMock())
+
+    await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0.2)
+
+    assert 0 < observed["webhook"] < observed["worker"] <= 0.2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_zero_grace_still_cancels_and_closes_everything(monkeypatch):
+    app = FastAPI()
+    cleanup_task = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+    worker = SimpleNamespace(stop=AsyncMock())
+    close_webhook = AsyncMock()
+    close_database = AsyncMock()
+    app.state.cleanup_task = cleanup_task
+    app.state.worker_pool = worker
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0)
+
+    assert cleanup_task.cancelled()
+    worker.stop.assert_awaited_once_with(timeout=0.0)
+    close_webhook.assert_awaited_once_with(timeout=0.0)
+    close_database.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

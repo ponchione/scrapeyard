@@ -284,7 +284,7 @@ class WorkerPool:
         )
         self._started = True
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout: float | None = None) -> None:
         """Stop picking new jobs and close the embedded worker."""
         if not self._started:
             return
@@ -293,7 +293,11 @@ class WorkerPool:
             raise RuntimeError("WorkerPool.stop() called but worker was never started")
 
         self._worker.allow_pick_jobs = False
-        grace_seconds = get_settings().workers_shutdown_grace_seconds
+        grace_seconds = (
+            get_settings().workers_shutdown_grace_seconds
+            if timeout is None
+            else max(0.0, timeout)
+        )
         pending = [
             task for task in self._worker.tasks.values()
             if not task.done()

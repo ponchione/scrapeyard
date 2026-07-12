@@ -9,6 +9,8 @@ import pytest
 from scrapeyard.api.scrape_submission import (
     ResultArtifactUnavailableError,
     submit_scrape_job,
+    wait_for_persisted_job,
+    wait_for_queued_job,
 )
 from scrapeyard.config.schema import ExecutionMode, FailStrategy, FetcherType
 from scrapeyard.models.job import JobStatus
@@ -23,6 +25,16 @@ class _QueuedJob:
     async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
         if self.should_timeout:
             raise asyncio.TimeoutError
+
+
+class _CancelledQueuedJob:
+    async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
+        raise asyncio.CancelledError
+
+
+class _BlockingQueuedJob:
+    async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
+        await asyncio.Event().wait()
 
 
 def _config(
@@ -42,6 +54,50 @@ def _config(
     )
     config.name = name
     return config
+
+
+@pytest.mark.asyncio
+async def test_wait_for_queued_job_treats_arq_cancellation_as_terminal():
+    completed = await wait_for_queued_job(
+        _CancelledQueuedJob(),
+        timeout_seconds=5,
+        poll_delay_seconds=0.1,
+    )
+
+    assert completed is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_queued_job_propagates_request_cancellation():
+    waiter = asyncio.create_task(
+        wait_for_queued_job(
+            _BlockingQueuedJob(),
+            timeout_seconds=5,
+            poll_delay_seconds=0.1,
+        )
+    )
+    await asyncio.sleep(0)
+    waiter.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [JobStatus.cancelled, JobStatus.deleting])
+async def test_wait_for_persisted_job_stops_for_non_result_terminal_status(status):
+    job_store = AsyncMock()
+    job_store.get_job.return_value = MagicMock(status=status)
+
+    completed = await wait_for_persisted_job(
+        "job-1",
+        job_store=job_store,
+        timeout_seconds=5,
+        poll_delay_seconds=0.1,
+    )
+
+    assert completed is False
+    job_store.get_job.assert_awaited_once_with("job-1")
 
 
 @pytest.mark.asyncio
