@@ -42,17 +42,21 @@ _HTML_EXCERPT_CHARS = 2000
 _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
+_MAX_BLOCKED_REQUESTS = 20
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
 
 
 _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
-    "scrapeyard_browser_block_resources", default=None,
+    "scrapeyard_browser_block_resources",
+    default=None,
 )
 _BROWSER_REQUIRE_RESOLVED_DNS: ContextVar[bool] = ContextVar(
-    "scrapeyard_browser_require_resolved_dns", default=False,
+    "scrapeyard_browser_require_resolved_dns",
+    default=False,
 )
 _BROWSER_BLOCKED_REQUESTS: ContextVar[list[dict[str, str]] | None] = ContextVar(
-    "scrapeyard_browser_blocked_requests", default=None,
+    "scrapeyard_browser_blocked_requests",
+    default=None,
 )
 
 
@@ -98,12 +102,20 @@ async def _guarded_async_intercept_route(route: Any) -> None:
                 allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
             )
         except UnsafeURLError:
+            safe_request_url = truncate_text(
+                redact_userinfo_in_url(request_url),
+                _EVENT_TEXT_CHARS,
+            )
             blocked_requests = _BROWSER_BLOCKED_REQUESTS.get()
             if blocked_requests is not None:
-                blocked_requests.append({"kind": "request", "url": request_url})
+                _bounded_append(
+                    blocked_requests,
+                    {"kind": "request", "url": safe_request_url},
+                    limit=_MAX_BLOCKED_REQUESTS,
+                )
             logger.warning(
                 "Blocked browser request to non-public URL: %s",
-                redact_userinfo_in_url(request_url),
+                safe_request_url,
             )
             await route.abort()
             raise
@@ -234,7 +246,9 @@ def _supported_fetcher_kwargs(fetcher_type: FetcherType) -> set[str]:
     return set(inspect.signature(fetcher_cls.async_fetch).parameters)
 
 
-def browser_fetch_kwargs(target: TargetConfig, fetcher_type: FetcherType, *, proxy_url: str | None) -> dict[str, Any]:
+def browser_fetch_kwargs(
+    target: TargetConfig, fetcher_type: FetcherType, *, proxy_url: str | None
+) -> dict[str, Any]:
     """Build browser-specific fetch kwargs from target config, filtered to the fetcher signature."""
     browser = target_browser_config(target)
     browser_values = browser.model_dump(mode="json")
@@ -417,9 +431,7 @@ async def _capture_html_excerpt(
 ) -> None:
     content_awaitable = page.content()
     content = (
-        await content_awaitable
-        if budget is None
-        else await budget.wait_for(content_awaitable)
+        await content_awaitable if budget is None else await budget.wait_for(content_awaitable)
     )
     excerpt = truncate_text(content)
     payload = excerpt.encode("utf-8")
@@ -444,9 +456,7 @@ async def _capture_html_excerpt(
     )
     capture["html_excerpt_omitted"] = granted == 0
     capture["html_excerpt"] = (
-        payload[:granted].decode("utf-8", errors="ignore") or None
-        if granted > 0
-        else None
+        payload[:granted].decode("utf-8", errors="ignore") or None if granted > 0 else None
     )
 
 
@@ -550,9 +560,7 @@ async def capture_browser_state(
             await budget.wait_for(validate_url)
     try:
         title = page.title()
-        capture["page_title"] = (
-            await title if budget is None else await budget.wait_for(title)
-        )
+        capture["page_title"] = await title if budget is None else await budget.wait_for(title)
     except BudgetExceeded:
         raise
     except Exception as exc:

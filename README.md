@@ -293,6 +293,12 @@ pagination:
 Browser-backed targets may define an ordered `browser.actions` list with
 `click`, `wait_for_selector`, `wait_ms`, `scroll`, and `repeat_click` actions.
 Use hard limits such as `times` or `max_times` on repeating actions.
+For `fetcher: stealthy`, `browser.additional_arguments` deliberately accepts
+only YAML-safe Camoufox overrides: `locale` (one tag or a list), `fonts` (a
+bounded list of names), `custom_fonts_only` (which requires `fonts`), and
+`window` (a two-integer `[width, height]` list). Python-object controls such as
+custom fingerprints and screen constraint objects are not accepted by the
+service schema.
 
 Example browser actions:
 

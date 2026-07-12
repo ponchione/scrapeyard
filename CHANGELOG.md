@@ -13,6 +13,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+### Added
+- Added configurable transform pipeline-step and intermediate-value byte caps,
+  with environment and Compose wiring.
+
+### Changed
+- Restricted stealth browser `additional_arguments` to bounded, typed,
+  YAML-safe Camoufox values (`locale`, `fonts`, `custom_fonts_only`, and
+  `window`); Python-object fingerprint and screen controls are rejected.
+- Expanded regression coverage for browser diagnostics, backup relocation,
+  independent cleanup phases, cancellation, and shutdown lifecycle behavior.
+
 ### Fixed
 - Restricted readiness project summaries to each monitoring credential's
   authorized projects.
@@ -24,6 +35,21 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   rollback cleanly for a safe retry.
 - Closed release-qualification path-filter gaps and corrected targeted-test and
   readiness-status documentation.
+- Bounded regex inputs, browser action counts/repeats, selector transform
+  pipelines, every intermediate transform value, and blocked-browser request
+  diagnostics before they can grow without limit.
+- Relocated result metadata safely when a backup is restored to another data
+  root, checkpointed restore-only WAL state, and validated the complete schema,
+  indexes, idempotency table, and exact migration ledger.
+- Enforced one hard monotonic shutdown deadline across cleanup, workers,
+  webhooks, HTTP client closure, and database closure, even when an awaitable
+  resists cancellation.
+- Preserved cancellation and ownership outcomes through scrape submission and
+  shutdown instead of misclassifying them as internal failures.
+- Isolated cleanup phases so later retention work still runs after a failure,
+  and now reports artifact reconciliation operation failures as incomplete.
+- Standardized unexpected API failures on the safe versioned error envelope
+  and prevented internal exception details from leaking.
 
 ## 0.6.0 — 2026-07-12
 

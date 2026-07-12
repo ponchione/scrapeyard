@@ -431,6 +431,52 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
 
 
 @pytest.mark.asyncio
+async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"disable_resources": False},
+    )
+    routes = [
+        FakeRoute(
+            "http://user:password@127.0.0.1/" + ("x" * 400) + f"?api_key=secret-{index}",
+            "document",
+        )
+        for index in range(25)
+    ]
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            last_error: UnsafeURLError | None = None
+            for route in routes:
+                try:
+                    await scrapling_pw_engine.async_intercept_route(route)
+                except UnsafeURLError as exc:
+                    last_error = exc
+            assert last_error is not None
+            raise last_error
+
+    with pytest.raises(UnsafeURLError) as exc_info:
+        await fetch_browser_response(
+            RouteFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            artifacts_dir=None,
+        )
+
+    blocked = exc_info.value.debug["blocked_requests"]
+    assert len(blocked) == 20
+    assert blocked[0]["url"].endswith("...")
+    assert all(len(entry["url"]) <= 300 for entry in blocked)
+    assert all("user:password" not in entry["url"] for entry in blocked)
+    assert all("secret-" not in entry["url"] for entry in blocked)
+
+
+@pytest.mark.asyncio
 async def test_fetch_browser_response_can_require_resolved_browser_route_dns(monkeypatch) -> None:
     target = TargetConfig(
         url="https://example.com",
