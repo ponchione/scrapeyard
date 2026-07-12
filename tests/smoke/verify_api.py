@@ -382,15 +382,24 @@ def verify_ssrf_defenses(
                 raise SmokeFailure(f"{label}: missing URL-guard diagnostic: {target}")
         else:
             blocked = (target.get("debug") or {}).get("blocked_requests", [])
-            if not any(
+            route_blocked = any(
                 PRIVATE_ORIGIN in str(item.get("url", ""))
                 for item in blocked
                 if isinstance(item, dict)
-            ):
-                raise SmokeFailure(f"{label}: missing browser route block: {target}")
+            )
             detail = str(target.get("error_detail") or "")
-            if "UnsafeURLError" not in detail or "non-public" not in detail:
-                raise SmokeFailure(f"{label}: missing browser redirect guard diagnostic: {target}")
+            # Chromium does not re-dispatch Playwright's route callback for
+            # every redirect after route.continue_(). The connected-IP egress
+            # policy is therefore the authoritative redirect/rebinding guard.
+            # Accept either the defense-in-depth route rejection or the
+            # firewall's refused connection, then prove below that the private
+            # fixture endpoint received no request.
+            network_blocked = (
+                target.get("error_type") == "browser_error"
+                and "ERR_CONNECTION_REFUSED" in detail
+            )
+            if not route_blocked and not network_blocked:
+                raise SmokeFailure(f"{label}: missing browser network rejection: {target}")
 
     status, stats = _request(f"{fixture_url}/__stats")
     _write_diagnostic(diagnostics, "fixture-protected-stats", stats)

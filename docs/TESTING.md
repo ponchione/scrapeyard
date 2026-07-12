@@ -345,7 +345,7 @@ normal non-root UID/GID 10001 runtime, the production `/data` volume, default
 Chromium seccomp/AppArmor policies, read-only root filesystem, and the same
 capability boundary. It does not contact public scrape targets or webhook
 services. The fixture's emulated-public and private networks remain isolated,
-and Item 14's guarded browser-route interception and protected-endpoint
+and Item 14's browser-route/connected-IP rejection and protected-endpoint
 SSRF proof are unchanged.
 
 Run the complete bounded profile locally:
