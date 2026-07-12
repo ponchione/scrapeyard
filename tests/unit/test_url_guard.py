@@ -11,6 +11,7 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
+    resolve_public_url,
     url_host_label,
 )
 
@@ -113,6 +114,34 @@ def test_assert_public_url_can_require_dns_resolution(monkeypatch) -> None:
 
     with pytest.raises(UnsafeURLError, match="could not be resolved"):
         assert_public_url("https://unresolved.example/resource", allow_unresolved=False)
+
+
+def test_resolve_public_url_pins_validated_ip_and_preserves_host_and_sni(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+
+    resolved = resolve_public_url("https://user:pass@example.com:8443/path?q=1")
+
+    assert resolved.connect_url == "https://user:pass@93.184.216.34:8443/path?q=1"
+    assert resolved.host_header == "example.com:8443"
+    assert resolved.sni_hostname == "example.com"
+
+
+def test_resolve_public_url_rejects_mixed_public_and_private_dns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+        ],
+    )
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        resolve_public_url("https://example.com/path")
 
 
 def test_assert_public_url_rejects_percent_encoded_hostname() -> None:
@@ -234,7 +263,10 @@ def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:
 
     redacted = redact_sensitive_mapping(value)
 
-    assert redacted["headers"] == {"Authorization": "<redacted>", "X-Test": "visible"}
+    assert redacted["headers"] == {
+        "Authorization": "<redacted>",
+        "X-Test": "<redacted>",
+    }
     assert redacted["nested"] == {"api_token": "<redacted>"}
     assert redacted["proxy"] == "socks5://gate.example.com:7777"
 

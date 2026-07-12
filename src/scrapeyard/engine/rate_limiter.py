@@ -11,6 +11,8 @@ from typing import Protocol
 from arq.connections import ArqRedis
 from redis.exceptions import NoScriptError
 
+from scrapeyard.runtime.metrics import observe_rate_limit_wait
+
 logger = logging.getLogger(__name__)
 _DEFAULT_LOCAL_RETENTION_SECONDS = 3600.0
 
@@ -45,6 +47,7 @@ class LocalDomainRateLimiter:
                 logger.debug(
                     "Domain rate limit: waiting %.1fs for %s (local)", wait, domain,
                 )
+                observe_rate_limit_wait("domain", wait)
                 await asyncio.sleep(wait)
             self._last_request[domain] = time.monotonic()
 
@@ -135,4 +138,5 @@ return {0, remaining_ms}
                 "Domain rate limit: waiting %.1fs for %s (cross-job)",
                 wait, domain,
             )
+            observe_rate_limit_wait("domain", wait)
             await asyncio.sleep(wait)

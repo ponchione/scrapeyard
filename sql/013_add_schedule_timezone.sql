@@ -1,0 +1,1 @@
+ALTER TABLE jobs ADD COLUMN schedule_timezone TEXT NOT NULL DEFAULT 'UTC';

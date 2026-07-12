@@ -8,17 +8,24 @@ from typing import Any
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_join
+from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.common.time import utc_now
+from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.protocols import JobStore, ResultStore
-from scrapeyard.storage.types import RunOwnershipError
+from scrapeyard.storage.types import RunOwnershipError, SaveResultMeta
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
 from scrapeyard.webhook.dispatcher import WebhookNotifier
 
 logger = logging.getLogger(__name__)
 
 
-def build_run_paths(settings: Any, project: str, job_name: str, run_id: str | None) -> tuple[str, str | None]:
+def build_run_paths(
+    settings: ServiceSettings,
+    project: str,
+    job_name: str,
+    run_id: str | None,
+) -> tuple[str, str | None]:
     adaptive_dir = str(safe_join(settings.adaptive_dir, project))
     browser_debug_enabled = bool(getattr(settings, "browser_debug_enabled", False))
     run_artifacts_dir = None if run_id is None or not browser_debug_enabled else str(
@@ -37,7 +44,7 @@ async def save_run_result(
     record_count: int,
     budget: RunBudget | None = None,
     max_serialized_bytes: int | None = None,
-) -> Any:
+) -> SaveResultMeta:
     return await result_store.save_result(
         job_id,
         output_data,
@@ -52,7 +59,7 @@ async def save_run_result(
 async def dispatch_webhook(
     *,
     webhook_dispatcher: WebhookNotifier | None,
-    config: Any,
+    config: ScrapeConfig,
     delivery: WebhookDeliveryCreate | None,
 ) -> None:
     """Schedule an already-durable terminal delivery without affecting status."""

@@ -15,7 +15,14 @@ from scrapeyard.queue.reconciliation import (
     QueuedReconciliationError,
     QueuedReconciliationSummary,
 )
-from scrapeyard.api.middleware import APIKeyAuthMiddleware, RateLimitMiddleware, RequestSizeLimitMiddleware
+from scrapeyard.runtime.instance_guard import SingleInstanceError
+from scrapeyard.api.middleware import (
+    APIKeyAuthMiddleware,
+    APIVersionHeaderMiddleware,
+    MetricsMiddleware,
+    RateLimitMiddleware,
+    RequestSizeLimitMiddleware,
+)
 from scrapeyard.storage.types import RunRecovery
 
 
@@ -67,13 +74,16 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     settings = SimpleNamespace(
         log_dir="/tmp/logs",
         log_level="DEBUG",
-        db_dir="/tmp/db",
+        db_dir=str(tmp_path / "db"),
+        redis_dsn="redis://redis:6379/0",
+        queue_name="scrapeyard-test",
         storage_results_dir=str(tmp_path / "results"),
         adaptive_dir=str(tmp_path / "adaptive"),
         browser_debug_enabled=False,
         workers_shutdown_grace_seconds=7,
         workers_queued_claim_timeout_seconds=300,
         workers_running_heartbeat_timeout_seconds=600,
+        storage_cleanup_interval_seconds=21600,
     )
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     job_store = SimpleNamespace(
@@ -109,6 +119,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     monkeypatch.setattr(main_module, "get_job_store", lambda: job_store)
     monkeypatch.setattr(main_module, "setup_logging", MagicMock())
     monkeypatch.setattr(main_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
     monkeypatch.setattr(
         main_module,
         "build_runtime_services",
@@ -135,7 +146,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     monkeypatch.setattr(
         main_module,
         "start_cleanup_loop",
-        lambda _result_store, _outbox_store: cleanup_task,
+        lambda _result_store, _outbox_store, *, interval_hours, job_store: cleanup_task,
     )
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
@@ -144,7 +155,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         assert not hasattr(app.state, "job_store")
         assert not hasattr(app.state, "error_store")
         assert not hasattr(app.state, "result_store")
-        assert not hasattr(app.state, "webhook_dispatcher")
+        assert app.state.webhook_dispatcher is webhook_dispatcher
+        assert app.state.webhook_outbox_store == "webhook-outbox-store"
         assert app.state.worker_pool is pool
         assert app.state.scheduler is scheduler
         assert app.state.cleanup_task is cleanup_task
@@ -153,7 +165,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         assert not (tmp_path / "browser-debug").exists()
 
     main_module.setup_logging.assert_called_once_with("/tmp/logs", "DEBUG")
-    main_module.init_db.assert_awaited_once_with("/tmp/db")
+    main_module.init_db.assert_awaited_once_with(str(tmp_path / "db"))
+    main_module.migrate_persisted_secrets.assert_awaited_once_with()
     job_store.recover_stale_running_jobs.assert_awaited_once_with(
         now - timedelta(seconds=600),
         now,
@@ -176,6 +189,58 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     pool.stop.assert_awaited_once()
     main_module.close_webhook_dispatcher.assert_awaited_once_with(timeout=7)
     main_module.close_db.assert_awaited_once()
+    assert app.state.instance_lock is None
+
+    restarted_lock = main_module.SingleInstanceLock(
+        main_module.instance_lock_path(settings.db_dir),
+        main_module.instance_identity(
+            db_dir=settings.db_dir,
+            queue_name=settings.queue_name,
+            redis_dsn=settings.redis_dsn,
+        ),
+    )
+    restarted_lock.acquire()
+    restarted_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_rejects_second_instance_before_database_start(monkeypatch, tmp_path):
+    app = FastAPI()
+    settings = SimpleNamespace(
+        log_dir=str(tmp_path / "logs"),
+        log_level="INFO",
+        db_dir=str(tmp_path / "db"),
+        redis_dsn="redis://redis:6379/0",
+        queue_name="shared-queue",
+        storage_results_dir=str(tmp_path / "results"),
+        adaptive_dir=str(tmp_path / "adaptive"),
+        workers_shutdown_grace_seconds=7,
+    )
+    held_lock = main_module.SingleInstanceLock(
+        main_module.instance_lock_path(settings.db_dir),
+        main_module.instance_identity(
+            db_dir=settings.db_dir,
+            queue_name=settings.queue_name,
+            redis_dsn=settings.redis_dsn,
+        ),
+    )
+    held_lock.acquire()
+    init_db = AsyncMock()
+    shutdown = AsyncMock()
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(main_module, "init_db", init_db)
+    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+
+    try:
+        with pytest.raises(SingleInstanceError, match="Another Scrapeyard"):
+            async with main_module.lifespan(app):
+                pytest.fail("contending lifespan must never begin serving")
+    finally:
+        held_lock.release()
+
+    init_db.assert_not_awaited()
+    shutdown.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -223,7 +288,10 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
     monkeypatch.setattr(
         main_module,
         "get_settings",
-        lambda: SimpleNamespace(workers_queued_claim_timeout_seconds=300),
+        lambda: SimpleNamespace(
+            workers_queued_claim_timeout_seconds=300,
+            storage_cleanup_interval_seconds=21600,
+        ),
     )
     monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
     monkeypatch.setattr(
@@ -287,12 +355,14 @@ async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch):
+async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(
         log_dir="/tmp/logs",
         log_level="DEBUG",
-        db_dir="/tmp/db",
+        db_dir=str(tmp_path / "db"),
+        redis_dsn="redis://redis:6379/0",
+        queue_name="scrapeyard-test",
         storage_results_dir="/tmp/results",
         adaptive_dir="/tmp/adaptive",
         workers_shutdown_grace_seconds=7,
@@ -302,6 +372,7 @@ async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch):
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "setup_logging", MagicMock())
     monkeypatch.setattr(main_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
     monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
     monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
     monkeypatch.setattr(main_module, "_startup_runtime_services", AsyncMock())
@@ -342,6 +413,15 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     monkeypatch.setattr(main_module, "probe_redis", _ok_async)
     monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
     monkeypatch.setattr(main_module, "probe_disk", _ok_sync)
+    monkeypatch.setattr(main_module, "probe_result_storage", _ok_sync)
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        lambda: {
+            name: ProbeResult(True)
+            for name in ("worker", "scheduler", "cleanup", "webhook")
+        },
+    )
     import scrapeyard.runtime.health as runtime_health
     monkeypatch.setattr(runtime_health.time, "monotonic", lambda: 13.3)
 
@@ -354,10 +434,12 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     assert payload["projects"] == {}
 
 
-def test_app_middleware_stack_keeps_size_limit_outermost_then_rate_limit_then_auth():
+def test_app_middleware_stack_versions_all_size_rate_and_auth_responses():
     middleware_classes = [middleware.cls for middleware in main_module.app.user_middleware]
 
-    assert middleware_classes[:3] == [
+    assert middleware_classes[:5] == [
+        MetricsMiddleware,
+        APIVersionHeaderMiddleware,
         RequestSizeLimitMiddleware,
         RateLimitMiddleware,
         APIKeyAuthMiddleware,

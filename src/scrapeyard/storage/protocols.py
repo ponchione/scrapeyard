@@ -11,9 +11,11 @@ from scrapeyard.storage.types import (
     CancellationOutcome,
     DeletionFinalizationOutcome,
     DeletionReservationOutcome,
+    IdempotentJobOutcome,
     ResultMetadata,
     ResultPayload,
     ResultReconciliationReport,
+    ScheduledJobMutationOutcome,
     RunRecovery,
     SaveResultMeta,
     StaleQueuedJob,
@@ -33,6 +35,57 @@ class JobStore(Protocol):
     """Async interface for job persistence."""
 
     async def save_job(self, job: Job) -> str: ...
+
+    async def create_idempotent_job(
+        self,
+        job: Job,
+        *,
+        caller_scope: str,
+        key_digest: str,
+        request_hash: str,
+        response_mode: str,
+        expires_at: datetime,
+    ) -> IdempotentJobOutcome:
+        """Atomically create or match one caller-scoped ad-hoc submission."""
+        ...
+
+    async def delete_expired_idempotency_records(
+        self,
+        expired_before: datetime,
+        *,
+        limit: int,
+    ) -> int:
+        """Delete a bounded batch of expired submission records."""
+        ...
+
+    async def update_scheduled_job(
+        self,
+        job_id: str,
+        *,
+        project: str,
+        name: str,
+        config_yaml: str,
+        schedule_cron: str,
+        schedule_timezone: str,
+        schedule_enabled: bool,
+        updated_at: datetime,
+    ) -> ScheduledJobMutationOutcome: ...
+
+    async def set_schedule_enabled(
+        self,
+        job_id: str,
+        *,
+        enabled: bool,
+        updated_at: datetime,
+    ) -> ScheduledJobMutationOutcome: ...
+
+    async def restore_scheduled_job(self, expected: Job, previous: Job) -> bool:
+        """Compensate a failed scheduler registration if state is unchanged."""
+        ...
+
+    async def rollback_scheduled_job_creation(self, job_id: str) -> bool:
+        """Remove a never-triggered scheduled job after registration failure."""
+        ...
 
     async def get_job(self, job_id: str) -> Job: ...
 
@@ -166,6 +219,7 @@ class JobStore(Protocol):
         new_run_id: str,
         queued_at: datetime,
         stale_before: datetime | None = None,
+        expected_config_yaml: str | None = None,
     ) -> bool:
         """Conditionally replace the current job delivery with a queued run."""
         ...
@@ -229,8 +283,8 @@ class JobStore(Protocol):
 
     async def list_scheduled_jobs(
         self,
-    ) -> list[tuple[str, str, bool]]:
-        """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
+    ) -> list[tuple[str, str, str, bool]]:
+        """Return ID, cron, timezone, and enabled state for scheduled jobs."""
         ...
 
 

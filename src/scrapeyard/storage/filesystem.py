@@ -41,6 +41,11 @@ def write_bytes_file(path: str | Path, payload: bytes) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         with suppress(FileNotFoundError):
             tmp.unlink()

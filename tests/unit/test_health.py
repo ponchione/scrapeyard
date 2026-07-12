@@ -1,5 +1,7 @@
 """Test the /health endpoint."""
 
+import asyncio
+
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -49,6 +51,14 @@ def _all_probes_ok(monkeypatch) -> None:
     monkeypatch.setattr("scrapeyard.main.probe_redis", _ok_async)
     monkeypatch.setattr("scrapeyard.main.probe_sqlite", _ok_async)
     monkeypatch.setattr("scrapeyard.main.probe_disk", _ok_sync)
+    monkeypatch.setattr("scrapeyard.main.probe_result_storage", _ok_sync)
+    monkeypatch.setattr(
+        "scrapeyard.main._background_probes",
+        lambda: {
+            name: ProbeResult(True)
+            for name in ("worker", "scheduler", "cleanup", "webhook")
+        },
+    )
     monkeypatch.setattr(
         "scrapeyard.queue.pool.WorkerPool.queue_depths",
         AsyncMock(return_value={"high": 2, "normal": 3, "low": 5}),
@@ -56,11 +66,29 @@ def _all_probes_ok(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/health", "/health/live"])
+async def test_public_liveness_is_minimal_and_does_not_run_probes(monkeypatch, path):
+    monkeypatch.setattr(
+        "scrapeyard.main.probe_redis",
+        AsyncMock(side_effect=AssertionError("liveness must not probe Redis")),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.main.probe_sqlite",
+        AsyncMock(side_effect=AssertionError("liveness must not probe SQLite")),
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path)
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
 async def test_health_returns_200_when_probes_pass(monkeypatch):
     _all_probes_ok(monkeypatch)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
@@ -80,7 +108,7 @@ async def test_health_returns_503_when_redis_unreachable(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
     assert response.status_code == 503
     data = response.json()
     assert data["status"] == "unhealthy"
@@ -88,11 +116,65 @@ async def test_health_returns_503_when_redis_unreachable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_readiness_probes_every_database_and_fails_on_one(monkeypatch):
+    _all_probes_ok(monkeypatch)
+    seen: list[str] = []
+
+    async def _sqlite(db_name: str):
+        seen.append(db_name)
+        return ProbeResult(db_name != "errors.db", "errors unavailable")
+
+    monkeypatch.setattr(main_module, "probe_sqlite", _sqlite)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert set(seen) == {"jobs.db", "errors.db", "results_meta.db"}
+    assert response.json()["dependencies"]["sqlite_errors"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_when_required_background_task_stops(monkeypatch):
+    _all_probes_ok(monkeypatch)
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        lambda: {
+            "worker": ProbeResult(True),
+            "scheduler": ProbeResult(True),
+            "cleanup": ProbeResult(False, "cleanup task failed: RuntimeError"),
+            "webhook": ProbeResult(True),
+        },
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["background_tasks"]["cleanup"] == {
+        "ok": False,
+        "detail": "cleanup task failed: RuntimeError",
+    }
+
+
+@pytest.mark.asyncio
+async def test_timed_probe_has_explicit_timeout():
+    async def _blocked():
+        await asyncio.Event().wait()
+        return ProbeResult(True)
+
+    result = await main_module._timed_async_probe("blocked", _blocked(), 0.01)
+
+    assert result == ProbeResult(False, "blocked probe timed out after 0.01s")
+
+
+@pytest.mark.asyncio
 async def test_health_response_shape(monkeypatch):
     _all_probes_ok(monkeypatch)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
     data = response.json()
     assert "status" in data
     assert "uptime_seconds" in data
@@ -123,7 +205,7 @@ async def test_health_queue_depth_failure_is_stable_and_marks_redis_unhealthy(
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
 
     assert response.status_code == 503
     assert response.json()["workers"]["queue_depths"] == {
@@ -145,7 +227,7 @@ async def test_health_omits_project_summary_by_default(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
 
     assert response.json()["projects"] == {}
     project_summary.assert_not_awaited()
@@ -161,6 +243,7 @@ async def test_health_includes_project_summary_when_enabled(monkeypatch):
             health_include_projects=True,
             storage_results_dir="/tmp",
             health_disk_free_min_mb=0,
+            health_probe_timeout_seconds=2.0,
         ),
     )
     project_summary = AsyncMock(return_value={"private-project": {"job_count": 1}})
@@ -168,7 +251,7 @@ async def test_health_includes_project_summary_when_enabled(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+        response = await client.get("/health/ready")
 
     assert response.json()["projects"] == {"private-project": {"job_count": 1}}
     project_summary.assert_awaited_once()

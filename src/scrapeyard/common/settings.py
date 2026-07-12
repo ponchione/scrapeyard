@@ -41,10 +41,15 @@ class ServiceSettings(BaseSettings):
     admin_read_default_limit: int = Field(default=100, ge=1)
     admin_read_max_limit: int = Field(default=500, ge=1)
 
+    idempotency_key_max_bytes: int = Field(default=128, ge=1, le=1024)
+    idempotency_retention_hours: int = Field(default=24, ge=1)
+    idempotency_cleanup_batch_size: int = Field(default=1000, ge=1)
+
     rate_limit_requests: int = Field(default=600, ge=0)
     rate_limit_window_seconds: int = Field(default=60, ge=0)
 
     scheduler_jitter_max_seconds: int = Field(default=120, ge=0)
+    scheduler_misfire_grace_seconds: int = Field(default=60, ge=1)
 
     webhook_max_delivery_attempts: int = Field(default=5, ge=1)
     webhook_max_delivery_age_seconds: int = Field(default=86400, ge=1)
@@ -59,6 +64,7 @@ class ServiceSettings(BaseSettings):
     storage_max_results_per_job: int = Field(default=100, ge=0)
     storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
     storage_reconciliation_dry_run: bool = True
+    storage_cleanup_interval_seconds: float = Field(default=21600.0, gt=0)
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False
@@ -70,9 +76,20 @@ class ServiceSettings(BaseSettings):
     domain_rate_limit_shared: bool = True
 
     api_keys: str = ""
+    api_credentials: str = ""
+    encryption_keys: str = Field(default="", repr=False)
+    encryption_active_key_id: str = ""
     max_request_bytes: int = Field(default=262144, ge=0)
     health_disk_free_min_mb: int = Field(default=100, ge=0)
     health_include_projects: bool = False
+    health_probe_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    metrics_refresh_interval_seconds: float = Field(default=5.0, ge=0, le=60)
+
+    # Destructive release qualification only. A crash point also requires the
+    # in-container runner sentinel; there is no remote trigger.
+    qualification_mode: bool = False
+    qualification_crash_point: str = ""
+    qualification_marker_dir: str = "/run/scrapeyard-qualification"
 
     model_config = {"env_prefix": "SCRAPEYARD_"}
 
@@ -100,6 +117,17 @@ class ServiceSettings(BaseSettings):
                 "webhook_dispatch_batch_size must be >= "
                 "webhook_dispatch_concurrency"
             )
+        if self.qualification_crash_point and not self.qualification_mode:
+            raise ValueError(
+                "qualification_crash_point requires qualification_mode=true"
+            )
+        if self.qualification_crash_point:
+            from scrapeyard.common.qualification import QUALIFICATION_CRASH_POINTS
+
+            if self.qualification_crash_point not in QUALIFICATION_CRASH_POINTS:
+                raise ValueError(
+                    "qualification_crash_point must name a supported local checkpoint"
+                )
         return self
 
     def parsed_api_keys(self) -> set[str]:

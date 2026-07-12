@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import TargetConfig
-from scrapeyard.engine.scrape_models import TargetResult
+from scrapeyard.engine.scrape_models import FetchOutcome, TargetResult
 from scrapeyard.engine.selectors import select_elements_strict
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 from scrapeyard.queue.cancellation import (
@@ -16,18 +16,21 @@ from scrapeyard.queue.cancellation import (
     cancellation_checkpoint,
 )
 
-FetchTargetPageCallable = Callable[..., Awaitable[Any]]
-ExtractPageDataCallable = Callable[[Any, TargetConfig], list[dict[str, Any]]]
+FetchTargetPageCallable = Callable[..., Awaitable[FetchOutcome]]
+ExtractPageDataCallable = Callable[[object, TargetConfig], list[dict[str, Any]]]
 
 
-def resolve_href(element: Any, base_url: str) -> str | None:
+def resolve_href(element: object, base_url: str) -> str | None:
     """Return an absolute URL for a next-page element or None."""
-    href = element.attrib.get("href") if hasattr(element, "attrib") else None
+    attrib = getattr(element, "attrib", None)
+    attrib_get = getattr(attrib, "get", None)
+    href = attrib_get("href") if callable(attrib_get) else None
     if href is None:
-        try:
-            href = element.attributes.get("href")
-        except AttributeError:
+        attributes = getattr(element, "attributes", None)
+        attributes_get = getattr(attributes, "get", None)
+        if not callable(attributes_get):
             return None
+        href = attributes_get("href")
     if not href:
         return None
     if not isinstance(href, str):
@@ -68,13 +71,13 @@ def _pagination_url_is_safe(url: str) -> bool:
 
 async def paginate_target(
     *,
-    page: Any,
+    page: object,
     target: TargetConfig,
     result: TargetResult,
     fetch_target_page: FetchTargetPageCallable,
     extract_page_data: ExtractPageDataCallable,
-    retry_handler: Any,
-    fetcher_cls: Any,
+    retry_handler: object,
+    fetcher_cls: object,
     adaptive: bool,
     retryable_status: set[int],
     adaptive_dir: str,

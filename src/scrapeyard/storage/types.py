@@ -7,7 +7,45 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from scrapeyard.models.job import JobStatus
+from scrapeyard.models.job import Job, JobStatus
+
+
+class IdempotentJobAction(str, Enum):
+    """Atomic outcome for caller-scoped ad-hoc submission creation."""
+
+    created = "created"
+    matched = "matched"
+    conflict = "conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotentJobOutcome:
+    """Persisted idempotency decision and its authoritative job identity."""
+
+    action: IdempotentJobAction
+    job: Job
+    run_id: str
+    response_mode: str
+
+
+class ScheduledJobMutationAction(str, Enum):
+    """Atomic outcome for a scheduled-job configuration/state mutation."""
+
+    updated = "updated"
+    unchanged = "unchanged"
+    missing = "missing"
+    not_scheduled = "not_scheduled"
+    active_conflict = "active_conflict"
+    lifecycle_conflict = "lifecycle_conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledJobMutationOutcome:
+    """Previous/current snapshots used for API consistency compensation."""
+
+    action: ScheduledJobMutationAction
+    previous: Job | None = None
+    current: Job | None = None
 
 
 class RunOwnershipError(RuntimeError):

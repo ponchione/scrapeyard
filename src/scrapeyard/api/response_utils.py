@@ -10,6 +10,38 @@ from fastapi.responses import JSONResponse
 _Row = TypeVar("_Row")
 
 
+_STATUS_ERROR_CODES = {
+    400: "bad_request",
+    401: "authentication_required",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    413: "request_too_large",
+    415: "unsupported_media_type",
+    422: "validation_error",
+    429: "rate_limited",
+    500: "internal_server_error",
+    503: "service_unavailable",
+}
+
+
+def error_content(
+    status_code: int,
+    message: str,
+    *,
+    code: str | None = None,
+    details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the one public error envelope used by routes and middleware."""
+
+    return {
+        "error": message,
+        "code": code or _STATUS_ERROR_CODES.get(status_code, "http_error"),
+        "status_code": status_code,
+        "details": details or [],
+    }
+
+
 def json_response(status_code: int, content: Any) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=content)
 

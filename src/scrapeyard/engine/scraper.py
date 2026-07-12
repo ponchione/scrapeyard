@@ -28,7 +28,12 @@ from scrapeyard.engine.fetch_classifier import (
 )
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.engine.scrape_models import FetchError, FetchOutcome, TargetResult, TargetStatus
+from scrapeyard.engine.scrape_models import (
+    FetchError,
+    FetchOutcome,
+    TargetResult as TargetResult,
+    TargetStatus as TargetStatus,
+)
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
     count_selector_matches_strict,
@@ -40,7 +45,11 @@ from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
 )
-from scrapeyard.engine.url_guard import assert_public_url, redact_userinfo_in_text
+from scrapeyard.engine.url_guard import (
+    assert_public_url,
+    redact_userinfo_in_text,
+    resolve_public_url,
+)
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_BASIC_REDIRECTS = 10
@@ -145,8 +154,27 @@ async def _fetch_basic_with_safe_redirects(
     redirects: list[str] = []
     call_kwargs["follow_redirects"] = False
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
-        await _assert_fetch_url(current_url, require_resolved_dns=require_resolved_dns)
-        response = await fetch_basic_response(fetcher_cls, current_url, call_kwargs)
+        request_url = current_url
+        request_kwargs = dict(call_kwargs)
+        if fetcher_cls is Fetcher and request_kwargs.get("proxy") is None:
+            resolved = await asyncio.to_thread(resolve_public_url, current_url)
+            request_url = resolved.connect_url
+            headers = dict(request_kwargs.get("headers") or {})
+            headers["Host"] = resolved.host_header
+            request_kwargs["headers"] = headers
+            extensions = dict(request_kwargs.get("extensions") or {})
+            extensions["sni_hostname"] = resolved.sni_hostname
+            request_kwargs["extensions"] = extensions
+        else:
+            await _assert_fetch_url(
+                current_url,
+                require_resolved_dns=require_resolved_dns,
+            )
+        response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
+        if request_url != current_url:
+            # Parsing, redirect joining, and public diagnostics use the logical
+            # URL, never the implementation-only pinned IP URL.
+            response.url = current_url
         await cancellation_checkpoint(
             cancellation_guard,
             "after_fetch",
@@ -168,6 +196,7 @@ async def _fetch_basic_with_safe_redirects(
         base_url = response_url if isinstance(response_url, str) and response_url else current_url
         current_url = urljoin(base_url, location)
         redirects.append(current_url)
+        debug["redirects"] = list(redirects)
     raise FetchError(310, debug={**debug, "redirects": redirects})
 
 

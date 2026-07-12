@@ -75,9 +75,11 @@ def test_row_to_schedule_state_coerces_boolean_flag() -> None:
     assert row_to_schedule_state({
         "job_id": "job-1",
         "schedule_cron": "0 * * * *",
+        "schedule_timezone": "America/New_York",
         "schedule_enabled": 0,
     }) == (
         "job-1",
         "0 * * * *",
+        "America/New_York",
         False,
     )

@@ -53,7 +53,7 @@ def build_webhook_payload(
     error_count: int,
     started_at: str,
     completed_at: str,
-) -> dict:
+) -> dict[str, Any]:
     """Construct the webhook POST body from job and run metadata.
 
     ``delivery_id`` is deterministic for the stable job/run/event tuple so

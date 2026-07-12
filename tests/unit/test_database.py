@@ -62,6 +62,8 @@ async def test_init_db_creates_tables(tmp_path):
         assert "schedule_enabled" in columns
         assert "deletion_requested_at" in columns
         assert "delete_results_on_delete" in columns
+        assert "schedule_timezone" in columns
+        assert "config_hash" in columns
         cursor = await db.execute("PRAGMA table_info(job_runs)")
         run_columns = {column[1]: column for column in await cursor.fetchall()}
         assert "heartbeat_at" in run_columns
@@ -121,6 +123,9 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "005",
         "009",
         "010",
+        "012",
+        "013",
+        "014",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [

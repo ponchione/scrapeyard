@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
@@ -640,6 +641,10 @@ class ScheduleConfig(StrictConfigModel):
     """Cron-style scheduling configuration."""
 
     cron: str = Field(..., description="Cron expression")
+    timezone: str = Field(
+        default="UTC",
+        description="IANA timezone used to interpret the cron expression",
+    )
     enabled: bool = Field(default=True, description="Whether the schedule is active")
 
     @field_validator("cron")
@@ -649,6 +654,15 @@ class ScheduleConfig(StrictConfigModel):
             CronTrigger.from_crontab(value)
         except ValueError as exc:
             raise ValueError(f"Invalid cron expression: {exc}") from exc
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Invalid IANA timezone: {value!r}") from exc
         return value
 
 

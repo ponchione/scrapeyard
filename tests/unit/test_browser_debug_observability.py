@@ -208,7 +208,7 @@ def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
 
     assert debug["browser_settings"]["extra_headers"] == {
         "Authorization": "<redacted>",
-        "X-Test": "visible",
+        "X-Test": "<redacted>",
     }
     assert debug["browser_settings"]["additional_arguments"] == {"api_token": "<redacted>"}
 

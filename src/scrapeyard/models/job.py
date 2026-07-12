@@ -65,6 +65,10 @@ class Job(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: Optional[datetime] = None
     schedule_cron: Optional[str] = Field(default=None, description="Cron expression if scheduled")
+    schedule_timezone: str = Field(
+        default="UTC",
+        description="IANA timezone used to interpret the cron expression",
+    )
     schedule_enabled: bool = Field(default=True, description="Whether the schedule is enabled")
     current_run_id: Optional[str] = Field(
         default=None, description="Current queued or active run identifier"

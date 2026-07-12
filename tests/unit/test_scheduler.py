@@ -1,6 +1,7 @@
 """Tests for scrapeyard.scheduler.cron — SchedulerService."""
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -77,6 +78,53 @@ def test_register_job_replaces_existing():
     svc.register_job("job-1", "0 * * * *")
     aps_job = svc._scheduler.get_job("job-1")
     assert aps_job is not None
+
+
+def test_register_job_uses_explicit_timezone_and_bounded_misfire_policy():
+    svc = _make_service(misfire_grace_seconds=45)
+    svc.register_job(
+        "job-1",
+        "30 2 * * *",
+        timezone_name="America/New_York",
+    )
+    aps_job = svc._scheduler.get_job("job-1")
+    assert aps_job is not None
+    assert str(aps_job.trigger.timezone) == "America/New_York"
+    assert aps_job.coalesce is True
+    assert aps_job.max_instances == 1
+    assert aps_job.misfire_grace_time == 45
+
+
+def test_cron_timezone_has_defined_spring_forward_and_fall_back_behavior():
+    svc = _make_service()
+    svc.register_job(
+        "spring",
+        "30 2 * * *",
+        timezone_name="America/New_York",
+    )
+    spring = svc._scheduler.get_job("spring").trigger
+    ny = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    spring_fire = spring.get_next_fire_time(
+        None,
+        datetime(2026, 3, 7, 3, 0, tzinfo=ny),
+    )
+    # The nonexistent 02:30 wall time resolves to the next real instant,
+    # 03:30 EDT / 07:30 UTC, exactly as APScheduler 3 defines it.
+    assert spring_fire.astimezone(utc) == datetime(2026, 3, 8, 7, 30, tzinfo=utc)
+
+    svc.register_job(
+        "fall",
+        "30 1 * * *",
+        timezone_name="America/New_York",
+    )
+    fall = svc._scheduler.get_job("fall").trigger
+    first = fall.get_next_fire_time(None, datetime(2026, 10, 31, 3, 0, tzinfo=ny))
+    second = fall.get_next_fire_time(first, first)
+    assert first.fold == 0
+    assert second.fold == 1
+    assert first.astimezone(utc) == datetime(2026, 11, 1, 5, 30, tzinfo=utc)
+    assert second.astimezone(utc) == datetime(2026, 11, 1, 6, 30, tzinfo=utc)
 
 
 def test_remove_job_silent_for_nonexistent():
@@ -197,6 +245,7 @@ async def test_trigger_job_recovers_and_requeues_stale_running_run():
         new_run_id="run-new",
         queued_at=NOW,
         stale_before=None,
+        expected_config_yaml=CONFIG_YAML,
     )
     pool.enqueue.assert_awaited_once_with(
         "job-1",
@@ -279,6 +328,7 @@ async def test_trigger_job_requeues_stale_queued_run_using_queued_timeout():
         new_run_id="run-new",
         queued_at=NOW,
         stale_before=NOW - timedelta(seconds=120),
+        expected_config_yaml=CONFIG_YAML,
     )
     pool.enqueue.assert_awaited_once()
 
@@ -317,8 +367,8 @@ async def test_start_registers_jobs_from_store():
     """start() loads scheduled jobs from the store and registers them."""
     job_store = AsyncMock()
     job_store.list_scheduled_jobs.return_value = [
-        ("cron-a", "*/10 * * * *", True),
-        ("cron-b", "0 3 * * *", False),
+        ("cron-a", "*/10 * * * *", "UTC", True),
+        ("cron-b", "0 3 * * *", "America/New_York", False),
     ]
     svc = _make_service(job_store=job_store)
     await svc.start()
@@ -328,6 +378,7 @@ async def test_start_registers_jobs_from_store():
         assert job_a is not None
         assert job_b is not None
         assert job_b.next_run_time is None
+        assert str(job_b.trigger.timezone) == "America/New_York"
     finally:
         svc.shutdown()
 
@@ -353,6 +404,7 @@ async def test_trigger_job_enqueues_queued_job():
         new_run_id="run-new",
         queued_at=NOW,
         stale_before=None,
+        expected_config_yaml=CONFIG_YAML,
     )
     pool.enqueue.assert_awaited_once()
 

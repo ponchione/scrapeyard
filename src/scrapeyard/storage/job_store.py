@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import NoReturn, cast
@@ -10,6 +11,7 @@ from typing import NoReturn, cast
 import aiosqlite
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
+from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.models.job import Job, JobRun, JobStatus
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.job_queries import (
@@ -32,8 +34,12 @@ from scrapeyard.storage.types import (
     DeletionFinalizationOutcome,
     DeletionReservationAction,
     DeletionReservationOutcome,
+    IdempotentJobAction,
+    IdempotentJobOutcome,
     RunOwnershipError,
     RunRecovery,
+    ScheduledJobMutationAction,
+    ScheduledJobMutationOutcome,
     StaleQueuedJob,
     TerminalIntentAction,
     TerminalIntentReconcileResult,
@@ -43,6 +49,7 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
     insert_webhook_delivery,
 )
+from scrapeyard.storage.secret_envelope import protect_text, reveal_text
 
 
 _TERMINAL_RUN_STATUSES = {
@@ -80,6 +87,52 @@ class SQLiteJobStore:
     ) -> aiosqlite.Cursor:
         async with get_db("jobs.db") as db, db_transaction(db):
             return await db.execute(sql, params)
+
+    @staticmethod
+    async def _insert_job(db: aiosqlite.Connection, job: Job) -> None:
+        protected_config = protect_text(
+            job.config_yaml,
+            purpose=f"jobs.config_yaml:{job.job_id}",
+        )
+        await db.execute(
+            """INSERT INTO jobs (job_id, project, name, status,
+               config_yaml, config_hash, created_at, updated_at, schedule_cron,
+               schedule_timezone, schedule_enabled, current_run_id,
+               deletion_requested_at, delete_results_on_delete)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                job.job_id,
+                job.project,
+                job.name,
+                job.status.value,
+                protected_config,
+                hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
+                fmt_dt(job.created_at),
+                fmt_dt(job.updated_at),
+                job.schedule_cron,
+                job.schedule_timezone,
+                int(job.schedule_enabled),
+                job.current_run_id,
+                fmt_dt(job.deletion_requested_at),
+                (
+                    None
+                    if job.delete_results_on_delete is None
+                    else int(job.delete_results_on_delete)
+                ),
+            ),
+        )
+
+    @staticmethod
+    async def _get_job_in_db(
+        db: aiosqlite.Connection,
+        job_id: str,
+    ) -> Job | None:
+        cursor = await db.execute(
+            f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs WHERE job_id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else row_to_job(cast(Mapping[str, object], row))
 
     @staticmethod
     def _raise_ownership(operation: str, job_id: str, run_id: str) -> NoReturn:
@@ -132,36 +185,291 @@ class SQLiteJobStore:
     async def save_job(self, job: Job) -> str:
         async with get_db("jobs.db") as db, db_transaction(db):
             try:
-                await db.execute(
-                    """INSERT INTO jobs (job_id, project, name, status,
-                       config_yaml, created_at, updated_at, schedule_cron,
-                       schedule_enabled, current_run_id,
-                       deletion_requested_at, delete_results_on_delete)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        job.job_id,
-                        job.project,
-                        job.name,
-                        job.status.value,
-                        job.config_yaml,
-                        fmt_dt(job.created_at),
-                        fmt_dt(job.updated_at),
-                        job.schedule_cron,
-                        int(job.schedule_enabled),
-                        job.current_run_id,
-                        fmt_dt(job.deletion_requested_at),
-                        (
-                            None
-                            if job.delete_results_on_delete is None
-                            else int(job.delete_results_on_delete)
-                        ),
-                    ),
-                )
+                await self._insert_job(db, job)
             except aiosqlite.IntegrityError as exc:
                 if is_duplicate_job_integrity_error(exc):
                     raise DuplicateJobError(job.project, job.name) from exc
                 raise
         return job.job_id
+
+    async def create_idempotent_job(
+        self,
+        job: Job,
+        *,
+        caller_scope: str,
+        key_digest: str,
+        request_hash: str,
+        response_mode: str,
+        expires_at: datetime,
+    ) -> IdempotentJobOutcome:
+        """Create one job/idempotency pair or return the serialized winner."""
+
+        if job.current_run_id is None:
+            raise ValueError("Idempotent ad-hoc jobs require current_run_id")
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            # Lazy expiry makes a key reusable on its first request after the
+            # retention window, independently of the periodic cleanup cadence.
+            await db.execute(
+                """DELETE FROM scrape_idempotency
+                   WHERE caller_scope = ? AND key_digest = ? AND expires_at <= ?""",
+                (caller_scope, key_digest, fmt_dt(job.created_at)),
+            )
+            cursor = await db.execute(
+                f"""SELECT scrape_idempotency.request_hash,
+                           scrape_idempotency.run_id,
+                           scrape_idempotency.response_mode,
+                           {select_columns(JOB_COLUMNS, table_alias='jobs')}
+                    FROM scrape_idempotency
+                    JOIN jobs ON jobs.job_id = scrape_idempotency.job_id
+                    WHERE scrape_idempotency.caller_scope = ?
+                      AND scrape_idempotency.key_digest = ?""",
+                (caller_scope, key_digest),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                existing = row_to_job(cast(Mapping[str, object], row))
+                action = (
+                    IdempotentJobAction.matched
+                    if row["request_hash"] == request_hash
+                    and row["response_mode"] == response_mode
+                    else IdempotentJobAction.conflict
+                )
+                return IdempotentJobOutcome(
+                    action=action,
+                    job=existing,
+                    run_id=cast(str, row["run_id"]),
+                    response_mode=cast(str, row["response_mode"]),
+                )
+
+            try:
+                await self._insert_job(db, job)
+            except aiosqlite.IntegrityError as exc:
+                if is_duplicate_job_integrity_error(exc):
+                    raise DuplicateJobError(job.project, job.name) from exc
+                raise
+            await db.execute(
+                """INSERT INTO scrape_idempotency
+                   (caller_scope, key_digest, request_hash, job_id, run_id,
+                    response_mode, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    caller_scope,
+                    key_digest,
+                    request_hash,
+                    job.job_id,
+                    job.current_run_id,
+                    response_mode,
+                    fmt_dt(job.created_at),
+                    fmt_dt(expires_at),
+                ),
+            )
+            return IdempotentJobOutcome(
+                action=IdempotentJobAction.created,
+                job=job,
+                run_id=job.current_run_id,
+                response_mode=response_mode,
+            )
+
+    async def delete_expired_idempotency_records(
+        self,
+        expired_before: datetime,
+        *,
+        limit: int,
+    ) -> int:
+        """Delete a deterministic bounded batch of expired records."""
+
+        if limit < 1:
+            raise ValueError("Idempotency cleanup limit must be positive")
+        cursor = await self._execute_write(
+            """DELETE FROM scrape_idempotency
+               WHERE rowid IN (
+                   SELECT rowid FROM scrape_idempotency
+                   WHERE expires_at <= ?
+                   ORDER BY expires_at, caller_scope, key_digest
+                   LIMIT ?
+               )""",
+            (fmt_dt(expired_before), limit),
+        )
+        return cursor.rowcount
+
+    async def update_scheduled_job(
+        self,
+        job_id: str,
+        *,
+        project: str,
+        name: str,
+        config_yaml: str,
+        schedule_cron: str,
+        schedule_timezone: str,
+        schedule_enabled: bool,
+        updated_at: datetime,
+    ) -> ScheduledJobMutationOutcome:
+        """Replace future scheduled config while excluding an accepted run."""
+
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            previous = await self._get_job_in_db(db, job_id)
+            if previous is None:
+                return ScheduledJobMutationOutcome(ScheduledJobMutationAction.missing)
+            if previous.schedule_cron is None:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.not_scheduled,
+                    previous,
+                    previous,
+                )
+            if previous.status in {JobStatus.cancelled, JobStatus.deleting}:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.lifecycle_conflict,
+                    previous,
+                    previous,
+                )
+            if previous.status is JobStatus.running or (
+                previous.status is JobStatus.queued
+                and previous.current_run_id is not None
+            ):
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.active_conflict,
+                    previous,
+                    previous,
+                )
+            try:
+                protected_config = protect_text(
+                    config_yaml,
+                    purpose=f"jobs.config_yaml:{job_id}",
+                )
+                await db.execute(
+                    """UPDATE jobs
+                       SET project = ?, name = ?, config_yaml = ?, config_hash = ?,
+                           schedule_cron = ?, schedule_timezone = ?,
+                           schedule_enabled = ?, updated_at = ?
+                       WHERE job_id = ?""",
+                    (
+                        project,
+                        name,
+                        protected_config,
+                        hashlib.sha256(config_yaml.encode("utf-8")).hexdigest(),
+                        schedule_cron,
+                        schedule_timezone,
+                        int(schedule_enabled),
+                        fmt_dt(updated_at),
+                        job_id,
+                    ),
+                )
+            except aiosqlite.IntegrityError as exc:
+                if is_duplicate_job_integrity_error(exc):
+                    raise DuplicateJobError(project, name) from exc
+                raise
+            current = await self._get_job_in_db(db, job_id)
+            if current is None:  # pragma: no cover - transaction invariant
+                raise RuntimeError("Scheduled job disappeared during update")
+            return ScheduledJobMutationOutcome(
+                ScheduledJobMutationAction.updated,
+                previous,
+                current,
+            )
+
+    async def set_schedule_enabled(
+        self,
+        job_id: str,
+        *,
+        enabled: bool,
+        updated_at: datetime,
+    ) -> ScheduledJobMutationOutcome:
+        """Persist pause/resume state independently of current run execution."""
+
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            previous = await self._get_job_in_db(db, job_id)
+            if previous is None:
+                return ScheduledJobMutationOutcome(ScheduledJobMutationAction.missing)
+            if previous.schedule_cron is None:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.not_scheduled,
+                    previous,
+                    previous,
+                )
+            if previous.status in {JobStatus.cancelled, JobStatus.deleting}:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.lifecycle_conflict,
+                    previous,
+                    previous,
+                )
+            if previous.schedule_enabled is enabled:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.unchanged,
+                    previous,
+                    previous,
+                )
+            await db.execute(
+                """UPDATE jobs SET schedule_enabled = ?, updated_at = ?
+                   WHERE job_id = ?""",
+                (int(enabled), fmt_dt(updated_at), job_id),
+            )
+            current = previous.model_copy(
+                update={"schedule_enabled": enabled, "updated_at": updated_at}
+            )
+            return ScheduledJobMutationOutcome(
+                ScheduledJobMutationAction.updated,
+                previous,
+                current,
+            )
+
+    async def restore_scheduled_job(self, expected: Job, previous: Job) -> bool:
+        """Restore one exact just-written snapshot after local scheduler failure."""
+
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET project = ?, name = ?, config_yaml = ?, config_hash = ?, schedule_cron = ?,
+                   schedule_timezone = ?, schedule_enabled = ?, updated_at = ?
+               WHERE job_id = ?
+                 AND project = ? AND name = ? AND config_hash = ?
+                 AND schedule_cron IS ? AND schedule_timezone = ?
+                 AND schedule_enabled = ? AND updated_at IS ?
+                 AND status = ? AND current_run_id IS ?""",
+            (
+                previous.project,
+                previous.name,
+                protect_text(
+                    previous.config_yaml,
+                    purpose=f"jobs.config_yaml:{previous.job_id}",
+                ),
+                hashlib.sha256(previous.config_yaml.encode("utf-8")).hexdigest(),
+                previous.schedule_cron,
+                previous.schedule_timezone,
+                int(previous.schedule_enabled),
+                fmt_dt(previous.updated_at),
+                expected.job_id,
+                expected.project,
+                expected.name,
+                hashlib.sha256(expected.config_yaml.encode("utf-8")).hexdigest(),
+                expected.schedule_cron,
+                expected.schedule_timezone,
+                int(expected.schedule_enabled),
+                fmt_dt(expected.updated_at),
+                expected.status.value,
+                expected.current_run_id,
+            ),
+        )
+        return cursor.rowcount == 1
+
+    async def rollback_scheduled_job_creation(self, job_id: str) -> bool:
+        """Remove a scheduled row only before any run or delivery exists."""
+
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """DELETE FROM jobs
+                   WHERE job_id = ?
+                     AND schedule_cron IS NOT NULL
+                     AND status = 'queued'
+                     AND current_run_id IS NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM job_runs WHERE job_runs.job_id = jobs.job_id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM webhook_deliveries
+                         WHERE webhook_deliveries.job_id = jobs.job_id
+                     )""",
+                (job_id,),
+            )
+            return cursor.rowcount == 1
 
     async def get_job(self, job_id: str) -> Job:
         async with get_db("jobs.db") as db:
@@ -648,6 +956,7 @@ class SQLiteJobStore:
                     webhook_delivery,
                     created_at=completed_at,
                 )
+                qualification_checkpoint("during_webhook_intent_transaction")
             await db.commit()
             if webhook_delivery is not None:
                 logger.info(
@@ -834,7 +1143,12 @@ class SQLiteJobStore:
                     status=JobStatus(cast(str, row["status"])),
                     project=cast(str, row["project"]),
                     name=cast(str, row["name"]),
-                    config_yaml=cast(str, row["config_yaml"]),
+                    config_yaml=reveal_text(
+                        cast(str, row["config_yaml"]),
+                        purpose=(
+                            f"jobs.config_yaml:{cast(str, row['job_id'])}"
+                        ),
+                    ),
                     config_hash=cast(str, row["config_hash"]),
                     started_at=started_at,
                     heartbeat_at=heartbeat_at,
@@ -883,7 +1197,10 @@ class SQLiteJobStore:
                 or row["run_status"] != candidate.status.value
                 or row["run_status"] not in _TERMINAL_RUN_STATUSES
                 or row["config_hash"] != candidate.config_hash
-                or row["config_yaml"] != candidate.config_yaml
+                or reveal_text(
+                    cast(str, row["config_yaml"]),
+                    purpose=f"jobs.config_yaml:{candidate.job_id}",
+                ) != candidate.config_yaml
                 or row["parent_status"] == JobStatus.deleting.value
             ):
                 await db.rollback()
@@ -984,6 +1301,7 @@ class SQLiteJobStore:
         new_run_id: str,
         queued_at: datetime,
         stale_before: datetime | None = None,
+        expected_config_yaml: str | None = None,
     ) -> bool:
         """Queue a replacement only if the scheduler's observed state still holds."""
         if expected_status in {
@@ -1002,13 +1320,20 @@ class SQLiteJobStore:
         if stale_before is not None:
             stale_clause = " AND (updated_at IS NULL OR updated_at <= ?)"
             params.append(fmt_dt(stale_before))
+        config_clause = ""
+        if expected_config_yaml is not None:
+            config_clause = " AND config_hash = ?"
+            params.append(
+                hashlib.sha256(expected_config_yaml.encode("utf-8")).hexdigest()
+            )
         cursor = await self._execute_write(
             """UPDATE jobs
                SET status = 'queued', updated_at = ?, current_run_id = ?
                WHERE job_id = ?
                  AND status = ?
                  AND current_run_id IS ?"""
-            + stale_clause,
+            + stale_clause
+            + config_clause,
             params,
         )
         return cursor.rowcount == 1
@@ -1064,7 +1389,10 @@ class SQLiteJobStore:
                 StaleQueuedJob(
                     job_id=cast(str, row["job_id"]),
                     run_id=run_id,
-                    config_yaml=cast(str, row["config_yaml"]),
+                    config_yaml=reveal_text(
+                        cast(str, row["config_yaml"]),
+                        purpose=f"jobs.config_yaml:{cast(str, row['job_id'])}",
+                    ),
                     queued_at=queued_at,
                     schedule_cron=cast(str | None, row["schedule_cron"]),
                     schedule_enabled=bool(row["schedule_enabled"]),
@@ -1264,8 +1592,8 @@ class SQLiteJobStore:
                     recoveries.append(recovery)
             return recoveries
 
-    async def list_scheduled_jobs(self) -> list[tuple[str, str, bool]]:
-        """Return (job_id, schedule_cron, schedule_enabled) for all scheduled jobs."""
+    async def list_scheduled_jobs(self) -> list[tuple[str, str, str, bool]]:
+        """Return ID, cron, timezone, and enabled state for scheduled jobs."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(SCHEDULED_JOBS_QUERY)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())

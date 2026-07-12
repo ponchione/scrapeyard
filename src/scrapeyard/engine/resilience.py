@@ -14,6 +14,7 @@ from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
 )
+from scrapeyard.runtime.metrics import RETRIES
 
 T = TypeVar("T")
 
@@ -75,6 +76,7 @@ class RetryHandler:
             except RetryableError as exc:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
+                    RETRIES.labels("scrape", "scheduled").inc()
                     await cancellation_checkpoint(
                         self._cancellation_guard,
                         "before_retry_backoff",
@@ -90,6 +92,7 @@ class RetryHandler:
                     )
         if last_exc is None:
             raise RuntimeError("RetryHandler exhausted attempts without catching an exception")
+        RETRIES.labels("scrape", "exhausted").inc()
         raise last_exc
 
 

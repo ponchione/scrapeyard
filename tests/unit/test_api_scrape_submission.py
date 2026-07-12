@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from scrapeyard.api.scrape_submission import submit_scrape_job
+from scrapeyard.api.scrape_submission import (
+    ResultArtifactUnavailableError,
+    submit_scrape_job,
+)
 from scrapeyard.config.schema import ExecutionMode, FailStrategy, FetcherType
 from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.job_store import DuplicateJobError
@@ -76,11 +79,53 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
 
 
 @pytest.mark.asyncio
+async def test_submit_scrape_job_rejects_terminal_run_with_missing_artifact():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    result_store.get_result.side_effect = KeyError("missing")
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job.model_copy(update={"status": JobStatus.complete})
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
+    worker_pool.enqueue.return_value = _QueuedJob()
+
+    with pytest.raises(ResultArtifactUnavailableError):
+        await submit_scrape_job(
+            config_yaml="project: integ",
+            config=_config(ExecutionMode.sync),
+            job_store=job_store,
+            result_store=result_store,
+            worker_pool=worker_pool,
+            sync_timeout_seconds=5,
+            sync_poll_delay_seconds=0.1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_submit_scrape_job_returns_queued_when_sync_wait_times_out():
     job_store = AsyncMock()
     result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob(should_timeout=True)
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
 
     submission = await submit_scrape_job(
         config_yaml="project: integ",
@@ -94,7 +139,40 @@ async def test_submit_scrape_job_returns_queued_when_sync_wait_times_out():
 
     assert submission.completed is False
     assert submission.status == "queued"
+    assert submission.run_id == saved_job.current_run_id
     assert submission.results is None
+
+
+@pytest.mark.asyncio
+async def test_sync_timeout_reports_current_persisted_running_status():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    worker_pool.enqueue.return_value = _QueuedJob(should_timeout=True)
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job.model_copy(update={"status": JobStatus.running})
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
+
+    submission = await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.sync),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=0,
+        sync_poll_delay_seconds=0.25,
+    )
+
+    assert submission.completed is False
+    assert submission.status == "running"
 
 
 @pytest.mark.asyncio

@@ -113,9 +113,83 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="Invalid cron expression"):
             ScrapeConfig(**data)
 
+    def test_schedule_defaults_to_utc_and_accepts_iana_timezone(self):
+        defaulted = ScrapeConfig(
+            **_tier1_config(schedule={"cron": "0 9 * * *", "enabled": True})
+        )
+        explicit = ScrapeConfig(
+            **_tier1_config(
+                schedule={
+                    "cron": "0 9 * * *",
+                    "timezone": "America/New_York",
+                    "enabled": True,
+                }
+            )
+        )
+        assert defaulted.schedule is not None
+        assert defaulted.schedule.timezone == "UTC"
+        assert explicit.schedule is not None
+        assert explicit.schedule.timezone == "America/New_York"
+
+    def test_schedule_rejects_unknown_timezone(self):
+        data = _tier1_config(
+            schedule={
+                "cron": "0 9 * * *",
+                "timezone": "Mars/Olympus_Mons",
+            }
+        )
+        with pytest.raises(ValidationError, match="Invalid IANA timezone"):
+            ScrapeConfig(**data)
+
     def test_unknown_top_level_config_key_raises(self):
         with pytest.raises(ValidationError, match="extra_forbidden"):
             ScrapeConfig(**_tier1_config(typo_mode="sync"))
+
+    def test_deployment_secret_references_resolve_at_load_time(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_PROXY_URL",
+            "https://user:proxy-secret@proxy.example.com:8443",
+        )
+        monkeypatch.setenv("SCRAPEYARD_SECRET_WEBHOOK_AUTH", "Bearer hook-secret")
+        config = load_config(
+            """
+project: secret-ref
+name: resolved
+proxy:
+  url: ${SCRAPEYARD_SECRET_PROXY_URL}
+webhook:
+  url: https://hooks.example.com/callback
+  headers:
+    Authorization: ${SCRAPEYARD_SECRET_WEBHOOK_AUTH}
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+        )
+        assert config.proxy is not None
+        assert "proxy-secret" in config.proxy.url
+        assert config.webhook is not None
+        assert config.webhook.headers["Authorization"] == "Bearer hook-secret"
+
+    def test_missing_deployment_secret_reference_fails_closed(self):
+        with pytest.raises(ValueError, match="SCRAPEYARD_SECRET_MISSING"):
+            load_config(
+                """
+project: secret-ref
+name: missing
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      Authorization: ${SCRAPEYARD_SECRET_MISSING}
+  selectors:
+    title: h1
+"""
+            )
 
     def test_unknown_nested_config_key_raises(self):
         with pytest.raises(ValidationError, match="extra_forbidden"):

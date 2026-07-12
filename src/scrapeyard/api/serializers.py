@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 from typing import Any
 
 from scrapeyard.engine.url_guard import (
@@ -11,10 +12,17 @@ from scrapeyard.engine.url_guard import (
     redact_userinfo_in_url,
 )
 from scrapeyard.models.job import ErrorRecord, Job, JobRun
+from scrapeyard.api.response_models import APICompatibility
 
 
 def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def _contract_datetime(value: Any) -> Any:
+    if isinstance(value, str) and value.endswith("+00:00"):
+        return value[:-6] + "Z"
+    return value
 
 
 def serialize_job_run(run: JobRun) -> dict[str, Any]:
@@ -45,6 +53,7 @@ def serialize_job_summary(
         "created_at": job.created_at.isoformat(),
         "updated_at": _isoformat(job.updated_at),
         "schedule_cron": job.schedule_cron,
+        "schedule_timezone": job.schedule_timezone,
         "schedule_enabled": job.schedule_enabled,
         "run_count": run_count,
         "last_run_at": _isoformat(last_run_at),
@@ -68,6 +77,7 @@ def serialize_job_detail(
         "created_at": job.created_at.isoformat(),
         "updated_at": _isoformat(job.updated_at),
         "schedule_cron": job.schedule_cron,
+        "schedule_timezone": job.schedule_timezone,
         "schedule_enabled": job.schedule_enabled,
         "next_run_at": _isoformat(next_run_at),
         "run_count": run_count,
@@ -105,29 +115,113 @@ def serialize_job_created(job: Job) -> dict[str, Any]:
         "project": job.project,
         "name": job.name,
         "schedule": job.schedule_cron,
+        "schedule_timezone": job.schedule_timezone,
     }
 
 
-def serialize_scrape_queued(job_id: str, *, status: str, poll_url: str) -> dict[str, str]:
+def serialize_schedule_state(job: Job) -> dict[str, Any]:
+    """Serialize the persisted future-run configuration identity."""
+
+    return {
+        "job_id": job.job_id,
+        "project": job.project,
+        "name": job.name,
+        "status": job.status.value,
+        "schedule_cron": job.schedule_cron,
+        "schedule_timezone": job.schedule_timezone,
+        "schedule_enabled": job.schedule_enabled,
+        "config_hash": hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
+        "updated_at": _isoformat(job.updated_at),
+    }
+
+
+def serialize_scrape_queued(
+    job_id: str,
+    *,
+    run_id: str,
+    status: str,
+    poll_url: str,
+) -> dict[str, str]:
     return {
         "job_id": job_id,
+        "run_id": run_id,
         "status": status,
         "poll_url": poll_url,
     }
 
 
-def serialize_scrape_result(job_id: str, *, status: str, results: Any) -> dict[str, Any]:
-    return {
-        "job_id": job_id,
-        "status": status,
-        "results": results,
-    }
-
-
-def serialize_results_payload(job_id: str, *, run_id: str, status: str, results: Any) -> dict[str, Any]:
+def serialize_result_response(
+    job_id: str,
+    *,
+    run_id: str,
+    status: str,
+    artifact: Any,
+    compatibility: APICompatibility = APICompatibility.v1,
+) -> dict[str, Any]:
+    if compatibility is APICompatibility.legacy_v0:
+        return {
+            "job_id": job_id,
+            "run_id": run_id,
+            "status": status,
+            "results": artifact,
+        }
+    if (
+        isinstance(artifact, dict)
+        and artifact.get("job_id") == job_id
+        and "results" in artifact
+        and isinstance(artifact.get("targets"), list)
+    ):
+        return {
+            "job_id": job_id,
+            "run_id": run_id,
+            "status": status,
+            "completed_at": _contract_datetime(artifact.get("completed_at")),
+            "errors": artifact.get("errors") or [],
+            "targets": artifact.get("targets") or [],
+            "budget_error": artifact.get("budget_error"),
+            "results": artifact["results"],
+        }
     return {
         "job_id": job_id,
         "run_id": run_id,
         "status": status,
-        "results": results,
+        "completed_at": None,
+        "errors": [],
+        "targets": [],
+        "budget_error": None,
+        "results": artifact,
     }
+
+
+def serialize_scrape_result(
+    job_id: str,
+    *,
+    run_id: str,
+    status: str,
+    results: Any,
+    compatibility: APICompatibility = APICompatibility.v1,
+) -> dict[str, Any]:
+    return serialize_result_response(
+        job_id,
+        run_id=run_id,
+        status=status,
+        artifact=results,
+        compatibility=compatibility,
+    )
+
+
+def serialize_results_payload(
+    job_id: str,
+    *,
+    run_id: str,
+    status: str,
+    results: Any,
+    compatibility: APICompatibility = APICompatibility.v1,
+) -> dict[str, Any]:
+    return serialize_result_response(
+        job_id,
+        run_id=run_id,
+        status=status,
+        artifact=results,
+        compatibility=compatibility,
+    )

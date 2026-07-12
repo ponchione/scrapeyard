@@ -87,6 +87,14 @@ def test_properties_return_correct_values():
     assert pool.redis is None
 
 
+@pytest.mark.asyncio
+async def test_ping_requires_started_redis_pool():
+    pool = _make_pool()
+
+    with pytest.raises(RuntimeError, match="redis pool not connected"):
+        await pool.ping()
+
+
 def _select_available(
     policy: WeightedPriorityPolicy,
     available: set[str],
@@ -145,8 +153,54 @@ async def test_queue_depths_reports_only_priority_intake_members():
 
 
 @pytest.mark.asyncio
-async def test_start_initializes_redis_and_worker_once(monkeypatch):
+async def test_queue_operational_snapshot_is_constant_cost_and_reports_oldest_age(
+    monkeypatch,
+):
     pool = _make_pool()
+    redis = MagicMock()
+    pipeline = MagicMock(
+        execute=AsyncMock(
+            return_value=[
+                2,
+                [(b"old-high", 99_000.0)],
+                0,
+                [],
+                1,
+                [(b"future-low", 101_000.0)],
+            ]
+        )
+    )
+    redis.pipeline.return_value.__aenter__.return_value = pipeline
+    pool._redis = redis
+    monkeypatch.setattr("scrapeyard.queue.pool.timestamp_ms", lambda: 100_000)
+
+    snapshot = await pool.queue_operational_snapshot()
+
+    assert snapshot == {
+        "high": (2, 1.0),
+        "normal": (0, 0.0),
+        "low": (1, 0.0),
+    }
+    assert pipeline.zcard.call_count == 3
+    assert pipeline.zrange.call_count == 3
+
+
+def test_worker_background_health_detects_stopped_runner():
+    pool = _make_pool()
+    pool._started = True
+    pool._runner_task = MagicMock(
+        done=MagicMock(return_value=True),
+        cancelled=MagicMock(return_value=False),
+        exception=MagicMock(return_value=RuntimeError("secret")),
+    )
+
+    assert pool.background_ok is False
+    assert pool.background_detail == "worker runner task failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_start_initializes_redis_and_worker_once(monkeypatch):
+    pool = _make_pool(job_timeout_seconds=37.5)
     fake_redis = MagicMock()
     fake_worker = MagicMock()
     fake_worker.async_run = AsyncMock()
@@ -179,6 +233,7 @@ async def test_start_initializes_redis_and_worker_once(monkeypatch):
     create_pool_mock.assert_awaited_once()
     worker_cls.assert_called_once()
     assert worker_cls.call_args.kwargs["allow_abort_jobs"] is True
+    assert worker_cls.call_args.kwargs["job_timeout"] == 37.5
     assert worker_cls.call_args.kwargs["priority_queues"] == {
         "high": "test-queue:priority:high",
         "normal": "test-queue:priority:normal",

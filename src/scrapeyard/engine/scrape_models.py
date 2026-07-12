@@ -47,7 +47,7 @@ class TargetResult:
 
 @dataclass
 class FetchOutcome:
-    page: Any
+    page: object
     debug: dict[str, Any]
 
 

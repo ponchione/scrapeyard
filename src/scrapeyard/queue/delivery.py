@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
-from scrapeyard.config.schema import FetcherType
+from scrapeyard.config.schema import FetcherType, ScrapeConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +15,7 @@ class QueueDeliveryMetadata:
     needs_browser: bool
 
 
-def queue_delivery_metadata(config: Any) -> QueueDeliveryMetadata:
+def queue_delivery_metadata(config: ScrapeConfig) -> QueueDeliveryMetadata:
     """Derive arq enqueue metadata from one validated stored config."""
     return QueueDeliveryMetadata(
         priority=config.execution.priority.value,

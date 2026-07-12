@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from scrapling import Fetcher
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import (
@@ -13,7 +14,10 @@ from scrapeyard.engine.adaptive_diagnostics import (
     missing_adaptive_selectors,
 )
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
-from scrapeyard.engine.scraper import _fetch_basic_with_safe_redirects, _fetch_page
+from scrapeyard.engine.scraper import (
+    _fetch_basic_with_safe_redirects,
+    _fetch_page,
+)
 from scrapeyard.engine.url_guard import UnsafeURLError
 
 
@@ -159,6 +163,47 @@ async def test_basic_redirect_validates_each_requested_url_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_production_basic_fetch_pins_connection_to_validated_ip(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com/products",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    fetch = AsyncMock(
+        return_value=SimpleNamespace(
+            status=200,
+            url="https://93.184.216.34/products",
+            headers={},
+            text="<h1>ok</h1>",
+        )
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda _url: SimpleNamespace(
+            connect_url="https://93.184.216.34/products",
+            host_header="example.com",
+            sni_hostname="example.com",
+        ),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
+
+    outcome = await _fetch_page(
+        Fetcher,
+        target.url,
+        target,
+        FetcherType.basic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert fetch.await_args.args[1] == "https://93.184.216.34/products"
+    assert fetch.await_args.args[2]["headers"]["Host"] == "example.com"
+    assert fetch.await_args.args[2]["extensions"]["sni_hostname"] == "example.com"
+    assert outcome.debug["final_url"] == target.url
+
+
+@pytest.mark.asyncio
 async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monkeypatch):
     target = TargetConfig(
         url="https://example.com",
@@ -255,6 +300,38 @@ async def test_fetch_page_still_allows_unresolved_dns_for_direct_basic_fetch(mon
     )
 
     assert outcome.debug["final_url"] == target.url
+
+
+@pytest.mark.asyncio
+async def test_browser_fetch_performs_one_navigation_without_http_preflight(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com/products",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    browser_fetch = AsyncMock(
+        return_value=(
+            SimpleNamespace(status=200, url=target.url, text="<h1>ok</h1>"),
+            {},
+        )
+    )
+    basic_fetch = AsyncMock()
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", browser_fetch)
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", basic_fetch)
+
+    await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.dynamic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    browser_fetch.assert_awaited_once()
+    assert browser_fetch.await_args.args[1] == target.url
+    basic_fetch.assert_not_awaited()
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

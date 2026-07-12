@@ -51,6 +51,9 @@ _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
 _BROWSER_REQUIRE_RESOLVED_DNS: ContextVar[bool] = ContextVar(
     "scrapeyard_browser_require_resolved_dns", default=False,
 )
+_BROWSER_BLOCKED_REQUESTS: ContextVar[list[dict[str, str]] | None] = ContextVar(
+    "scrapeyard_browser_blocked_requests", default=None,
+)
 
 
 class BrowserPageActionError(RuntimeError):
@@ -95,6 +98,9 @@ async def _guarded_async_intercept_route(route: Any) -> None:
                 allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
             )
         except UnsafeURLError:
+            blocked_requests = _BROWSER_BLOCKED_REQUESTS.get()
+            if blocked_requests is not None:
+                blocked_requests.append({"kind": "request", "url": request_url})
             logger.warning(
                 "Blocked browser request to non-public URL: %s",
                 redact_userinfo_in_url(request_url),
@@ -109,8 +115,23 @@ async def _guarded_async_intercept_route(route: Any) -> None:
 
 
 def _install_browser_route_guard() -> None:
-    scrapling_pw_engine.async_intercept_route = _guarded_async_intercept_route
-    scrapling_camo_engine.async_intercept_route = _guarded_async_intercept_route
+    # Scrapling exposes these runtime hook points without declaring them in its
+    # package surface, so contain the dynamic mutation at this adapter boundary.
+    _set_dynamic_attribute(
+        scrapling_pw_engine,
+        "async_intercept_route",
+        _guarded_async_intercept_route,
+    )
+    _set_dynamic_attribute(
+        scrapling_camo_engine,
+        "async_intercept_route",
+        _guarded_async_intercept_route,
+    )
+
+
+def _set_dynamic_attribute(target: object, name: str, value: object) -> None:
+    """Set one attribute at an explicitly dynamic dependency boundary."""
+    setattr(target, name, value)
 
 
 _install_browser_route_guard()
@@ -629,14 +650,28 @@ async def fetch_browser_response(
 
     call_kwargs["page_action"] = _page_action
     call_kwargs["disable_resources"] = True
+    blocked_requests: list[dict[str, str]] = []
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
+    blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
     try:
         fetch = fetcher_cls.async_fetch(url, **call_kwargs)
-        response = await fetch if budget is None else await budget.wait_for(fetch)
+        try:
+            response = await fetch if budget is None else await budget.wait_for(fetch)
+        except Exception as exc:
+            if blocked_requests:
+                capture["blocked_requests"] = blocked_requests
+                try:
+                    cast(Any, exc).debug = capture
+                except Exception:
+                    pass
+            raise
     finally:
+        _BROWSER_BLOCKED_REQUESTS.reset(blocked_token)
         _BROWSER_REQUIRE_RESOLVED_DNS.reset(dns_token)
         _BROWSER_BLOCK_RESOURCES.reset(guard_token)
+    if blocked_requests:
+        capture["blocked_requests"] = blocked_requests
     action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)
     if action_exc is not None:
         if isinstance(action_exc, BudgetExceeded):

@@ -18,6 +18,7 @@ from scrapeyard.api.dependencies import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.main import app
+from scrapeyard.api.auth import parse_api_credentials
 from scrapeyard.storage.database import init_db, reset_db
 
 
@@ -109,8 +110,12 @@ async def live_app() -> AsyncIterator:
 async def client(live_app) -> AsyncIterator[AsyncClient]:
     """HTTP client against the ASGI app using the live Redis-backed pool."""
     transport = ASGITransport(app=live_app)
-    api_keys = sorted(get_settings().parsed_api_keys())
-    headers = {"X-API-Key": api_keys[0]} if api_keys else None
+    settings = get_settings()
+    credentials = parse_api_credentials(
+        settings.api_credentials,
+        legacy_keys=settings.parsed_api_keys(),
+    )
+    headers = {"X-API-Key": credentials[0].secret} if credentials else None
     async with AsyncClient(
         transport=transport,
         base_url="http://test",
