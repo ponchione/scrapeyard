@@ -129,6 +129,9 @@ def test_backup_manifest_round_trip_and_inconsistency_detection(tmp_path: Path) 
     assert (restored / "adaptive/project/selectors.json").read_bytes() == (
         data / "adaptive/project/selectors.json"
     ).read_bytes()
+    with sqlite3.connect(restored / "db/results_meta.db") as db:
+        restored_path = db.execute("SELECT file_path FROM results_meta").fetchone()[0]
+    assert restored_path == str((restored / "results/project/job/run-1").resolve())
 
     manifest_path = backup / "manifest.json"
     value = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -224,6 +227,9 @@ def test_restore_rolls_back_partial_directory_install_for_safe_retry(
     monkeypatch.setattr("scripts.qualification_backup.os.replace", original_replace)
     restore_backup(backup, destination)
     assert (destination / "results/project/job/run-1/results.json").is_file()
+    with sqlite3.connect(destination / "db/results_meta.db") as db:
+        restored_path = db.execute("SELECT file_path FROM results_meta").fetchone()[0]
+    assert restored_path == str((destination / "results/project/job/run-1").resolve())
 
 
 def test_threshold_percentiles_are_nearest_rank_and_profile_is_host_sized() -> None:

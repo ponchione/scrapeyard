@@ -217,6 +217,36 @@ def _artifact_relative_path(
     return Path(*relative.parts)
 
 
+def _relocate_result_metadata(
+    payload: Path,
+    *,
+    source_data_root: Path,
+    destination_data_root: Path,
+) -> None:
+    """Rewrite artifact paths in a staged restore for its destination root."""
+    results_db = payload / "db" / "results_meta.db"
+    destination_root = destination_data_root.resolve()
+    with sqlite3.connect(results_db) as db:
+        rows = db.execute("SELECT rowid, file_path FROM results_meta").fetchall()
+        relocated: list[tuple[str, int]] = []
+        for row_id, file_path in rows:
+            relative = _artifact_relative_path(
+                str(file_path),
+                "results",
+                data_root=source_data_root,
+            )
+            relocated.append(
+                (
+                    (destination_root / "results" / relative).as_posix(),
+                    int(row_id),
+                )
+            )
+        db.executemany(
+            "UPDATE results_meta SET file_path = ? WHERE rowid = ?",
+            relocated,
+        )
+
+
 def validate_backup(backup: Path) -> dict[str, Any]:
     manifest = load_manifest(backup)
     source_data_root = _source_data_root(manifest)
@@ -277,6 +307,13 @@ def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
     try:
         shutil.copytree(backup / "payload", stage)
         _sqlite_contract(stage, source_data_root=source_data_root)
+        destination_data_root = data_root.resolve()
+        _relocate_result_metadata(
+            stage,
+            source_data_root=source_data_root,
+            destination_data_root=destination_data_root,
+        )
+        _sqlite_contract(stage, source_data_root=destination_data_root)
         # A fresh production image initializes these empty mount points before
         # the named volume is first used. Preserve their modes for rollback and
         # keep empty logs in place.
@@ -290,7 +327,7 @@ def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
             os.replace(child, destination)
             installed.append(destination)
         stage.rmdir()
-        _sqlite_contract(data_root, source_data_root=source_data_root)
+        _sqlite_contract(data_root, source_data_root=destination_data_root)
     except BaseException:
         for destination in reversed(installed):
             shutil.rmtree(destination, ignore_errors=True)
