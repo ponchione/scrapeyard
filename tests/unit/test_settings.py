@@ -65,6 +65,11 @@ class TestServiceSettingsDefaults:
         assert settings.run_max_serialized_result_bytes == 52428800
         assert settings.run_max_browser_debug_bytes == 26214400
 
+    def test_regex_safety_defaults(self):
+        settings = ServiceSettings()
+        assert settings.transform_regex_timeout_seconds == 0.1
+        assert settings.transform_regex_max_pattern_bytes == 2048
+
     def test_scheduler_jitter_max_seconds_default(self):
         settings = ServiceSettings()
         assert settings.scheduler_jitter_max_seconds == 120
@@ -232,6 +237,16 @@ class TestServiceSettingsFromEnv:
         assert settings.run_max_extracted_records == 321
         assert settings.run_max_serialized_result_bytes == 8192
         assert settings.run_max_browser_debug_bytes == 4096
+
+    def test_reads_regex_safety_settings(self):
+        values = {
+            "SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS": "0.25",
+            "SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES": "1024",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.transform_regex_timeout_seconds == 0.25
+        assert settings.transform_regex_max_pattern_bytes == 1024
 
     def test_reads_webhook_retry_and_retention_settings(self):
         values = {
@@ -435,6 +450,8 @@ def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):
         ("RUN_MAX_EXTRACTED_RECORDS", "0"),
         ("RUN_MAX_SERIALIZED_RESULT_BYTES", "4095"),
         ("RUN_MAX_BROWSER_DEBUG_BYTES", "0"),
+        ("TRANSFORM_REGEX_TIMEOUT_SECONDS", "0"),
+        ("TRANSFORM_REGEX_MAX_PATTERN_BYTES", "0"),
     ],
 )
 def test_aggregate_run_budgets_reject_nonsensical_values(monkeypatch, name, value):

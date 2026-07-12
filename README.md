@@ -389,6 +389,8 @@ settings are:
 | `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
 | `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
+| `SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS` | `0.1` | Per-operation deadline for selector regex transforms |
+| `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` | `2048` | Maximum UTF-8 size of a selector regex pattern |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
