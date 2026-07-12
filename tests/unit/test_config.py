@@ -515,6 +515,20 @@ class TestParseTransform:
         with pytest.raises(ValueError, match="timed out"):
             fn("a" * 20_000 + "!")
 
+    def test_regex_replacement_rejects_predicted_output_growth(self, monkeypatch):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(
+                transform_regex_max_pattern_bytes=2048,
+                transform_regex_timeout_seconds=0.1,
+                transform_max_value_bytes=1024,
+            ),
+        )
+        fn = parse_transform("regex:a:" + ("x" * 300))
+
+        with pytest.raises(ValueError, match="exceeds 1024 UTF-8 bytes"):
+            fn("aaaa")
+
     def test_remove(self):
         fn = parse_transform("remove:$")
         assert fn("$12.99") == "12.99"
@@ -562,6 +576,55 @@ class TestApplyTransforms:
 
     def test_empty_list_returns_unchanged(self):
         assert apply_transforms("value", []) == "value"
+
+    def test_literal_replacement_stops_exponential_growth_before_allocation(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(transform_max_value_bytes=1024),
+        )
+        transforms = [parse_transform("replace:a:aa") for _ in range(11)]
+
+        with pytest.raises(
+            ValueError,
+            match=r"exceeds 1024 UTF-8 bytes \(predicted 2048\)",
+        ):
+            apply_transforms("a", transforms)
+
+    def test_initial_multibyte_value_is_bounded_by_utf8_bytes(self, monkeypatch):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(transform_max_value_bytes=1024),
+        )
+
+        with pytest.raises(ValueError, match="exceeds 1024 UTF-8 bytes"):
+            apply_transforms("é" * 513, [])
+
+    def test_config_rejects_excessive_transform_pipeline_steps(self, monkeypatch):
+        monkeypatch.setattr(
+            "scrapeyard.config.transforms.get_settings",
+            lambda: SimpleNamespace(
+                transform_max_pipeline_steps=2,
+                transform_regex_max_pattern_bytes=2048,
+                transform_regex_timeout_seconds=0.1,
+            ),
+        )
+
+        with pytest.raises(ValidationError, match="pipeline exceeds 2 steps"):
+            ScrapeConfig(
+                **_tier1_config(
+                    target=_target_dict(
+                        selectors={
+                            "title": {
+                                "query": "h1",
+                                "transform": "trim|lowercase|uppercase",
+                            }
+                        }
+                    )
+                )
+            )
 
 
 # --- YAML Loader ---

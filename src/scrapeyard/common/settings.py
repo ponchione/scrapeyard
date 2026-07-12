@@ -36,6 +36,8 @@ class ServiceSettings(BaseSettings):
     run_max_browser_debug_bytes: int = Field(default=26214400, ge=1)
     transform_regex_timeout_seconds: float = Field(default=0.1, gt=0, le=5)
     transform_regex_max_pattern_bytes: int = Field(default=2048, ge=1, le=16384)
+    transform_max_pipeline_steps: int = Field(default=32, ge=1, le=256)
+    transform_max_value_bytes: int = Field(default=1048576, ge=1024, le=52428800)
 
     redis_dsn: str = "redis://redis:6379/0"
     queue_name: str = "scrapeyard"
