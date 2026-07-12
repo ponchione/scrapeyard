@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -62,10 +63,15 @@ def _minimal_data(root: Path) -> None:
             """
             CREATE TABLE results_meta (job_id TEXT, run_id TEXT, file_path TEXT);
             CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY);
-            INSERT INTO results_meta VALUES (
-                'job-1', 'run-1', '/data/results/project/job/run-1'
-            );
             """
+        )
+        db.execute(
+            "INSERT INTO results_meta VALUES (?, ?, ?)",
+            (
+                "job-1",
+                "run-1",
+                str(result_dir.resolve()),
+            ),
         )
 
 
@@ -163,6 +169,63 @@ def test_backup_accepts_results_intentionally_retained_after_job_deletion(
     assert validated["row_counts"]["results_meta.db:results_meta"] == 1
 
 
+def test_backup_rejects_result_metadata_outside_declared_data_root(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    _minimal_data(data)
+    with sqlite3.connect(data / "db/results_meta.db") as db:
+        db.execute(
+            "UPDATE results_meta SET file_path = ?",
+            ("/tmp/attacker/results/project/job/run-1",),
+        )
+
+    with pytest.raises(BackupError, match="metadata path is outside"):
+        create_backup(data, tmp_path / "backup", quiesced=True)
+
+    assert not (tmp_path / "backup").exists()
+
+
+def test_restore_rolls_back_partial_directory_install_for_safe_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = tmp_path / "data"
+    backup = tmp_path / "backup"
+    destination = tmp_path / "restored"
+    _minimal_data(data)
+    create_backup(data, backup, quiesced=True)
+    destination.mkdir()
+    for name in ("db", "results", "adaptive", "logs"):
+        (destination / name).mkdir(mode=0o750)
+
+    original_replace = os.replace
+    calls = 0
+
+    def _fail_second_install(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated install failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr("scripts.qualification_backup.os.replace", _fail_second_install)
+    with pytest.raises(OSError, match="simulated install failure"):
+        restore_backup(backup, destination)
+
+    assert {child.name for child in destination.iterdir()} == {
+        "db",
+        "results",
+        "adaptive",
+        "logs",
+    }
+    assert all(not any((destination / name).iterdir()) for name in ("db", "results", "adaptive", "logs"))
+
+    monkeypatch.setattr("scripts.qualification_backup.os.replace", original_replace)
+    restore_backup(backup, destination)
+    assert (destination / "results/project/job/run-1/results.json").is_file()
+
+
 def test_threshold_percentiles_are_nearest_rank_and_profile_is_host_sized() -> None:
     assert percentile([1, 2, 3, 4, 100], 95) == 100
     thresholds = Thresholds()
@@ -240,6 +303,9 @@ def test_release_workflow_triggers_permissions_jobs_and_no_mutable_cache() -> No
     assert workflow["on"]["schedule"] == [{"cron": "41 7 * * 6"}]
     assert "github.event_name == 'pull_request'" in workflow["concurrency"]["cancel-in-progress"]
     assert set(workflow["jobs"]) == {"quick-recovery-restore", "full-load-soak"}
+    qualification_paths = set(workflow["on"]["pull_request"]["paths"])
+    assert "src/scrapeyard/**" in qualification_paths
+    assert "sql/**" in qualification_paths
     quick = workflow["jobs"]["quick-recovery-restore"]
     full = workflow["jobs"]["full-load-soak"]
     assert quick["timeout-minutes"] == "60"
