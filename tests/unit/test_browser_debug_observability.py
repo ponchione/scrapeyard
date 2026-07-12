@@ -200,7 +200,7 @@ def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
                 "Authorization": "Bearer secret",
                 "X-Test": "visible",
             },
-            "additional_arguments": {"api_token": "secret"},
+            "additional_arguments": {"fingerprint": {"api_token": "secret"}},
         },
     )
 
@@ -210,7 +210,9 @@ def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
         "Authorization": "<redacted>",
         "X-Test": "<redacted>",
     }
-    assert debug["browser_settings"]["additional_arguments"] == {"api_token": "<redacted>"}
+    assert debug["browser_settings"]["additional_arguments"] == {
+        "fingerprint": {"api_token": "<redacted>"}
+    }
 
 
 @pytest.mark.asyncio
