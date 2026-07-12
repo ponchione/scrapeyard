@@ -5,7 +5,7 @@ import shutil
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
@@ -151,20 +151,65 @@ async def _startup_runtime_services(app: FastAPI) -> None:
     )
 
 
-async def _shutdown_runtime_services(app: FastAPI, *, shutdown_grace_seconds: int) -> None:
+async def _shutdown_runtime_services(
+    app: FastAPI,
+    *,
+    shutdown_grace_seconds: float,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, shutdown_grace_seconds)
+    failures: list[tuple[str, Exception]] = []
+
+    def remaining() -> float:
+        return max(0.0, deadline - loop.time())
+
+    def record_failure(phase: str, exc: Exception) -> None:
+        failures.append((phase, exc))
+        logger.exception("Runtime shutdown phase failed phase=%s", phase)
+
     cleanup_task = getattr(app.state, "cleanup_task", None)
     if cleanup_task is not None:
         cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cleanup_task
+        cleanup_future = asyncio.ensure_future(cleanup_task)
+        try:
+            cleanup_timeout = remaining()
+            if cleanup_timeout > 0:
+                await asyncio.wait_for(
+                    asyncio.shield(cleanup_future),
+                    timeout=cleanup_timeout,
+                )
+            else:
+                await asyncio.sleep(0)
+                if cleanup_future.done():
+                    await cleanup_future
+        except asyncio.CancelledError:
+            if not cleanup_future.done():
+                raise
+        except Exception as exc:
+            record_failure("cleanup", exc)
     scheduler = getattr(app.state, "scheduler", None)
     if scheduler is not None:
-        scheduler.shutdown()
+        try:
+            scheduler.shutdown()
+        except Exception as exc:
+            record_failure("scheduler", exc)
     worker_pool = getattr(app.state, "worker_pool", None)
     if worker_pool is not None:
-        await worker_pool.stop()
-    await close_webhook_dispatcher(timeout=shutdown_grace_seconds)
-    await close_db()
+        try:
+            await worker_pool.stop(timeout=remaining())
+        except Exception as exc:
+            record_failure("worker", exc)
+    try:
+        await close_webhook_dispatcher(timeout=remaining())
+    except Exception as exc:
+        record_failure("webhook", exc)
+    try:
+        await close_db()
+    except Exception as exc:
+        record_failure("database", exc)
+    if failures:
+        phases = ", ".join(phase for phase, _exc in failures)
+        raise RuntimeError(f"Runtime shutdown failed for phase(s): {phases}") from failures[0][1]
 
 
 @asynccontextmanager

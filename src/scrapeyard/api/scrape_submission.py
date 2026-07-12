@@ -228,10 +228,22 @@ async def wait_for_queued_job(
     timeout_seconds: int,
     poll_delay_seconds: float,
 ) -> bool:
+    result_task = asyncio.ensure_future(
+        queued_job.result(timeout=timeout_seconds, poll_delay=poll_delay_seconds)
+    )
     try:
-        await queued_job.result(timeout=timeout_seconds, poll_delay=poll_delay_seconds)
+        await asyncio.shield(result_task)
     except asyncio.TimeoutError:
         return False
+    except asyncio.CancelledError:
+        if result_task.done():
+            # arq reports an aborted job using CancelledError. That is a
+            # terminal queue outcome, not cancellation of this HTTP request.
+            return False
+        result_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await result_task
+        raise
     return True
 
 
@@ -250,6 +262,8 @@ async def wait_for_persisted_job(
         job = await job_store.get_job(job_id)
         if job.status in {JobStatus.complete, JobStatus.partial, JobStatus.failed}:
             return True
+        if job.status in {JobStatus.cancelled, JobStatus.deleting}:
+            return False
         remaining = deadline - loop.time()
         if remaining <= 0:
             return False
