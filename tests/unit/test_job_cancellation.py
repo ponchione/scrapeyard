@@ -32,6 +32,7 @@ async def _save_queued(store: SQLiteJobStore, run_id: str = "run-1") -> None:
             config_yaml=YAML,
             updated_at=NOW,
             current_run_id=run_id,
+            current_trigger="adhoc",
             schedule_cron="*/5 * * * *",
         )
     )
@@ -199,6 +200,7 @@ async def test_cancelled_state_cannot_be_requeued_or_reconciled(store):
         expected_status=JobStatus.cancelled.value,
         expected_run_id="run-1",
         new_run_id="run-2",
+        new_trigger="adhoc",
         queued_at=NOW + timedelta(seconds=1),
     )
     assert await store.list_stale_queued_jobs(NOW + timedelta(days=1)) == []

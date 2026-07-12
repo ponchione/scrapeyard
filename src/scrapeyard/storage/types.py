@@ -145,13 +145,9 @@ class StaleQueuedJob:
     run_id: str
     config_yaml: str
     queued_at: datetime
+    trigger: str
     schedule_cron: str | None
     schedule_enabled: bool
-
-    @property
-    def trigger(self) -> str:
-        """Classify the accepted delivery from state persisted in SQLite."""
-        return "scheduled" if self.schedule_cron is not None else "adhoc"
 
 
 @dataclass(frozen=True, slots=True)

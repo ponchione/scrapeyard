@@ -43,3 +43,4 @@ objects are verified.
 | `012_create_scrape_idempotency.sql` | Caller-scoped, expiring ad-hoc submission deduplication records. |
 | `013_add_schedule_timezone.sql` | Persist explicit IANA timezone semantics for scheduled jobs. |
 | `014_add_jobs_config_hash.sql` | Preserve plaintext-free config compare-and-set semantics. |
+| `015_add_jobs_current_trigger.sql` | Preserve accepted ad-hoc, scheduled, or manual trigger provenance through queued-delivery recovery. |

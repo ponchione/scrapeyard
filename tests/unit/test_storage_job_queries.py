@@ -53,12 +53,14 @@ def test_row_to_job_with_stats_maps_run_count_and_timestamp() -> None:
             "schedule_cron": "*/5 * * * *",
             "schedule_enabled": 1,
             "current_run_id": "run-123",
+            "current_trigger": "scheduled",
             "run_count": 7,
             "last_run_at": "2026-03-03T10:00:00",
         }
     )
 
     assert job.job_id == "j-1"
+    assert job.current_trigger == "scheduled"
     assert run_count == 7
     assert last_run_at == datetime(2026, 3, 3, 10, 0, 0)
 

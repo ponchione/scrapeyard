@@ -165,6 +165,7 @@ async def _save_adhoc_job(
             config_yaml=config_yaml,
             updated_at=utc_now(),
             current_run_id=generate_run_id(),
+            current_trigger="adhoc",
         )
         try:
             if idempotency is None:

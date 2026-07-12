@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -19,6 +20,7 @@ from scrapeyard.storage.database import (
     get_db,
     init_db,
 )
+from scrapeyard.storage.job_store import SQLiteJobStore
 
 
 def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
@@ -64,6 +66,7 @@ async def test_init_db_creates_tables(tmp_path):
         assert "delete_results_on_delete" in columns
         assert "schedule_timezone" in columns
         assert "config_hash" in columns
+        assert "current_trigger" in columns
         cursor = await db.execute("PRAGMA table_info(job_runs)")
         run_columns = {column[1]: column for column in await cursor.fetchall()}
         assert "heartbeat_at" in run_columns
@@ -126,6 +129,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "012",
         "013",
         "014",
+        "015",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [
@@ -321,7 +325,18 @@ async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_pat
                    (run_id, job_id, status, trigger, config_hash, started_at)
                VALUES
                    ('old-run', 'old-job', 'running', 'adhoc', 'hash',
-                    '2026-07-10T12:00:00+00:00');"""
+                    '2026-07-10T12:00:00+00:00');
+               INSERT INTO jobs
+                   (job_id, project, name, status, config_yaml, created_at,
+                    updated_at, schedule_cron, schedule_enabled, current_run_id)
+               VALUES
+                   ('old-job', 'legacy', 'adhoc', 'running', '{}',
+                    '2026-07-10T12:00:00+00:00',
+                    '2026-07-10T12:00:00+00:00', NULL, 1, 'old-run'),
+                   ('old-scheduled-job', 'legacy', 'scheduled', 'queued', '{}',
+                    '2026-07-10T12:00:00+00:00',
+                    '2026-07-10T12:00:00+00:00', '*/5 * * * *', 1,
+                    'old-scheduled-run');"""
         )
         await db.commit()
 
@@ -335,12 +350,35 @@ async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_pat
         columns = [row[1] for row in await cursor.fetchall()]
         cursor = await db.execute("SELECT heartbeat_at FROM job_runs WHERE run_id = 'old-run'")
         row = await cursor.fetchone()
+        cursor = await db.execute(
+            "SELECT job_id, current_trigger FROM jobs ORDER BY job_id"
+        )
+        trigger_rows = [tuple(item) for item in await cursor.fetchall()]
 
     assert columns.count("heartbeat_at") == 1
     assert job_columns.count("deletion_requested_at") == 1
     assert job_columns.count("delete_results_on_delete") == 1
+    assert job_columns.count("current_trigger") == 1
     assert row is not None
     assert row["heartbeat_at"] == "2026-07-10T12:00:00+00:00"
+    assert trigger_rows == [
+        ("old-job", "adhoc"),
+        ("old-scheduled-job", None),
+    ]
+
+    store = SQLiteJobStore()
+    assert await store.claim_run(
+        "old-scheduled-run",
+        "old-scheduled-job",
+        "manual",
+        "hash",
+        datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc),
+    )
+    claimed = await store.get_job("old-scheduled-job")
+    run = await store.get_job_run("old-scheduled-job", "old-scheduled-run")
+    assert claimed.current_trigger == "manual"
+    assert run is not None
+    assert run.trigger == "manual"
 
 
 async def test_init_db_upgrades_existing_webhook_outbox_item06_columns(tmp_path):

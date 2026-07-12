@@ -138,7 +138,8 @@ async def test_scrape_task_discards_result_when_finalization_loses_ownership():
 
     with patch("scrapeyard.queue.worker.scrape_target", new=AsyncMock(return_value=success_result)), \
          patch("scrapeyard.queue.worker.load_config") as mock_load, \
-         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
+         patch("scrapeyard.queue.worker.get_settings") as mock_settings, \
+         patch("scrapeyard.queue.worker.observe_run") as observe_run:
         mock_settings.return_value = make_settings_mock()
         mock_load.return_value = MagicMock(
             project="test",
@@ -174,6 +175,7 @@ async def test_scrape_task_discards_result_when_finalization_loses_ownership():
     job_store.finalize_owned_run.assert_awaited_once()
     job_store.fail_owned_run.assert_not_awaited()
     webhook_dispatcher.submit.assert_not_awaited()
+    assert observe_run.call_args.kwargs["status"] == "ignored"
 
 
 @pytest.mark.asyncio

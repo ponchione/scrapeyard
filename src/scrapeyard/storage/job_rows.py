@@ -44,6 +44,10 @@ def row_to_job(row: RowMapping) -> Job:
         ),
         schedule_enabled=bool(row["schedule_enabled"]),
         current_run_id=cast(str | None, row["current_run_id"]),
+        current_trigger=cast(
+            str | None,
+            _optional_row_value(row, "current_trigger"),
+        ),
         deletion_requested_at=parse_dt(
             cast(str | None, _optional_row_value(row, "deletion_requested_at"))
         ),

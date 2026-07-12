@@ -341,7 +341,10 @@ def _background_probes() -> dict[str, ProbeResult]:
     }
 
 
-async def health() -> JSONResponse:
+async def health(
+    *,
+    allowed_projects: frozenset[str] | None = None,
+) -> JSONResponse:
     """Service health check endpoint with detailed status.
 
     Returns 200 when all dependencies (Redis, SQLite, disk) are reachable and
@@ -353,6 +356,12 @@ async def health() -> JSONResponse:
 
     uptime = _health.uptime
     projects = await _health.project_summary() if settings.health_include_projects else {}
+    if allowed_projects is not None:
+        projects = {
+            project: summary
+            for project, summary in projects.items()
+            if project in allowed_projects
+        }
 
     timeout = settings.health_probe_timeout_seconds
     redis_probe = await _timed_async_probe("redis", probe_redis(pool), timeout)
@@ -459,8 +468,8 @@ async def liveness() -> dict[str, str]:
 async def readiness(request: Request) -> JSONResponse:
     """Detailed dependency/capacity diagnostics for monitoring credentials."""
 
-    authorize_request(request, AuthScope.health_detail)
-    return await health()
+    caller = authorize_request(request, AuthScope.health_detail)
+    return await health(allowed_projects=caller.projects)
 
 
 async def _refresh_metrics() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,6 +40,7 @@ def _stale_job(*, scheduled: bool = False) -> StaleQueuedJob:
         run_id="run-scheduled" if scheduled else "run-adhoc",
         config_yaml=CONFIG_YAML,
         queued_at=NOW - timedelta(seconds=TIMEOUT + 1),
+        trigger="scheduled" if scheduled else "adhoc",
         schedule_cron="*/5 * * * *" if scheduled else None,
         schedule_enabled=not scheduled,
     )
@@ -62,6 +64,7 @@ async def _save_stale_job(
     job_id: str = "job-adhoc",
     run_id: str = "run-adhoc",
     scheduled: bool = False,
+    trigger: str | None = None,
     queued_at: datetime | None = None,
     config_yaml: str = CONFIG_YAML,
 ) -> None:
@@ -76,6 +79,7 @@ async def _save_stale_job(
             schedule_cron="*/5 * * * *" if scheduled else None,
             schedule_enabled=not scheduled,
             current_run_id=run_id,
+            current_trigger=trigger or ("scheduled" if scheduled else "adhoc"),
         )
     )
 
@@ -230,6 +234,47 @@ async def test_missing_scheduled_delivery_recovers_accepted_run_when_disabled() 
     )
 
 
+async def test_missing_manual_delivery_preserves_trigger_for_scheduled_job(
+    tmp_path,
+) -> None:
+    store = await _sqlite_store(tmp_path)
+    await _save_stale_job(
+        store,
+        job_id="job-manual",
+        run_id="run-manual",
+        scheduled=True,
+        trigger="manual",
+    )
+    pool = _mock_pool(QueueDeliveryState.missing)
+
+    summary = await reconcile_stale_queued_jobs(
+        job_store=store,
+        worker_pool=pool,
+        queued_claim_timeout_seconds=TIMEOUT,
+        now=NOW,
+    )
+
+    assert summary.recovered == 1
+    pool.enqueue.assert_awaited_once_with(
+        "job-manual",
+        CONFIG_YAML,
+        "high",
+        True,
+        run_id="run-manual",
+        trigger="manual",
+    )
+    assert await store.claim_run(
+        "run-manual",
+        "job-manual",
+        "manual",
+        hashlib.sha256(CONFIG_YAML.encode()).hexdigest(),
+        NOW,
+    )
+    run = await store.get_job_run("job-manual", "run-manual")
+    assert run is not None
+    assert run.trigger == "manual"
+
+
 async def test_redis_inspection_failure_aborts_reconciliation() -> None:
     job = _stale_job()
     store = AsyncMock()
@@ -354,6 +399,7 @@ async def test_current_run_replacement_racing_reconciliation_is_a_noop(
             expected_status="queued",
             expected_run_id="run-adhoc",
             new_run_id="run-new",
+            new_trigger="adhoc",
             queued_at=NOW,
         )
         assert replaced is True
