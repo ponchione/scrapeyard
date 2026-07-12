@@ -156,6 +156,20 @@ async def test_yaml_and_query_validation_use_equivalent_422_envelopes(client):
 
 
 @pytest.mark.asyncio
+async def test_framework_404_and_405_use_the_public_error_envelope(client):
+    missing = await client.get("/route-that-does-not-exist")
+    wrong_method = await client.patch("/jobs")
+
+    assert missing.status_code == 404
+    assert wrong_method.status_code == 405
+    _assert_error_envelope(missing.json(), 404)
+    _assert_error_envelope(wrong_method.json(), 405)
+    assert missing.json()["code"] == "not_found"
+    assert wrong_method.json()["code"] == "method_not_allowed"
+    assert wrong_method.headers["allow"]
+
+
+@pytest.mark.asyncio
 async def test_unhandled_errors_use_safe_versioned_json_envelope(test_app):
     async def _boom() -> None:
         raise RuntimeError("database password must never escape")

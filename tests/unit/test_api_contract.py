@@ -29,7 +29,21 @@ def test_openapi_has_concrete_success_and_error_contracts_for_every_operation():
 
             if path.startswith("/health"):
                 continue
-            for status in (400, 401, 403, 404, 409, 413, 415, 422, 429, 503):
+            for status in (
+                400,
+                401,
+                403,
+                404,
+                405,
+                409,
+                413,
+                415,
+                422,
+                429,
+                500,
+                503,
+                504,
+            ):
                 response = operation["responses"][str(status)]
                 assert _schema_for(response) == {
                     "$ref": "#/components/schemas/ErrorEnvelope"

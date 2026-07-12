@@ -185,7 +185,7 @@ class LivenessResponse(APIResponseModel):
 
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": ErrorEnvelope}
-    for status in (400, 401, 403, 404, 409, 413, 415, 422, 429, 500, 503)
+    for status in (400, 401, 403, 404, 405, 409, 413, 415, 422, 429, 500, 503, 504)
 }
 
 PAGINATION_HEADERS: dict[str, dict[str, Any]] = {

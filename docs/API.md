@@ -71,6 +71,9 @@ rate limiting all return:
 `details` is always a list and is empty when no safe field-level detail exists.
 Validation details omit submitted values and URLs that could contain secrets.
 The legacy string `error` field remains in place as an additive migration aid.
+Framework-generated errors, including unmatched routes (`404`) and unsupported
+methods (`405`), use this same envelope. Worker-quiescence timeouts use `504`
+with code `gateway_timeout`; all three statuses are declared in OpenAPI.
 
 ## Pagination
 
