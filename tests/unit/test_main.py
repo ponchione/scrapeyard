@@ -434,6 +434,75 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     assert payload["projects"] == {}
 
 
+@pytest.mark.asyncio
+async def test_health_filters_project_summary_for_scoped_monitor(monkeypatch):
+    import json
+
+    from scrapeyard.runtime.health import ProbeResult
+
+    settings = SimpleNamespace(
+        health_include_projects=True,
+        health_probe_timeout_seconds=0.5,
+        storage_results_dir="/tmp/results",
+        health_disk_free_min_mb=1,
+    )
+    pool = SimpleNamespace(
+        max_concurrent=2,
+        active_tasks=0,
+        max_browsers=1,
+        active_browsers=0,
+        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
+    )
+    summaries = {
+        "alpha": {"job_count": 1, "status": "healthy", "status_counts": {}},
+        "beta": {"job_count": 2, "status": "failing", "status_counts": {}},
+    }
+
+    async def _ok_async(*_args, **_kwargs):
+        return ProbeResult(True)
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    monkeypatch.setattr(
+        main_module._health,
+        "project_summary",
+        AsyncMock(return_value=summaries),
+    )
+    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
+    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
+    monkeypatch.setattr(main_module, "probe_result_storage", lambda *_args: ProbeResult(True))
+    monkeypatch.setattr(main_module, "probe_disk", lambda *_args: ProbeResult(True))
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        lambda: {
+            name: ProbeResult(True)
+            for name in ("worker", "scheduler", "cleanup", "webhook")
+        },
+    )
+
+    response = await main_module.health(allowed_projects=frozenset({"alpha"}))
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["projects"] == {"alpha": summaries["alpha"]}
+
+
+@pytest.mark.asyncio
+async def test_readiness_forwards_authenticated_project_scope(monkeypatch):
+    request = MagicMock()
+    caller = SimpleNamespace(projects=frozenset({"alpha"}))
+    response = MagicMock()
+    authorize = MagicMock(return_value=caller)
+    health = AsyncMock(return_value=response)
+    monkeypatch.setattr(main_module, "authorize_request", authorize)
+    monkeypatch.setattr(main_module, "health", health)
+
+    assert await main_module.readiness(request) is response
+
+    authorize.assert_called_once_with(request, main_module.AuthScope.health_detail)
+    health.assert_awaited_once_with(allowed_projects=caller.projects)
+
+
 def test_app_middleware_stack_versions_all_size_rate_and_auth_responses():
     middleware_classes = [middleware.cls for middleware in main_module.app.user_middleware]
 

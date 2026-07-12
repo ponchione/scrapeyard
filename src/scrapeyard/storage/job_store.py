@@ -90,6 +90,9 @@ class SQLiteJobStore:
 
     @staticmethod
     async def _insert_job(db: aiosqlite.Connection, job: Job) -> None:
+        current_trigger = job.current_trigger
+        if current_trigger is None and job.current_run_id is not None:
+            current_trigger = "scheduled" if job.schedule_cron is not None else "adhoc"
         protected_config = protect_text(
             job.config_yaml,
             purpose=f"jobs.config_yaml:{job.job_id}",
@@ -97,9 +100,9 @@ class SQLiteJobStore:
         await db.execute(
             """INSERT INTO jobs (job_id, project, name, status,
                config_yaml, config_hash, created_at, updated_at, schedule_cron,
-               schedule_timezone, schedule_enabled, current_run_id,
+               schedule_timezone, schedule_enabled, current_run_id, current_trigger,
                deletion_requested_at, delete_results_on_delete)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.job_id,
                 job.project,
@@ -113,6 +116,7 @@ class SQLiteJobStore:
                 job.schedule_timezone,
                 int(job.schedule_enabled),
                 job.current_run_id,
+                current_trigger,
                 fmt_dt(job.deletion_requested_at),
                 (
                     None
@@ -848,11 +852,12 @@ class SQLiteJobStore:
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             cursor = await db.execute(
                 """UPDATE jobs
-                       SET status = 'running', updated_at = ?
+                       SET status = 'running', updated_at = ?, current_trigger = ?
                        WHERE job_id = ?
                          AND status = 'queued'
-                         AND current_run_id IS ?""",
-                (timestamp, job_id, run_id),
+                         AND current_run_id IS ?
+                         AND (current_trigger = ? OR current_trigger IS NULL)""",
+                (timestamp, trigger, job_id, run_id, trigger),
             )
             if cursor.rowcount != 1:
                 await db.rollback()
@@ -1299,6 +1304,7 @@ class SQLiteJobStore:
         expected_status: str,
         expected_run_id: str | None,
         new_run_id: str,
+        new_trigger: str,
         queued_at: datetime,
         stale_before: datetime | None = None,
         expected_config_yaml: str | None = None,
@@ -1312,6 +1318,7 @@ class SQLiteJobStore:
         params: list[object] = [
             fmt_dt(queued_at),
             new_run_id,
+            new_trigger,
             job_id,
             expected_status,
             expected_run_id,
@@ -1328,7 +1335,8 @@ class SQLiteJobStore:
             )
         cursor = await self._execute_write(
             """UPDATE jobs
-               SET status = 'queued', updated_at = ?, current_run_id = ?
+               SET status = 'queued', updated_at = ?, current_run_id = ?,
+                   current_trigger = ?
                WHERE job_id = ?
                  AND status = ?
                  AND current_run_id IS ?"""
@@ -1367,7 +1375,7 @@ class SQLiteJobStore:
         """
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                """SELECT job_id, current_run_id, config_yaml, updated_at,
+                """SELECT job_id, current_run_id, current_trigger, config_yaml, updated_at,
                           schedule_cron, schedule_enabled
                    FROM jobs
                    WHERE status = 'queued'
@@ -1385,6 +1393,13 @@ class SQLiteJobStore:
             run_id = cast(str | None, row["current_run_id"])
             if queued_at is None or run_id is None:
                 continue
+            schedule_cron = cast(str | None, row["schedule_cron"])
+            trigger = cast(str | None, row["current_trigger"])
+            if trigger is None:
+                # Pre-015 queued rows did not persist provenance. Preserve
+                # the historical fallback only for this unresolvable upgrade
+                # case; all newly accepted runs store an explicit trigger.
+                trigger = "scheduled" if schedule_cron is not None else "adhoc"
             stale_jobs.append(
                 StaleQueuedJob(
                     job_id=cast(str, row["job_id"]),
@@ -1394,7 +1409,8 @@ class SQLiteJobStore:
                         purpose=f"jobs.config_yaml:{cast(str, row['job_id'])}",
                     ),
                     queued_at=queued_at,
-                    schedule_cron=cast(str | None, row["schedule_cron"]),
+                    trigger=trigger,
+                    schedule_cron=schedule_cron,
                     schedule_enabled=bool(row["schedule_enabled"]),
                 )
             )

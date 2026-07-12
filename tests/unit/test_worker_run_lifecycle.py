@@ -35,21 +35,26 @@ from tests.unit.worker_helpers import (
 # ---------------------------------------------------------------------------
 
 
-async def _insert_job_row(db_path: str, job: Job) -> None:
+async def _insert_job_row(
+    db_path: str,
+    job: Job,
+    *,
+    trigger: str = "adhoc",
+) -> None:
     """Insert a job row into the real DB for tests using real SQLiteJobStore."""
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """INSERT INTO jobs (job_id, project, name, status,
                config_yaml, created_at, updated_at, schedule_cron,
-               schedule_enabled, current_run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               schedule_enabled, current_run_id, current_trigger)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.job_id, job.project, job.name, job.status.value,
                 job.config_yaml,
                 job.created_at.isoformat() if job.created_at else None,
                 job.updated_at.isoformat() if job.updated_at else None,
                 job.schedule_cron, int(job.schedule_enabled),
-                job.current_run_id,
+                job.current_run_id, trigger if job.current_run_id else None,
             ),
         )
         await db.commit()
@@ -118,7 +123,11 @@ class TestRunCreation:
 
         job = make_job(current_run_id="run-abc")
         job_store = SQLiteJobStore()
-        await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
+        await _insert_job_row(
+            str(tmp_path / "db" / "jobs.db"),
+            job,
+            trigger="scheduled",
+        )
 
         success_result = TargetResult(
             url="http://example.com", status="success", data=[{"title": "A"}],

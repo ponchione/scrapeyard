@@ -40,6 +40,7 @@ async def _save(store: SQLiteJobStore, status: JobStatus) -> None:
             status=status,
             updated_at=NOW,
             current_run_id="run-1",
+            current_trigger="adhoc",
             schedule_cron="*/5 * * * *",
         )
     )
@@ -223,6 +224,7 @@ async def test_deleting_parent_is_not_terminal_reconciliation_candidate(store):
         expected_status=JobStatus.deleting.value,
         expected_run_id="run-1",
         new_run_id="run-2",
+        new_trigger="adhoc",
         queued_at=NOW + timedelta(seconds=1),
     )
 

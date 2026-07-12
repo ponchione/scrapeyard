@@ -269,6 +269,7 @@ class SchedulerService:
             expected_status=job.status.value,
             expected_run_id=job.current_run_id,
             new_run_id=run_id,
+            new_trigger=trigger,
             queued_at=now,
             stale_before=stale_before,
             expected_config_yaml=job.config_yaml,

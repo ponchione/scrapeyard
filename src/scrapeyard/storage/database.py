@@ -25,6 +25,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "012_create_scrape_idempotency.sql",
         "013_add_schedule_timezone.sql",
         "014_add_jobs_config_hash.sql",
+        "015_add_jobs_current_trigger.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -235,6 +236,8 @@ async def _migration_is_reflected(
         return await _columns_include(db, "jobs", {"schedule_timezone"})
     if migration_id == "014":
         return await _columns_include(db, "jobs", {"config_hash"})
+    if migration_id == "015":
+        return await _columns_include(db, "jobs", {"current_trigger"})
     return False
 
 

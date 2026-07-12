@@ -133,6 +133,7 @@ async def test_config_update_cannot_race_future_run_reservation(store):
         expected_status=JobStatus.queued.value,
         expected_run_id=None,
         new_run_id="run-old-config",
+        new_trigger="scheduled",
         queued_at=NOW,
         expected_config_yaml=original.config_yaml,
     )

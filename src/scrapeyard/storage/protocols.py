@@ -217,6 +217,7 @@ class JobStore(Protocol):
         expected_status: str,
         expected_run_id: str | None,
         new_run_id: str,
+        new_trigger: str,
         queued_at: datetime,
         stale_before: datetime | None = None,
         expected_config_yaml: str | None = None,

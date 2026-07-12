@@ -493,6 +493,7 @@ async def _mark_run_started(
             expected_status=JobStatus.queued.value,
             expected_run_id=None,
             new_run_id=run_id,
+            new_trigger=trigger,
             queued_at=context.started_at,
         )
         if not queued:
@@ -601,8 +602,7 @@ async def _finalize_job_execution(
             run_id,
             context.settings.workers_running_heartbeat_timeout_seconds,
         )
-        await _discard_unowned_result(result_store, job_id, run_id)
-        return
+        raise
 
     qualification_checkpoint("after_terminal_state_before_delivery_ack")
     await dispatch_webhook(

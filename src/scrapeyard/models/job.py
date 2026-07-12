@@ -73,6 +73,10 @@ class Job(BaseModel):
     current_run_id: Optional[str] = Field(
         default=None, description="Current queued or active run identifier"
     )
+    current_trigger: Optional[str] = Field(
+        default=None,
+        description="Accepted trigger provenance for the current queued or active run",
+    )
     deletion_requested_at: Optional[datetime] = Field(
         default=None,
         description="UTC time at which resumable deletion was reserved",

@@ -12,6 +12,7 @@ JOB_COLUMNS = (
     "schedule_timezone",
     "schedule_enabled",
     "current_run_id",
+    "current_trigger",
     "deletion_requested_at",
     "delete_results_on_delete",
 )
