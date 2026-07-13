@@ -116,6 +116,7 @@ async def test_startup_repairs_missing_intent_and_is_idempotent(
     await _terminal_without_intent(store, config_yaml)
     metadata = ResultMetadata(
         job_id="job-1",
+        project="test",
         run_id="run-1",
         status="complete",
         record_count=4,

@@ -347,17 +347,13 @@ class LocalResultStore:
     async def get_result_metadata(
         self,
         job_id: str,
-        run_id: str,
+        run_id: str | None = None,
     ) -> ResultMetadata | None:
-        """Return one run's metadata without opening its filesystem artifact."""
+        """Return explicit or deterministically newest metadata without its artifact."""
 
+        sql, params = build_result_lookup_query(job_id, run_id)
         async with get_db("results_meta.db") as db:
-            cursor = await db.execute(
-                """SELECT job_id, run_id, status, record_count, file_path, created_at
-                   FROM results_meta
-                   WHERE job_id = ? AND run_id = ?""",
-                (job_id, run_id),
-            )
+            cursor = await db.execute(sql, params)
             row = await cursor.fetchone()
         if row is None:
             return None
@@ -369,6 +365,7 @@ class LocalResultStore:
             )
         return ResultMetadata(
             job_id=str(row["job_id"]),
+            project=str(row["project"]),
             run_id=str(row["run_id"]),
             status=str(row["status"]),
             record_count=cast(int | None, row["record_count"]),

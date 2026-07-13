@@ -651,11 +651,6 @@ async def get_results(
         job = None
     if job is not None:
         authorize_request(request, AuthScope.read, project=job.project)
-    elif caller.projects is not None:
-        raise_json_error(
-            403,
-            "Project-scoped callers cannot read retained results without job context",
-        )
 
     if (
         run_id is None
@@ -675,6 +670,13 @@ async def get_results(
         if run_id is not None
         else (None if job is None else job.current_run_id)
     )
+    if job is None and caller.projects is not None:
+        metadata = await result_store.get_result_metadata(job_id, result_run_id)
+        if metadata is None or not caller.permits_project(metadata.project):
+            # Retained-result ownership and absence intentionally share one
+            # response so cross-project job/run IDs are not an enumeration oracle.
+            raise_json_error(404, f"No results found for job {job_id!r}")
+        result_run_id = metadata.run_id
     try:
         payload = await result_store.get_result(job_id, run_id=result_run_id)
     except (KeyError, FileNotFoundError):

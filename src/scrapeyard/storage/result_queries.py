@@ -9,12 +9,14 @@ def build_result_lookup_query(
 ) -> tuple[str, tuple[object, ...]]:
     if run_id is not None:
         return (
-            "SELECT run_id, status, file_path FROM results_meta"
+            "SELECT job_id, project, run_id, status, record_count, file_path, created_at"
+            " FROM results_meta"
             " WHERE job_id=? AND run_id=?",
             (job_id, run_id),
         )
     return (
-        "SELECT run_id, status, file_path FROM results_meta"
+        "SELECT job_id, project, run_id, status, record_count, file_path, created_at"
+        " FROM results_meta"
         " WHERE job_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
         (job_id,),
     )

@@ -104,6 +104,11 @@ retained run. `GET /jobs/{job_id}` remains `404`. Preserved results remain
 subject to normal age and per-job result retention. Errors have no
 post-deletion access path and are always removed.
 
+When the parent job is absent, project-scoped readers are authorized against
+the `results_meta.project` owner selected by the same explicit/latest lookup as
+the artifact. Cross-project and missing retained IDs both return `404`;
+unscoped readers retain access.
+
 Periodic artifact reconciliation also treats every retained `results_meta` row
 as authoritative, so absence of the parent job after `delete_results=false`
 does not make its run directory an orphan. An unindexed cancellation artifact
