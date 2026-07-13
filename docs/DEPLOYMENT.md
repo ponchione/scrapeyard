@@ -429,7 +429,8 @@ representative production results, then leave headroom for normal catalog
 growth; do not set the serialized-result ceiling below 4096 bytes because a
 compact terminal diagnostic must remain persistable.
 
-The fetched-byte ceiling counts reliable body bytes for `basic` requests,
+The fetched-byte ceiling counts the encoded body representation exposed by
+Scrapling for `basic` requests,
 including redirects and retry responses. It is checked after each complete
 response because Scrapling's basic API is not streaming. Browser-backed
 `dynamic` and `stealthy` fetches do not expose reliable total transfer size and

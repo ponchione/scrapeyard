@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from scrapling.engines.toolbelt.custom import Response
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
@@ -19,6 +20,50 @@ def _budget(max_fetched_bytes: int) -> RunBudget:
         max_serialized_result_bytes=4096,
         max_browser_debug_bytes=1000,
     )
+
+
+def _scrapling_response(*, body: bytes, url: str = "https://example.com/") -> Response:
+    return Response(
+        url=url,
+        text=body.decode(),
+        body=body,
+        status=200,
+        reason="OK",
+        cookies={},
+        headers={},
+        request_headers={},
+        encoding="utf-8",
+        method="GET",
+        history=[],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore:The 'strip_cdata' option:DeprecationWarning")
+async def test_real_scrapling_response_body_is_counted(monkeypatch):
+    response = _scrapling_response(body=b"<html><body>hello</body></html>")
+
+    class Fetcher:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return response
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper._assert_fetch_url",
+        AsyncMock(),
+    )
+    budget = _budget(10_000)
+
+    await _fetch_basic_with_safe_redirects(
+        Fetcher,
+        "https://example.com/",
+        {},
+        {},
+        budget=budget,
+    )
+
+    assert isinstance(response.body, str)
+    assert budget.fetched_bytes == len(response.body.encode(response.encoding))
 
 
 @pytest.mark.asyncio

@@ -71,8 +71,31 @@ async def test_deadline_cancels_all_concurrent_children():
     with pytest.raises(BudgetExceeded) as exc_info:
         await budget.wait_for(asyncio.gather(blocked(1), blocked(2)))
 
+    await asyncio.sleep(0)
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
     assert sorted(cancelled) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_deadline_does_not_wait_for_cancellation_resistant_child():
+    budget = _budget(max_duration_seconds=0.01)
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def cancellation_resistant() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            finished.set()
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await asyncio.wait_for(budget.wait_for(cancellation_resistant()), timeout=0.1)
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
+    assert not finished.is_set()
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -96,6 +119,8 @@ async def test_already_expired_deadline_cancels_future_before_awaiting_it():
     with pytest.raises(BudgetExceeded):
         await budget.wait_for(future)
 
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert future.done()
     assert child.cancelled()
 
