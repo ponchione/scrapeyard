@@ -49,7 +49,9 @@ def split_transform_pipeline(raw: str) -> list[str]:
     while index < len(raw):
         character = raw[index]
         step_prefix = raw[start:index].strip()
-        colon_regex = step_prefix.startswith(("regex:", "extract:"))
+        colon_pattern = step_prefix.startswith("extract:") or (
+            step_prefix.startswith("regex:") and step_prefix.count(":") == 1
+        )
         if quote_open:
             if character == '"':
                 if index + 1 < len(raw) and raw[index + 1] == '"':
@@ -63,13 +65,13 @@ def split_transform_pipeline(raw: str) -> list[str]:
             continue
         if character == '"' and parentheses:
             quote_open = True
-        elif character == "[" and colon_regex:
+        elif character == "[" and colon_pattern:
             character_class = True
         elif character == "]" and character_class:
             character_class = False
         elif not character_class:
             if character == "(":
-                if parentheses or colon_regex or re.fullmatch(r"\w+", step_prefix):
+                if parentheses or colon_pattern or re.fullmatch(r"\w+", step_prefix):
                     parentheses += 1
             elif character == ")":
                 if parentheses:
