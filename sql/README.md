@@ -44,3 +44,4 @@ objects are verified.
 | `013_add_schedule_timezone.sql` | Persist explicit IANA timezone semantics for scheduled jobs. |
 | `014_add_jobs_config_hash.sql` | Preserve plaintext-free config compare-and-set semantics. |
 | `015_add_jobs_current_trigger.sql` | Preserve accepted ad-hoc, scheduled, or manual trigger provenance through queued-delivery recovery. |
+| `016_add_webhook_decode_failure_reason.sql` | Add a terminal reason for quarantined malformed webhook outbox rows. |

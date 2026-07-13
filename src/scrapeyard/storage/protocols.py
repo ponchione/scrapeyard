@@ -434,6 +434,14 @@ class WebhookOutboxStore(Protocol):
         attempts: int = 0,
     ) -> bool: ...
 
+    async def quarantine_malformed_delivery(
+        self,
+        delivery_id: str,
+        *,
+        failed_at: datetime,
+        decode_error_type: str,
+    ) -> bool: ...
+
     async def scrub_terminal_deliveries(
         self,
         *,

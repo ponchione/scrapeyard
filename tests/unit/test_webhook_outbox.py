@@ -172,7 +172,7 @@ async def test_delivery_survives_close_and_reopen_cycle(tmp_path):
     await close_db()
 
 
-async def test_list_pending_skips_malformed_delivery_rows(tmp_path, caplog):
+async def test_list_pending_quarantines_malformed_delivery_rows(tmp_path, caplog):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
@@ -204,6 +204,11 @@ async def test_list_pending_skips_malformed_delivery_rows(tmp_path, caplog):
 
     assert [delivery.delivery_id for delivery in pending] == ["good"]
     assert "bad-json" in caplog.text
+    quarantined = await store.get_delivery("bad-json")
+    assert quarantined is not None
+    assert quarantined.status is WebhookDeliveryStatus.failed
+    assert quarantined.failure_reason is WebhookFailureReason.decode_failure
+    assert quarantined.is_scrubbed
     await close_db()
 
 
@@ -235,6 +240,9 @@ async def test_get_delivery_returns_none_for_malformed_delivery_row(tmp_path, ca
 
     assert await SQLiteWebhookOutboxStore().get_delivery("bad-headers") is None
     assert "bad-headers" in caplog.text
+    quarantined = await SQLiteWebhookOutboxStore().get_delivery("bad-headers")
+    assert quarantined is not None
+    assert quarantined.failure_reason is WebhookFailureReason.decode_failure
     await close_db()
 
 
@@ -260,6 +268,86 @@ async def test_due_query_is_bounded_and_excludes_future_rows(tmp_path):
     assert [row.delivery_id for row in due] == ["due-1"]
     assert await store.next_pending_due_at() == now - timedelta(seconds=2)
     assert await store.oldest_pending_created_at() == now
+
+
+async def test_malformed_rows_filling_batch_are_scrubbed_without_starving_valid_due_row(
+    tmp_path,
+    caplog,
+):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteWebhookOutboxStore()
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    await store.enqueue_delivery(
+        _delivery("bad-1", next_attempt_at=now - timedelta(seconds=3)),
+        now=now,
+    )
+    await store.enqueue_delivery(
+        _delivery("bad-2", next_attempt_at=now - timedelta(seconds=2)),
+        now=now,
+    )
+    await store.enqueue_delivery(
+        _delivery("good", next_attempt_at=now - timedelta(seconds=1)),
+        now=now,
+    )
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE webhook_deliveries SET payload_json = ? "
+            "WHERE delivery_id IN ('bad-1', 'bad-2')",
+            ("sensitive malformed payload",),
+        )
+        await db.commit()
+
+    due = await store.list_due_pending(now=now, limit=2)
+
+    assert [delivery.delivery_id for delivery in due] == ["good"]
+    assert await store.next_pending_due_at() == now - timedelta(seconds=1)
+    for delivery_id in ("bad-1", "bad-2"):
+        quarantined = await store.get_delivery(delivery_id)
+        assert quarantined is not None
+        assert quarantined.status is WebhookDeliveryStatus.failed
+        assert quarantined.failure_reason is WebhookFailureReason.decode_failure
+        assert quarantined.is_scrubbed
+        assert quarantined.url == ""
+        assert quarantined.headers == {}
+        assert quarantined.payload == {}
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute(
+            "SELECT url, headers_json, payload_json, last_error, scrubbed_at "
+            "FROM webhook_deliveries WHERE delivery_id = 'bad-1'"
+        )
+        raw = await cursor.fetchone()
+    assert tuple(raw[:4]) == ("", "{}", "{}", None)
+    assert raw[4] is not None
+    assert "sensitive malformed payload" not in caplog.text
+
+
+async def test_malformed_exhausted_row_is_quarantined_and_transition_is_idempotent(
+    tmp_path,
+):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteWebhookOutboxStore()
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    await store.enqueue_delivery(_delivery("bad-exhausted"), now=now - timedelta(days=2))
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE webhook_deliveries SET headers_json = '[]', attempts = 5 "
+            "WHERE delivery_id = 'bad-exhausted'"
+        )
+        await db.commit()
+
+    assert await store.list_exhausted_pending(
+        attempts_gte=5,
+        created_at_lte=now - timedelta(days=1),
+        limit=1,
+    ) == []
+    assert not await store.quarantine_malformed_delivery(
+        "bad-exhausted",
+        failed_at=now,
+        decode_error_type="ValueError",
+    )
+    quarantined = await store.get_delivery("bad-exhausted")
+    assert quarantined is not None
+    assert quarantined.failure_reason is WebhookFailureReason.decode_failure
 
 
 async def test_begin_attempt_is_compare_and_set_and_survives_reopen(tmp_path):

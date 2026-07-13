@@ -135,6 +135,27 @@ async def test_pending_webhook_blocks_reservation_without_mutating_parent(store)
     assert (await store.get_job("job-1")).status is JobStatus.complete
 
 
+async def test_quarantined_malformed_webhook_no_longer_blocks_deletion(store):
+    await _terminal_run(store)
+    outbox = SQLiteWebhookOutboxStore()
+    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE webhook_deliveries SET payload_json = '{malformed' "
+            "WHERE delivery_id = 'delivery-1'"
+        )
+        await db.commit()
+
+    assert await outbox.list_due_pending(now=NOW, limit=1) == []
+    outcome = await store.reserve_job_deletion(
+        "job-1",
+        delete_results=False,
+        requested_at=NOW + timedelta(seconds=1),
+    )
+
+    assert outcome.action is DeletionReservationAction.created
+
+
 @pytest.mark.parametrize("terminal_kind", ["delivered", "failed", "scrubbed"])
 async def test_final_deletion_removes_terminal_delivery_run_and_parent(
     store,
