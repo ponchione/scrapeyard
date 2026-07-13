@@ -11,7 +11,7 @@ from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import FetchOutcome, TargetResult
 from scrapeyard.engine.selectors import select_elements_strict
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError, assert_public_url
 from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
@@ -94,6 +94,11 @@ async def _pagination_url_is_safe(
             await budget.wait_for(lookup)
     except UnsafeURLError:
         return False
+    except URLResolutionError:
+        # The actual fetch repeats DNS validation inside RetryHandler. Continue
+        # to that path so resolver availability failures consume retry policy,
+        # while concrete unsafe destinations remain permanently blocked above.
+        return True
     await cancellation_checkpoint(
         cancellation_guard,
         "after_pagination_dns_validation",

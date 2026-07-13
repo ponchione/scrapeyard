@@ -11,6 +11,7 @@ from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
+from scrapeyard.engine.url_guard import URLResolutionError
 
 
 class _Element:
@@ -440,7 +441,7 @@ async def test_blocking_pagination_dns_does_not_block_event_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pagination_resolver_error_stops_before_fetch(monkeypatch):
+async def test_pagination_resolver_error_defers_to_retryable_fetch(monkeypatch):
     target = TargetConfig.model_validate(
         {
             "url": "https://example.com/page-1",
@@ -456,24 +457,25 @@ async def test_pagination_resolver_error_stops_before_fetch(monkeypatch):
         "scrapeyard.engine.url_guard.socket.getaddrinfo",
         failed_resolver,
     )
-    fetch_page = AsyncMock()
+    fetch_page = AsyncMock(side_effect=URLResolutionError("resolver unavailable"))
 
-    await paginate_target(
-        page=_Page([_Element("https://unresolved.example.test/page-2")]),
-        target=target,
-        result=TargetResult(url=target.url, debug={"final_url": target.url}),
-        fetch_target_page=fetch_page,
-        extract_page_data=MagicMock(),
-        retry_handler=MagicMock(),
-        fetcher_cls=object(),
-        adaptive=False,
-        retryable_status=set(),
-        adaptive_dir="/tmp/adaptive",
-        proxy_url=None,
-        artifacts_dir=None,
-    )
+    with pytest.raises(URLResolutionError, match="resolver unavailable"):
+        await paginate_target(
+            page=_Page([_Element("https://unresolved.example.test/page-2")]),
+            target=target,
+            result=TargetResult(url=target.url, debug={"final_url": target.url}),
+            fetch_target_page=fetch_page,
+            extract_page_data=MagicMock(),
+            retry_handler=MagicMock(),
+            fetcher_cls=object(),
+            adaptive=False,
+            retryable_status=set(),
+            adaptive_dir="/tmp/adaptive",
+            proxy_url=None,
+            artifacts_dir=None,
+        )
 
-    fetch_page.assert_not_awaited()
+    fetch_page.assert_awaited_once()
 
 
 @pytest.mark.asyncio

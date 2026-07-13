@@ -18,7 +18,7 @@ from scrapeyard.engine.scraper import (
     _fetch_basic_with_safe_redirects,
     _fetch_page,
 )
-from scrapeyard.engine.url_guard import UnsafeURLError
+from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_fetch_page_requires_resolved_dns_when_proxy_can_resolve_remotely(
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+    with pytest.raises(URLResolutionError, match="could not be resolved"):
         await _fetch_page(
             object(),
             target.url,
@@ -556,7 +556,4 @@ def test_log_adaptive_selector_gap_redacts_target_url_secrets(caplog):
 
     assert "user:pass" not in caplog.text
     assert "api_key=secret" not in caplog.text
-    assert (
-        "https://example.com/products?api_key=<redacted>&page=<redacted>"
-        in caplog.text
-    )
+    assert "https://example.com/products?api_key=<redacted>&page=<redacted>" in caplog.text

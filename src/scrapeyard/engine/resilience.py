@@ -17,6 +17,7 @@ from scrapeyard.queue.cancellation import (
     cancellation_checkpoint,
 )
 from scrapeyard.runtime.metrics import RETRIES
+from scrapeyard.engine.url_guard import URLResolutionError
 
 T = TypeVar("T")
 
@@ -75,7 +76,7 @@ class RetryHandler:
                     "after_retry_attempt",
                 )
                 return result
-            except RetryableError as exc:
+            except (RetryableError, URLResolutionError) as exc:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
                     RETRIES.labels("scrape", "scheduled").inc()
@@ -124,8 +125,7 @@ class ResultValidator:
                 return True
         elif isinstance(value, list | tuple):
             if any(
-                item is not None and (not isinstance(item, str) or item.strip())
-                for item in value
+                item is not None and (not isinstance(item, str) or item.strip()) for item in value
             ):
                 return True
         elif value is not None:

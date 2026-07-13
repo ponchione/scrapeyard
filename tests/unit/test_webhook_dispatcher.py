@@ -14,7 +14,11 @@ import httpx
 import pytest
 
 from scrapeyard.config.schema import WebhookConfig
-from scrapeyard.engine.url_guard import ResolvedPublicURL, resolve_public_url
+from scrapeyard.engine.url_guard import (
+    URLResolutionError,
+    ResolvedPublicURL,
+    resolve_public_url,
+)
 from scrapeyard.storage.webhook_outbox import (
     WebhookDelivery,
     WebhookDeliveryCreate,
@@ -42,7 +46,11 @@ def _pin_test_webhook_hosts(monkeypatch) -> None:
 
     def _resolve(url: str) -> ResolvedPublicURL:
         parsed = urlparse(url)
-        if parsed.hostname and parsed.hostname.endswith(".example.com") or parsed.hostname == "example.com":
+        if (
+            parsed.hostname
+            and parsed.hostname.endswith(".example.com")
+            or parsed.hostname == "example.com"
+        ):
             port = f":{parsed.port}" if parsed.port is not None else ""
             return ResolvedPublicURL(
                 urlunparse(parsed._replace(netloc=f"93.184.216.34{port}")),
@@ -73,6 +81,20 @@ def _payload(delivery_id: str = "delivery-1") -> dict[str, Any]:
         "job_id": "job-1",
         "run_id": "run-1",
     }
+
+
+class _UnreadResponseStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.iterated = False
+        self.closed = False
+
+    async def __aiter__(self):
+        self.iterated = True
+        raise AssertionError("webhook response body must not be consumed")
+        yield b"unreachable"
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class MemoryWebhookOutboxStore:
@@ -126,9 +148,7 @@ class MemoryWebhookOutboxStore:
         limit: int,
     ) -> list[WebhookDelivery]:
         return [
-            delivery
-            for delivery in await self.list_pending()
-            if delivery.next_attempt_at <= now
+            delivery for delivery in await self.list_pending() if delivery.next_attempt_at <= now
         ][:limit]
 
     async def list_exhausted_pending(
@@ -141,8 +161,7 @@ class MemoryWebhookOutboxStore:
         rows = [
             delivery
             for delivery in await self.list_pending()
-            if delivery.attempts >= attempts_gte
-            or delivery.created_at <= created_at_lte
+            if delivery.attempts >= attempts_gte or delivery.created_at <= created_at_lte
         ]
         rows.sort(key=lambda delivery: (delivery.created_at, delivery.delivery_id))
         return rows[:limit]
@@ -167,17 +186,13 @@ class MemoryWebhookOutboxStore:
         return WebhookOutboxSummary(
             pending=len(pending),
             delivered=sum(
-                row.status is WebhookDeliveryStatus.delivered
-                for row in self.deliveries.values()
+                row.status is WebhookDeliveryStatus.delivered for row in self.deliveries.values()
             ),
             failed=sum(
-                row.status is WebhookDeliveryStatus.failed
-                for row in self.deliveries.values()
+                row.status is WebhookDeliveryStatus.failed for row in self.deliveries.values()
             ),
             oldest_pending_age_seconds=(
-                None
-                if oldest is None
-                else max(0.0, (observed_at - oldest).total_seconds())
+                None if oldest is None else max(0.0, (observed_at - oldest).total_seconds())
             ),
             pending_attempts_min=None if not attempts else min(attempts),
             pending_attempts_max=None if not attempts else max(attempts),
@@ -286,9 +301,7 @@ class MemoryWebhookOutboxStore:
             status=WebhookDeliveryStatus.failed,
             attempts=attempt_count,
             last_attempt_at=(
-                failed_at
-                if expected_attempts is None and attempts
-                else delivery.last_attempt_at
+                failed_at if expected_attempts is None and attempts else delivery.last_attempt_at
             ),
             failed_at=failed_at,
             failure_reason=reason,
@@ -336,7 +349,7 @@ class TestSendOnce:
     @pytest.mark.asyncio
     async def test_send_once_blocks_non_public_persisted_urls(self) -> None:
         client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
+        client.send = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(client_factory=lambda: client)
 
         result = await dispatcher.send_once(
@@ -350,23 +363,92 @@ class TestSendOnce:
 
         assert result.status is WebhookDispatchStatus.permanent_failed
         assert "unsafe" in (result.last_error or "")
-        client.post.assert_not_awaited()
+        client.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_send_once_disables_http_redirect_following(self) -> None:
         client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
+        client.send = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(client_factory=lambda: client)
 
         result = await dispatcher.send_once(_webhook_config(), {})
 
         assert result.status is WebhookDispatchStatus.delivered
-        assert client.post.await_args.kwargs["follow_redirects"] is False
-        assert client.post.await_args.args[0] == "https://93.184.216.34/hook"
-        assert client.post.await_args.kwargs["headers"]["Host"] == "example.com"
-        assert client.post.await_args.kwargs["extensions"] == {
-            "sni_hostname": "example.com"
+        assert client.send.await_args.kwargs["follow_redirects"] is False
+        assert client.send.await_args.kwargs["stream"] is True
+        request = client.send.await_args.args[0]
+        assert str(request.url) == "https://93.184.216.34/hook"
+        assert request.headers["Host"] == "example.com"
+        assert request.extensions["sni_hostname"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_send_once_closes_stream_without_reading_response_body(self) -> None:
+        stream = _UnreadResponseStream()
+        response = httpx.Response(
+            503,
+            headers={"Retry-After": "2"},
+            stream=stream,
+            request=httpx.Request("POST", "https://example.com/hook"),
+        )
+        client = AsyncMock()
+        client.send = AsyncMock(return_value=response)
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: client)
+
+        result = await dispatcher.send_once(_webhook_config(), {})
+
+        assert result.status is WebhookDispatchStatus.retryable_failed
+        assert result.retry_after_seconds == 2
+        assert stream.iterated is False
+        assert stream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_send_once_isolates_clients_by_logical_tls_hostname(self) -> None:
+        first_client = AsyncMock()
+        first_client.send = AsyncMock(return_value=_ok_response())
+        second_client = AsyncMock()
+        second_client.send = AsyncMock(side_effect=httpx.ConnectError("certificate mismatch"))
+        clients = iter((first_client, second_client))
+        dispatcher = HttpWebhookDispatcher(client_factory=lambda: next(clients))
+
+        first = await dispatcher.send_once(
+            _webhook_config("https://first.example.com/hook"),
+            {},
+        )
+        second = await dispatcher.send_once(
+            _webhook_config("https://second.example.com/hook"),
+            {},
+        )
+
+        assert first.status is WebhookDispatchStatus.delivered
+        assert second.status is WebhookDispatchStatus.retryable_failed
+        first_client.send.assert_awaited_once()
+        second_client.send.assert_awaited_once()
+        assert set(dispatcher._clients) == {
+            "first.example.com",
+            "second.example.com",
         }
+
+    @pytest.mark.asyncio
+    async def test_send_once_treats_dns_availability_failure_as_retryable(
+        self,
+        monkeypatch,
+    ) -> None:
+        def _temporary_resolution_failure(_url: str) -> ResolvedPublicURL:
+            raise URLResolutionError("temporary resolver failure")
+
+        monkeypatch.setattr(
+            "scrapeyard.webhook.dispatcher.resolve_public_url",
+            _temporary_resolution_failure,
+        )
+        client_factory = AsyncMock()
+        dispatcher = HttpWebhookDispatcher(client_factory=client_factory)
+
+        result = await dispatcher.send_once(_webhook_config(), {})
+
+        assert result.status is WebhookDispatchStatus.retryable_failed
+        assert result.reason_code is not None
+        assert result.reason_code.value == "transport_failure"
+        client_factory.assert_not_called()
 
 
 class TestBackoffDelay:
@@ -404,6 +486,7 @@ class TestNotifyAndShutdown:
         assert dispatcher._wake_event.is_set()
         outbox.enqueue_delivery.assert_not_awaited()
 
+
 class TestDurableOutboxDispatch:
     @pytest.mark.asyncio
     async def test_submit_persists_delivery_before_http_attempt_finishes(self) -> None:
@@ -415,7 +498,7 @@ class TestDurableOutboxDispatch:
             return _ok_response(200)
 
         client = AsyncMock()
-        client.post = AsyncMock(side_effect=_post)
+        client.send = AsyncMock(side_effect=_post)
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -433,8 +516,7 @@ class TestDurableOutboxDispatch:
         assert persisted.payload["delivery_id"] == "delivery-1"
         release_post.set()
         await _wait_until(
-            lambda: outbox.deliveries["delivery-1"].status
-            is WebhookDeliveryStatus.delivered
+            lambda: outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
         )
         await dispatcher.shutdown(timeout=1.0)
         assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
@@ -458,24 +540,24 @@ class TestDurableOutboxDispatch:
             now=now,
         )
         client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
+        client.send = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
         )
 
         await dispatcher.startup()
-        await _wait_until(lambda: client.post.await_count == 1)
+        await _wait_until(lambda: client.send.await_count == 1)
         await dispatcher.shutdown(timeout=1.0)
 
-        client.post.assert_awaited_once()
+        client.send.assert_awaited_once()
         assert outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.delivered
 
     @pytest.mark.asyncio
     async def test_retryable_failure_leaves_delivery_pending_with_next_attempt(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         client = AsyncMock()
-        client.post = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+        client.send = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             backoff_base=60.0,
@@ -488,9 +570,7 @@ class TestDurableOutboxDispatch:
             created_at=datetime.now(timezone.utc),
         )
         await dispatcher.startup()
-        await _wait_until(
-            lambda: outbox.deliveries["delivery-1"].last_error is not None
-        )
+        await _wait_until(lambda: outbox.deliveries["delivery-1"].last_error is not None)
 
         delivery = outbox.deliveries["delivery-1"]
         assert delivery.status is WebhookDeliveryStatus.pending
@@ -501,10 +581,43 @@ class TestDurableOutboxDispatch:
         await dispatcher.shutdown(timeout=0.01)
 
     @pytest.mark.asyncio
+    async def test_temporary_dns_failure_keeps_durable_delivery_pending(
+        self,
+        monkeypatch,
+    ) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        now = datetime.now(timezone.utc)
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="dns-retry",
+            created_at=now,
+        )
+
+        def _temporary_resolution_failure(_url: str) -> ResolvedPublicURL:
+            raise URLResolutionError("EAI_AGAIN")
+
+        monkeypatch.setattr(
+            "scrapeyard.webhook.dispatcher.resolve_public_url",
+            _temporary_resolution_failure,
+        )
+        dispatcher = HttpWebhookDispatcher(
+            backoff_base=60.0,
+            outbox_store=outbox,
+        )
+
+        await dispatcher._process_delivery(outbox.deliveries["dns-retry"])
+
+        persisted = outbox.deliveries["dns-retry"]
+        assert persisted.status is WebhookDeliveryStatus.pending
+        assert persisted.attempts == 1
+        assert persisted.last_error == "Transport failure: URLResolutionError"
+        assert persisted.next_attempt_at > persisted.last_attempt_at
+
+    @pytest.mark.asyncio
     async def test_nonretryable_4xx_marks_delivery_permanently_failed(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         client = AsyncMock()
-        client.post = AsyncMock(return_value=_err_response(404))
+        client.send = AsyncMock(return_value=_err_response(404))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -517,8 +630,7 @@ class TestDurableOutboxDispatch:
         )
         await dispatcher.startup()
         await _wait_until(
-            lambda: outbox.deliveries["delivery-1"].status
-            is WebhookDeliveryStatus.failed
+            lambda: outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.failed
         )
         await dispatcher.shutdown(timeout=1.0)
 
@@ -547,7 +659,7 @@ class TestDurableOutboxDispatch:
             now=now,
         )
         client = AsyncMock()
-        client.post = AsyncMock(return_value=_ok_response(200))
+        client.send = AsyncMock(return_value=_ok_response(200))
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -555,12 +667,11 @@ class TestDurableOutboxDispatch:
 
         await dispatcher.startup()
         await _wait_until(
-            lambda: outbox.deliveries["delivery-1"].status
-            is WebhookDeliveryStatus.failed
+            lambda: outbox.deliveries["delivery-1"].status is WebhookDeliveryStatus.failed
         )
         await dispatcher.shutdown(timeout=1.0)
 
-        client.post.assert_not_awaited()
+        client.send.assert_not_awaited()
         delivery = outbox.deliveries["delivery-1"]
         assert delivery.status is WebhookDeliveryStatus.failed
         assert "non-public" in (delivery.last_error or "")
@@ -667,7 +778,7 @@ class TestPersistentRetryBounds:
             created_at=now,
         )
         client = AsyncMock()
-        client.post.return_value = _err_response(503)
+        client.send.return_value = _err_response(503)
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -676,7 +787,7 @@ class TestPersistentRetryBounds:
 
         await dispatcher._process_delivery(delivery)
 
-        client.post.assert_awaited_once()
+        client.send.assert_awaited_once()
         persisted = outbox.deliveries[delivery.delivery_id]
         assert persisted.attempts == 1
         assert persisted.status is WebhookDeliveryStatus.failed
@@ -702,7 +813,7 @@ class TestPersistentRetryBounds:
 
         await dispatcher._process_delivery(delivery)
 
-        client.post.assert_not_awaited()
+        client.send.assert_not_awaited()
         persisted = outbox.deliveries[delivery.delivery_id]
         assert persisted.status is WebhookDeliveryStatus.failed
         assert persisted.attempts == 3
@@ -718,7 +829,7 @@ class TestPersistentRetryBounds:
             created_at=now,
         )
         failing_client = AsyncMock()
-        failing_client.post.side_effect = httpx.TimeoutException("secret endpoint detail")
+        failing_client.send.side_effect = httpx.TimeoutException("secret endpoint detail")
         first = HttpWebhookDispatcher(
             client_factory=lambda: failing_client,
             outbox_store=outbox,
@@ -731,7 +842,7 @@ class TestPersistentRetryBounds:
         assert after_failure.status is WebhookDeliveryStatus.pending
 
         success_client = AsyncMock()
-        success_client.post.return_value = _ok_response()
+        success_client.send.return_value = _ok_response()
         second = HttpWebhookDispatcher(
             client_factory=lambda: success_client,
             outbox_store=outbox,
@@ -762,7 +873,7 @@ class TestPersistentRetryBounds:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = _ok_response()
+        client.send.return_value = _ok_response()
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -780,7 +891,7 @@ class TestPersistentRetryBounds:
         )
         await dispatcher._process_delivery(at_boundary)
 
-        assert client.post.await_count == 1
+        assert client.send.await_count == 1
         assert outbox.deliveries["below-age"].status is WebhookDeliveryStatus.delivered
         assert outbox.deliveries["at-age"].failure_reason is WebhookFailureReason.age_exhausted
 
@@ -810,7 +921,7 @@ class TestPersistentRetryBounds:
 
         await dispatcher._process_delivery(delivery)
 
-        client.post.assert_not_awaited()
+        client.send.assert_not_awaited()
         assert outbox.deliveries[delivery.delivery_id].failure_reason is (
             WebhookFailureReason.age_exhausted
         )
@@ -828,7 +939,7 @@ class TestPersistentRetryBounds:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = _err_response(503)
+        client.send.return_value = _err_response(503)
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -854,7 +965,7 @@ class TestPersistentRetryBounds:
             created_at=now,
         )
         client = AsyncMock()
-        client.post.return_value = _err_response(400)
+        client.send.return_value = _err_response(400)
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -862,7 +973,7 @@ class TestPersistentRetryBounds:
 
         await dispatcher._process_delivery(delivery)
 
-        client.post.assert_awaited_once()
+        client.send.assert_awaited_once()
         persisted = outbox.deliveries[delivery.delivery_id]
         assert persisted.failure_reason is WebhookFailureReason.permanent_http_response
         assert persisted.last_error == "HTTP 400"
@@ -953,7 +1064,7 @@ class TestRetryAfter:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = httpx.Response(
+        client.send.return_value = httpx.Response(
             status,
             headers={"Retry-After": header_value},
             request=httpx.Request("POST", "https://example.com"),
@@ -1016,7 +1127,7 @@ class TestRetryAfter:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = httpx.Response(
+        client.send.return_value = httpx.Response(
             429,
             headers={"Retry-After": "9" * 309},
             request=httpx.Request("POST", "https://example.com"),
@@ -1047,7 +1158,7 @@ class TestRetryAfter:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = httpx.Response(
+        client.send.return_value = httpx.Response(
             503,
             headers={"Retry-After": "9" * 308},
             request=httpx.Request("POST", "https://example.com"),
@@ -1077,7 +1188,7 @@ class TestRetryAfter:
             created_at=created,
         )
         client = AsyncMock()
-        client.post.return_value = httpx.Response(
+        client.send.return_value = httpx.Response(
             503,
             headers={"Retry-After": "60"},
             request=httpx.Request("POST", "https://example.com"),
@@ -1123,7 +1234,7 @@ class TestBoundedCoordinator:
                 active -= 1
 
         client = AsyncMock()
-        client.post.side_effect = _post
+        client.send.side_effect = _post
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -1197,12 +1308,11 @@ class TestBoundedCoordinator:
         clock[0] = created + timedelta(seconds=10)
         dispatcher._wake_event.set()
         await _wait_until(
-            lambda: outbox.deliveries["age-wakeup"].status
-            is WebhookDeliveryStatus.failed
+            lambda: outbox.deliveries["age-wakeup"].status is WebhookDeliveryStatus.failed
         )
         await dispatcher.shutdown(timeout=1)
 
-        client.post.assert_not_awaited()
+        client.send.assert_not_awaited()
         assert outbox.deliveries["age-wakeup"].failure_reason is (
             WebhookFailureReason.age_exhausted
         )
@@ -1226,7 +1336,7 @@ class TestBoundedCoordinator:
             created_at=now,
         )
         client = AsyncMock()
-        client.post.return_value = _ok_response()
+        client.send.return_value = _ok_response()
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -1235,7 +1345,7 @@ class TestBoundedCoordinator:
         )
 
         await dispatcher.startup()
-        await _wait_until(lambda: client.post.await_count == 1)
+        await _wait_until(lambda: client.send.await_count == 1)
         await dispatcher.shutdown(timeout=1)
 
         assert outbox.due_limits
@@ -1285,7 +1395,7 @@ class TestBoundedCoordinator:
             return _ok_response()
 
         client = AsyncMock()
-        client.post.side_effect = _post
+        client.send.side_effect = _post
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -1310,7 +1420,7 @@ class TestBoundedCoordinator:
         assert max_active == 1
         release.set()
         await dispatcher.shutdown(timeout=1)
-        assert client.post.await_count == 1
+        assert client.send.await_count == 1
 
     @pytest.mark.asyncio
     async def test_shutdown_cancellation_leaves_pending_and_restart_resumes_once(self) -> None:
@@ -1322,7 +1432,7 @@ class TestBoundedCoordinator:
             await asyncio.Event().wait()
 
         blocked_client = AsyncMock()
-        blocked_client.post.side_effect = _blocked_post
+        blocked_client.send.side_effect = _blocked_post
         first = HttpWebhookDispatcher(
             client_factory=lambda: blocked_client,
             outbox_store=outbox,
@@ -1345,7 +1455,7 @@ class TestBoundedCoordinator:
         assert pending.attempts == 1
 
         success_client = AsyncMock()
-        success_client.post.return_value = _ok_response()
+        success_client.send.return_value = _ok_response()
         second = HttpWebhookDispatcher(
             client_factory=lambda: success_client,
             outbox_store=outbox,
@@ -1355,12 +1465,11 @@ class TestBoundedCoordinator:
         )
         await second.startup()
         await _wait_until(
-            lambda: outbox.deliveries["shutdown"].status
-            is WebhookDeliveryStatus.delivered
+            lambda: outbox.deliveries["shutdown"].status is WebhookDeliveryStatus.delivered
         )
         await second.shutdown(timeout=1)
 
-        success_client.post.assert_awaited_once()
+        success_client.send.assert_awaited_once()
         assert outbox.deliveries["shutdown"].attempts == 2
 
     @pytest.mark.asyncio
@@ -1407,9 +1516,7 @@ class TestBoundedCoordinator:
 
         release.set()
         await _wait_until(worker.done)
-        assert outbox.deliveries["stubborn-shutdown"].status is (
-            WebhookDeliveryStatus.delivered
-        )
+        assert outbox.deliveries["stubborn-shutdown"].status is (WebhookDeliveryStatus.delivered)
 
         await dispatcher.startup()
         await dispatcher.shutdown(timeout=1)
@@ -1435,7 +1542,7 @@ class TestBoundedCoordinator:
             created_at=now,
         )
         client = AsyncMock()
-        client.post.return_value = _ok_response()
+        client.send.return_value = _ok_response()
         dispatcher = HttpWebhookDispatcher(
             client_factory=lambda: client,
             outbox_store=outbox,
@@ -1447,8 +1554,7 @@ class TestBoundedCoordinator:
         await asyncio.sleep(0.02)
         dispatcher._wake_event.set()
         await _wait_until(
-            lambda: outbox.deliveries["recovery"].status
-            is WebhookDeliveryStatus.delivered
+            lambda: outbox.deliveries["recovery"].status is WebhookDeliveryStatus.delivered
         )
         await dispatcher.shutdown(timeout=1)
 

@@ -18,7 +18,7 @@ from scrapeyard.engine.browser_debug import (
     fetch_browser_response,
     run_browser_actions,
 )
-from scrapeyard.engine.url_guard import UnsafeURLError
+from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
 
 
 def _debug_budget(max_bytes: int) -> RunBudget:
@@ -497,7 +497,7 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
 
-    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+    with pytest.raises(URLResolutionError, match="could not be resolved"):
         await fetch_browser_response(
             RouteFetcher,
             target.url,

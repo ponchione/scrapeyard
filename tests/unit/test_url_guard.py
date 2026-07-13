@@ -5,6 +5,7 @@ import socket
 import pytest
 
 from scrapeyard.engine.url_guard import (
+    URLResolutionError,
     UnsafeURLError,
     activate_deployment_secret_redaction,
     assert_public_url,
@@ -116,7 +117,7 @@ def test_assert_public_url_can_require_dns_resolution(monkeypatch) -> None:
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
 
-    with pytest.raises(UnsafeURLError, match="could not be resolved"):
+    with pytest.raises(URLResolutionError, match="could not be resolved"):
         assert_public_url("https://unresolved.example/resource", allow_unresolved=False)
 
 
@@ -145,6 +146,21 @@ def test_resolve_public_url_rejects_mixed_public_and_private_dns(monkeypatch) ->
     )
 
     with pytest.raises(UnsafeURLError, match="non-public"):
+        resolve_public_url("https://example.com/path")
+
+
+def test_resolve_public_url_classifies_temporary_dns_failure_as_transport(
+    monkeypatch,
+) -> None:
+    def _raise_temporary_failure(*_args, **_kwargs):
+        raise socket.gaierror(socket.EAI_AGAIN, "temporary failure")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        _raise_temporary_failure,
+    )
+
+    with pytest.raises(URLResolutionError, match="could not be resolved"):
         resolve_public_url("https://example.com/path")
 
 
@@ -180,7 +196,9 @@ def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
 
 
 def test_redact_userinfo_in_text_handles_non_http_schemes() -> None:
-    text = "proxy: socks5://user:pass@gate.example.com:1080 cdp: ws://token@browser.example/devtools"
+    text = (
+        "proxy: socks5://user:pass@gate.example.com:1080 cdp: ws://token@browser.example/devtools"
+    )
 
     assert redact_userinfo_in_text(text) == (
         "proxy: socks5://gate.example.com:1080 cdp: ws://browser.example/devtools"
@@ -202,39 +220,46 @@ def test_redact_userinfo_in_url_handles_invalid_port_without_raising() -> None:
 def test_redact_userinfo_in_text_handles_malformed_ipv6_without_raising() -> None:
     text = "failed at https://user:pass@[::1/private?api_key=secret"
 
-    assert redact_userinfo_in_text(text) == (
-        "failed at https://[::1/private?api_key=<redacted>"
-    )
+    assert redact_userinfo_in_text(text) == ("failed at https://[::1/private?api_key=<redacted>")
 
 
 def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
-    assert redact_userinfo_in_url(
-        "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
-    ) == "https://example.com/path?api_key=<redacted>&page=<redacted>&session_id=<redacted>"
+    assert (
+        redact_userinfo_in_url(
+            "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
+        )
+        == "https://example.com/path?api_key=<redacted>&page=<redacted>&session_id=<redacted>"
+    )
 
 
 def test_redact_userinfo_in_url_masks_semicolon_query_values() -> None:
-    assert redact_userinfo_in_url(
-        "https://example.com/path?page=2;api_key=secret;session_id=abc"
-    ) == "https://example.com/path?page=<redacted>;api_key=<redacted>;session_id=<redacted>"
+    assert (
+        redact_userinfo_in_url("https://example.com/path?page=2;api_key=secret;session_id=abc")
+        == "https://example.com/path?page=<redacted>;api_key=<redacted>;session_id=<redacted>"
+    )
 
 
 def test_redact_userinfo_in_url_masks_sensitive_path_params() -> None:
-    assert redact_userinfo_in_url(
-        "https://example.com/products;jsessionid=abc/page;api_key=secret?ok=1"
-    ) == "https://example.com/products;jsessionid=<redacted>/page;api_key=<redacted>?ok=<redacted>"
+    assert (
+        redact_userinfo_in_url(
+            "https://example.com/products;jsessionid=abc/page;api_key=secret?ok=1"
+        )
+        == "https://example.com/products;jsessionid=<redacted>/page;api_key=<redacted>?ok=<redacted>"
+    )
 
 
 def test_redact_userinfo_in_url_masks_sensitive_fragment_values() -> None:
-    assert redact_userinfo_in_url(
-        "https://example.com/callback#access_token=secret&state=ok"
-    ) == "https://example.com/callback#<redacted>"
+    assert (
+        redact_userinfo_in_url("https://example.com/callback#access_token=secret&state=ok")
+        == "https://example.com/callback#<redacted>"
+    )
 
 
 def test_redact_userinfo_in_url_masks_fragment_query_values() -> None:
-    assert redact_userinfo_in_url(
-        "https://example.com/app#/callback?session_id=abc&page=2"
-    ) == "https://example.com/app#<redacted>"
+    assert (
+        redact_userinfo_in_url("https://example.com/app#/callback?session_id=abc&page=2")
+        == "https://example.com/app#<redacted>"
+    )
 
 
 def test_redact_userinfo_in_url_masks_signed_url_query_values() -> None:
@@ -280,12 +305,8 @@ def test_run_scoped_redaction_masks_raw_encoded_and_nested_tuple_secrets() -> No
     token = activate_deployment_secret_redaction((secret,))
     try:
         assert redact_deployment_secrets(f"raw={secret}") == "raw=<redacted>"
-        assert redact_deployment_secrets("path=Vendor%20Value%2F91") == (
-            "path=<redacted>"
-        )
-        assert redact_deployment_secrets("query=Vendor+Value%2F91") == (
-            "query=<redacted>"
-        )
+        assert redact_deployment_secrets("path=Vendor%20Value%2F91") == ("path=<redacted>")
+        assert redact_deployment_secrets("query=Vendor+Value%2F91") == ("query=<redacted>")
         assert redact_sensitive_mapping({secret: (secret,), f"x-{secret}": secret}) == {
             "<redacted>": ("<redacted>",),
             "x-<redacted>": "<redacted>",
