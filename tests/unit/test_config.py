@@ -111,6 +111,29 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError):
             ScrapeConfig(**data)
 
+    def test_merge_grouping_rejects_reserved_source_selector(self):
+        data = _tier1_config(
+            target=_target_dict(selectors={"_source": ".catalog-source"}),
+            output={"group_by": "merge"},
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="'_source' is reserved when output.group_by is 'merge'",
+        ):
+            ScrapeConfig(**data)
+
+    def test_target_grouping_allows_source_selector(self):
+        data = _tier1_config(
+            target=_target_dict(selectors={"_source": ".catalog-source"}),
+            output={"group_by": "target"},
+        )
+
+        config = ScrapeConfig(**data)
+
+        assert config.target is not None
+        assert config.target.selectors == {"_source": ".catalog-source"}
+
     @pytest.mark.parametrize("field", ["project", "name"])
     def test_project_and_name_reject_path_components(self, field):
         data = _tier1_config(**{field: "../outside"})

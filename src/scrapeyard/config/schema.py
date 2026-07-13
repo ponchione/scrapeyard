@@ -997,6 +997,15 @@ class ScrapeConfig(StrictConfigModel):
             raise ValueError("One of 'target' or 'targets' must be provided")
         if self.targets is None and self.target is not None:
             self.targets = [self.target]
+        if (
+            self.output.group_by == GroupBy.merge
+            and self.targets is not None
+            and any("_source" in target.selectors for target in self.targets)
+        ):
+            raise ValueError(
+                "Selector field name '_source' is reserved when "
+                "output.group_by is 'merge'"
+            )
         return self
 
     def resolved_targets(self) -> list[TargetConfig]:
