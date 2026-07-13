@@ -442,10 +442,12 @@ byte count, and SHA-256. Logs and Redis persistence are excluded. Validation
 rejects a missing/extra file, duplicate or unsafe path, checksum/size drift,
 missing database/table/column/index, a migration-ledger filename or checksum
 that differs from the packaged SQL, failed `PRAGMA integrity_check`, a
-result/error without its job/run, and result metadata without `results.json`.
-This includes the idempotency table and its unique live-key index. Read-only
-immutable validation prevents WAL/SHM side effects from becoming undeclared
-files.
+error without its job/run, and result metadata without `results.json`. Retained
+result metadata and artifacts may intentionally outlive a deleted job/run when
+`DELETE /jobs/{id}?delete_results=false` is used. Source trees and completed
+backup sets reject symlinks and special files. This includes the idempotency
+table and its unique live-key index. Read-only immutable validation prevents
+WAL/SHM side effects from becoming undeclared files.
 
 Restore accepts only a truly empty target or the four empty mount points that
 Docker initializes from the production image (`db`, `results`, `adaptive`, and

@@ -36,6 +36,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   consumed cancelled gather results without event-loop callback errors.
 - Restored the Python 3.10 test lane by avoiding the Python 3.11-only
   `datetime.UTC` constant.
+- Rejected source-tree symlinks before artifact backup and preserved links
+  during staging so links discovered while copying are rejected instead of
+  dereferenced.
+- Corrected backup documentation to permit intentionally retained results
+  after their job/run metadata is deleted.
 - Restricted readiness project summaries to each monitoring credential's
   authorized projects.
 - Persisted accepted run trigger provenance across queued-delivery recovery,

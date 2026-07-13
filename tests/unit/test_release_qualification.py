@@ -204,6 +204,33 @@ def test_backup_requires_quiescing_and_restore_requires_fresh_destination(tmp_pa
         restore_backup(tmp_path / "backup", destination)
 
 
+@pytest.mark.parametrize("link_target", ["file", "directory"])
+def test_backup_rejects_source_symlinks_without_copying_external_content(
+    tmp_path: Path,
+    link_target: str,
+) -> None:
+    data = tmp_path / "data"
+    backup = tmp_path / "backup"
+    outside = tmp_path / "outside"
+    _minimal_data(data)
+    outside.mkdir()
+    if link_target == "file":
+        target = outside / "secret.json"
+        target.write_text('{"external":"secret"}\n', encoding="utf-8")
+    else:
+        target = outside
+        (outside / "secret.json").write_text(
+            '{"external":"secret"}\n',
+            encoding="utf-8",
+        )
+    (data / "adaptive" / "project" / "external").symlink_to(target)
+
+    with pytest.raises(BackupError, match="symlink is not allowed"):
+        create_backup(data, backup, quiesced=True)
+
+    assert not backup.exists()
+
+
 def test_backup_accepts_results_intentionally_retained_after_job_deletion(
     tmp_path: Path,
 ) -> None:

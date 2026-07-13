@@ -206,12 +206,28 @@ def sha256(path: Path) -> str:
 
 
 def regular_files(root: Path) -> list[Path]:
+    if root.is_symlink():
+        raise BackupError(f"symlink is not allowed in backup set: {root}")
+    if not root.is_dir():
+        raise BackupError(f"backup tree is not a directory: {root}")
+
     files: list[Path] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise BackupError(f"symlink is not allowed in backup set: {path}")
-        if path.is_file():
-            files.append(path)
+
+    def _visit(directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            ordered = sorted(entries, key=lambda entry: entry.name)
+        for entry in ordered:
+            path = Path(entry.path)
+            if entry.is_symlink():
+                raise BackupError(f"symlink is not allowed in backup set: {path}")
+            if entry.is_dir(follow_symlinks=False):
+                _visit(path)
+            elif entry.is_file(follow_symlinks=False):
+                files.append(path)
+            else:
+                raise BackupError(f"special file is not allowed in backup set: {path}")
+
+    _visit(root)
     return files
 
 
@@ -229,13 +245,18 @@ def create_backup(data_root: Path, output: Path, *, quiesced: bool) -> dict[str,
         raise BackupError("creation requires --quiesced after the documented shutdown order")
     if output.exists():
         raise BackupError(f"backup destination already exists: {output}")
+    if data_root.is_symlink() or not data_root.is_dir():
+        raise BackupError(f"source data root must be a real directory: {data_root}")
+    regular_files(data_root / "db")
     for database in DATABASES:
         source = data_root / "db" / database
-        if not source.is_file():
+        if source.is_symlink() or not source.is_file():
             raise BackupError(f"required database is missing: {source}")
     for directory in ("results", "adaptive"):
-        if not (data_root / directory).is_dir():
-            raise BackupError(f"required artifact directory is missing: {data_root / directory}")
+        source = data_root / directory
+        if not source.is_dir():
+            raise BackupError(f"required artifact directory is missing: {source}")
+        regular_files(source)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -244,7 +265,11 @@ def create_backup(data_root: Path, output: Path, *, quiesced: bool) -> dict[str,
         for database in DATABASES:
             sqlite_snapshot(data_root / "db" / database, payload / "db" / database)
         for directory in ("results", "adaptive"):
-            shutil.copytree(data_root / directory, payload / directory)
+            shutil.copytree(
+                data_root / directory,
+                payload / directory,
+                symlinks=True,
+            )
 
         entries = [
             {
@@ -524,7 +549,8 @@ def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
     installed: list[Path] = []
     original_modes: dict[str, int] = {}
     try:
-        shutil.copytree(backup / "payload", stage)
+        shutil.copytree(backup / "payload", stage, symlinks=True)
+        regular_files(stage)
         _sqlite_contract(stage, source_data_root=source_data_root)
         destination_data_root = data_root.resolve()
         _relocate_result_metadata(
