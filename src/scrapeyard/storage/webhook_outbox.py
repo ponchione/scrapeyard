@@ -36,6 +36,7 @@ class WebhookFailureReason(str, Enum):
     permanent_http_response = "permanent_http_response"
     unsafe_url = "unsafe_url"
     non_retryable_failure = "non_retryable_failure"
+    decode_failure = "decode_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +102,15 @@ class WebhookRetentionSummary:
 
     delivered_scrubbed: int = 0
     failed_scrubbed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookDecodeResult:
+    """A decoded delivery or sanitized identity for a malformed row."""
+
+    delivery: WebhookDelivery | None
+    delivery_id: str | None
+    error_type: str | None
 
 
 WEBHOOK_DELIVERY_COLUMNS = (
@@ -254,16 +264,16 @@ def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
     )
 
 
-def _decode_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery | None:
+def _decode_webhook_delivery(row: Mapping[str, Any]) -> WebhookDecodeResult:
     try:
-        return row_to_webhook_delivery(row)
+        return WebhookDecodeResult(row_to_webhook_delivery(row), None, None)
     except (KeyError, TypeError, ValueError) as exc:
-        logger.warning(
-            "Skipping malformed webhook delivery delivery_id=%r error_type=%s",
-            _row_value(row, "delivery_id"),
+        raw_delivery_id = _row_value(row, "delivery_id")
+        return WebhookDecodeResult(
+            None,
+            None if raw_delivery_id is None else str(raw_delivery_id),
             type(exc).__name__,
         )
-        return None
 
 
 def _row_value(row: Mapping[str, Any], key: str) -> Any:
@@ -304,11 +314,18 @@ class SQLiteWebhookOutboxStore:
                 (delivery_id,),
             )
             row = await cursor.fetchone()
-        return (
-            None
-            if row is None
-            else _decode_webhook_delivery(cast(Mapping[str, Any], row))
-        )
+            if row is None:
+                return None
+            decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
+            if decoded.delivery is not None:
+                return decoded.delivery
+            await self._quarantine_malformed_row(
+                db,
+                decoded,
+                failed_at=utc_now(),
+            )
+            await db.commit()
+            return None
 
     async def list_pending(
         self,
@@ -322,12 +339,9 @@ class SQLiteWebhookOutboxStore:
             "WHERE status = 'pending' "
             "ORDER BY next_attempt_at ASC, created_at ASC, delivery_id ASC"
         )
-        params: tuple[object, ...] = ()
         if limit is not None:
             _validate_limit(limit)
-            sql += " LIMIT ?"
-            params = (limit,)
-        return await self._fetch_deliveries(sql, params)
+        return await self._fetch_deliveries(sql, limit=limit)
 
     async def list_due_pending(
         self,
@@ -342,9 +356,9 @@ class SQLiteWebhookOutboxStore:
             f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} "
             "FROM webhook_deliveries "
             "WHERE status = 'pending' AND next_attempt_at <= ? "
-            "ORDER BY next_attempt_at ASC, created_at ASC, delivery_id ASC "
-            "LIMIT ?",
-            (fmt_dt(now), limit),
+            "ORDER BY next_attempt_at ASC, created_at ASC, delivery_id ASC",
+            (fmt_dt(now),),
+            limit=limit,
         )
 
     async def list_exhausted_pending(
@@ -361,8 +375,9 @@ class SQLiteWebhookOutboxStore:
             f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} "
             "FROM webhook_deliveries "
             "WHERE status = 'pending' AND (attempts >= ? OR created_at <= ?) "
-            "ORDER BY created_at ASC, delivery_id ASC LIMIT ?",
-            (attempts_gte, fmt_dt(created_at_lte), limit),
+            "ORDER BY created_at ASC, delivery_id ASC",
+            (attempts_gte, fmt_dt(created_at_lte)),
+            limit=limit,
         )
 
     async def next_pending_due_at(self) -> datetime | None:
@@ -456,11 +471,36 @@ class SQLiteWebhookOutboxStore:
             )
             row = await cursor.fetchone()
             await db.commit()
-        return (
-            None
-            if row is None
-            else _decode_webhook_delivery(cast(Mapping[str, Any], row))
+        if row is None:
+            return None
+        decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
+        if decoded.delivery is not None:
+            return decoded.delivery
+        await self.quarantine_malformed_delivery(
+            decoded.delivery_id or delivery_id,
+            failed_at=attempted_at,
+            decode_error_type=decoded.error_type or "UnknownDecodeError",
         )
+        return None
+
+    async def quarantine_malformed_delivery(
+        self,
+        delivery_id: str,
+        *,
+        failed_at: datetime,
+        decode_error_type: str,
+    ) -> bool:
+        """Atomically dead-letter and scrub one undecodable pending row."""
+
+        decoded = WebhookDecodeResult(None, delivery_id, decode_error_type)
+        async with get_db("jobs.db") as db:
+            transitioned = await self._quarantine_malformed_row(
+                db,
+                decoded,
+                failed_at=failed_at,
+            )
+            await db.commit()
+        return transitioned
 
     async def mark_delivered(
         self,
@@ -622,15 +662,98 @@ class SQLiteWebhookOutboxStore:
         self,
         sql: str,
         params: Sequence[object] = (),
+        *,
+        limit: int | None = None,
     ) -> list[WebhookDelivery]:
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(sql, params)
-            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-        return [
-            delivery
-            for row in rows
-            if (delivery := _decode_webhook_delivery(row)) is not None
-        ]
+            deliveries: list[WebhookDelivery] = []
+            inspected = 0
+            inspection_limit = None if limit is None else limit * 2
+            while limit is None or len(deliveries) < limit:
+                query = sql
+                query_params: tuple[object, ...] = tuple(params)
+                if limit is not None:
+                    assert inspection_limit is not None
+                    remaining_inspections = inspection_limit - inspected
+                    if remaining_inspections <= 0:
+                        break
+                    fetch_limit = min(limit - len(deliveries), remaining_inspections)
+                    query += " LIMIT ? OFFSET ?"
+                    query_params += (fetch_limit, len(deliveries))
+                cursor = await db.execute(query, query_params)
+                rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
+                if not rows:
+                    break
+                inspected += len(rows)
+                malformed = 0
+                for row in rows:
+                    decoded = _decode_webhook_delivery(row)
+                    if decoded.delivery is not None:
+                        deliveries.append(decoded.delivery)
+                        continue
+                    malformed += 1
+                    await self._quarantine_malformed_row(
+                        db,
+                        decoded,
+                        failed_at=utc_now(),
+                    )
+                if malformed:
+                    await db.commit()
+                if limit is None or malformed == 0:
+                    break
+            return deliveries
+
+    @staticmethod
+    async def _quarantine_malformed_row(
+        db: aiosqlite.Connection,
+        decoded: WebhookDecodeResult,
+        *,
+        failed_at: datetime,
+    ) -> bool:
+        if decoded.delivery_id is None:
+            return False
+        failed_at_text = fmt_dt(failed_at)
+        cursor = await db.execute(
+            """UPDATE webhook_deliveries
+               SET url = '',
+                   headers_json = '{}',
+                   timeout_seconds = 0,
+                   payload_json = '{}',
+                   status = 'failed',
+                   attempts = CASE
+                       WHEN typeof(attempts) = 'integer' AND attempts >= 0
+                           THEN attempts
+                       ELSE 0
+                   END,
+                   next_attempt_at = ?,
+                   last_attempt_at = NULL,
+                   delivered_at = NULL,
+                   failed_at = ?,
+                   failure_reason = 'decode_failure',
+                   last_error = NULL,
+                   scrubbed_at = ?,
+                   created_at = ?,
+                   updated_at = ?
+               WHERE delivery_id = ? AND status = 'pending'""",
+            (
+                failed_at_text,
+                failed_at_text,
+                failed_at_text,
+                failed_at_text,
+                failed_at_text,
+                decoded.delivery_id,
+            ),
+        )
+        transitioned = cursor.rowcount == 1
+        if transitioned:
+            logger.error(
+                "Webhook delivery quarantined delivery_id=%r "
+                "decode_error_type=%s reason_code=decode_failure "
+                "recovery_action=scrub_terminal_corrupt_row",
+                decoded.delivery_id,
+                decoded.error_type or "UnknownDecodeError",
+            )
+        return transitioned
 
     async def _pending_update(
         self,

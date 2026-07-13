@@ -130,6 +130,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "013",
         "014",
         "015",
+        "016",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [
@@ -142,7 +143,68 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         cursor = await db.execute(
             "SELECT migration_id, filename, applied_at FROM schema_migrations ORDER BY migration_id"
         )
-        assert [tuple(row) for row in await cursor.fetchall()] == histories["jobs.db"]
+    assert [tuple(row) for row in await cursor.fetchall()] == histories["jobs.db"]
+
+
+async def test_webhook_failure_reason_constraint_accepts_only_known_values(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'webhook_deliveries'"
+        )
+        schema_sql = str((await cursor.fetchone())[0])
+        insert_sql = """INSERT INTO webhook_deliveries
+            (delivery_id, job_id, event, url, headers_json, payload_json,
+             status, next_attempt_at, failure_reason, created_at, updated_at)
+            VALUES (?, 'job', 'job.failed', '', '{}', '{}', 'failed',
+                    '2026-01-01T00:00:00+00:00', ?,
+                    '2026-01-01T00:00:00+00:00',
+                    '2026-01-01T00:00:00+00:00')"""
+        await db.execute(insert_sql, ("accepted", "decode_failure"))
+        with pytest.raises(aiosqlite.IntegrityError):
+            await db.execute(insert_sql, ("rejected", "unknown_failure"))
+        await db.rollback()
+
+    assert "decode_failure" in schema_sql
+
+
+async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path):
+    sql_dir = _resolve_sql_dir()
+    migrations = _load_migrations(sql_dir)["jobs.db"]
+    migration = next(item for item in migrations if item.migration_id == "016")
+    async with aiosqlite.connect(tmp_path / "upgrade.db") as db:
+        await db.executescript((sql_dir / "009_create_webhook_outbox.sql").read_text())
+        await db.execute(
+            """CREATE TABLE schema_migrations (
+                   migration_id TEXT PRIMARY KEY,
+                   filename TEXT NOT NULL UNIQUE,
+                   checksum TEXT NOT NULL,
+                   applied_at TEXT NOT NULL
+               )"""
+        )
+        await db.execute(
+            """INSERT INTO webhook_deliveries
+                (delivery_id, job_id, event, url, headers_json, payload_json,
+                 next_attempt_at, created_at, updated_at)
+                VALUES ('existing', 'job', 'job.complete', 'url', '{}', '{}',
+                        '2026-01-01T00:00:00+00:00',
+                        '2026-01-01T00:00:00+00:00',
+                        '2026-01-01T00:00:00+00:00')"""
+        )
+        await db.commit()
+
+        await _apply_migration(db, migration)
+
+        cursor = await db.execute(
+            "SELECT job_id, status FROM webhook_deliveries WHERE delivery_id = 'existing'"
+        )
+        assert tuple(await cursor.fetchone()) == ("job", "pending")
+        await db.execute(
+            "UPDATE webhook_deliveries SET failure_reason = 'decode_failure' "
+            "WHERE delivery_id = 'existing'"
+        )
+        await db.commit()
 
 
 async def test_init_db_rejects_checksum_drift(tmp_path):

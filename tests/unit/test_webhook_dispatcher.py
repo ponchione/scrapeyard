@@ -296,6 +296,16 @@ class MemoryWebhookOutboxStore:
         )
         return True
 
+    async def quarantine_malformed_delivery(
+        self,
+        delivery_id: str,
+        *,
+        failed_at: datetime,
+        decode_error_type: str,
+    ) -> bool:
+        del delivery_id, failed_at, decode_error_type
+        return False
+
     async def scrub_terminal_deliveries(
         self,
         *,
@@ -1229,6 +1239,34 @@ class TestBoundedCoordinator:
 
         assert outbox.due_limits
         assert set(outbox.due_limits) == {7}
+
+    @pytest.mark.asyncio
+    async def test_coordinator_clamps_past_due_idle_wakeup_to_nonzero_delay(
+        self,
+    ) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        now = datetime.now(timezone.utc)
+        outbox.list_exhausted_pending = AsyncMock(return_value=[])
+        outbox.list_due_pending = AsyncMock(return_value=[])
+        outbox.next_pending_due_at = AsyncMock(return_value=now - timedelta(seconds=1))
+        outbox.oldest_pending_created_at = AsyncMock(return_value=None)
+        dispatcher = HttpWebhookDispatcher(
+            outbox_store=outbox,
+            dispatch_concurrency=1,
+            dispatch_batch_size=1,
+        )
+        dispatcher._queue = asyncio.Queue(maxsize=1)
+        observed_timeouts: list[float | None] = []
+
+        async def stop_after_wait(timeout: float | None) -> None:
+            observed_timeouts.append(timeout)
+            dispatcher._stopping = True
+
+        dispatcher._wait_for_wake = stop_after_wait
+
+        await dispatcher._coordinator_loop()
+
+        assert observed_timeouts == [pytest.approx(0.05)]
 
     @pytest.mark.asyncio
     async def test_duplicate_durable_intent_does_not_dispatch_concurrently(self) -> None:

@@ -32,6 +32,7 @@ _DEFAULT_MAX_DELIVERY_AGE_SECONDS = 86400
 _DEFAULT_DISPATCH_CONCURRENCY = 4
 _DEFAULT_DISPATCH_BATCH_SIZE = 100
 _COORDINATOR_ERROR_RETRY_SECONDS = 1.0
+_COORDINATOR_MIN_IDLE_DELAY_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +586,8 @@ class HttpWebhookDispatcher:
                     if wake_at is None
                     else max(0.0, (self._as_utc(wake_at) - utc_now()).total_seconds())
                 )
+                if timeout is not None:
+                    timeout = max(timeout, _COORDINATOR_MIN_IDLE_DELAY_SECONDS)
                 await self._wait_for_wake(timeout)
             except asyncio.CancelledError:
                 raise
