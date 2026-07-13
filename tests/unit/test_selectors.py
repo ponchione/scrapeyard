@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 from pydantic import ValidationError
+from scrapling import Adaptor
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import (
@@ -61,6 +64,16 @@ class _NestedTextNode(_Node):
         return self._all_text
 
 
+def _adaptor(html: str) -> Adaptor:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The 'strip_cdata' option of HTMLParser\(\) has never done anything and will eventually be removed\.",
+            category=DeprecationWarning,
+        )
+        return Adaptor(html)
+
+
 def test_extract_selectors_page_wide_scalar_and_list() -> None:
     page = _Node(
         css_map={
@@ -88,6 +101,42 @@ def test_extract_selectors_combines_direct_and_descendant_text() -> None:
     result = extract_selectors_strict(page, {"title": ".title"})
 
     assert result == {"title": "Title\nSuffix"}
+
+
+@pytest.mark.parametrize(
+    ("markup", "expected"),
+    [
+        ("Direct only", "Direct only"),
+        ("<span>Descendant only</span>", "Descendant only"),
+        ("Before <span>descendant</span>", "Before descendant"),
+        ("<span>SKU 123</span> In Stock", "SKU 123 In Stock"),
+        (
+            "Alpha <span>Beta <em>Gamma</em> Delta</span> Omega",
+            "Alpha Beta Gamma Delta Omega",
+        ),
+        ("None", "None"),
+    ],
+)
+def test_extract_selectors_reads_complete_real_adaptor_text(
+    markup: str,
+    expected: str,
+) -> None:
+    page = _adaptor(f'<div class="product">{markup}</div>')
+
+    result = extract_selectors_strict(page, {"text": ".product"})
+
+    assert result == {"text": expected}
+
+
+def test_extract_selectors_excludes_non_visible_script_and_style_text() -> None:
+    page = _adaptor(
+        '<div class="product">Before<script>ignored()</script> Middle'
+        "<style>.ignored {}</style> After</div>"
+    )
+
+    result = extract_selectors_strict(page, {"text": ".product"})
+
+    assert result == {"text": "Before Middle After"}
 
 
 def test_select_items_returns_one_element_per_item() -> None:

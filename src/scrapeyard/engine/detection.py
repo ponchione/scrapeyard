@@ -16,6 +16,7 @@ from scrapeyard.config.schema import (
     StockPatternConfig,
     StockStatus,
 )
+from scrapeyard.engine.dom_text import element_text_content
 
 logger = logging.getLogger(__name__)
 
@@ -328,18 +329,7 @@ def _check_budget(budget: RunBudget | None) -> None:
 
 def _get_element_text(element: object) -> str:
     """Get text content from a Scrapling element."""
-    if element is None:
-        return ""
-    if isinstance(element, str):
-        return _clean_element_text(element)
-
-    get_all_text = getattr(element, "get_all_text", None)
-    if callable(get_all_text):
-        text = _clean_element_text(get_all_text())
-        if text:
-            return text
-
-    return _clean_element_text(getattr(element, "text", None))
+    return _clean_element_text(element_text_content(element))
 
 
 def _clean_element_text(value: object) -> str:

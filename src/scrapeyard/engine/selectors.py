@@ -9,10 +9,10 @@ from typing import Any, cast
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
 from scrapeyard.config.transforms import (
     apply_transforms,
-    checked_combined_selector_value_size,
     checked_selector_value_size,
     parse_transform_pipeline,
 )
+from scrapeyard.engine.dom_text import element_text_content
 
 OutputByteReserver = Callable[[int], None]
 
@@ -226,40 +226,6 @@ def _select_elements(
 
 def _element_text(element: object) -> str:
     """Extract text from a Scrapling element."""
-    if element is None:
-        return ""
-    if isinstance(element, str):
-        checked_selector_value_size(element)
-        return element
-
-    direct_text = _text_attr(element)
-    checked_selector_value_size(direct_text)
-    get_all_text = getattr(element, "get_all_text", None)
-    if callable(get_all_text):
-        nested_text = _coerce_text(get_all_text())
-        checked_selector_value_size(nested_text)
-        if direct_text.strip() and nested_text:
-            checked_combined_selector_value_size(
-                (direct_text, nested_text),
-                separator_bytes=1,
-            )
-            return f"{direct_text}\n{nested_text}"
-        if nested_text:
-            return nested_text
-
-    return direct_text
-
-
-def _text_attr(element: object) -> str:
-    text = getattr(element, "text", None)
-    if callable(text):
-        text = text()
-    return _coerce_text(text)
-
-
-def _coerce_text(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    return str(value)
+    text = element_text_content(element)
+    checked_selector_value_size(text)
+    return text
