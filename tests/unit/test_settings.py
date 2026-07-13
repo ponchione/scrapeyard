@@ -114,6 +114,14 @@ class TestServiceSettingsDefaults:
         assert settings.storage_max_results_per_job == 100
         assert settings.storage_cleanup_batch_size == 500
 
+    @pytest.mark.parametrize(
+        "field",
+        ["storage_retention_days", "storage_max_results_per_job"],
+    )
+    def test_result_retention_settings_reject_zero(self, field):
+        with pytest.raises(ValidationError):
+            ServiceSettings(**{field: 0})
+
     def test_storage_reconciliation_defaults(self):
         settings = ServiceSettings()
         assert settings.storage_orphan_grace_seconds == 86400

@@ -24,6 +24,7 @@ from scrapeyard.api.middleware import (
     RequestSizeLimitMiddleware,
 )
 from scrapeyard.storage.types import RunRecovery
+from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
 @pytest.mark.asyncio
@@ -255,6 +256,72 @@ async def test_shutdown_passes_remaining_shared_budget_to_later_phases(monkeypat
     await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0.2)
 
     assert 0 < observed["webhook"] < observed["worker"] <= 0.2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_webhook_backlog_drains_before_database_close(monkeypatch):
+    app = FastAPI()
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    summary = SimpleNamespace(
+        pending=0,
+        delivered=0,
+        failed=0,
+        oldest_pending_age_seconds=None,
+        pending_attempts_min=None,
+        pending_attempts_max=None,
+        pending_attempts_total=0,
+    )
+    outbox = SimpleNamespace(
+        summarize=AsyncMock(return_value=summary),
+        list_exhausted_pending=AsyncMock(return_value=[]),
+        list_due_pending=AsyncMock(return_value=[]),
+        next_pending_due_at=AsyncMock(return_value=None),
+        oldest_pending_created_at=AsyncMock(return_value=None),
+    )
+    dispatcher = HttpWebhookDispatcher(
+        outbox_store=outbox,
+        dispatch_concurrency=1,
+        dispatch_batch_size=3,
+    )
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    processed: list[str] = []
+
+    async def process_delivery(delivery) -> None:
+        processed.append(delivery.delivery_id)
+        if len(processed) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    dispatcher._process_delivery = process_delivery
+    await dispatcher.startup()
+    assert dispatcher._queue is not None
+    for index in range(3):
+        delivery = SimpleNamespace(delivery_id=f"queued-{index}")
+        dispatcher._queue.put_nowait(delivery)
+        dispatcher._scheduled_ids.add(delivery.delivery_id)
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    async def close_webhook(*, timeout: float) -> None:
+        await dispatcher.shutdown(timeout=timeout)
+
+    database_closed = asyncio.Event()
+
+    async def close_database() -> None:
+        database_closed.set()
+
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    shutdown = asyncio.create_task(
+        main_module._shutdown_runtime_services(app, shutdown_grace_seconds=1)
+    )
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.wait_for(shutdown, timeout=1)
+
+    assert processed == ["queued-0", "queued-1", "queued-2"]
+    assert database_closed.is_set()
 
 
 @pytest.mark.asyncio
