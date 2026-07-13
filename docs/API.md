@@ -35,7 +35,10 @@ The v1 terminal sync response and polling response use the same shape:
 `results` is the only record location. It is a list for `output.group_by:
 merge`, and a mapping of target group names to target result/data objects for
 `output.group_by: target`. Run/job/status metadata is never repeated inside
-that field. `targets` contains bounded target diagnostics; secrets remain
+that field. Each merge-mode record includes an injected `_source` field with
+the target hostname (and port, when present), so `_source` is reserved as a
+selector field name when merge grouping is configured. `targets` contains
+bounded target diagnostics; secrets remain
 redacted and local result paths are never serialized. Diagnostic URLs redact
 all query values and the complete fragment. Selector-engine diagnostics expose
 a query SHA-256 fingerprint and exception type, not the raw query or exception
