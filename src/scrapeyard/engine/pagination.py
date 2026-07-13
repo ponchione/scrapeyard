@@ -11,7 +11,12 @@ from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import FetchOutcome, TargetResult
 from scrapeyard.engine.selectors import select_elements_strict
-from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError, assert_public_url
+from scrapeyard.engine.url_guard import (
+    URLResolutionError,
+    UnsafeURLError,
+    assert_public_url,
+    url_host_label,
+)
 from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
@@ -55,23 +60,8 @@ def pagination_url_key(url: str) -> str:
     """Return a normalized key for pagination loop detection."""
     parsed = urlsplit(url)
     scheme = parsed.scheme.lower()
-    hostname = (parsed.hostname or "").lower()
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-
-    netloc = hostname
-    if parsed.username is not None:
-        userinfo = parsed.username
-        if parsed.password is not None:
-            userinfo = f"{userinfo}:{parsed.password}"
-        netloc = f"{userinfo}@{netloc}"
-
-    port = parsed.port
-    if port is not None and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
-        netloc = f"{netloc}:{port}"
-
     path = parsed.path or "/"
-    return urlunsplit((scheme, netloc, path, parsed.query, ""))
+    return urlunsplit((scheme, url_host_label(url), path, parsed.query, ""))
 
 
 async def _pagination_url_is_safe(

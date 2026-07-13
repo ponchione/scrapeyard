@@ -600,15 +600,30 @@ def redact_userinfo_in_url(url: str) -> str:
 
 
 def url_host_label(url: str) -> str:
-    """Return a hostname[:port] label without userinfo for grouping and paths."""
+    """Return the canonical hostname[:non-default-port] URL identity.
+
+    Hostnames are normalized to their lowercase ASCII IDNA form. Equivalent
+    explicit default ports share an identity, while non-default ports remain
+    separate origins for rate limiting and circuit isolation.
+    """
     parsed = urlparse(url)
-    host = (parsed.hostname or parsed.netloc or "unknown-host").lower().rstrip(".")
-    if ":" in host and not host.startswith("["):
+    raw_host = parsed.hostname
+    if raw_host is None:
+        return "unknown-host"
+    host = _canonical_hostname(raw_host)
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        host = str(literal)
+    if ":" in host:
         host = f"[{host}]"
     try:
         port = parsed.port
     except ValueError:
         port = None
-    if port is None:
+    scheme = parsed.scheme.lower()
+    if port is None or (scheme, port) in {("http", 80), ("https", 443)}:
         return host
     return f"{host}:{port}"
