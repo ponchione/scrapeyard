@@ -14,7 +14,7 @@ import aiosqlite
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.time import utc_now
-from scrapeyard.storage.database import get_db
+from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.secret_envelope import protect_text, reveal_text
 
 logger = logging.getLogger(__name__)
@@ -245,11 +245,7 @@ def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
         last_attempt_at=parse_dt(cast(str | None, row["last_attempt_at"])),
         delivered_at=parse_dt(cast(str | None, row["delivered_at"])),
         failed_at=parse_dt(cast(str | None, row["failed_at"])),
-        failure_reason=(
-            None
-            if reason_value is None
-            else WebhookFailureReason(str(reason_value))
-        ),
+        failure_reason=(None if reason_value is None else WebhookFailureReason(str(reason_value))),
         last_error=(
             None
             if row["last_error"] is None
@@ -300,9 +296,8 @@ class SQLiteWebhookOutboxStore:
         """Persist a delivery if it has not already been enqueued."""
 
         created_at = now or utc_now()
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db") as db, db_transaction(db):
             await insert_webhook_delivery(db, delivery, created_at=created_at)
-            await db.commit()
 
     async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None:
         """Return one delivery or terminal tombstone by ID."""
@@ -319,12 +314,12 @@ class SQLiteWebhookOutboxStore:
             decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
             if decoded.delivery is not None:
                 return decoded.delivery
-            await self._quarantine_malformed_row(
-                db,
-                decoded,
-                failed_at=utc_now(),
-            )
-            await db.commit()
+            async with db_transaction(db):
+                await self._quarantine_malformed_row(
+                    db,
+                    decoded,
+                    failed_at=utc_now(),
+                )
             return None
 
     async def list_pending(
@@ -385,8 +380,7 @@ class SQLiteWebhookOutboxStore:
 
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT MIN(next_attempt_at) FROM webhook_deliveries "
-                "WHERE status = 'pending'"
+                "SELECT MIN(next_attempt_at) FROM webhook_deliveries WHERE status = 'pending'"
             )
             row = await cursor.fetchone()
         return None if row is None else parse_dt(cast(str | None, row[0]))
@@ -396,8 +390,7 @@ class SQLiteWebhookOutboxStore:
 
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT MIN(created_at) FROM webhook_deliveries "
-                "WHERE status = 'pending'"
+                "SELECT MIN(created_at) FROM webhook_deliveries WHERE status = 'pending'"
             )
             row = await cursor.fetchone()
         return None if row is None else parse_dt(cast(str | None, row[0]))
@@ -445,15 +438,18 @@ class SQLiteWebhookOutboxStore:
     ) -> WebhookDelivery | None:
         """Durably reserve one attempt with a pending-state compare-and-set."""
 
-        async with get_db("jobs.db") as db:
+        async with (
+            get_db("jobs.db") as db,
+            db_transaction(db, immediate=True),
+        ):
             cursor = await db.execute(
                 """UPDATE webhook_deliveries
-                   SET attempts = attempts + 1,
-                       last_attempt_at = ?,
-                       updated_at = ?
-                   WHERE delivery_id = ?
-                     AND status = 'pending'
-                     AND attempts = ?""",
+                       SET attempts = attempts + 1,
+                           last_attempt_at = ?,
+                           updated_at = ?
+                       WHERE delivery_id = ?
+                         AND status = 'pending'
+                         AND attempts = ?""",
                 (
                     fmt_dt(attempted_at),
                     fmt_dt(attempted_at),
@@ -470,7 +466,6 @@ class SQLiteWebhookOutboxStore:
                 (delivery_id,),
             )
             row = await cursor.fetchone()
-            await db.commit()
         if row is None:
             return None
         decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
@@ -493,13 +488,12 @@ class SQLiteWebhookOutboxStore:
         """Atomically dead-letter and scrub one undecodable pending row."""
 
         decoded = WebhookDecodeResult(None, delivery_id, decode_error_type)
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db") as db, db_transaction(db):
             transitioned = await self._quarantine_malformed_row(
                 db,
                 decoded,
                 failed_at=failed_at,
             )
-            await db.commit()
         return transitioned
 
     async def mark_delivered(
@@ -619,7 +613,10 @@ class SQLiteWebhookOutboxStore:
         """Scrub bounded terminal rows while retaining logical tombstones."""
 
         _validate_limit(limit)
-        async with get_db("jobs.db") as db:
+        async with (
+            get_db("jobs.db") as db,
+            db_transaction(db, immediate=True),
+        ):
             delivered_ids = await self._terminal_ids_for_scrub(
                 db,
                 status=WebhookDeliveryStatus.delivered,
@@ -640,19 +637,18 @@ class SQLiteWebhookOutboxStore:
                 placeholders = ",".join("?" for _ in delivery_ids)
                 await db.execute(
                     f"""UPDATE webhook_deliveries
-                        SET url = '',
-                            headers_json = '{{}}',
-                            timeout_seconds = 0,
-                            payload_json = '{{}}',
-                            last_error = NULL,
-                            scrubbed_at = ?,
-                            updated_at = ?
-                        WHERE delivery_id IN ({placeholders})
-                          AND status IN ('delivered', 'failed')
-                          AND scrubbed_at IS NULL""",
+                            SET url = '',
+                                headers_json = '{{}}',
+                                timeout_seconds = 0,
+                                payload_json = '{{}}',
+                                last_error = NULL,
+                                scrubbed_at = ?,
+                                updated_at = ?
+                            WHERE delivery_id IN ({placeholders})
+                              AND status IN ('delivered', 'failed')
+                              AND scrubbed_at IS NULL""",
                     (fmt_dt(scrubbed_at), fmt_dt(scrubbed_at), *delivery_ids),
                 )
-            await db.commit()
         return WebhookRetentionSummary(
             delivered_scrubbed=len(delivered_ids),
             failed_scrubbed=len(failed_ids),
@@ -665,7 +661,7 @@ class SQLiteWebhookOutboxStore:
         *,
         limit: int | None = None,
     ) -> list[WebhookDelivery]:
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db") as db, db_transaction(db):
             deliveries: list[WebhookDelivery] = []
             inspected = 0
             inspection_limit = None if limit is None else limit * 2
@@ -697,8 +693,6 @@ class SQLiteWebhookOutboxStore:
                         decoded,
                         failed_at=utc_now(),
                     )
-                if malformed:
-                    await db.commit()
                 if limit is None or malformed == 0:
                     break
             return deliveries
@@ -778,9 +772,8 @@ class SQLiteWebhookOutboxStore:
         sql: str,
         params: Sequence[object],
     ) -> bool:
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db") as db, db_transaction(db):
             cursor = await db.execute(sql, params)
-            await db.commit()
         return cursor.rowcount == 1
 
     @staticmethod

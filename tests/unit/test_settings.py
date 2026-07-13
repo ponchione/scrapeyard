@@ -112,6 +112,7 @@ class TestServiceSettingsDefaults:
     def test_storage_max_results_per_job_default(self):
         settings = ServiceSettings()
         assert settings.storage_max_results_per_job == 100
+        assert settings.storage_cleanup_batch_size == 500
 
     def test_storage_reconciliation_defaults(self):
         settings = ServiceSettings()
@@ -272,6 +273,15 @@ class TestServiceSettingsFromEnv:
         assert settings.webhook_delivered_retention_days == 2
         assert settings.webhook_failed_retention_days == 14
 
+    def test_reads_result_cleanup_batch_size(self):
+        with patch.dict(
+            os.environ,
+            {"SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE": "37"},
+        ):
+            settings = ServiceSettings()
+
+        assert settings.storage_cleanup_batch_size == 37
+
     def test_reads_circuit_breaker_cooldown_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS": "600"}):
             settings = ServiceSettings()
@@ -314,6 +324,7 @@ def test_proxy_url_defaults_to_empty(monkeypatch):
     """proxy_url defaults to empty string (no proxy)."""
     monkeypatch.delenv("SCRAPEYARD_PROXY_URL", raising=False)
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.proxy_url == ""
 
@@ -321,6 +332,7 @@ def test_proxy_url_defaults_to_empty(monkeypatch):
 def test_proxy_url_from_env(monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_PROXY_URL", " http://gate.example.com:7777 ")
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.proxy_url == "http://gate.example.com:7777"
 
@@ -350,6 +362,7 @@ def test_proxy_url_from_env_rejects_ambiguous_url_syntax(monkeypatch, proxy_url,
 def test_log_level_defaults_to_info(monkeypatch):
     monkeypatch.delenv("SCRAPEYARD_LOG_LEVEL", raising=False)
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.log_level == "INFO"
 
@@ -357,6 +370,7 @@ def test_log_level_defaults_to_info(monkeypatch):
 def test_log_level_from_env(monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_LOG_LEVEL", "debug")
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.log_level == "debug"
 
@@ -364,6 +378,7 @@ def test_log_level_from_env(monkeypatch):
 def test_domain_rate_limit_shared_defaults_true(monkeypatch):
     monkeypatch.delenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", raising=False)
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.domain_rate_limit_shared is True
 
@@ -371,6 +386,7 @@ def test_domain_rate_limit_shared_defaults_true(monkeypatch):
 def test_domain_rate_limit_shared_from_env(monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", "false")
     from scrapeyard.common.settings import ServiceSettings
+
     settings = ServiceSettings()
     assert settings.domain_rate_limit_shared is False
 
@@ -456,8 +472,7 @@ def test_secret_reference_allowlist_defaults_to_deny_all():
 def test_secret_reference_allowlist_parses_project_and_shared_names():
     settings = ServiceSettings(
         secret_reference_allowlist=(
-            '{"catalog":["SCRAPEYARD_SECRET_PROXY"],'
-            '"*":["SCRAPEYARD_SECRET_SHARED"]}'
+            '{"catalog":["SCRAPEYARD_SECRET_PROXY"],"*":["SCRAPEYARD_SECRET_SHARED"]}'
         )
     )
 
@@ -510,6 +525,7 @@ class TestInitRateLimiter:
     def test_returns_local_when_redis_is_none(self):
         from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
         from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
+
         try:
             limiter = init_rate_limiter(redis=None)
             assert isinstance(limiter, LocalDomainRateLimiter)
@@ -522,6 +538,7 @@ class TestInitRateLimiter:
         from scrapeyard.common.settings import get_settings
         from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
         from unittest.mock import MagicMock
+
         get_settings.cache_clear()
         try:
             limiter = init_rate_limiter(redis=MagicMock())
@@ -534,6 +551,7 @@ class TestInitRateLimiter:
         from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
         from scrapeyard.engine.rate_limiter import RedisDomainRateLimiter
         from unittest.mock import MagicMock
+
         try:
             limiter = init_rate_limiter(redis=MagicMock())
             assert isinstance(limiter, RedisDomainRateLimiter)

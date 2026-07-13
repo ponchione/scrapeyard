@@ -23,20 +23,21 @@ def build_result_lookup_query(
 
 
 EXPIRED_RESULTS_QUERY = (
-    "SELECT id, file_path FROM results_meta WHERE created_at < ?"
+    "SELECT id, file_path FROM results_meta WHERE created_at < ? "
+    "ORDER BY created_at ASC, id ASC LIMIT ?"
 )
 
-JOB_RESULTS_DELETE_QUERY = (
-    "SELECT id, file_path FROM results_meta WHERE job_id=?"
-)
+JOB_RESULTS_DELETE_QUERY = "SELECT id, file_path FROM results_meta WHERE job_id=?"
 
 EXCESS_RESULTS_PER_JOB_QUERY = """
 SELECT id, file_path FROM (
-    SELECT id, file_path,
+    SELECT id, file_path, created_at,
            ROW_NUMBER() OVER (
                PARTITION BY job_id
                ORDER BY created_at DESC, id DESC
            ) AS rn
     FROM results_meta
 ) WHERE rn > ?
+ORDER BY created_at ASC, id ASC
+LIMIT ?
 """
