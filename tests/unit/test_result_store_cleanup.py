@@ -1,4 +1,6 @@
 """Test result retention cleanup."""
+
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -86,9 +88,7 @@ async def test_delete_expired_removes_old_results(store, tmp_path):
 
     # Verify the result is gone from DB.
     async with get_db("results_meta.db") as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM results_meta WHERE run_id = ?", (run_id,)
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM results_meta WHERE run_id = ?", (run_id,))
         row = await cursor.fetchone()
     assert row[0] == 0
 
@@ -104,9 +104,7 @@ async def test_delete_expired_keeps_fresh_results(store):
     from scrapeyard.storage.database import get_db
 
     async with get_db("results_meta.db") as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM results_meta WHERE run_id = ?", (run_id,)
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM results_meta WHERE run_id = ?", (run_id,))
         row = await cursor.fetchone()
     assert row[0] == 1
 
@@ -176,6 +174,78 @@ async def test_delete_expired_chunks_metadata_ids(store, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delete_expired_limits_one_deterministic_batch(store):
+    run_ids: list[str] = []
+    for index in range(5):
+        meta = await store.save_result(
+            f"job-batch-{index}",
+            {"index": index},
+            run_id=f"run-batch-{index}",
+        )
+        run_ids.append(meta.run_id)
+
+    async with get_db("results_meta.db") as db:
+        for index, run_id in enumerate(run_ids):
+            created_at = datetime.now(timezone.utc) - timedelta(days=35 - index)
+            await db.execute(
+                "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+                (created_at.isoformat(), run_id),
+            )
+        await db.commit()
+
+    assert await store.delete_expired(30, limit=2) == 2
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute("SELECT run_id FROM results_meta ORDER BY created_at")
+        remaining = [str(row[0]) for row in await cursor.fetchall()]
+
+    assert remaining == run_ids[2:]
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_releases_database_before_directory_removal(store):
+    expired = await store.save_result(
+        "job-expired-lock",
+        {"expired": True},
+        run_id="run-expired-lock",
+    )
+    fresh = await store.save_result(
+        "job-fresh-lock",
+        {"fresh": True},
+        run_id="run-fresh-lock",
+    )
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+            (
+                (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),
+                expired.run_id,
+            ),
+        )
+        await db.commit()
+
+    removal_started = asyncio.Event()
+    release_removal = asyncio.Event()
+
+    async def _blocked_to_thread(func, *args, **kwargs):
+        removal_started.set()
+        await release_removal.wait()
+        return func(*args, **kwargs)
+
+    with patch.object(result_store_module.asyncio, "to_thread", _blocked_to_thread):
+        cleanup_task = asyncio.create_task(store.delete_expired(30, limit=1))
+        await asyncio.wait_for(removal_started.wait(), timeout=1)
+        metadata = await asyncio.wait_for(
+            store.get_result_metadata("job-fresh-lock", fresh.run_id),
+            timeout=0.2,
+        )
+        release_removal.set()
+        assert await cleanup_task == 1
+
+    assert metadata is not None
+    assert metadata.run_id == fresh.run_id
+
+
+@pytest.mark.asyncio
 async def test_prune_excess_per_job_removes_oldest_runs(store):
     from scrapeyard.storage.database import get_db
 
@@ -204,6 +274,23 @@ async def test_prune_excess_per_job_removes_oldest_runs(store):
         await store.get_result("job-prune", run_id="run-0")
     payload = await store.get_result("job-prune", run_id="run-2")
     assert payload.run_id == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_prune_excess_per_job_limits_one_batch(store):
+    for index in range(5):
+        await store.save_result(
+            "job-prune-batch",
+            {"index": index},
+            run_id=f"run-prune-batch-{index}",
+        )
+
+    assert await store.prune_excess_per_job(1, limit=2) == 2
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM results_meta WHERE job_id = 'job-prune-batch'"
+        )
+        assert (await cursor.fetchone())[0] == 3
 
 
 @pytest.mark.asyncio
@@ -313,14 +400,40 @@ async def test_reconciliation_keeps_metadata_backed_result_without_parent_job(st
     meta = await store.save_result("job-valid", {"ok": True}, run_id="run-valid")
     _backdate_tree(Path(meta.file_path))
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.metadata_rows_inspected == 1
     assert report.valid_artifacts == 1
     assert report.orphan_candidates == 0
     assert Path(meta.file_path).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_paginates_metadata_and_filesystem_work(store):
+    for index in range(3):
+        await store.save_result(
+            f"job-reconcile-batch-{index}",
+            {"index": index},
+            run_id=f"run-reconcile-batch-{index}",
+        )
+
+    first = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=2,
+    )
+    second = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=2,
+    )
+
+    assert first.metadata_rows_inspected == 2
+    assert first.filesystem_run_directories_inspected == 2
+    assert second.metadata_rows_inspected == 1
+    assert second.filesystem_run_directories_inspected == 1
 
 
 @pytest.mark.asyncio
@@ -330,20 +443,14 @@ async def test_reconciliation_dry_run_then_removes_stale_orphan_idempotently(sto
     (run_dir / "artifact.bin").write_bytes(b"12345")
     _backdate_tree(run_dir)
 
-    dry_run = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=True, now=NOW
-    )
+    dry_run = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
     assert dry_run.orphan_candidates == 1
     assert dry_run.directories_would_remove == 1
     assert dry_run.directories_removed == 0
     assert run_dir.is_dir()
 
-    removed = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
-    converged = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    removed = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
+    converged = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert removed.directories_removed == 1
     assert removed.removed_bytes == 5
@@ -358,9 +465,7 @@ async def test_reconciliation_skips_recent_orphan(store):
     run_dir.mkdir(parents=True)
     (run_dir / "debug.txt").write_text("recent", encoding="utf-8")
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.orphan_candidates == 0
     assert report.recent_candidates_skipped == 1
@@ -381,9 +486,7 @@ async def test_reconciliation_skips_stale_active_run(store):
     run_dir.mkdir(parents=True)
     _backdate_tree(run_dir)
 
-    report = await protected_store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await protected_store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.active_run_candidates_skipped == 1
     assert report.directories_removed == 0
@@ -404,9 +507,7 @@ async def test_reconciliation_rechecks_active_state_before_removal(store):
     run_dir.mkdir(parents=True)
     _backdate_tree(run_dir)
 
-    report = await protected_store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await protected_store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert checks == 2
     assert report.active_run_race_candidates_skipped == 1
@@ -421,9 +522,7 @@ async def test_metadata_appearing_after_scan_prevents_orphan_removal(store):
     (run_dir / "results.json").write_text('{"ok":true}', encoding="utf-8")
     _backdate_tree(run_dir)
 
-    async def insert_metadata_once(
-        _project: str, _job_name: str, _run_id: str
-    ) -> bool:
+    async def insert_metadata_once(_project: str, _job_name: str, _run_id: str) -> bool:
         nonlocal inserted
         if not inserted:
             inserted = True
@@ -434,12 +533,8 @@ async def test_metadata_appearing_after_scan_prevents_orphan_removal(store):
             )
         return False
 
-    protected_store = LocalResultStore(
-        str(store._results_dir), _lookup, insert_metadata_once
-    )
-    report = await protected_store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    protected_store = LocalResultStore(str(store._results_dir), _lookup, insert_metadata_once)
+    report = await protected_store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.metadata_race_candidates_skipped == 1
     assert run_dir.is_dir()
@@ -469,16 +564,12 @@ async def test_reconciliation_removes_only_exact_stale_atomic_temp(store):
     lookalike.write_bytes(b"keep")
     _backdate_tree(run_dir)
 
-    dry_run = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=True, now=NOW
-    )
+    dry_run = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
     assert dry_run.stale_temporary_candidates == 1
     assert dry_run.files_would_remove == 1
     assert exact.exists()
 
-    removed = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    removed = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert removed.files_removed == 1
     assert removed.removed_bytes == 4
@@ -495,9 +586,7 @@ async def test_reconciliation_skips_temp_in_recent_run(store):
     old = (NOW - timedelta(days=2)).timestamp()
     os.utime(temp, (old, old))
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.stale_temporary_candidates == 0
     assert report.recent_candidates_skipped == 1
@@ -518,9 +607,7 @@ async def test_reconciliation_reports_missing_and_corrupt_metadata_artifacts(
         (run_dir / "results.json").write_text(contents, encoding="utf-8")
     await _insert_metadata(job_id=f"job-{field}", run_id=f"run-{field}", file_path=run_dir)
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert getattr(report, field) == 1
     assert report.failure_count == 1
@@ -528,9 +615,7 @@ async def test_reconciliation_reports_missing_and_corrupt_metadata_artifacts(
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_reports_unreadable_artifact_without_deleting(
-    store, monkeypatch
-):
+async def test_reconciliation_reports_unreadable_artifact_without_deleting(store, monkeypatch):
     meta = await store.save_result("job-io", {"ok": True}, run_id="run-io")
     real_read = result_store_module.read_json_file_no_follow
 
@@ -540,9 +625,7 @@ async def test_reconciliation_reports_unreadable_artifact_without_deleting(
         return real_read(path)
 
     monkeypatch.setattr(result_store_module, "read_json_file_no_follow", fail_read)
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.unreadable_result_files == 1
     assert report.artifact_failures[0].error_type == "OSError"
@@ -550,18 +633,14 @@ async def test_reconciliation_reports_unreadable_artifact_without_deleting(
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_reports_unsafe_outside_metadata_and_preserves_target(
-    store, tmp_path
-):
+async def test_reconciliation_reports_unsafe_outside_metadata_and_preserves_target(store, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     result = outside / "results.json"
     result.write_text('{"secret":true}', encoding="utf-8")
     await _insert_metadata(job_id="job-outside", run_id="run-outside", file_path=outside)
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.unsafe_metadata_paths == 1
     assert result.read_text(encoding="utf-8") == '{"secret":true}'
@@ -579,13 +658,9 @@ async def test_reconciliation_never_follows_run_or_result_symlinks(store, tmp_pa
     result_link_run = job_dir / "run-result-link"
     result_link_run.mkdir()
     (result_link_run / "results.json").symlink_to(outside_result)
-    await _insert_metadata(
-        job_id="job-link", run_id="run-result-link", file_path=result_link_run
-    )
+    await _insert_metadata(job_id="job-link", run_id="run-result-link", file_path=result_link_run)
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.unsafe_metadata_paths == 1
     assert report.malformed_entries_ignored >= 1
@@ -593,17 +668,13 @@ async def test_reconciliation_never_follows_run_or_result_symlinks(store, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_never_follows_project_job_or_temp_symlinks(
-    store, tmp_path
-):
+async def test_reconciliation_never_follows_project_job_or_temp_symlinks(store, tmp_path):
     outside = tmp_path / "outside-tree"
     outside.mkdir()
     outside_marker = outside / "keep.txt"
     outside_marker.write_text("keep", encoding="utf-8")
     store._results_dir.mkdir(parents=True)
-    (store._results_dir / "project-link").symlink_to(
-        outside, target_is_directory=True
-    )
+    (store._results_dir / "project-link").symlink_to(outside, target_is_directory=True)
     project = store._results_dir / "test-project"
     project.mkdir()
     (project / "job-link").symlink_to(outside, target_is_directory=True)
@@ -614,9 +685,7 @@ async def test_reconciliation_never_follows_project_job_or_temp_symlinks(
     temp_link.symlink_to(temp_target)
     _backdate_tree(Path(meta.file_path))
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.malformed_entries_ignored >= 2
     assert report.stale_temporary_candidates == 0
@@ -638,9 +707,7 @@ async def test_reconciliation_skips_temp_in_stale_active_run(store):
     temp.write_bytes(b"keep")
     _backdate_tree(Path(meta.file_path))
 
-    report = await protected_store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await protected_store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.stale_temporary_candidates == 1
     assert report.active_run_candidates_skipped == 1
@@ -668,9 +735,7 @@ async def test_reconciliation_ignores_non_directory_at_run_depth(store):
     run_file.write_text("keep", encoding="utf-8")
     _backdate_tree(run_file)
 
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.filesystem_run_directories_inspected == 0
     assert report.malformed_entries_ignored == 1
@@ -678,9 +743,7 @@ async def test_reconciliation_ignores_non_directory_at_run_depth(store):
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_partial_removal_failure_is_reported_and_retryable(
-    store, monkeypatch
-):
+async def test_reconciliation_partial_removal_failure_is_reported_and_retryable(store, monkeypatch):
     first = store._results_dir / "test-project" / "test-job" / "run-a"
     second = store._results_dir / "test-project" / "test-job" / "run-b"
     first.mkdir(parents=True)
@@ -697,9 +760,7 @@ async def test_reconciliation_partial_removal_failure_is_reported_and_retryable(
         return real_remove(candidate, cutoff)
 
     monkeypatch.setattr(store, "_remove_run_candidate", partial_failure)
-    report = await store.reconcile_artifacts(
-        grace_seconds=86400, dry_run=False, now=NOW
-    )
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
 
     assert report.directories_removed == 1
     assert report.removed_bytes == 2

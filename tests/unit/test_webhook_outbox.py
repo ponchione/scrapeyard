@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.webhook_outbox import (
@@ -46,8 +49,12 @@ async def test_enqueue_delivery_and_list_pending(tmp_path):
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
 
-    await store.enqueue_delivery(_delivery("due", next_attempt_at=now - timedelta(seconds=1)), now=now)
-    await store.enqueue_delivery(_delivery("future", next_attempt_at=now + timedelta(minutes=5)), now=now)
+    await store.enqueue_delivery(
+        _delivery("due", next_attempt_at=now - timedelta(seconds=1)), now=now
+    )
+    await store.enqueue_delivery(
+        _delivery("future", next_attempt_at=now + timedelta(minutes=5)), now=now
+    )
 
     pending = await store.list_pending()
 
@@ -335,11 +342,14 @@ async def test_malformed_exhausted_row_is_quarantined_and_transition_is_idempote
         )
         await db.commit()
 
-    assert await store.list_exhausted_pending(
-        attempts_gte=5,
-        created_at_lte=now - timedelta(days=1),
-        limit=1,
-    ) == []
+    assert (
+        await store.list_exhausted_pending(
+            attempts_gte=5,
+            created_at_lte=now - timedelta(days=1),
+            limit=1,
+        )
+        == []
+    )
     assert not await store.quarantine_malformed_delivery(
         "bad-exhausted",
         failed_at=now,
@@ -375,6 +385,93 @@ async def test_begin_attempt_is_compare_and_set_and_survives_reopen(tmp_path):
     assert duplicate is None
     assert restored is not None and restored.attempts == 1
     assert restored.status is WebhookDeliveryStatus.pending
+
+
+@pytest.mark.parametrize("operation", ["begin_attempt", "mark_failed"])
+async def test_outbox_write_rolls_back_when_commit_fails(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteWebhookOutboxStore()
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    await store.enqueue_delivery(_delivery(), now=now)
+    async with get_db("jobs.db") as db:
+        pass
+    original_commit = db.commit
+
+    async def _fail_commit() -> None:
+        raise OSError("commit failed")
+
+    monkeypatch.setattr(db, "commit", _fail_commit)
+    with pytest.raises(OSError, match="commit failed"):
+        if operation == "begin_attempt":
+            await store.begin_attempt(
+                "delivery-1",
+                expected_attempts=0,
+                attempted_at=now + timedelta(seconds=1),
+            )
+        else:
+            await store.mark_failed(
+                "delivery-1",
+                failed_at=now + timedelta(seconds=1),
+                reason=WebhookFailureReason.non_retryable_failure,
+                last_error="failure",
+            )
+
+    assert db.in_transaction is False
+    monkeypatch.setattr(db, "commit", original_commit)
+    persisted = await store.get_delivery("delivery-1")
+    assert persisted is not None
+    assert persisted.status is WebhookDeliveryStatus.pending
+    assert persisted.attempts == 0
+    await close_db()
+
+
+@pytest.mark.parametrize("operation", ["begin_attempt", "mark_failed"])
+async def test_outbox_write_rolls_back_on_cancellation(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteWebhookOutboxStore()
+    now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
+    await store.enqueue_delivery(_delivery(), now=now)
+    async with get_db("jobs.db") as db:
+        pass
+    original_execute = db.execute
+
+    async def _cancel_after_dml(sql, parameters=None):
+        cursor = await original_execute(sql, parameters)
+        if sql.lstrip().startswith("UPDATE webhook_deliveries"):
+            raise asyncio.CancelledError
+        return cursor
+
+    monkeypatch.setattr(db, "execute", _cancel_after_dml)
+    with pytest.raises(asyncio.CancelledError):
+        if operation == "begin_attempt":
+            await store.begin_attempt(
+                "delivery-1",
+                expected_attempts=0,
+                attempted_at=now + timedelta(seconds=1),
+            )
+        else:
+            await store.mark_failed(
+                "delivery-1",
+                failed_at=now + timedelta(seconds=1),
+                reason=WebhookFailureReason.non_retryable_failure,
+                last_error="failure",
+            )
+
+    assert db.in_transaction is False
+    monkeypatch.setattr(db, "execute", original_execute)
+    persisted = await store.get_delivery("delivery-1")
+    assert persisted is not None
+    assert persisted.status is WebhookDeliveryStatus.pending
+    assert persisted.attempts == 0
+    await close_db()
 
 
 async def test_terminal_transitions_cannot_return_to_pending(tmp_path):

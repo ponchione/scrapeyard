@@ -51,6 +51,7 @@ from scrapeyard.storage.types import (
 logger = logging.getLogger(__name__)
 _RESULT_RUN_DIR_DEPTH = 3
 _DELETE_ID_BATCH_SIZE = 500
+_DEFAULT_CLEANUP_BATCH_SIZE = 500
 _ATOMIC_TEMP_PATTERN = re.compile(
     r"^\.(?:results\.json|dynamic-main\.png|stealthy-main\.png)\."
     r"[1-9][0-9]*\.[0-9a-f]{32}\.tmp$"
@@ -73,6 +74,7 @@ class _RemovalCandidate:
     identity: _RunIdentity
     path: Path
     size: int
+    recent: bool = False
 
 
 @dataclass(slots=True)
@@ -147,6 +149,8 @@ class LocalResultStore:
         self._job_lookup = job_lookup
         self._active_run_lookup = active_run_lookup
         self._save_lock = asyncio.Lock()
+        self._reconciliation_metadata_cursor = 0
+        self._reconciliation_filesystem_cursor: tuple[str, str, str] | None = None
 
     def _checked_result_dir(self, file_path: str) -> Path:
         path = Path(file_path)
@@ -199,19 +203,24 @@ class LocalResultStore:
                 batch,
             )
 
-    async def _delete_by_ids(
+    async def _delete_retention_batch(
         self,
-        db: Any,
-        rows: Sequence[Mapping[str, Any]],
+        query: str,
+        params: Sequence[object],
     ) -> int:
-        if not rows:
-            return 0
-
-        await self._delete_metadata_ids(db, rows)
-        await db.commit()
+        async with (
+            get_db("results_meta.db") as db,
+            db_transaction(db, immediate=True),
+        ):
+            cursor = await db.execute(query, params)
+            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
+            if not rows:
+                return 0
+            await self._delete_metadata_ids(db, rows)
         # Delete files after metadata so a crash leaves orphaned files
         # (recoverable) rather than orphaned metadata rows pointing to
-        # missing files.
+        # missing files. The database context has exited here so filesystem
+        # latency cannot block unrelated metadata access.
         await asyncio.to_thread(remove_directories, self._checked_result_dirs(rows))
         return len(rows)
 
@@ -231,8 +240,8 @@ class LocalResultStore:
             return 0
         paths = [self._checked_result_dir(str(row["file_path"])) for row in rows]
         await cleanup_safe_to_thread(remove_directories, paths)
-        await self._delete_metadata_ids(db, rows)
-        await db.commit()
+        async with db_transaction(db):
+            await self._delete_metadata_ids(db, rows)
         return len(rows)
 
     async def save_result(
@@ -550,25 +559,36 @@ class LocalResultStore:
 
     def _scan_artifacts(
         self,
-        rows: Sequence[Mapping[str, Any]],
+        state: _ReconciliationState,
         cutoff_timestamp: float,
-    ) -> tuple[_ReconciliationState, list[_RemovalCandidate], list[_RemovalCandidate]]:
-        state = _ReconciliationState()
-        referenced = self._validate_metadata_rows(rows, state)
+        limit: int,
+        after: tuple[str, str, str] | None,
+    ) -> tuple[
+        list[_RemovalCandidate],
+        list[_RemovalCandidate],
+        tuple[str, str, str] | None,
+        bool,
+    ]:
+        """Scan at most *limit* run entries after a deterministic cursor."""
+
         run_candidates: list[_RemovalCandidate] = []
         temp_candidates: list[_RemovalCandidate] = []
+        processed = 0
+        last_cursor = after
         root = self._results_dir.resolve(strict=False)
         try:
             project_entries = self._directory_entries(root)
         except FileNotFoundError:
-            return state, run_candidates, temp_candidates
+            return run_candidates, temp_candidates, None, True
         except OSError as exc:
             state.operation_failures.append(
                 ReconciliationOperationFailure("scan_root", ".", type(exc).__name__)
             )
-            return state, run_candidates, temp_candidates
+            return run_candidates, temp_candidates, None, True
 
         for project_name, project_path, project_stat in project_entries:
+            if after is not None and project_name < after[0]:
+                continue
             try:
                 if not stat.S_ISDIR(project_stat.st_mode) or stat.S_ISLNK(project_stat.st_mode):
                     state.malformed_entries_ignored += 1
@@ -582,6 +602,8 @@ class LocalResultStore:
                 )
                 continue
             for job_name, job_path, job_stat in job_entries:
+                if after is not None and (project_name, job_name) < after[:2]:
+                    continue
                 project_job = f"{project_name[:80]}/{job_name[:80]}"
                 try:
                     if not stat.S_ISDIR(job_stat.st_mode) or stat.S_ISLNK(job_stat.st_mode):
@@ -594,6 +616,18 @@ class LocalResultStore:
                     )
                     continue
                 for run_name, run_path, run_stat in run_entries:
+                    cursor = (project_name, job_name, run_name)
+                    if after is not None and cursor <= after:
+                        continue
+                    if processed >= limit:
+                        return (
+                            run_candidates,
+                            temp_candidates,
+                            last_cursor,
+                            False,
+                        )
+                    processed += 1
+                    last_cursor = cursor
                     identity = _RunIdentity(project_name, job_name, run_name)
                     try:
                         if not stat.S_ISDIR(run_stat.st_mode) or stat.S_ISLNK(run_stat.st_mode):
@@ -609,25 +643,22 @@ class LocalResultStore:
                         )
                         continue
                     state.filesystem_run_directories_inspected += 1
-                    is_referenced = run_dir in referenced
                     run_is_recent = newest_mtime >= cutoff_timestamp
-                    orphan_is_eligible = not is_referenced and not run_is_recent
-                    if not is_referenced:
-                        if run_is_recent:
-                            state.recent_candidates_skipped += 1
-                        else:
-                            state.orphan_candidates += 1
-                            run_candidates.append(_RemovalCandidate(identity, run_dir, total_bytes))
+                    run_candidates.append(
+                        _RemovalCandidate(
+                            identity,
+                            run_dir,
+                            total_bytes,
+                            recent=run_is_recent,
+                        )
+                    )
                     for temp_path, temp_size, temp_mtime in temporary_files:
                         if temp_mtime >= cutoff_timestamp or run_is_recent:
                             state.recent_candidates_skipped += 1
                             continue
                         state.stale_temporary_candidates += 1
-                        if not orphan_is_eligible:
-                            temp_candidates.append(
-                                _RemovalCandidate(identity, temp_path, temp_size)
-                            )
-        return state, run_candidates, temp_candidates
+                        temp_candidates.append(_RemovalCandidate(identity, temp_path, temp_size))
+        return run_candidates, temp_candidates, None, True
 
     async def _active(self, identity: _RunIdentity) -> bool:
         if self._active_run_lookup is None:
@@ -715,23 +746,67 @@ class LocalResultStore:
         grace_seconds: int,
         dry_run: bool,
         now: datetime | None = None,
+        batch_size: int = _DEFAULT_CLEANUP_BATCH_SIZE,
     ) -> ResultReconciliationReport:
-        """Validate metadata and remove only stale, unowned, contained artifacts."""
+        """Validate and reconcile one bounded, cursor-paginated artifact batch."""
 
         if grace_seconds < 1:
             raise ValueError("grace_seconds must be at least 1")
+        if batch_size < 1:
+            raise ValueError("result reconciliation batch_size must be positive")
         observed_at = now or utc_now()
         cutoff_timestamp = (observed_at - timedelta(seconds=grace_seconds)).timestamp()
+        state = _ReconciliationState()
         async with get_db("results_meta.db") as db:
             cursor = await db.execute(
-                "SELECT job_id, run_id, file_path FROM results_meta ORDER BY id"
+                """SELECT id, job_id, run_id, file_path
+                   FROM results_meta
+                   WHERE id > ?
+                   ORDER BY id
+                   LIMIT ?""",
+                (self._reconciliation_metadata_cursor, batch_size),
             )
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-        state, run_candidates, temp_candidates = await cleanup_safe_to_thread(
-            self._scan_artifacts,
+        await cleanup_safe_to_thread(
+            self._validate_metadata_rows,
             rows,
-            cutoff_timestamp,
+            state,
         )
+        if len(rows) < batch_size:
+            self._reconciliation_metadata_cursor = 0
+        elif rows:
+            self._reconciliation_metadata_cursor = int(rows[-1]["id"])
+
+        (
+            run_candidates,
+            temp_candidates,
+            filesystem_cursor,
+            exhausted,
+        ) = await cleanup_safe_to_thread(
+            self._scan_artifacts,
+            state,
+            cutoff_timestamp,
+            batch_size,
+            self._reconciliation_filesystem_cursor,
+        )
+        self._reconciliation_filesystem_cursor = None if exhausted else filesystem_cursor
+
+        referenced_identities: set[_RunIdentity] = set()
+        orphan_candidates: list[_RemovalCandidate] = []
+        for candidate in run_candidates:
+            if await self._metadata_references(candidate):
+                referenced_identities.add(candidate.identity)
+            elif candidate.recent:
+                state.recent_candidates_skipped += 1
+            else:
+                state.orphan_candidates += 1
+                orphan_candidates.append(candidate)
+        run_candidates = orphan_candidates
+        temp_candidates = [
+            candidate
+            for candidate in temp_candidates
+            if candidate.identity in referenced_identities
+        ]
 
         async def active_or_failed(candidate: _RemovalCandidate, action: str) -> bool:
             try:
@@ -806,20 +881,33 @@ class LocalResultStore:
                 state.recent_candidates_skipped += 1
         return state.report(dry_run=dry_run)
 
-    async def delete_expired(self, retention_days: int) -> int:
-        """Delete results older than *retention_days*. Returns count deleted."""
-        cutoff = (utc_now() - timedelta(days=retention_days)).isoformat()
-        async with get_db("results_meta.db") as db:
-            cursor = await db.execute(EXPIRED_RESULTS_QUERY, (cutoff,))
-            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            return await self._delete_by_ids(db, rows)
+    async def delete_expired(
+        self,
+        retention_days: int,
+        *,
+        limit: int = _DEFAULT_CLEANUP_BATCH_SIZE,
+    ) -> int:
+        """Delete one deterministic bounded batch older than the retention window."""
 
-    async def prune_excess_per_job(self, max_results_per_job: int) -> int:
-        """Delete result runs exceeding the per-job retention limit."""
-        async with get_db("results_meta.db") as db:
-            cursor = await db.execute(
-                EXCESS_RESULTS_PER_JOB_QUERY,
-                (max_results_per_job,),
-            )
-            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            return await self._delete_by_ids(db, rows)
+        if limit < 1:
+            raise ValueError("result cleanup limit must be positive")
+        cutoff = (utc_now() - timedelta(days=retention_days)).isoformat()
+        return await self._delete_retention_batch(
+            EXPIRED_RESULTS_QUERY,
+            (cutoff, limit),
+        )
+
+    async def prune_excess_per_job(
+        self,
+        max_results_per_job: int,
+        *,
+        limit: int = _DEFAULT_CLEANUP_BATCH_SIZE,
+    ) -> int:
+        """Delete one deterministic bounded batch exceeding the per-job limit."""
+
+        if limit < 1:
+            raise ValueError("result cleanup limit must be positive")
+        return await self._delete_retention_batch(
+            EXCESS_RESULTS_PER_JOB_QUERY,
+            (max_results_per_job, limit),
+        )

@@ -71,6 +71,7 @@ class ServiceSettings(BaseSettings):
     db_dir: str = "/data/db"
     storage_results_dir: str = "/data/results"
     storage_max_results_per_job: int = Field(default=100, ge=0)
+    storage_cleanup_batch_size: int = Field(default=500, ge=1)
     storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
     storage_reconciliation_dry_run: bool = True
     storage_cleanup_interval_seconds: float = Field(default=21600.0, gt=0)
@@ -123,21 +124,14 @@ class ServiceSettings(BaseSettings):
                 "of workers_running_heartbeat_timeout_seconds"
             )
         if self.webhook_dispatch_batch_size < self.webhook_dispatch_concurrency:
-            raise ValueError(
-                "webhook_dispatch_batch_size must be >= "
-                "webhook_dispatch_concurrency"
-            )
+            raise ValueError("webhook_dispatch_batch_size must be >= webhook_dispatch_concurrency")
         if self.qualification_crash_point and not self.qualification_mode:
-            raise ValueError(
-                "qualification_crash_point requires qualification_mode=true"
-            )
+            raise ValueError("qualification_crash_point requires qualification_mode=true")
         if self.qualification_crash_point:
             from scrapeyard.common.qualification import QUALIFICATION_CRASH_POINTS
 
             if self.qualification_crash_point not in QUALIFICATION_CRASH_POINTS:
-                raise ValueError(
-                    "qualification_crash_point must name a supported local checkpoint"
-                )
+                raise ValueError("qualification_crash_point must name a supported local checkpoint")
         self.parsed_secret_reference_allowlist()
         return self
 
@@ -152,13 +146,9 @@ class ServiceSettings(BaseSettings):
         try:
             parsed = json.loads(self.secret_reference_allowlist)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be valid JSON"
-            ) from exc
+            raise ValueError("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be valid JSON") from exc
         if not isinstance(parsed, dict):
-            raise ValueError(
-                "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be a JSON object"
-            )
+            raise ValueError("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be a JSON object")
 
         policy: dict[str, frozenset[str]] = {}
         for project, names in parsed.items():
@@ -170,9 +160,7 @@ class ServiceSettings(BaseSettings):
                 from scrapeyard.common.paths import safe_path_part
 
                 safe_path_part(project, label="secret-reference project")
-            if not isinstance(names, list) or not all(
-                isinstance(name, str) for name in names
-            ):
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
                 raise ValueError(
                     "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST values must be lists of names"
                 )

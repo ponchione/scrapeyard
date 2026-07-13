@@ -266,6 +266,7 @@ Set limits to match host capacity:
 - `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` (default `60`)
 - `SCRAPEYARD_STORAGE_RETENTION_DAYS`
 - `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB`
+- `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` (default `500`)
 - `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` (default `86400`)
 - `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` (default `true`)
 - `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB`
@@ -489,7 +490,11 @@ artifact is opened; missing and cross-project retained IDs return the same
 The periodic cleanup order is expired-result retention, per-job result
 pruning, artifact reconciliation, expired submission-idempotency deletion,
 then webhook tombstone scrubbing. Retention
-remains metadata-first, so a crash leaves a recoverable filesystem orphan.
+processes at most `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` deterministic rows
+per phase. It commits each metadata batch and releases SQLite before removing
+the corresponding directories, so filesystem latency does not block result
+metadata access. Retention remains metadata-first, so a crash leaves a
+recoverable filesystem orphan.
 Explicit job deletion remains filesystem-first and retryable. Running
 reconciliation after retention avoids diagnosing directories the same pass is
 already meant to remove normally.
@@ -521,11 +526,14 @@ run is protected; an eligible orphan run subsumes its temp into the contained
 directory removal.
 
 `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN=true` is the safe default. Each pass
-performs the same validation and eligibility checks and reports what would be
-removed without mutating files or metadata. Review at least one grace-period
-window of summaries before setting it to `false`. Destructive passes remove
-only eligible directories and known temp files, converge idempotently, and
-never modify `results_meta`.
+validates and scans cursor-paginated batches no larger than
+`SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE`, performs the same eligibility checks,
+and reports what would be removed without mutating files or metadata. Cursors
+advance across later passes so large stores are covered without one unbounded
+metadata load or full-tree candidate list. Review at least one grace-period
+window of summaries before setting dry-run to `false`. Destructive passes
+remove only eligible directories and known temp files, converge idempotently,
+and never modify `results_meta`.
 
 Every pass logs a typed summary: metadata inspected/valid, missing/corrupt/
 unreadable/unsafe artifacts, filesystem runs inspected, orphan/temp candidates,
@@ -606,6 +614,16 @@ timeouts and connection/HTTP client failures are retryable until an attempt or
 age boundary is reached. Stored and logged errors use sanitized status or
 exception-class descriptions and never raw headers, payloads, URLs, or
 exception strings.
+
+Each attempt resolves and validates the destination once, pins the socket URL
+to that public address, and retains the logical hostname for `Host` and TLS
+SNI. HTTP connection pools are isolated by that logical hostname, so hosts
+sharing one address can never reuse each other's authenticated TLS session.
+Resolver availability failures are retryable transport failures; a concrete
+private or otherwise non-public address remains a permanent safety rejection.
+Response handling streams only status and headers, closes the response without
+consuming its unused body, and therefore does not buffer destination-controlled
+response content.
 
 For 429 and 503 only, `Retry-After` accepts either non-negative integer delta
 seconds or a future timezone-aware HTTP date. Malformed, negative, past, or

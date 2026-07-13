@@ -43,20 +43,24 @@ async def test_cleanup_loop_handles_cancellation():
 @pytest.mark.asyncio
 async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
     calls = []
-    settings = iter([
-        SimpleNamespace(
-            storage_retention_days=7,
-            storage_max_results_per_job=20,
-            storage_orphan_grace_seconds=3600,
-            storage_reconciliation_dry_run=True,
-        ),
-        SimpleNamespace(
-            storage_retention_days=14,
-            storage_max_results_per_job=40,
-            storage_orphan_grace_seconds=7200,
-            storage_reconciliation_dry_run=False,
-        ),
-    ])
+    settings = iter(
+        [
+            SimpleNamespace(
+                storage_retention_days=7,
+                storage_max_results_per_job=20,
+                storage_cleanup_batch_size=50,
+                storage_orphan_grace_seconds=3600,
+                storage_reconciliation_dry_run=True,
+            ),
+            SimpleNamespace(
+                storage_retention_days=14,
+                storage_max_results_per_job=40,
+                storage_cleanup_batch_size=75,
+                storage_orphan_grace_seconds=7200,
+                storage_reconciliation_dry_run=False,
+            ),
+        ]
+    )
 
     async def fake_run_cleanup(**kwargs):
         calls.append(kwargs)
@@ -72,6 +76,7 @@ async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
 
     assert [call["retention_days"] for call in calls] == [7, 14]
     assert [call["max_results_per_job"] for call in calls] == [20, 40]
+    assert [call["result_cleanup_batch_size"] for call in calls] == [50, 75]
     assert [call["orphan_grace_seconds"] for call in calls] == [3600, 7200]
     assert [call["reconciliation_dry_run"] for call in calls] == [True, False]
 
@@ -82,6 +87,7 @@ async def test_cleanup_loop_wires_webhook_retention_settings(monkeypatch):
     settings = SimpleNamespace(
         storage_retention_days=7,
         storage_max_results_per_job=20,
+        storage_cleanup_batch_size=50,
         webhook_delivered_retention_days=2,
         webhook_failed_retention_days=14,
         webhook_dispatch_batch_size=25,
@@ -105,5 +111,6 @@ async def test_cleanup_loop_wires_webhook_retention_settings(monkeypatch):
     assert calls[0]["webhook_delivered_retention_days"] == 2
     assert calls[0]["webhook_failed_retention_days"] == 14
     assert calls[0]["webhook_cleanup_batch_size"] == 25
+    assert calls[0]["result_cleanup_batch_size"] == 50
     assert calls[0]["orphan_grace_seconds"] == 86400
     assert calls[0]["reconciliation_dry_run"] is True

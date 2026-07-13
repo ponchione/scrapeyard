@@ -37,6 +37,7 @@ async def run_cleanup(
     webhook_delivered_retention_days: int | None = None,
     webhook_failed_retention_days: int | None = None,
     webhook_cleanup_batch_size: int = 100,
+    result_cleanup_batch_size: int = 500,
     orphan_grace_seconds: int = 86400,
     reconciliation_dry_run: bool = True,
     job_store: JobStore | None = None,
@@ -47,7 +48,10 @@ async def run_cleanup(
     """Clean result artifacts and scrub bounded terminal webhook secrets."""
     failed_phases: list[str] = []
     try:
-        deleted = await result_store.delete_expired(retention_days)
+        deleted = await result_store.delete_expired(
+            retention_days,
+            limit=result_cleanup_batch_size,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -62,7 +66,10 @@ async def run_cleanup(
             logger.info("Cleanup removed %d expired result(s)", deleted)
 
     try:
-        pruned = await result_store.prune_excess_per_job(max_results_per_job)
+        pruned = await result_store.prune_excess_per_job(
+            max_results_per_job,
+            limit=result_cleanup_batch_size,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -81,6 +88,7 @@ async def run_cleanup(
             grace_seconds=orphan_grace_seconds,
             dry_run=reconciliation_dry_run,
             now=now,
+            batch_size=result_cleanup_batch_size,
         )
     except asyncio.CancelledError:
         raise
@@ -245,6 +253,7 @@ def start_cleanup_loop(
                         result_store=result_store,
                         retention_days=settings.storage_retention_days,
                         max_results_per_job=settings.storage_max_results_per_job,
+                        result_cleanup_batch_size=settings.storage_cleanup_batch_size,
                         orphan_grace_seconds=settings.storage_orphan_grace_seconds,
                         reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
                         job_store=job_store,
@@ -257,6 +266,7 @@ def start_cleanup_loop(
                         result_store=result_store,
                         retention_days=settings.storage_retention_days,
                         max_results_per_job=settings.storage_max_results_per_job,
+                        result_cleanup_batch_size=settings.storage_cleanup_batch_size,
                         webhook_outbox_store=webhook_outbox_store,
                         webhook_delivered_retention_days=(
                             settings.webhook_delivered_retention_days

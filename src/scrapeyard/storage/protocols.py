@@ -130,11 +130,14 @@ class JobStore(Protocol):
         ...
 
     async def get_job_runs(
-        self, job_id: str, limit: int = 10,
+        self,
+        job_id: str,
+        limit: int = 10,
     ) -> list[JobRun]: ...
 
     async def get_job_run_stats(
-        self, job_id: str,
+        self,
+        job_id: str,
     ) -> tuple[int, datetime | None]: ...
 
     async def list_jobs_with_stats(
@@ -305,7 +308,9 @@ class ResultStore(Protocol):
     ) -> SaveResultMeta: ...
 
     async def get_result(
-        self, job_id: str, run_id: str | None = None,
+        self,
+        job_id: str,
+        run_id: str | None = None,
     ) -> ResultPayload: ...
 
     async def get_result_metadata(
@@ -322,9 +327,14 @@ class ResultStore(Protocol):
         """Delete one run-specific artifact and metadata row if present."""
         ...
 
-    async def delete_expired(self, retention_days: int) -> int: ...
+    async def delete_expired(self, retention_days: int, *, limit: int = 500) -> int: ...
 
-    async def prune_excess_per_job(self, max_results_per_job: int) -> int: ...
+    async def prune_excess_per_job(
+        self,
+        max_results_per_job: int,
+        *,
+        limit: int = 500,
+    ) -> int: ...
 
     async def reconcile_artifacts(
         self,
@@ -332,6 +342,7 @@ class ResultStore(Protocol):
         grace_seconds: int,
         dry_run: bool,
         now: datetime | None = None,
+        batch_size: int = 500,
     ) -> ResultReconciliationReport:
         """Validate metadata and reconcile stale contained filesystem artifacts."""
         ...

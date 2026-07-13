@@ -26,8 +26,8 @@ async def test_run_cleanup_delegates_age_based_deletion():
 
     await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
 
-    result_store.delete_expired.assert_awaited_once_with(30)
-    result_store.prune_excess_per_job.assert_awaited_once_with(100)
+    result_store.delete_expired.assert_awaited_once_with(30, limit=500)
+    result_store.prune_excess_per_job.assert_awaited_once_with(100, limit=500)
 
 
 @pytest.mark.asyncio
@@ -41,8 +41,8 @@ async def test_run_cleanup_delegates_per_job_pruning():
 
     await run_cleanup(result_store, retention_days=14, max_results_per_job=3)
 
-    result_store.delete_expired.assert_awaited_once_with(14)
-    result_store.prune_excess_per_job.assert_awaited_once_with(3)
+    result_store.delete_expired.assert_awaited_once_with(14, limit=500)
+    result_store.prune_excess_per_job.assert_awaited_once_with(3, limit=500)
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_expired_result_failure_does_not_skip_later_cleanup_phases(caplog)
             job_store=job_store,
         )
 
-    result_store.prune_excess_per_job.assert_awaited_once_with(100)
+    result_store.prune_excess_per_job.assert_awaited_once_with(100, limit=500)
     result_store.reconcile_artifacts.assert_awaited_once()
     job_store.delete_expired_idempotency_records.assert_awaited_once()
     outbox.scrub_terminal_deliveries.assert_awaited_once()

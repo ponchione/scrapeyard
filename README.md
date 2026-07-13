@@ -401,6 +401,7 @@ settings are:
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Result artifact directory |
+| `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows and reconciliation run directories processed per cleanup phase and pass |
 | `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` | `86400` | Minimum artifact age before orphan/temp removal eligibility |
 | `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` | `true` | Report eligible orphan/temp removals without changing files |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive state directory |
