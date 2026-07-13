@@ -36,7 +36,6 @@ def test_format_output_serializes_target_status_enum_values():
     payload = _format_output(
         _Cfg(),
         [result],
-        [{"title": "Example"}],
         "job-1",
         final_status=JobStatus.complete,
         all_errors=[],

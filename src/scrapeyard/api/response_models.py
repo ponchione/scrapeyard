@@ -42,6 +42,7 @@ class ResultTargetSummary(APIResponseModel):
     url: str
     status: str
     count: int
+    observed_count: int
     debug: dict[str, Any] | None = None
     error_type: str | None = None
     error_detail: str | None = None

@@ -380,7 +380,6 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
     payload = _format_output(
         config,
         results,
-        [{"sku": "a1"}, "raw-item"],
         "job-1",
         JobStatus.partial,
         ["boom"],
@@ -392,6 +391,7 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
             "url": "https://a.example/products",
             "status": "success",
             "count": 1,
+            "observed_count": 1,
             "pages_scraped": 1,
             "error_type": None,
             "error_detail": None,
@@ -402,6 +402,7 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
             "url": "https://b.example/products",
             "status": "failed",
             "count": 1,
+            "observed_count": 1,
             "pages_scraped": 1,
             "error_type": None,
             "error_detail": None,
@@ -426,7 +427,6 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
     payload = _format_output(
         config,
         results,
-        [first_item, second_item],
         "job-1",
         JobStatus.partial,
         ["boom"],
@@ -436,6 +436,7 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
         "a.example": {
             "status": "success",
             "count": 1,
+            "observed_count": 1,
             "data": [first_item],
             "debug": None,
             "error_type": None,
@@ -444,6 +445,7 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
         "b.example": {
             "status": "failed",
             "count": 1,
+            "observed_count": 1,
             "data": [second_item],
             "debug": None,
             "error_type": None,
@@ -465,7 +467,6 @@ def test_format_output_keeps_same_domain_targets_separate():
     payload = _format_output(
         config,
         results,
-        [{"sku": "a"}, {"sku": "b"}],
         "job-1",
         JobStatus.complete,
         [],
@@ -497,7 +498,6 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     payload = _format_output(
         config,
         [result],
-        [{"sku": "a1"}],
         "job-1",
         JobStatus.failed,
         result.errors,
@@ -530,7 +530,13 @@ def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debu
         },
     )
 
-    payload = _format_output(config, [result], [], "job-1", JobStatus.failed, result.errors)
+    payload = _format_output(
+        config,
+        [result],
+        "job-1",
+        JobStatus.failed,
+        result.errors,
+    )
 
     assert payload["targets"][0]["url"] == "https://example.com/products?api_key=<redacted>&page=2"
     assert payload["targets"][0]["error_detail"] == (

@@ -38,6 +38,14 @@ merge`, and a mapping of target group names to target result/data objects for
 that field. `targets` contains bounded target diagnostics; secrets remain
 redacted and local result paths are never serialized.
 
+`execution.fail_strategy: all_or_nothing` is strict: if any target fails,
+`status` is `failed`, `results` is empty in either grouping mode, and the run,
+artifact metadata, and webhook `result_count` are all zero. Per-target status,
+errors, page counts, and redacted debug details remain under `targets`.
+`targets[].count` is the number of accepted records (zero for a rejected atomic
+run); `targets[].observed_count` records how many records extraction observed
+for diagnostics. Fully successful atomic runs publish all records normally.
+
 The artifact on disk retains its historical self-describing document so old
 backups and pending webhooks remain readable. The API serializer unwraps that
 document at the boundary. The `legacy-v0` compatibility parameter exposes it
