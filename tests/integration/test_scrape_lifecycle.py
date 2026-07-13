@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,6 +13,8 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.api.dependencies import get_job_store, get_result_store, get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, Job, JobStatus
+from scrapeyard.queue.cancellation import RunActivityGuard
+from scrapeyard.storage.database import get_db
 
 
 def _async_scrape_yaml() -> str:
@@ -78,6 +81,63 @@ async def test_scrape_lifecycle_eventually_returns_results(client, monkeypatch):
     results_payload = results_response.json()
     assert results_payload["job_id"] == job_id
     assert "results" in results_payload
+
+
+@pytest.mark.asyncio
+async def test_active_result_survives_cleanup_between_persistence_and_finalization(
+    client,
+    monkeypatch,
+):
+    async def _fake_scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "Protected"}],
+            pages_scraped=1,
+        )
+
+    real_checkpoint = RunActivityGuard.checkpoint
+    cleanup_deleted: list[int] = []
+
+    async def _cleanup_checkpoint(self, name: str) -> None:
+        if name == "after_result_persistence":
+            async with get_db("results_meta.db") as db:
+                await db.execute(
+                    "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+                    (
+                        (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+                        self.run_id,
+                    ),
+                )
+                await db.commit()
+            cleanup_deleted.append(await get_result_store().delete_expired(1))
+        await real_checkpoint(self, name)
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _fake_scrape_target)
+    monkeypatch.setattr(RunActivityGuard, "checkpoint", _cleanup_checkpoint)
+
+    response = await client.post(
+        "/scrape",
+        content=_async_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    job_response = await poll_until_ready(
+        lambda: client.get(f"/jobs/{job_id}"),
+        lambda result: result.status_code == 200
+        and result.json()["status"] in {"complete", "partial", "failed"},
+        failure_message="Timed out waiting for cleanup-race scrape finalization",
+    )
+    result_response = await client.get(f"/results/{job_id}")
+
+    assert job_response.json()["status"] == "complete"
+    assert cleanup_deleted == [0]
+    assert result_response.status_code == 200
+    assert result_response.json()["results"]["example.com"]["data"] == [
+        {"title": "Protected"}
+    ]
 
 
 @pytest.mark.asyncio

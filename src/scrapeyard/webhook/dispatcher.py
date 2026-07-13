@@ -694,7 +694,7 @@ class HttpWebhookDispatcher:
                 self._scheduled_ids.discard(delivery.delivery_id)
                 queue.task_done()
                 self._wake_event.set()
-            if self._stopping:
+            if self._stopping and queue.empty():
                 return
 
     async def _process_delivery(self, delivery: WebhookDelivery) -> None:

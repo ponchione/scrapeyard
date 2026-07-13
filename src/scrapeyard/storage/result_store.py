@@ -208,21 +208,50 @@ class LocalResultStore:
         query: str,
         params: Sequence[object],
     ) -> int:
-        async with (
-            get_db("results_meta.db") as db,
-            db_transaction(db, immediate=True),
-        ):
+        async with get_db("results_meta.db") as db:
             cursor = await db.execute(query, params)
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            if not rows:
-                return 0
-            await self._delete_metadata_ids(db, rows)
+
+        inactive_rows: list[Mapping[str, Any]] = []
+        for row in rows:
+            try:
+                path = self._checked_result_dir(str(row["file_path"]))
+                relative = path.relative_to(self._results_dir.resolve(strict=False))
+                identity = _RunIdentity(*relative.parts)
+            except (OSError, TypeError, ValueError):
+                # Unsafe metadata is still eligible for metadata cleanup; its
+                # filesystem path is rejected separately by _checked_result_dirs.
+                inactive_rows.append(row)
+                continue
+            try:
+                active = await self._active(identity)
+            except Exception as exc:
+                logger.error(
+                    "Result retention active-run lookup failed run=%s "
+                    "error_type=%s recovery_action=retry_next_cleanup_pass",
+                    identity.identifier,
+                    type(exc).__name__,
+                )
+                continue
+            if active:
+                logger.info(
+                    "Result retention skipped active run=%s "
+                    "recovery_action=retry_after_run_finalization",
+                    identity.identifier,
+                )
+                continue
+            inactive_rows.append(row)
+
+        if not inactive_rows:
+            return 0
+        async with get_db("results_meta.db") as db, db_transaction(db, immediate=True):
+            await self._delete_metadata_ids(db, inactive_rows)
         # Delete files after metadata so a crash leaves orphaned files
         # (recoverable) rather than orphaned metadata rows pointing to
         # missing files. The database context has exited here so filesystem
         # latency cannot block unrelated metadata access.
-        await asyncio.to_thread(remove_directories, self._checked_result_dirs(rows))
-        return len(rows)
+        await asyncio.to_thread(remove_directories, self._checked_result_dirs(inactive_rows))
+        return len(inactive_rows)
 
     async def _delete_files_then_ids(
         self,
@@ -889,6 +918,8 @@ class LocalResultStore:
     ) -> int:
         """Delete one deterministic bounded batch older than the retention window."""
 
+        if retention_days < 1:
+            raise ValueError("result retention days must be positive")
         if limit < 1:
             raise ValueError("result cleanup limit must be positive")
         cutoff = (utc_now() - timedelta(days=retention_days)).isoformat()
@@ -905,6 +936,8 @@ class LocalResultStore:
     ) -> int:
         """Delete one deterministic bounded batch exceeding the per-job limit."""
 
+        if max_results_per_job < 1:
+            raise ValueError("maximum results per job must be positive")
         if limit < 1:
             raise ValueError("result cleanup limit must be positive")
         return await self._delete_retention_batch(

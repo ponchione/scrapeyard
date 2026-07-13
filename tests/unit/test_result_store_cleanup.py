@@ -110,6 +110,37 @@ async def test_delete_expired_keeps_fresh_results(store):
 
 
 @pytest.mark.asyncio
+async def test_delete_expired_skips_active_matching_run(store):
+    lookups: list[tuple[str, str, str]] = []
+
+    async def active(project: str, job_name: str, run_id: str) -> bool:
+        lookups.append((project, job_name, run_id))
+        return run_id == "run-active-expired"
+
+    protected_store = LocalResultStore(str(store._results_dir), _lookup, active)
+    meta = await protected_store.save_result(
+        "job-active-expired",
+        {"ok": True},
+        run_id="run-active-expired",
+    )
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+            (
+                (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+                meta.run_id,
+            ),
+        )
+        await db.commit()
+
+    assert await protected_store.delete_expired(1) == 0
+    assert lookups == [("test-project", "test-job", "run-active-expired")]
+    assert (await protected_store.get_result("job-active-expired", meta.run_id)).data == {
+        "ok": True
+    }
+
+
+@pytest.mark.asyncio
 async def test_delete_expired_offloads_directory_removal(store):
     meta = await store.save_result("job-3", [{"url": "http://example.com"}])
     run_id = meta.run_id
@@ -274,6 +305,48 @@ async def test_prune_excess_per_job_removes_oldest_runs(store):
         await store.get_result("job-prune", run_id="run-0")
     payload = await store.get_result("job-prune", run_id="run-2")
     assert payload.run_id == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_prune_excess_per_job_skips_active_candidate_and_removes_inactive(store):
+    async def active(_project: str, _job_name: str, run_id: str) -> bool:
+        return run_id == "run-active-oldest"
+
+    protected_store = LocalResultStore(str(store._results_dir), _lookup, active)
+    run_ids = ["run-active-oldest", "run-inactive-middle", "run-newest"]
+    for run_id in run_ids:
+        await protected_store.save_result("job-active-prune", {"run": run_id}, run_id=run_id)
+
+    async with get_db("results_meta.db") as db:
+        for age, run_id in zip((3, 2, 1), run_ids, strict=True):
+            await db.execute(
+                "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+                (
+                    (datetime.now(timezone.utc) - timedelta(hours=age)).isoformat(),
+                    run_id,
+                ),
+            )
+        await db.commit()
+
+    assert await protected_store.prune_excess_per_job(1) == 1
+    assert (
+        await protected_store.get_result("job-active-prune", "run-active-oldest")
+    ).data == {"run": "run-active-oldest"}
+    with pytest.raises(KeyError):
+        await protected_store.get_result("job-active-prune", "run-inactive-middle")
+    assert (await protected_store.get_result("job-active-prune", "run-newest")).data == {
+        "run": "run-newest"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "argument"),
+    [("delete_expired", 0), ("prune_excess_per_job", 0)],
+)
+async def test_result_retention_rejects_zero_values(store, method, argument):
+    with pytest.raises(ValueError, match="positive"):
+        await getattr(store, method)(argument)
 
 
 @pytest.mark.asyncio

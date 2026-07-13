@@ -67,10 +67,10 @@ class ServiceSettings(BaseSettings):
     webhook_delivered_retention_days: int = Field(default=7, ge=1)
     webhook_failed_retention_days: int = Field(default=30, ge=1)
 
-    storage_retention_days: int = Field(default=30, ge=0)
+    storage_retention_days: int = Field(default=30, ge=1)
     db_dir: str = "/data/db"
     storage_results_dir: str = "/data/results"
-    storage_max_results_per_job: int = Field(default=100, ge=0)
+    storage_max_results_per_job: int = Field(default=100, ge=1)
     storage_cleanup_batch_size: int = Field(default=500, ge=1)
     storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
     storage_reconciliation_dry_run: bool = True

@@ -1423,6 +1423,56 @@ class TestBoundedCoordinator:
         assert client.send.await_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("shutdown_timeout", [1.0, None])
+    async def test_shutdown_drains_fast_batch_larger_than_worker_count(
+        self,
+        shutdown_timeout: float | None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        outbox = MemoryWebhookOutboxStore()
+        for index in range(3):
+            await _enqueue_memory_delivery(
+                outbox,
+                delivery_id=f"drain-{index}",
+                created_at=now,
+            )
+
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        processed = 0
+        client = AsyncMock()
+
+        async def _post(*_args, **_kwargs):
+            nonlocal processed
+            processed += 1
+            if processed == 1:
+                first_started.set()
+                await release_first.wait()
+            return _ok_response()
+
+        client.send.side_effect = _post
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            outbox_store=outbox,
+            dispatch_concurrency=1,
+            dispatch_batch_size=3,
+        )
+
+        await dispatcher.startup()
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await _wait_until(lambda: dispatcher.pending_tasks == 3)
+        shutdown = asyncio.create_task(dispatcher.shutdown(timeout=shutdown_timeout))
+        await asyncio.sleep(0)
+        release_first.set()
+        await asyncio.wait_for(shutdown, timeout=1)
+
+        assert processed == 3
+        assert all(
+            delivery.status is WebhookDeliveryStatus.delivered
+            for delivery in outbox.deliveries.values()
+        )
+
+    @pytest.mark.asyncio
     async def test_shutdown_cancellation_leaves_pending_and_restart_resumes_once(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         started = asyncio.Event()
