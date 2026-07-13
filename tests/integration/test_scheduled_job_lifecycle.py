@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
 import hashlib
+import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -381,6 +381,50 @@ async def test_update_and_second_manual_trigger_conflict_with_active_run(
         release.set()
     assert update.status_code == 409
     assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_returns_503_when_redis_inspection_fails(
+    client,
+    monkeypatch,
+):
+    yaml = _managed_yaml(enabled=False)
+    created = await client.post(
+        "/jobs",
+        content=yaml,
+        headers={"content-type": "application/x-yaml"},
+    )
+    job_id = created.json()["job_id"]
+    store = get_job_store()
+    scheduler = get_scheduler()
+    job = await store.get_job(job_id)
+    queued_at = datetime.now(timezone.utc) - timedelta(
+        seconds=scheduler._queued_claim_timeout_seconds + 1
+    )
+    queued = await store.queue_run(
+        job_id,
+        expected_status=job.status.value,
+        expected_run_id=None,
+        new_run_id="run-stale-manual",
+        new_trigger="manual",
+        queued_at=queued_at,
+    )
+    assert queued is True
+
+    async def _inspection_failure(_run_id: str):
+        raise ConnectionError("redis unavailable")
+
+    pool = get_worker_pool()
+    monkeypatch.setattr(pool, "inspect_delivery", _inspection_failure)
+
+    triggered = await client.post(f"/jobs/{job_id}/trigger")
+
+    assert triggered.status_code == 503
+    assert triggered.json()["error"] == (
+        "Authoritative queue state is temporarily unavailable"
+    )
+    stored = await store.get_job(job_id)
+    assert stored.current_run_id == "run-stale-manual"
 
 
 @pytest.mark.asyncio

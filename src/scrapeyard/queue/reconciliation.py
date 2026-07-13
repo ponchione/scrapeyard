@@ -109,6 +109,176 @@ async def _conditionally_fail_delivery(
     return True
 
 
+async def reconcile_stale_queued_job(
+    job: StaleQueuedJob,
+    *,
+    job_store: JobStore,
+    worker_pool: WorkerPool,
+    queued_claim_timeout_seconds: int,
+    stale_before: datetime,
+    inspected_at: datetime,
+) -> QueuedReconciliationSummary:
+    """Reconcile one stale SQLite queue owner against authoritative arq state."""
+
+    age = _queued_age_seconds(job, inspected_at)
+    try:
+        delivery_state = await worker_pool.inspect_delivery(job.run_id)
+    except Exception as exc:
+        logger.error(
+            "Redis queued-delivery inspection failed job_id=%s run_id=%s "
+            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+            "recovery_policy=%s recovery_action=fail_closed error_type=%s",
+            job.job_id,
+            job.run_id,
+            age,
+            queued_claim_timeout_seconds,
+            job.trigger,
+            _policy(job),
+            type(exc).__name__,
+        )
+        raise QueuedReconciliationError(
+            "Redis delivery inspection failed "
+            f"for job_id={job.job_id!r} run_id={job.run_id!r}"
+        ) from exc
+
+    if delivery_state in _ACTIVE_DELIVERY_STATES:
+        logger.info(
+            "Queued reconciliation found active delivery job_id=%s run_id=%s "
+            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+            "recovery_policy=%s redis_state=%s recovery_action=queue_present_noop",
+            job.job_id,
+            job.run_id,
+            age,
+            queued_claim_timeout_seconds,
+            job.trigger,
+            _policy(job),
+            delivery_state.value,
+        )
+        return QueuedReconciliationSummary(inspected=1, queue_present=1)
+
+    if delivery_state is QueueDeliveryState.complete:
+        did_fail = await _conditionally_fail_delivery(
+            job,
+            job_store=job_store,
+            failed_at=inspected_at,
+            timeout_seconds=queued_claim_timeout_seconds,
+            action="failed_completed_arq_record_without_sqlite_claim",
+        )
+        return QueuedReconciliationSummary(
+            inspected=1,
+            failed=int(did_fail),
+            race_noop=int(not did_fail),
+        )
+
+    logger.warning(
+        "Queued reconciliation found missing delivery job_id=%s run_id=%s "
+        "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+        "recovery_policy=%s redis_state=%s recovery_action=prepare_reenqueue",
+        job.job_id,
+        job.run_id,
+        age,
+        queued_claim_timeout_seconds,
+        job.trigger,
+        _policy(job),
+        delivery_state.value,
+    )
+    try:
+        config = await asyncio.to_thread(load_config, job.config_yaml)
+        metadata = queue_delivery_metadata(config)
+    except Exception as exc:
+        logger.error(
+            "Queued recovery config reconstruction failed job_id=%s run_id=%s "
+            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+            "recovery_policy=%s recovery_action=fail_invalid_stored_config "
+            "error_type=%s",
+            job.job_id,
+            job.run_id,
+            age,
+            queued_claim_timeout_seconds,
+            job.trigger,
+            _policy(job),
+            type(exc).__name__,
+        )
+        did_fail = await _conditionally_fail_delivery(
+            job,
+            job_store=job_store,
+            failed_at=inspected_at,
+            timeout_seconds=queued_claim_timeout_seconds,
+            action="failed_unreconstructable_stored_config",
+        )
+        return QueuedReconciliationSummary(
+            inspected=1,
+            failed=int(did_fail),
+            race_noop=int(not did_fail),
+        )
+
+    reserved = await job_store.reserve_queued_run_recovery(
+        job.job_id,
+        job.run_id,
+        expected_queued_at=job.queued_at,
+        stale_before=stale_before,
+        reserved_at=inspected_at,
+    )
+    if not reserved:
+        _log_race_noop(
+            job,
+            now=inspected_at,
+            timeout_seconds=queued_claim_timeout_seconds,
+            action="reenqueue_original_run",
+        )
+        return QueuedReconciliationSummary(inspected=1, race_noop=1)
+
+    try:
+        await worker_pool.enqueue(
+            job.job_id,
+            job.config_yaml,
+            metadata.priority,
+            metadata.needs_browser,
+            run_id=job.run_id,
+            trigger=job.trigger,
+        )
+    except Exception as exc:
+        logger.error(
+            "Queued recovery enqueue failed job_id=%s run_id=%s "
+            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+            "recovery_policy=%s recovery_action=conditionally_fail_delivery "
+            "error_type=%s",
+            job.job_id,
+            job.run_id,
+            age,
+            queued_claim_timeout_seconds,
+            job.trigger,
+            _policy(job),
+            type(exc).__name__,
+        )
+        did_fail = await _conditionally_fail_delivery(
+            job,
+            job_store=job_store,
+            failed_at=inspected_at,
+            timeout_seconds=queued_claim_timeout_seconds,
+            action="failed_recovery_enqueue",
+            expected_queued_at=inspected_at,
+        )
+        return QueuedReconciliationSummary(
+            inspected=1,
+            failed=int(did_fail),
+            race_noop=int(not did_fail),
+        )
+
+    logger.warning(
+        "Queued reconciliation restored missing delivery job_id=%s run_id=%s "
+        "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
+        "recovery_policy=%s recovery_action=reenqueued_original_run",
+        job.job_id,
+        job.run_id,
+        age,
+        queued_claim_timeout_seconds,
+        job.trigger,
+        _policy(job),
+    )
+    return QueuedReconciliationSummary(inspected=1, recovered=1)
+
+
 async def reconcile_stale_queued_jobs(
     *,
     job_store: JobStore,
@@ -138,159 +308,24 @@ async def reconcile_stale_queued_jobs(
     race_noop = 0
 
     for job in stale_jobs:
-        age = _queued_age_seconds(job, inspected_at)
         try:
-            delivery_state = await worker_pool.inspect_delivery(job.run_id)
-        except Exception as exc:
-            logger.error(
-                "Redis queued-delivery inspection failed job_id=%s run_id=%s "
-                "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-                "recovery_policy=%s recovery_action=abort_startup error_type=%s",
-                job.job_id,
-                job.run_id,
-                age,
-                queued_claim_timeout_seconds,
-                job.trigger,
-                _policy(job),
-                type(exc).__name__,
+            item_summary = await reconcile_stale_queued_job(
+                job,
+                job_store=job_store,
+                worker_pool=worker_pool,
+                queued_claim_timeout_seconds=queued_claim_timeout_seconds,
+                stale_before=stale_before,
+                inspected_at=inspected_at,
             )
+        except QueuedReconciliationError as exc:
             raise QueuedReconciliationError(
                 "Redis delivery inspection failed; scheduler startup aborted "
                 f"for job_id={job.job_id!r} run_id={job.run_id!r}"
             ) from exc
-
-        if delivery_state in _ACTIVE_DELIVERY_STATES:
-            queue_present += 1
-            logger.info(
-                "Queued reconciliation found active delivery job_id=%s run_id=%s "
-                "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-                "recovery_policy=%s redis_state=%s recovery_action=queue_present_noop",
-                job.job_id,
-                job.run_id,
-                age,
-                queued_claim_timeout_seconds,
-                job.trigger,
-                _policy(job),
-                delivery_state.value,
-            )
-            continue
-
-        if delivery_state is QueueDeliveryState.complete:
-            did_fail = await _conditionally_fail_delivery(
-                job,
-                job_store=job_store,
-                failed_at=inspected_at,
-                timeout_seconds=queued_claim_timeout_seconds,
-                action="failed_completed_arq_record_without_sqlite_claim",
-            )
-            failed += int(did_fail)
-            race_noop += int(not did_fail)
-            continue
-
-        logger.warning(
-            "Queued reconciliation found missing delivery job_id=%s run_id=%s "
-            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-            "recovery_policy=%s redis_state=%s recovery_action=prepare_reenqueue",
-            job.job_id,
-            job.run_id,
-            age,
-            queued_claim_timeout_seconds,
-            job.trigger,
-            _policy(job),
-            delivery_state.value,
-        )
-        try:
-            config = await asyncio.to_thread(load_config, job.config_yaml)
-            metadata = queue_delivery_metadata(config)
-        except Exception as exc:
-            logger.error(
-                "Queued recovery config reconstruction failed job_id=%s run_id=%s "
-                "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-                "recovery_policy=%s recovery_action=fail_invalid_stored_config "
-                "error_type=%s",
-                job.job_id,
-                job.run_id,
-                age,
-                queued_claim_timeout_seconds,
-                job.trigger,
-                _policy(job),
-                type(exc).__name__,
-            )
-            did_fail = await _conditionally_fail_delivery(
-                job,
-                job_store=job_store,
-                failed_at=inspected_at,
-                timeout_seconds=queued_claim_timeout_seconds,
-                action="failed_unreconstructable_stored_config",
-            )
-            failed += int(did_fail)
-            race_noop += int(not did_fail)
-            continue
-
-        reserved = await job_store.reserve_queued_run_recovery(
-            job.job_id,
-            job.run_id,
-            expected_queued_at=job.queued_at,
-            stale_before=stale_before,
-            reserved_at=inspected_at,
-        )
-        if not reserved:
-            race_noop += 1
-            _log_race_noop(
-                job,
-                now=inspected_at,
-                timeout_seconds=queued_claim_timeout_seconds,
-                action="reenqueue_original_run",
-            )
-            continue
-
-        try:
-            await worker_pool.enqueue(
-                job.job_id,
-                job.config_yaml,
-                metadata.priority,
-                metadata.needs_browser,
-                run_id=job.run_id,
-                trigger=job.trigger,
-            )
-        except Exception as exc:
-            logger.error(
-                "Queued recovery enqueue failed job_id=%s run_id=%s "
-                "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-                "recovery_policy=%s recovery_action=conditionally_fail_delivery "
-                "error_type=%s",
-                job.job_id,
-                job.run_id,
-                age,
-                queued_claim_timeout_seconds,
-                job.trigger,
-                _policy(job),
-                type(exc).__name__,
-            )
-            did_fail = await _conditionally_fail_delivery(
-                job,
-                job_store=job_store,
-                failed_at=inspected_at,
-                timeout_seconds=queued_claim_timeout_seconds,
-                action="failed_recovery_enqueue",
-                expected_queued_at=inspected_at,
-            )
-            failed += int(did_fail)
-            race_noop += int(not did_fail)
-            continue
-
-        recovered += 1
-        logger.warning(
-            "Queued reconciliation restored missing delivery job_id=%s run_id=%s "
-            "queued_age_seconds=%.3f timeout_seconds=%s trigger=%s "
-            "recovery_policy=%s recovery_action=reenqueued_original_run",
-            job.job_id,
-            job.run_id,
-            age,
-            queued_claim_timeout_seconds,
-            job.trigger,
-            _policy(job),
-        )
+        queue_present += item_summary.queue_present
+        recovered += item_summary.recovered
+        failed += item_summary.failed
+        race_noop += item_summary.race_noop
 
     summary = QueuedReconciliationSummary(
         inspected=len(stale_jobs),
