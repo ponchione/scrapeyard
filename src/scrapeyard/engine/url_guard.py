@@ -7,9 +7,10 @@ import logging
 import re
 import socket
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote_plus, unquote_plus, urlparse, urlunparse
+from urllib.parse import quote, quote_plus, unquote_plus, urlparse, urlunparse
 
 import yaml
 from yaml import YAMLError
@@ -54,6 +55,10 @@ _URL_AUTHORITY_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)([^/?#]*)(.*)$", re.IGNO
 _QUERY_SEPARATOR_RE = re.compile(r"([&;])")
 
 _REDACTED_VALUE = "<redacted>"
+_ACTIVE_DEPLOYMENT_SECRETS: ContextVar[tuple[str, ...]] = ContextVar(
+    "scrapeyard_active_deployment_secrets",
+    default=(),
+)
 _SENSITIVE_EXACT_KEYS = frozenset(
     {
         "accesskey",
@@ -305,6 +310,37 @@ def resolve_public_url(url: str) -> ResolvedPublicURL:
     return ResolvedPublicURL(connect_url, host_authority, canonical_host)
 
 
+def activate_deployment_secret_redaction(
+    secret_values: tuple[str, ...],
+) -> Token[tuple[str, ...]]:
+    """Activate resolved-secret redaction for the current run context."""
+
+    return _ACTIVE_DEPLOYMENT_SECRETS.set(tuple(value for value in secret_values if value))
+
+
+def reset_deployment_secret_redaction(token: Token[tuple[str, ...]]) -> None:
+    """Restore the prior run-scoped secret redaction context."""
+
+    _ACTIVE_DEPLOYMENT_SECRETS.reset(token)
+
+
+def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
+    """Replace raw and URL-encoded forms of resolved deployment secrets."""
+
+    values = (
+        _ACTIVE_DEPLOYMENT_SECRETS.get()
+        if secret_values is None
+        else tuple(value for value in secret_values if isinstance(value, str) and value)
+    )
+    variants: set[str] = set()
+    for value in values:
+        variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            text = text.replace(variant, _REDACTED_VALUE)
+    return text
+
+
 def redact_userinfo_in_text(text: str) -> str:
     """Strip userinfo and sensitive query values from URLs embedded in *text*.
 
@@ -312,7 +348,8 @@ def redact_userinfo_in_text(text: str) -> str:
     credentials and URL-bearing tokens do not leak through ``GET /jobs/{id}``.
     """
 
-    return _URL_IN_TEXT_RE.sub(lambda match: redact_userinfo_in_url(match.group(0)), text)
+    redacted = redact_deployment_secrets(text)
+    return _URL_IN_TEXT_RE.sub(lambda match: redact_userinfo_in_url(match.group(0)), redacted)
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -323,23 +360,45 @@ def _is_sensitive_key(key: str) -> bool:
     )
 
 
-def redact_sensitive_mapping(value: Any) -> Any:
+def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
     """Recursively redact common secret-bearing keys in JSON-like values."""
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
+            redacted_key: Any = key
+            if isinstance(key, str):
+                redacted_key = redact_deployment_secrets(key, secret_values)
+                if redacted_key in redacted and redacted_key != key:
+                    base_key = redacted_key
+                    suffix = 2
+                    while redacted_key in redacted:
+                        redacted_key = f"{base_key}#{suffix}"
+                        suffix += 1
             normalized = str(key).lower().replace("-", "").replace("_", "")
             if _is_sensitive_key(str(key)):
-                redacted[key] = _REDACTED_VALUE
+                redacted[redacted_key] = _REDACTED_VALUE
             elif normalized in _SECRET_CONTAINER_KEYS and isinstance(item, Mapping):
-                redacted[key] = {header: _REDACTED_VALUE for header in item}
+                redacted[redacted_key] = {header: _REDACTED_VALUE for header in item}
             else:
-                redacted[key] = redact_sensitive_mapping(item)
+                redacted[redacted_key] = redact_sensitive_mapping(
+                    item,
+                    secret_values=secret_values,
+                )
         return redacted
     if isinstance(value, list):
-        return [redact_sensitive_mapping(item) for item in value]
+        return [
+            redact_sensitive_mapping(item, secret_values=secret_values)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            redact_sensitive_mapping(item, secret_values=secret_values)
+            for item in value
+        )
     if isinstance(value, str):
-        return redact_userinfo_in_text(value)
+        return redact_userinfo_in_text(
+            redact_deployment_secrets(value, secret_values)
+        )
     return value
 
 
@@ -412,28 +471,18 @@ def redact_sensitive_config_text(text: str) -> str:
     return yaml.safe_dump(redact_sensitive_mapping(data), sort_keys=False)
 
 
-def _query_part_key(part: str) -> str | None:
-    key, separator, _value = part.partition("=")
-    if not separator:
-        return None
-    return unquote_plus(key)
-
-
 def _redact_query_part(part: str) -> str:
     key, separator, _value = part.partition("=")
     if not separator:
-        return part
+        return _REDACTED_VALUE if part else part
     key_text = unquote_plus(key)
-    if not _is_sensitive_key(key_text):
-        return part
     return f"{quote_plus(key_text)}={_REDACTED_VALUE}"
 
 
 def _redact_query(query: str) -> str:
-    parts = _QUERY_SEPARATOR_RE.split(query)
-    keys = [_query_part_key(part) for part in parts[::2]]
-    if not any(key is not None and _is_sensitive_key(key) for key in keys):
+    if not query:
         return query
+    parts = _QUERY_SEPARATOR_RE.split(query)
     return "".join(
         part if index % 2 else _redact_query_part(part)
         for index, part in enumerate(parts)
@@ -457,12 +506,7 @@ def _redact_path_params(path: str) -> str:
 def _redact_fragment(fragment: str) -> str:
     if not fragment:
         return fragment
-    head, separator, query = fragment.partition("?")
-    if separator:
-        return f"{head}{separator}{_redact_query(query)}"
-    if "=" in fragment:
-        return _redact_query(fragment)
-    return fragment
+    return _REDACTED_VALUE
 
 
 def _strip_userinfo_fallback(url: str) -> str:
@@ -486,7 +530,9 @@ def _redact_malformed_url(url: str) -> str:
 
 
 def redact_userinfo_in_url(url: str) -> str:
-    """Return *url* with userinfo and sensitive query values removed."""
+    """Return a diagnostic URL with userinfo, query values, and fragment removed."""
+
+    url = redact_deployment_secrets(url)
 
     try:
         parsed = urlparse(url)

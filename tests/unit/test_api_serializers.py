@@ -118,7 +118,7 @@ target:
     assert "browser-secret" not in payload["config_yaml"]
     assert "target-secret" not in payload["config_yaml"]
     assert "user:pass" not in payload["config_yaml"]
-    assert payload["config_yaml"].count("<redacted>") == 3
+    assert payload["config_yaml"].count("<redacted>") == 4
 
 
 def test_serialize_error_record_formats_enum_and_datetime_fields():
@@ -163,7 +163,9 @@ def test_serialize_error_record_redacts_sensitive_query_values():
 
     payload = serialize_error_record(error)
 
-    assert payload["target_url"] == "https://example.com/products?api_key=<redacted>&page=2"
+    assert payload["target_url"] == (
+        "https://example.com/products?api_key=<redacted>&page=<redacted>"
+    )
     assert payload["error_message"] == "failed at https://example.com/private?access_token=<redacted>"
 
 

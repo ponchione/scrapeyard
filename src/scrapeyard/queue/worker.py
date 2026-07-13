@@ -22,9 +22,11 @@ from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
+    activate_deployment_secret_redaction,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
+    reset_deployment_secret_redaction,
     url_host_label,
 )
 from scrapeyard.models.job import (
@@ -135,10 +137,14 @@ async def scrape_task(
     metric_claimed = False
     metric_status = "ignored"
     metric_started = time.monotonic()
+    redaction_token = None
     try:
         context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
         if context is None:
             return
+        redaction_token = activate_deployment_secret_redaction(
+            context.config.resolved_secret_values
+        )
         active_run_id = context.run_id
 
         claimed = await _mark_run_started(
@@ -310,6 +316,8 @@ async def scrape_task(
     finally:
         if heartbeat is not None:
             await heartbeat.stop()
+        if redaction_token is not None:
+            reset_deployment_secret_redaction(redaction_token)
         if metric_claimed:
             observe_run(
                 status=metric_status,
@@ -420,11 +428,13 @@ async def _discard_unowned_result(
         return
     try:
         deleted = await result_store.delete_result(job_id, run_id)
-    except Exception:
-        logger.exception(
-            "Failed to discard unowned result artifact job_id=%s run_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to discard unowned result artifact job_id=%s run_id=%s "
+            "error_type=%s",
             job_id,
             run_id,
+            type(exc).__name__,
         )
     else:
         if deleted:
@@ -536,13 +546,16 @@ async def _persist_job_results(
     if not publish_results:
         flat_data.clear()
 
-    output_data = _format_output(
-        context.config,
-        all_results,
-        job_id,
-        final_status,
-        all_errors,
-        publish_results=publish_results,
+    output_data = redact_sensitive_mapping(
+        _format_output(
+            context.config,
+            all_results,
+            job_id,
+            final_status,
+            all_errors,
+            publish_results=publish_results,
+        ),
+        secret_values=context.config.resolved_secret_values,
     )
     context.budget.check_deadline()
     save_meta = await save_run_result(
@@ -672,11 +685,12 @@ async def _handle_budget_exhaustion(
     try:
         await context.activity.checkpoint("before_budget_error_flush")
         await error_store.log_error(budget_record)
-    except Exception:
-        logger.exception(
-            "Failed to persist budget error job_id=%s run_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to persist budget error job_id=%s run_id=%s error_type=%s",
             job_id,
             run_id,
+            type(exc).__name__,
         )
 
     completed_at = utc_now()
@@ -707,11 +721,13 @@ async def _handle_budget_exhaustion(
     except RunOwnershipError:
         await _discard_unowned_result(result_store, job_id, run_id)
         return
-    except Exception:
-        logger.exception(
-            "Failed to persist terminal budget result job_id=%s run_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to persist terminal budget result job_id=%s run_id=%s "
+            "error_type=%s",
             job_id,
             run_id,
+            type(exc).__name__,
         )
 
     if heartbeat is not None:
@@ -761,11 +777,13 @@ async def _handle_budget_exhaustion(
         )
         await _discard_unowned_result(result_store, job_id, run_id)
         return
-    except Exception:
-        logger.exception(
-            "Failed to finalize terminal budget status job_id=%s run_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed to finalize terminal budget status job_id=%s run_id=%s "
+            "error_type=%s",
             job_id,
             run_id,
+            type(exc).__name__,
         )
         await _discard_unowned_result(result_store, job_id, run_id)
         await _handle_execution_crash(

@@ -9,7 +9,15 @@ from typing import Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.transforms import parse_transform_pipeline
@@ -52,6 +60,9 @@ MAX_BROWSER_ACTIONS = 50
 MAX_BROWSER_ACTION_REPEAT = 50
 MAX_BROWSER_TIMEOUT_MS = 300_000
 MAX_BROWSER_WAIT_MS = 60_000
+MAX_DETECTION_CSS_SELECTORS = 50
+MAX_DETECTION_PATTERNS = 100
+MAX_DETECTION_TEXT_PATTERN_CHARS = 512
 MAX_DOMAIN_RATE_LIMIT_SECONDS = 3_600
 MAX_EXECUTION_CONCURRENCY = 50
 MAX_EXECUTION_DELAY_SECONDS = 3_600
@@ -59,6 +70,7 @@ MAX_PAGINATION_PAGES = 100
 MAX_RETRY_ATTEMPTS = 10
 MAX_RETRY_BACKOFF_SECONDS = 300
 MAX_RETRYABLE_STATUSES = 32
+MAX_REQUIRED_FIELDS = 100
 MAX_SELECTORS_PER_TARGET = 100
 MAX_SELECTOR_FIELD_NAME_CHARS = 256
 MAX_SELECTOR_QUERY_CHARS = 4096
@@ -181,21 +193,89 @@ class StrictConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _validate_pattern_list(
+    values: list[str],
+    *,
+    label: str,
+    max_item_chars: int,
+    case_insensitive: bool,
+    allow_explicit_empty: bool = False,
+) -> list[str]:
+    """Normalize bounded pattern lists and reject ambiguous duplicates."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if allow_explicit_empty and value == "":
+            if value in seen:
+                raise ValueError(f"{label} values must be unique")
+            seen.add(value)
+            normalized.append(value)
+            continue
+        item = value.strip()
+        if not item:
+            raise ValueError(f"{label} values must not be blank")
+        if len(item) > max_item_chars:
+            raise ValueError(
+                f"{label} values must not exceed {max_item_chars} characters"
+            )
+        identity = item.casefold() if case_insensitive else item
+        if identity in seen:
+            raise ValueError(f"{label} values must be unique")
+        seen.add(identity)
+        normalized.append(item.lower() if case_insensitive else item)
+    return normalized
+
+
 class MapDetectionConfig(StrictConfigModel):
     """MAP pricing detection patterns for a target (Doc 2 Section 2.2)."""
 
     text_patterns: list[str] = Field(
         default_factory=list,
+        max_length=MAX_DETECTION_PATTERNS,
         description="Text strings to match case-insensitively in item content",
     )
     css_selectors: list[str] = Field(
         default_factory=list,
+        max_length=MAX_DETECTION_CSS_SELECTORS,
         description="CSS selectors whose presence indicates MAP pricing",
     )
     price_value_patterns: list[str] = Field(
         default_factory=list,
+        max_length=MAX_DETECTION_PATTERNS,
         description="Raw price field values that indicate MAP (e.g. '<hidden-price>', '[price hidden]')",
     )
+
+    @field_validator("text_patterns")
+    @classmethod
+    def _validate_text_patterns(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="MAP text_patterns",
+            max_item_chars=MAX_DETECTION_TEXT_PATTERN_CHARS,
+            case_insensitive=True,
+        )
+
+    @field_validator("css_selectors")
+    @classmethod
+    def _validate_css_selectors(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="MAP css_selectors",
+            max_item_chars=MAX_SELECTOR_QUERY_CHARS,
+            case_insensitive=False,
+        )
+
+    @field_validator("price_value_patterns")
+    @classmethod
+    def _validate_price_value_patterns(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="MAP price_value_patterns",
+            max_item_chars=MAX_DETECTION_TEXT_PATTERN_CHARS,
+            case_insensitive=False,
+            allow_explicit_empty=True,
+        )
 
 
 class StockPatternConfig(StrictConfigModel):
@@ -203,12 +283,34 @@ class StockPatternConfig(StrictConfigModel):
 
     text_patterns: list[str] = Field(
         default_factory=list,
+        max_length=MAX_DETECTION_PATTERNS,
         description="Text strings to match case-insensitively in item content",
     )
     css_selectors: list[str] = Field(
         default_factory=list,
+        max_length=MAX_DETECTION_CSS_SELECTORS,
         description="CSS selectors whose presence indicates this stock state",
     )
+
+    @field_validator("text_patterns")
+    @classmethod
+    def _validate_text_patterns(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="Stock text_patterns",
+            max_item_chars=MAX_DETECTION_TEXT_PATTERN_CHARS,
+            case_insensitive=True,
+        )
+
+    @field_validator("css_selectors")
+    @classmethod
+    def _validate_css_selectors(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="Stock css_selectors",
+            max_item_chars=MAX_SELECTOR_QUERY_CHARS,
+            case_insensitive=False,
+        )
 
 
 class StockDetectionConfig(StrictConfigModel):
@@ -231,6 +333,13 @@ class SelectorLong(StrictConfigModel):
     type: SelectorType = SelectorType.css
     transform: Optional[str] = None
 
+    @field_validator("query")
+    @classmethod
+    def _validate_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Selector queries must not be blank")
+        return value
+
     @field_validator("transform")
     @classmethod
     def _validate_transform_pipeline(cls, value: str | None) -> str | None:
@@ -248,7 +357,7 @@ SelectorValue = Union[str, SelectorLong]
 
 
 def _validate_short_selector_query(value: str) -> str:
-    if not value:
+    if not value.strip():
         raise ValueError("Selector queries must not be blank")
     if len(value) > MAX_SELECTOR_QUERY_CHARS:
         raise ValueError(
@@ -723,12 +832,24 @@ class ValidationConfig(StrictConfigModel):
     """Result validation rules."""
 
     required_fields: list[str] = Field(
-        default_factory=list, description="Fields that must be non-empty"
+        default_factory=list,
+        max_length=MAX_REQUIRED_FIELDS,
+        description="Fields that must be non-empty",
     )
     min_results: int = Field(default=0, ge=0, description="Minimum number of results expected")
     on_empty: OnEmptyAction = Field(
         default=OnEmptyAction.warn, description="Action when selectors return empty"
     )
+
+    @field_validator("required_fields")
+    @classmethod
+    def _validate_required_fields(cls, value: list[str]) -> list[str]:
+        return _validate_pattern_list(
+            value,
+            label="required_fields",
+            max_item_chars=MAX_SELECTOR_FIELD_NAME_CHARS,
+            case_insensitive=False,
+        )
 
 
 class ExecutionConfig(StrictConfigModel):
@@ -859,6 +980,7 @@ class ScrapeConfig(StrictConfigModel):
     schedule: Optional[ScheduleConfig] = None
     webhook: Optional[WebhookConfig] = None
     output: OutputConfig = Field(default_factory=OutputConfig)
+    _resolved_secret_values: tuple[str, ...] = PrivateAttr(default=())
 
     @field_validator("project", "name")
     @classmethod
@@ -882,3 +1004,9 @@ class ScrapeConfig(StrictConfigModel):
         if self.targets is None:
             raise RuntimeError("ScrapeConfig targets were not normalized")
         return self.targets
+
+    @property
+    def resolved_secret_values(self) -> tuple[str, ...]:
+        """Deployment-secret values used only by run-scoped redaction."""
+
+        return self._resolved_secret_values

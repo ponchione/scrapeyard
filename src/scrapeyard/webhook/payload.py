@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from scrapeyard.config.schema import ScrapeConfig, WebhookConfig
+from scrapeyard.engine.url_guard import redact_sensitive_mapping
 from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
 
@@ -129,17 +130,20 @@ def build_terminal_webhook_delivery(
     webhook = config.webhook
     if webhook is None or not should_fire(webhook, status):
         return None
-    payload = build_webhook_payload(
-        job_id=job_id,
-        project=config.project,
-        name=config.name,
-        status=status,
-        run_id=run_id,
-        result_path=result_path,
-        result_count=result_count,
-        error_count=error_count,
-        started_at=started_at.isoformat(),
-        completed_at=completed_at.isoformat(),
+    payload = redact_sensitive_mapping(
+        build_webhook_payload(
+            job_id=job_id,
+            project=config.project,
+            name=config.name,
+            status=status,
+            run_id=run_id,
+            result_path=result_path,
+            result_count=result_count,
+            error_count=error_count,
+            started_at=started_at.isoformat(),
+            completed_at=completed_at.isoformat(),
+        ),
+        secret_values=config.resolved_secret_values,
     )
     return webhook_delivery_from_payload(
         webhook,

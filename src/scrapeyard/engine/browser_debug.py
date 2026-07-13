@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import re
@@ -540,8 +541,9 @@ async def capture_browser_state(
             raise
         except Exception as exc:
             logger.info(
-                "Optional browser click_selector did not resolve or click: %s (%s: %s)",
-                browser.click_selector,
+                "Optional browser click_selector did not resolve or click: "
+                "query_sha256=%s (%s: %s)",
+                hashlib.sha256(browser.click_selector.encode("utf-8")).hexdigest(),
                 type(exc).__name__,
                 _exception_text(exc),
             )
@@ -568,7 +570,6 @@ async def capture_browser_state(
             "Failed to capture browser page title: %s: %s",
             type(exc).__name__,
             _exception_text(exc),
-            exc_info=exc,
         )
         capture["page_title"] = None
     try:
@@ -580,7 +581,6 @@ async def capture_browser_state(
             "Failed to capture browser HTML excerpt: %s: %s",
             type(exc).__name__,
             _exception_text(exc),
-            exc_info=exc,
         )
         capture["html_excerpt"] = None
         capture["_html_excerpt_captured"] = True
@@ -601,7 +601,6 @@ async def capture_browser_state(
                 artifacts_dir,
                 type(exc).__name__,
                 _exception_text(exc),
-                exc_info=exc,
             )
             capture["screenshot_path"] = None
     return page

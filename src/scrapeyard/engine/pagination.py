@@ -21,6 +21,18 @@ FetchTargetPageCallable = Callable[..., Awaitable[FetchOutcome]]
 ExtractPageDataCallable = Callable[[object, TargetConfig], list[dict[str, Any]]]
 
 
+async def _run_cpu_work(
+    function: Callable[..., Any],
+    *args: Any,
+    budget: RunBudget | None,
+    **kwargs: Any,
+) -> Any:
+    work = asyncio.to_thread(function, *args, **kwargs)
+    if budget is None:
+        return await work
+    return await budget.wait_for(work)
+
+
 def resolve_href(element: object, base_url: str) -> str | None:
     """Return an absolute URL for a next-page element or None."""
     attrib = getattr(element, "attrib", None)
@@ -121,9 +133,11 @@ async def paginate_target(
         )
         if budget is not None:
             budget.check_deadline()
-        next_links = select_elements_strict(
+        next_links = await _run_cpu_work(
+            select_elements_strict,
             page,
             next_selector,
+            budget=budget,
             operation="select_pagination_next",
         )
         if not next_links:
@@ -172,7 +186,12 @@ async def paginate_target(
         seen_urls.add(final_key)
         page = next_outcome.page
         current_url = final_url
-        page_data = extract_page_data(page, target)
+        page_data = await _run_cpu_work(
+            extract_page_data,
+            page,
+            target,
+            budget=budget,
+        )
         if budget is not None:
             await budget.consume_extracted_records(len(page_data))
         result.data.extend(page_data)

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
 from typing import Any, cast
 
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import (
     MapDetectionConfig,
     PricingVisibility,
@@ -16,6 +18,8 @@ from scrapeyard.config.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CALL_PATTERN_RE = re.compile(r"\bcall\b", re.IGNORECASE)
 
 _NUMERIC_PRICE_RE = re.compile(
     r"^\s*(?:(?:USD|CAD|AUD|EUR|GBP|JPY)\s+|[$€£¥]\s*)?"
@@ -40,22 +44,36 @@ def enrich_item_detection(
     element: object,
     map_config: MapDetectionConfig | None,
     stock_config: StockDetectionConfig | None,
+    *,
+    budget: RunBudget | None = None,
 ) -> None:
     """Add pricing_visibility, display_price_text, and stock_status to *item_data* in-place."""
-    vis, display_text = detect_pricing_visibility(item_data, element, map_config)
+    vis, display_text = detect_pricing_visibility(
+        item_data,
+        element,
+        map_config,
+        budget=budget,
+    )
     item_data["pricing_visibility"] = vis
     item_data["display_price_text"] = display_text
     if not _has_usable_stock_signal(item_data.get("stock_signal")):
         raw_stock = item_data.get("stock_status")
         if _has_usable_stock_signal(raw_stock):
             item_data["stock_signal"] = raw_stock
-    item_data["stock_status"] = detect_stock_status(item_data, element, stock_config)
+    item_data["stock_status"] = detect_stock_status(
+        item_data,
+        element,
+        stock_config,
+        budget=budget,
+    )
 
 
 def detect_pricing_visibility(
     item_data: dict[str, Any],
     element: object,
     config: MapDetectionConfig | None,
+    *,
+    budget: RunBudget | None = None,
 ) -> tuple[PricingVisibility, str | None]:
     """Classify a listing's pricing visibility.
 
@@ -80,19 +98,21 @@ def detect_pricing_visibility(
     if config is None:
         return (PricingVisibility.unknown, None)
 
+    _check_budget(budget)
     item_text = _get_element_text(element)
-    if _matches_call_for_price(item_text, config.text_patterns):
-        return (PricingVisibility.call_for_price, None)
+    text_visibility, display_text = _match_map_text_patterns(
+        item_text,
+        config.text_patterns,
+        budget=budget,
+    )
+    if text_visibility is not None:
+        return (text_visibility, display_text)
 
-    text_matched, display_text = _match_map_text_patterns(item_text, config.text_patterns)
-    if text_matched:
-        return (
-            (PricingVisibility.map, display_text)
-            if display_text
-            else (PricingVisibility.cart_only, None)
-        )
-
-    css_matched, display_text = _match_map_css_selectors(element, config.css_selectors)
+    css_matched, display_text = _match_map_css_selectors(
+        element,
+        config.css_selectors,
+        budget=budget,
+    )
     if css_matched:
         return (
             (PricingVisibility.map, display_text)
@@ -100,7 +120,11 @@ def detect_pricing_visibility(
             else (PricingVisibility.cart_only, None)
         )
 
-    if _match_map_price_value(item_data.get("price"), config.price_value_patterns):
+    if _match_map_price_value(
+        item_data.get("price"),
+        config.price_value_patterns,
+        budget=budget,
+    ):
         return (PricingVisibility.cart_only, None)
 
     return (PricingVisibility.missing, None)
@@ -124,6 +148,8 @@ def detect_stock_status(
     item_data: dict[str, Any],
     element: object,
     config: StockDetectionConfig | None,
+    *,
+    budget: RunBudget | None = None,
 ) -> StockStatus:
     """Classify a listing's stock status.
 
@@ -147,39 +173,72 @@ def detect_stock_status(
 
     extracted_signal_text = _normalize_stock_signal_text(item_data.get("stock_signal"))
     if extracted_signal_text:
+        extracted_signal_normalized = extracted_signal_text.lower()
         for status in _STOCK_PRIORITY:
+            _check_budget(budget)
             extracted_patterns: StockPatternConfig | None = getattr(config, status.value, None)
             if extracted_patterns is None:
                 continue
-            if _stock_text_patterns_match(extracted_signal_text, extracted_patterns):
+            if _stock_text_patterns_match(
+                extracted_signal_normalized,
+                extracted_patterns,
+                budget=budget,
+            ):
                 return status
 
+    _check_budget(budget)
     item_text = _get_element_text(element)
+    item_text_normalized = item_text.lower()
 
     for status in _STOCK_PRIORITY:
+        _check_budget(budget)
         patterns: StockPatternConfig | None = getattr(config, status.value, None)
         if patterns is None:
             continue
-        if _stock_patterns_match(item_text, element, patterns):
+        if _stock_patterns_match(
+            item_text_normalized,
+            element,
+            patterns,
+            budget=budget,
+        ):
             return status
 
     return StockStatus.unknown
 
 
-def _stock_text_patterns_match(item_text: str, patterns: StockPatternConfig) -> bool:
+def _stock_text_patterns_match(
+    normalized_item_text: str,
+    patterns: StockPatternConfig,
+    *,
+    budget: RunBudget | None,
+) -> bool:
     """Return True if any text pattern in *patterns* matches *item_text*."""
-    return any(_text_contains(item_text, tp) for tp in patterns.text_patterns)
+    for pattern in patterns.text_patterns:
+        _check_budget(budget)
+        if pattern in normalized_item_text:
+            return True
+    return False
 
 
 def _stock_patterns_match(
-    item_text: str,
+    normalized_item_text: str,
     element: object,
     patterns: StockPatternConfig,
+    *,
+    budget: RunBudget | None,
 ) -> bool:
     """Return True if any text pattern or CSS selector in *patterns* matches."""
-    if _stock_text_patterns_match(item_text, patterns):
+    if _stock_text_patterns_match(
+        normalized_item_text,
+        patterns,
+        budget=budget,
+    ):
         return True
-    return any(_css_select(element, selector) for selector in patterns.css_selectors)
+    for selector in patterns.css_selectors:
+        _check_budget(budget)
+        if _css_select(element, selector):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -201,21 +260,38 @@ def _is_numeric_price(value: Any) -> bool:
     return _NUMERIC_PRICE_RE.fullmatch(s) is not None or _PRICE_RANGE_RE.fullmatch(s) is not None
 
 
-def _matches_call_for_price(item_text: str, patterns: list[str]) -> bool:
-    return any("call" in pattern.lower() and _text_contains(item_text, pattern) for pattern in patterns)
-
-
-def _match_map_text_patterns(item_text: str, patterns: list[str]) -> tuple[bool, str | None]:
+def _match_map_text_patterns(
+    item_text: str,
+    patterns: list[str],
+    *,
+    budget: RunBudget | None,
+) -> tuple[PricingVisibility | None, str | None]:
+    normalized_item_text = item_text.lower()
+    first_map_match: tuple[PricingVisibility, str | None] | None = None
     for pattern in patterns:
-        if "call" in pattern.lower():
+        _check_budget(budget)
+        match_index = normalized_item_text.find(pattern)
+        if match_index < 0:
             continue
-        if _text_contains(item_text, pattern):
-            return True, _extract_display_text(item_text, pattern)
-    return False, None
+        if _CALL_PATTERN_RE.search(pattern):
+            return PricingVisibility.call_for_price, None
+        if first_map_match is None:
+            display_text = item_text[match_index : match_index + len(pattern)]
+            first_map_match = (
+                PricingVisibility.map if display_text else PricingVisibility.cart_only,
+                display_text or None,
+            )
+    return first_map_match or (None, None)
 
 
-def _match_map_css_selectors(element: object, selectors: list[str]) -> tuple[bool, str | None]:
+def _match_map_css_selectors(
+    element: object,
+    selectors: list[str],
+    *,
+    budget: RunBudget | None,
+) -> tuple[bool, str | None]:
     for selector in selectors:
+        _check_budget(budget)
         hits = _css_select(element, selector)
         if not hits:
             continue
@@ -223,9 +299,18 @@ def _match_map_css_selectors(element: object, selectors: list[str]) -> tuple[boo
     return False, None
 
 
-def _match_map_price_value(price_raw: Any, patterns: list[str]) -> bool:
+def _match_map_price_value(
+    price_raw: Any,
+    patterns: list[str],
+    *,
+    budget: RunBudget | None,
+) -> bool:
     price_str = _normalize_price_text(price_raw)
-    return any(pattern == price_str for pattern in patterns)
+    for pattern in patterns:
+        _check_budget(budget)
+        if pattern == price_str:
+            return True
+    return False
 
 
 def _first_non_empty_element_text(elements: list[object]) -> str | None:
@@ -236,17 +321,9 @@ def _first_non_empty_element_text(elements: list[object]) -> str | None:
     return None
 
 
-def _text_contains(haystack: str, needle: str) -> bool:
-    """Case-insensitive substring search."""
-    return needle.lower() in haystack.lower()
-
-
-def _extract_display_text(full_text: str, pattern: str) -> str:
-    """Return the substring of *full_text* matching *pattern*, preserving case."""
-    idx = full_text.lower().find(pattern.lower())
-    if idx == -1:
-        return pattern
-    return full_text[idx : idx + len(pattern)]
+def _check_budget(budget: RunBudget | None) -> None:
+    if budget is not None:
+        budget.check_deadline()
 
 
 def _get_element_text(element: object) -> str:
@@ -312,9 +389,9 @@ def _css_select(element: object, selector: str) -> list[object]:
         return cast(list[object], css_fn(selector))
     except Exception as exc:
         logger.debug(
-            "Suppressing detection CSS selector failure for %s: %s",
-            selector,
-            exc,
-            exc_info=exc,
+            "Suppressing detection CSS selector failure "
+            "query_sha256=%s exception_type=%s",
+            hashlib.sha256(selector.encode("utf-8")).hexdigest(),
+            type(exc).__name__,
         )
         return []

@@ -8,11 +8,18 @@ and webhook headers. The raw YAML historically carried all of those into
 `jobs.config_yaml`. A terminal webhook intent then copied the resolved webhook
 URL, headers, and payload into `webhook_deliveries`; retry error text can also
 contain a URL. Those job/outbox fields are the durable secret-bearing boundary.
+The config `project` and `name` must remain literal and cannot be derived from
+a secret reference.
 
 New writes encrypt the complete YAML and the complete outbox URL, headers,
 payload, and non-null retry error. Encrypting complete values avoids relying on
-an incomplete sensitive-key list. Result/API serializers still redact target
-URLs, proxy/userinfo, config secrets, and diagnostic mappings. Result records
+an incomplete sensitive-key list. During execution, resolved references also
+form a run-scoped redaction set. Result/API/error/webhook serializers remove
+raw and URL-encoded occurrences from the complete diagnostic payload,
+including extracted records. Diagnostic URLs preserve query keys but redact
+every query value and the complete fragment. Selector failures retain
+operation, field, selector type, exception type, and a SHA-256 query
+fingerprint, never the raw query or exception message. Result records still
 contain extracted site data by design and therefore require the same access,
 retention, and backup controls as any scrape output. Logs record identifiers
 and exception types rather than config/header values.
@@ -37,7 +44,8 @@ export SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='{"catalog":["SCRAPEYARD_SECRET_PRO
 ```
 
 The default empty policy denies every secret reference. The config `project`
-must remain literal, so it cannot select its own policy through a reference.
+and `name` must remain literal, so neither authorization policy nor plaintext
+storage paths can be derived from a secret reference.
 Resolution happens each time YAML is validated/executed; the reference remains
 in persisted YAML. A missing or unauthorized reference fails closed. A
 terminal webhook stores an encrypted copy of the resolved retry

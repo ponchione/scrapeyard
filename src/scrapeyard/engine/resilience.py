@@ -134,7 +134,14 @@ class ResultValidator:
             return False
         return record.get("pricing_visibility") in self._HIDDEN_PRICE_VISIBILITIES
 
-    def validate(self, data: list[dict[str, Any]]) -> ValidationResult:
+    def validate(
+        self,
+        data: list[dict[str, Any]],
+        *,
+        budget: RunBudget | None = None,
+    ) -> ValidationResult:
+        if budget is not None:
+            budget.check_deadline()
         if len(data) < self._min_results:
             return ValidationResult(
                 passed=False,
@@ -143,7 +150,11 @@ class ResultValidator:
             )
 
         for field in self._required_fields:
+            if budget is not None:
+                budget.check_deadline()
             for i, record in enumerate(data):
+                if budget is not None and i % 64 == 0:
+                    budget.check_deadline()
                 if not self._has_required_field(field, record):
                     return ValidationResult(
                         passed=False,

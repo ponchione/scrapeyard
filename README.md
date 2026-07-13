@@ -284,6 +284,15 @@ UTF-8 bytes. During extraction, the run also reserves the compact JSON size of
 each result value against `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES`; an exact
 check of the complete artifact remains in place before it is written.
 
+MAP and per-status stock detection accept at most 100 text patterns and 50 CSS
+selectors per list. Text/price patterns are limited to 512 characters;
+detection CSS uses the normal 4,096-character selector limit. Blank text/CSS
+patterns and duplicates are rejected, while an explicitly empty MAP
+`price_value_patterns` entry remains supported for sites that emit an empty raw
+price. Validation accepts at most 100 unique, nonblank `required_fields`.
+Extraction/detection and validation run outside the event loop under the one
+run deadline, with deadline checkpoints inside record/pattern loops.
+
 Example transform chain:
 
 ```yaml

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -33,10 +34,12 @@ class SelectorExecutionError(Exception):
         self.selector_type = selector_type
         self.field_name = field_name
         self.original_exception = original_exception
+        self.query_sha256 = hashlib.sha256(query.encode("utf-8")).hexdigest()
         field_detail = f" for field '{field_name}'" if field_name else ""
         message = (
             f"Selector execution failed during {operation}{field_detail} "
-            f"({selector_type.value}: {query}): {type(original_exception).__name__}: {original_exception}"
+            f"({selector_type.value}, query_sha256={self.query_sha256}): "
+            f"{type(original_exception).__name__}"
         )
         super().__init__(message)
 
@@ -45,10 +48,9 @@ class SelectorExecutionError(Exception):
         return {
             "operation": self.operation,
             "field_name": self.field_name,
-            "query": self.query,
+            "query_sha256": self.query_sha256,
             "selector_type": self.selector_type.value,
             "exception_type": type(self.original_exception).__name__,
-            "exception_message": str(self.original_exception),
         }
 
 
