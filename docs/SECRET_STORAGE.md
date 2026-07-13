@@ -69,13 +69,18 @@ against a compromised running process that holds the key.
 
 ## Existing plaintext migration
 
-After schema migrations and before workers/scheduler start, one immediate
+After schema migrations and before workers/scheduler start, one atomic
 `jobs.db` transaction:
 
 1. authenticates every existing envelope;
 2. encrypts every legacy job config and unsanitized outbox request;
 3. writes a SHA-256 config fingerprint used only for compare-and-set behavior;
 4. rotates old envelopes to the configured active key.
+
+Already-current envelopes are still authenticated and their config hashes are
+verified, but their rows are not rewritten. A no-change restart therefore
+performs no `UPDATE` statements; only plaintext, old-key envelopes, or stale
+config hashes acquire the write lock and change rows.
 
 Any failure rolls back the whole mutation, preserving the original rows. For
 legacy plaintext, SQLite `secure_delete` is enabled and the WAL is checkpointed
