@@ -48,6 +48,7 @@ REQUIRED_MIGRATION_FILES = {
         "013_add_schedule_timezone.sql",
         "014_add_jobs_config_hash.sql",
         "015_add_jobs_current_trigger.sql",
+        "016_add_webhook_decode_failure_reason.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
