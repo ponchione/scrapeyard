@@ -25,6 +25,7 @@ from scrapeyard.storage.webhook_outbox import (
 )
 from scrapeyard.webhook.dispatcher import (
     HttpWebhookDispatcher,
+    WebhookDispatchResult,
     WebhookDispatchStatus,
     WebhookRequestConfig,
 )
@@ -1361,6 +1362,57 @@ class TestBoundedCoordinator:
 
         success_client.post.assert_awaited_once()
         assert outbox.deliveries["shutdown"].attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_shutdown_reports_and_retains_cancellation_resistant_worker(
+        self,
+    ) -> None:
+        outbox = MemoryWebhookOutboxStore()
+        await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="stubborn-shutdown",
+            created_at=datetime.now(timezone.utc),
+        )
+        dispatcher = HttpWebhookDispatcher(
+            outbox_store=outbox,
+            dispatch_concurrency=1,
+            dispatch_batch_size=1,
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _stubborn_send(*_args, **_kwargs):
+            started.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+            return WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
+
+        dispatcher.send_once = _stubborn_send
+        await dispatcher.startup()
+        await asyncio.wait_for(started.wait(), timeout=1)
+        worker = dispatcher._worker_tasks[0]
+
+        with pytest.raises(asyncio.TimeoutError, match="workers"):
+            await dispatcher.shutdown(timeout=0.01)
+
+        assert not worker.done()
+        assert dispatcher._worker_tasks == [worker]
+        assert worker in dispatcher._tasks
+        assert dispatcher.pending_tasks == 1
+        with pytest.raises(RuntimeError, match="previous shutdown"):
+            await dispatcher.startup()
+
+        release.set()
+        await _wait_until(worker.done)
+        assert outbox.deliveries["stubborn-shutdown"].status is (
+            WebhookDeliveryStatus.delivered
+        )
+
+        await dispatcher.startup()
+        await dispatcher.shutdown(timeout=1)
 
     @pytest.mark.asyncio
     async def test_coordinator_store_failure_recovers(self, caplog) -> None:

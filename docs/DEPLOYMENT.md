@@ -638,8 +638,10 @@ coordinator; it never waits for the endpoint. Submission during shutdown still
 leaves the durable row pending for restart. Shutdown stops the coordinator and
 drains only the bounded queued/in-flight set within one shared monotonic hard
 deadline, then cancels unfinished requests. Cancellation-resistant work cannot
-extend process shutdown beyond that deadline. A request may have reached the
-receiver even when success was not durably recorded; that row stays pending
+extend the bounded wait beyond that deadline: it remains tracked and the
+runtime reports shutdown failure instead of silently abandoning it or starting
+a second dispatcher over it. A request may have reached the receiver even when
+success was not durably recorded; that row stays pending
 with its reserved attempt and restart may send the same `delivery_id` again.
 Receivers must therefore deduplicate. The contract remains at-least-once, not
 exactly-once.

@@ -187,11 +187,21 @@ class HttpWebhookDispatcher:
         """Start one coordinator and a fixed number of durable workers."""
 
         async with self._startup_lock:
-            self._accepting_tasks = True
             if self._started or self._outbox_store is None:
+                self._accepting_tasks = True
                 return
+            lingering = [task for task in self._tasks if not task.done()]
+            if lingering:
+                raise RuntimeError(
+                    "Webhook dispatcher cannot start while tasks from a previous "
+                    "shutdown are still running"
+                )
 
+            self._accepting_tasks = True
             self._stopping = False
+            self._tasks.clear()
+            self._worker_tasks.clear()
+            self._coordinator_task = None
             self._queue = asyncio.Queue(maxsize=self._dispatch_batch_size)
             self._scheduled_ids.clear()
             self._active_ids.clear()
@@ -412,7 +422,11 @@ class HttpWebhookDispatcher:
         self._wake_event.set()
 
     async def shutdown(self, timeout: float | None = None) -> None:
-        """Stop scheduling, drain bounded work within grace, then cancel."""
+        """Stop scheduling, drain bounded work within grace, then cancel.
+
+        Live tasks that miss the deadline remain tracked and cause
+        :class:`asyncio.TimeoutError`; a later startup cannot overlap them.
+        """
 
         self._accepting_tasks = False
         self._stopping = True
@@ -453,31 +467,37 @@ class HttpWebhookDispatcher:
                     asyncio.gather(*self._worker_tasks, return_exceptions=True)
                 )
             except asyncio.TimeoutError:
-                logger.warning(
-                    "Webhook worker cancellation did not acknowledge before "
-                    "the shutdown deadline"
-                )
+                # A cancelled gather and its child tasks can require one more
+                # non-blocking loop turn to publish their terminal state.
+                await asyncio.sleep(0)
+                if any(not task.done() for task in self._worker_tasks):
+                    unresolved_phases.append("workers")
+                    logger.warning(
+                        "Webhook worker cancellation did not acknowledge before "
+                        "the shutdown deadline"
+                    )
 
         remaining = (0 if queue is None else queue.qsize()) + len(self._active_ids)
         logger.info(
             "Webhook dispatcher shutdown complete queued_at_start=%s "
             "active_at_start=%s remaining_pending_work=%s "
             "worker_tasks_cancelled=%s grace_timed_out=%s "
-            "recovery_action=%s",
+            "unresolved_phases=%s recovery_action=%s",
             queued_at_start,
             active_at_start,
             remaining,
             cancelled,
             timed_out,
-            "resume_pending_on_restart" if remaining or timed_out else "drained",
+            ",".join(unresolved_phases) or "none",
+            (
+                "shutdown_failure"
+                if unresolved_phases
+                else "resume_pending_on_restart"
+                if remaining or timed_out
+                else "drained"
+            ),
         )
 
-        self._coordinator_task = None
-        self._worker_tasks.clear()
-        self._tasks.clear()
-        self._scheduled_ids.clear()
-        self._active_ids.clear()
-        self._queue = None
         self._started = False
 
         async def _close_client() -> None:
@@ -491,6 +511,20 @@ class HttpWebhookDispatcher:
             await deadline.run(_close_client())
         except asyncio.TimeoutError:
             unresolved_phases.append("http_client")
+
+        live_tasks = {task for task in self._tasks if not task.done()}
+        self._tasks.intersection_update(live_tasks)
+        self._worker_tasks[:] = [
+            task for task in self._worker_tasks if not task.done()
+        ]
+        if self._coordinator_task is not None and self._coordinator_task.done():
+            self._coordinator_task = None
+        if not live_tasks:
+            self._worker_tasks.clear()
+            self._scheduled_ids.clear()
+            self._active_ids.clear()
+            self._queue = None
+
         if unresolved_phases:
             raise asyncio.TimeoutError(
                 "Webhook shutdown deadline exceeded in phase(s): "
@@ -648,6 +682,8 @@ class HttpWebhookDispatcher:
                 self._scheduled_ids.discard(delivery.delivery_id)
                 queue.task_done()
                 self._wake_event.set()
+            if self._stopping:
+                return
 
     async def _process_delivery(self, delivery: WebhookDelivery) -> None:
         assert self._outbox_store is not None
