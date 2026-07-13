@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
-from scrapeyard.config.schema import SelectorLong, SelectorType
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
+from scrapeyard.config.schema import (
+    MAX_SELECTORS_PER_TARGET,
+    MAX_SELECTOR_FIELD_NAME_CHARS,
+    MAX_SELECTOR_QUERY_CHARS,
+    SelectorLong,
+    SelectorType,
+    TargetConfig,
+)
+from scrapeyard.engine.scraper import _extract_page_data
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
     count_selector_matches_strict,
     extract_selectors_strict,
     select_items_strict,
 )
+
+
+def _value_budget(max_serialized_result_bytes: int) -> RunBudget:
+    return RunBudget(
+        max_duration_seconds=60,
+        max_fetched_bytes=10_000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=max_serialized_result_bytes,
+        max_browser_debug_bytes=1_000,
+    )
 
 
 class _Node:
@@ -138,3 +158,108 @@ def test_strict_selector_helpers_raise_same_selector_execution_error_shape() -> 
         count_selector_matches_strict(_ExplodingNode(), selector, field_name="price")
     assert count_exc.value.operation == "count_selector_matches"
     assert count_exc.value.field_name == "price"
+
+
+@pytest.mark.parametrize("transform", [None, "trim"])
+def test_selector_value_limit_applies_with_and_without_transform(
+    monkeypatch,
+    transform,
+) -> None:
+    monkeypatch.setattr(
+        "scrapeyard.config.transforms.get_settings",
+        lambda: type("Settings", (), {"transform_max_value_bytes": 1024})(),
+    )
+    selector = "h1" if transform is None else SelectorLong(query="h1", transform=transform)
+    page = _Node(css_map={"h1": [_Node(text="x" * 1025)]})
+
+    with pytest.raises(ValueError, match="Selector value exceeds 1024 UTF-8 bytes"):
+        extract_selectors_strict(page, {"title": selector})
+
+
+@pytest.mark.parametrize("transform", [None, "trim"])
+def test_selector_value_limit_accepts_exact_multibyte_boundary(
+    monkeypatch,
+    transform,
+) -> None:
+    monkeypatch.setattr(
+        "scrapeyard.config.transforms.get_settings",
+        lambda: type("Settings", (), {"transform_max_value_bytes": 1024})(),
+    )
+    selector = "h1" if transform is None else SelectorLong(query="h1", transform=transform)
+    page = _Node(css_map={"h1": [_Node(text="é" * 512)]})
+
+    assert extract_selectors_strict(page, {"title": selector}) == {"title": "é" * 512}
+
+
+def test_selector_value_limit_measures_multibyte_input_in_bytes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scrapeyard.config.transforms.get_settings",
+        lambda: type("Settings", (), {"transform_max_value_bytes": 1024})(),
+    )
+    page = _Node(css_map={"h1": [_Node(text="é" * 513)]})
+
+    with pytest.raises(ValueError, match="Selector value exceeds 1024 UTF-8 bytes"):
+        extract_selectors_strict(page, {"title": "h1"})
+
+
+def test_aggregate_result_budget_rejects_legal_list_values_during_extraction() -> None:
+    page = _Node(css_map={".value": [_Node(text="x" * 800) for _ in range(6)]})
+    budget = _value_budget(4096)
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        extract_selectors_strict(
+            page,
+            {"values": ".value"},
+            reserve_output_bytes=budget.reserve_estimated_result_bytes,
+        )
+
+    assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
+    assert budget.estimated_result_bytes < budget.max_serialized_result_bytes
+
+
+def test_many_selectors_cannot_repeat_one_large_page_value_past_budget() -> None:
+    selectors = {f"field_{index}": "h1" for index in range(6)}
+    target = TargetConfig.model_construct(
+        url="https://example.com",
+        selectors=selectors,
+        item_selector=None,
+        map_detection=None,
+        stock_detection=None,
+    )
+    page = _Node(css_map={"h1": [_Node(text="x" * 800)]})
+    budget = _value_budget(4096)
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        _extract_page_data(page, target, budget=budget)
+
+    assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
+
+
+def test_aggregate_result_budget_accepts_exact_estimated_boundary() -> None:
+    page = _Node(css_map={"h1": [_Node(text="a")]})
+    budget = _value_budget(9)  # compact JSON: {"x":"a"}
+
+    assert extract_selectors_strict(
+        page,
+        {"x": "h1"},
+        reserve_output_bytes=budget.reserve_estimated_result_bytes,
+    ) == {"x": "a"}
+    assert budget.estimated_result_bytes == 9
+
+
+def test_target_selector_schema_limits_count_names_and_queries() -> None:
+    base = {"url": "https://example.com"}
+    exact = {
+        "f" * MAX_SELECTOR_FIELD_NAME_CHARS: "q" * MAX_SELECTOR_QUERY_CHARS,
+        **{f"field-{index}": "h1" for index in range(MAX_SELECTORS_PER_TARGET - 1)},
+    }
+    assert len(TargetConfig.model_validate({**base, "selectors": exact}).selectors) == 100
+
+    invalid_values = [
+        {f"field-{index}": "h1" for index in range(MAX_SELECTORS_PER_TARGET + 1)},
+        {"f" * (MAX_SELECTOR_FIELD_NAME_CHARS + 1): "h1"},
+        {"title": "q" * (MAX_SELECTOR_QUERY_CHARS + 1)},
+    ]
+    for selectors in invalid_values:
+        with pytest.raises(ValidationError):
+            TargetConfig.model_validate({**base, "selectors": selectors})

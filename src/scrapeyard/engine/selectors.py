@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, cast
 
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
-from scrapeyard.config.transforms import apply_transforms, parse_transform_pipeline
+from scrapeyard.config.transforms import (
+    apply_transforms,
+    checked_combined_selector_value_size,
+    checked_selector_value_size,
+    parse_transform_pipeline,
+)
+
+OutputByteReserver = Callable[[int], None]
 
 
 class SelectorExecutionError(Exception):
@@ -83,34 +91,94 @@ def count_selector_matches_strict(
     )
 
 
-def extract_selectors_strict(page: object, selectors: dict[str, SelectorValue]) -> dict[str, Any]:
+def extract_selectors_strict(
+    page: object,
+    selectors: dict[str, SelectorValue],
+    *,
+    reserve_output_bytes: OutputByteReserver | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
+    _reserve_json_structure(reserve_output_bytes, 2)
     for name, selector in selectors.items():
-        result[name] = _extract_selector_value(page, selector, field_name=name)
+        _reserve_json_structure(
+            reserve_output_bytes,
+            _json_string_serialized_size(name) + 1 + int(bool(result)),
+        )
+        result[name] = _extract_selector_value(
+            page,
+            selector,
+            field_name=name,
+            reserve_output_bytes=reserve_output_bytes,
+        )
     return result
 
 
-def _extract_selector_value(page: object, selector: SelectorValue, *, field_name: str) -> Any:
+def _extract_selector_value(
+    page: object,
+    selector: SelectorValue,
+    *,
+    field_name: str,
+    reserve_output_bytes: OutputByteReserver | None,
+) -> Any:
     query, sel_type, transform_str = _unpack_selector(selector)
-    texts = [
-        _element_text(element)
-        for element in _select_elements(
-            page,
-            query,
-            sel_type,
-            operation="extract_selectors",
-            field_name=field_name,
+    elements = _select_elements(
+        page,
+        query,
+        sel_type,
+        operation="extract_selectors",
+        field_name=field_name,
+    )
+    transforms = parse_transform_pipeline(transform_str) if transform_str else []
+    texts: list[str] = []
+    for element in elements:
+        text = _element_text(element)
+        checked_selector_value_size(text)
+        transformed = apply_transforms(text, transforms)
+        checked_selector_value_size(transformed)
+        _reserve_json_structure(
+            reserve_output_bytes,
+            _json_string_serialized_size(transformed),
         )
-    ]
-    transformed_texts = _apply_selector_transforms(texts, transform_str)
-    return _collapse_selector_values(transformed_texts)
+        texts.append(transformed)
+    if len(texts) > 1:
+        _reserve_json_structure(reserve_output_bytes, len(texts) + 1)
+    return _collapse_selector_values(texts)
 
 
 def _apply_selector_transforms(texts: list[str], transform_str: str | None) -> list[str]:
-    if not transform_str:
-        return texts
-    transforms = parse_transform_pipeline(transform_str)
-    return [apply_transforms(text, transforms) for text in texts]
+    transforms = parse_transform_pipeline(transform_str) if transform_str else []
+    transformed: list[str] = []
+    for text in texts:
+        checked_selector_value_size(text)
+        value = apply_transforms(text, transforms)
+        checked_selector_value_size(value)
+        transformed.append(value)
+    return transformed
+
+
+def _reserve_json_structure(
+    reserve_output_bytes: OutputByteReserver | None,
+    amount: int,
+) -> None:
+    if reserve_output_bytes is not None:
+        reserve_output_bytes(amount)
+
+
+def _json_string_serialized_size(value: str) -> int:
+    """Return json.dumps' UTF-8 size for one string without building it."""
+
+    size = 2  # surrounding quotes
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"} or character in "\b\t\n\f\r":
+            size += 2
+        elif codepoint < 0x20 or codepoint <= 0xFFFF and codepoint > 0x7F:
+            size += 6
+        elif codepoint > 0xFFFF:
+            size += 12
+        else:
+            size += 1
+    return size
 
 
 def _collapse_selector_values(texts: list[str]) -> Any:
@@ -159,13 +227,20 @@ def _element_text(element: object) -> str:
     if element is None:
         return ""
     if isinstance(element, str):
+        checked_selector_value_size(element)
         return element
 
     direct_text = _text_attr(element)
+    checked_selector_value_size(direct_text)
     get_all_text = getattr(element, "get_all_text", None)
     if callable(get_all_text):
         nested_text = _coerce_text(get_all_text())
+        checked_selector_value_size(nested_text)
         if direct_text.strip() and nested_text:
+            checked_combined_selector_value_size(
+                (direct_text, nested_text),
+                separator_bytes=1,
+            )
             return f"{direct_text}\n{nested_text}"
         if nested_text:
             return nested_text

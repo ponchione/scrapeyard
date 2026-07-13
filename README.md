@@ -267,6 +267,14 @@ Selector transforms can be chained with `|`. Supported string transforms are
 `replace`, `remove`, `strip_prefix`, `strip_suffix`, `regex`, `extract`, and
 `default`.
 
+Each target accepts at most 100 selectors. Selector field names are limited to
+256 characters and CSS/XPath queries to 4,096 characters. The historical
+`SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` setting applies to every extracted
+selector value, including selectors without transforms. Values are measured as
+UTF-8 bytes. During extraction, the run also reserves the compact JSON size of
+each result value against `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES`; an exact
+check of the complete artifact remains in place before it is written.
+
 Example transform chain:
 
 ```yaml
@@ -394,12 +402,12 @@ settings are:
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
 | `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate encoded basic-response body bytes, checked after each response |
 | `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
-| `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Exact maximum UTF-8 bytes for persisted result JSON |
+| `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Aggregate extracted JSON growth ceiling plus exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
 | `SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS` | `0.1` | Per-operation deadline for selector regex transforms |
 | `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` | `2048` | Maximum UTF-8 size of a selector regex pattern |
 | `SCRAPEYARD_TRANSFORM_MAX_PIPELINE_STEPS` | `32` | Maximum transforms in one selector pipeline |
-| `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` | `1048576` | Maximum UTF-8 bytes for each intermediate selector value |
+| `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` | `1048576` | Historical name for the maximum UTF-8 bytes of every selector value, with or without transforms |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
