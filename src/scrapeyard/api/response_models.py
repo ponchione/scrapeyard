@@ -148,7 +148,9 @@ class ErrorRecordResponse(APIResponseModel):
     selectors_matched: dict[str, int] | None
     budget: BudgetErrorResponse | None
     action_taken: str
-    resolved: bool
+    resolved: bool = Field(
+        description="Whether a subsequent validation retry corrected this error"
+    )
 
 
 class DependencyProbeResponse(APIResponseModel):

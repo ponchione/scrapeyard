@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
-from scrapeyard.config.transforms import apply_transforms, parse_transform
+from scrapeyard.config.transforms import apply_transforms, parse_transform_pipeline
 
 
 class SelectorExecutionError(Exception):
@@ -109,7 +109,7 @@ def _extract_selector_value(page: object, selector: SelectorValue, *, field_name
 def _apply_selector_transforms(texts: list[str], transform_str: str | None) -> list[str]:
     if not transform_str:
         return texts
-    transforms = [parse_transform(part.strip()) for part in transform_str.split("|")]
+    transforms = parse_transform_pipeline(transform_str)
     return [apply_transforms(text, transforms) for text in texts]
 
 

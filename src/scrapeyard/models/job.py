@@ -135,7 +135,10 @@ class ErrorRecord(BaseModel):
     selectors_matched: Optional[dict[str, int]] = None
     budget: Optional[BudgetErrorDetails] = None
     action_taken: ActionTaken
-    resolved: bool = False
+    resolved: bool = Field(
+        default=False,
+        description="Whether a subsequent validation retry corrected this error",
+    )
 
 
 class ErrorFilters(BaseModel):

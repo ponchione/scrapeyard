@@ -38,6 +38,24 @@ async def test_timeout_does_not_wait_for_cancellation_acknowledgement() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_gather_result_is_consumed_without_callback_error() -> None:
+    loop = asyncio.get_running_loop()
+    callback_errors: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
+    try:
+        child = asyncio.create_task(asyncio.Event().wait())
+        with pytest.raises(asyncio.TimeoutError):
+            await await_with_timeout(asyncio.gather(child), timeout=0.001)
+        await asyncio.sleep(0)
+
+        assert child.cancelled()
+        assert callback_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
 async def test_deadline_budget_is_shared_between_phases() -> None:
     deadline = MonotonicDeadline(0.03)
 

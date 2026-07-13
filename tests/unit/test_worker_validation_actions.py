@@ -163,6 +163,7 @@ async def test_validation_retry_rescrapes_and_succeeds(mock_stores):
     result_store.save_result.assert_called_once()
     error = _first_logged_error(error_store)
     assert error.action_taken == ActionTaken.retry
+    assert error.resolved is True
 
 
 @pytest.mark.asyncio

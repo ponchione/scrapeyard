@@ -343,6 +343,48 @@ async def test_stop_cancels_pending_tasks_after_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_reports_active_job_that_resists_cancellation(monkeypatch):
+    cancellation_requested = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _resistant_job() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_requested.set()
+            await release.wait()
+
+    pending = asyncio.create_task(_resistant_job())
+    await asyncio.sleep(0)
+
+    async def _close() -> None:
+        return None
+
+    worker = SimpleNamespace(
+        allow_pick_jobs=True,
+        tasks={"one": pending},
+        main_task=None,
+        close=_close,
+    )
+    pool = _make_pool()
+    pool._started = True
+    pool._worker = worker
+    pool._runner_task = asyncio.create_task(asyncio.sleep(0))
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: MagicMock(workers_shutdown_grace_seconds=0.001),
+    )
+
+    with pytest.raises(asyncio.TimeoutError, match="active_jobs"):
+        await pool.stop()
+
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    assert not pending.done()
+    release.set()
+    await asyncio.wait_for(pending, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_stop_cancellation_releases_active_browser_target(monkeypatch):
     browser_started = asyncio.Event()
 

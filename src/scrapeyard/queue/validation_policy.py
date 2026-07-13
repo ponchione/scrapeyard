@@ -13,7 +13,7 @@ from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.engine.url_guard import redact_userinfo_in_url
-from scrapeyard.models.job import ActionTaken, ErrorType
+from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
 from scrapeyard.queue.error_records import (
     TargetErrorRecorder,
     validation_error_type,
@@ -54,7 +54,7 @@ async def apply_validation(
     if validation.passed:
         return result
 
-    _record_validation_failure(
+    retry_error = _record_validation_failure(
         recorder=recorder,
         target_cfg=target_cfg,
         attempt=attempt,
@@ -93,6 +93,7 @@ async def apply_validation(
         proxy_url=proxy_url,
         budget=budget,
         cancellation_guard=cancellation_guard,
+        retry_error=retry_error,
     )
 
 
@@ -104,8 +105,8 @@ def _record_validation_failure(
     result: TargetResult,
     action: ActionTaken,
     message: str,
-) -> None:
-    recorder.record_validation_failure(
+) -> ErrorRecord:
+    return recorder.record_validation_failure(
         target_url=target_cfg.url,
         fetcher_used=target_cfg.fetcher.value,
         attempt=attempt,
@@ -153,6 +154,7 @@ async def _retry_after_validation_failure(
     proxy_url: str | None,
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
+    retry_error: ErrorRecord,
 ) -> TargetResult:
     await cancellation_checkpoint(
         cancellation_guard,
@@ -199,6 +201,7 @@ async def _retry_after_validation_failure(
     recorder.record_success(domain)
     retry_validation = validator.validate(retry_result.data)
     if retry_validation.passed:
+        retry_error.resolved = True
         return retry_result
 
     _record_validation_failure(

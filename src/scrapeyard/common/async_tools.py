@@ -20,7 +20,7 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
 
     if task.cancelled():
         return
-    with suppress(Exception):
+    with suppress(Exception, asyncio.CancelledError):
         task.result()
 
 
