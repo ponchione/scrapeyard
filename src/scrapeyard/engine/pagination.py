@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -61,11 +62,32 @@ def pagination_url_key(url: str) -> str:
     return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
 
-def _pagination_url_is_safe(url: str) -> bool:
+async def _pagination_url_is_safe(
+    url: str,
+    *,
+    budget: RunBudget | None,
+    cancellation_guard: CancellationCheckpoint | None,
+) -> bool:
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "before_pagination_dns_validation",
+    )
+    if budget is not None:
+        budget.check_deadline()
     try:
-        assert_public_url(url)
+        lookup = asyncio.to_thread(assert_public_url, url, allow_unresolved=False)
+        if budget is None:
+            await lookup
+        else:
+            await budget.wait_for(lookup)
     except UnsafeURLError:
         return False
+    await cancellation_checkpoint(
+        cancellation_guard,
+        "after_pagination_dns_validation",
+    )
+    if budget is not None:
+        budget.check_deadline()
     return True
 
 
@@ -109,7 +131,11 @@ async def paginate_target(
         next_url = resolve_href(next_links[0], current_url)
         if not next_url:
             break
-        if not _pagination_url_is_safe(next_url):
+        if not await _pagination_url_is_safe(
+            next_url,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+        ):
             break
         if pagination_url_key(next_url) in seen_urls:
             break
