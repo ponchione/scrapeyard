@@ -66,6 +66,38 @@ async def test_apply_validation_warn_appends_warning_and_returns_original_result
 
 
 @pytest.mark.asyncio
+async def test_successful_validation_retry_resolves_the_initial_error():
+    target = make_target("https://example.com")
+    first = TargetResult(url=target.url, status="success", data=[])
+    retried = TargetResult(url=target.url, status="success", data=[{"title": "ok"}])
+    validator = MagicMock()
+    validator.validate.side_effect = [
+        MagicMock(passed=False, action=OnEmptyAction.retry, message="empty first pass"),
+        MagicMock(passed=True),
+    ]
+    pending_errors = []
+
+    validated = await apply_validation(
+        target_cfg=target,
+        domain="example.com",
+        adaptive=False,
+        result=first,
+        config=_config(),
+        adaptive_dir="/tmp/adaptive",
+        run_artifacts_dir=None,
+        recorder=_recorder(pending_errors),
+        rate_limiter=AsyncMock(),
+        validator=validator,
+        scrape=AsyncMock(return_value=retried),
+    )
+
+    assert validated is retried
+    assert len(pending_errors) == 1
+    assert pending_errors[0].action_taken == ActionTaken.retry
+    assert pending_errors[0].resolved is True
+
+
+@pytest.mark.asyncio
 async def test_apply_validation_retry_returns_failed_result_after_second_invalid_response():
     target = make_target("https://example.com")
     first = TargetResult(url=target.url, status="success", data=[], errors=[])
@@ -102,6 +134,7 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
     assert scrape.await_count == 1
     circuit_breaker.record_success.assert_called_once_with("example.com")
     assert [record.action_taken for record in pending_errors] == [ActionTaken.retry, ActionTaken.fail]
+    assert all(record.resolved is False for record in pending_errors)
 
 
 @pytest.mark.asyncio

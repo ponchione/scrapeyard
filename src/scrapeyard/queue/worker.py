@@ -788,6 +788,8 @@ async def _process_all_targets(
     config = context.config
     targets = list(config.resolved_targets())
     sem = asyncio.Semaphore(config.execution.concurrency)
+    start_lock = asyncio.Lock()
+    next_start_at = 0.0
     target_context = TargetProcessingContext(
         config=config,
         job_id=job_id,
@@ -803,18 +805,26 @@ async def _process_all_targets(
         activity=context.activity,
     )
 
-    async def _process_one(index: int, target_cfg: TargetConfig) -> TargetResult:
+    async def _process_one(target_cfg: TargetConfig) -> TargetResult:
+        nonlocal next_start_at
         pending_errors: list[ErrorRecord] = []
         cancelled = False
         target_result: TargetResult | None = None
         target_started = 0.0
         try:
             await context.activity.checkpoint("before_target_start")
-            if index > 0 and config.execution.delay_between > 0:
-                await context.budget.sleep(index * config.execution.delay_between)
-                await context.activity.checkpoint("after_target_delay")
             async with sem:
                 await context.activity.checkpoint("before_target_fetch")
+                if config.execution.delay_between > 0:
+                    async with start_lock:
+                        wait_seconds = max(0.0, next_start_at - time.monotonic())
+                        if wait_seconds > 0:
+                            await context.budget.sleep(wait_seconds)
+                            await context.activity.checkpoint("after_target_delay")
+                        context.budget.check_deadline()
+                        next_start_at = (
+                            time.monotonic() + config.execution.delay_between
+                        )
                 context.budget.check_deadline()
                 target_started = time.monotonic()
                 with active_target():
@@ -852,8 +862,8 @@ async def _process_all_targets(
                 )
 
     tasks = [
-        asyncio.create_task(_process_one(index, target_cfg))
-        for index, target_cfg in enumerate(targets)
+        asyncio.create_task(_process_one(target_cfg))
+        for target_cfg in targets
     ]
     try:
         outcomes = await context.budget.wait_for(asyncio.gather(*tasks))

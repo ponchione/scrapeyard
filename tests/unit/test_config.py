@@ -21,6 +21,7 @@ from scrapeyard.config import (
     apply_transforms,
     load_config,
     parse_transform,
+    parse_transform_pipeline,
 )
 from scrapeyard.config.schema import (
     MAX_BROWSER_ACTIONS,
@@ -474,6 +475,25 @@ class TestResolvedTargets:
                 )
             )
 
+    def test_long_form_selector_transform_preserves_pipes_in_arguments(self):
+        config = ScrapeConfig(
+            **_tier1_config(
+                target=_target_dict(
+                    selectors={
+                        "title": {
+                            "query": "h1",
+                            "transform": 'regex("a|b", "X")|append("|done")',
+                        }
+                    }
+                )
+            )
+        )
+
+        assert config.target is not None
+        selector = config.target.selectors["title"]
+        assert not isinstance(selector, str)
+        assert selector.transform == 'regex("a|b", "X")|append("|done")'
+
     @pytest.mark.parametrize(
         ("model", "kwargs"),
         [
@@ -600,6 +620,26 @@ class TestParseTransform:
     def test_regex(self):
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"
+
+    def test_pipeline_parser_preserves_regex_alternation_and_literal_pipe(self):
+        transforms = parse_transform_pipeline(
+            'regex("a|b", "X")|append("|done")'
+        )
+
+        assert apply_transforms("a b", transforms) == "X X|done"
+
+    def test_pipeline_parser_handles_regex_character_class_pipe(self):
+        transforms = parse_transform_pipeline("extract:[|]|append:(")
+
+        assert apply_transforms("before|after", transforms) == "|("
+
+    @pytest.mark.parametrize(
+        "pipeline",
+        ['append("unterminated)|trim', "trim|", "trim||lowercase"],
+    )
+    def test_pipeline_parser_rejects_malformed_or_blank_steps(self, pipeline):
+        with pytest.raises(ValueError):
+            parse_transform_pipeline(pipeline)
 
     def test_regex_rejects_oversized_patterns(self, monkeypatch):
         monkeypatch.setattr(

@@ -29,6 +29,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ### Fixed
 - Authorized submit/schedule scopes before parsing secret-bearing YAML and
   prevented project-scoped callers from resolving another project's secrets.
+- Paced real target starts after concurrency admission, preserved pipes inside
+  transform arguments, and marked validation failures resolved after a
+  successful retry.
+- Reported cancellation-resistant active jobs as incomplete shutdown work and
+  consumed cancelled gather results without event-loop callback errors.
+- Restored the Python 3.10 test lane by avoiding the Python 3.11-only
+  `datetime.UTC` constant.
 - Restricted readiness project summaries to each monitoring credential's
   authorized projects.
 - Persisted accepted run trigger provenance across queued-delivery recovery,

@@ -154,18 +154,18 @@ class TargetErrorRecorder:
         result: TargetResult,
         action: ActionTaken,
         message: str,
-    ) -> None:
-        self.pending_errors.append(
-            build_error_record(
-                self.job_id,
-                self.run_id or "",
-                self.project,
-                target_url,
-                attempt,
-                validation_error_type(result),
-                None,
-                fetcher_used,
-                action,
-                error_message=message,
-            )
+    ) -> ErrorRecord:
+        record = build_error_record(
+            self.job_id,
+            self.run_id or "",
+            self.project,
+            target_url,
+            attempt,
+            validation_error_type(result),
+            None,
+            fetcher_used,
+            action,
+            error_message=message,
         )
+        self.pending_errors.append(record)
+        return record

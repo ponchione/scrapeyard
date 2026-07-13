@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import time
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -46,7 +47,7 @@ def _job_execution_context(
         config=config,
         job=MagicMock(),
         settings=MagicMock(proxy_url=""),
-        started_at=datetime.now(UTC),
+        started_at=datetime.now(timezone.utc),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir=None,
         budget=RunBudget(
@@ -119,6 +120,33 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
     assert len(results) == 4
     assert max_active_fetches == 2
     assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
+    limiter = BrowserExecutionLimiter(2)
+    targets = [
+        _concurrent_target(f"https://target-{index}.example", FetcherType.basic)
+        for index in range(4)
+    ]
+    context = _job_execution_context(targets, concurrency=2)
+    context.config.execution.delay_between = 0.02
+    started: list[float] = []
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        started.append(time.monotonic())
+        index = int(target.url.split("-")[1].split(".")[0])
+        await asyncio.sleep({0: 0.1, 1: 0.08}.get(index, 0))
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+        results = await _run_targets(context, limiter, job_id="paced")
+
+    assert len(results) == 4
+    assert all(
+        later - earlier >= 0.015
+        for earlier, later in zip(started, started[1:], strict=False)
+    )
 
 
 @pytest.mark.asyncio

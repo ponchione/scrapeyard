@@ -331,14 +331,24 @@ class WorkerPool:
         except asyncio.TimeoutError:
             unresolved_phases.append("redis_close")
 
+        active_jobs_unresolved = any(not task.done() for task in pending)
+        if active_jobs_unresolved:
+            unresolved_phases.append("active_jobs")
+
         self._redis = None
         self._worker = None
         self._runner_task = None
         self._started = False
         if drain_timed_out:
-            logger.info(
-                "Worker shutdown grace expired; active jobs were cancelled"
-            )
+            if active_jobs_unresolved:
+                logger.warning(
+                    "Worker shutdown grace expired; active-job cancellation "
+                    "remains unresolved"
+                )
+            else:
+                logger.info(
+                    "Worker shutdown grace expired; active-job cancellation completed"
+                )
         if unresolved_phases:
             raise asyncio.TimeoutError(
                 "Worker shutdown deadline exceeded in phase(s): "

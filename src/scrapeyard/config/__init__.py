@@ -14,7 +14,11 @@ from scrapeyard.config.schema import (
     WebhookConfig,
     WebhookStatus,
 )
-from scrapeyard.config.transforms import apply_transforms, parse_transform
+from scrapeyard.config.transforms import (
+    apply_transforms,
+    parse_transform,
+    parse_transform_pipeline,
+)
 
 __all__ = [
     "BrowserActionConfig",
@@ -31,4 +35,5 @@ __all__ = [
     "apply_transforms",
     "load_config",
     "parse_transform",
+    "parse_transform_pipeline",
 ]

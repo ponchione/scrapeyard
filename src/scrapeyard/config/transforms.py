@@ -37,6 +37,69 @@ def transform_pipeline_limit() -> int:
     )
 
 
+def split_transform_pipeline(raw: str) -> list[str]:
+    """Split a pipeline only at top-level pipes outside quoted arguments."""
+
+    steps: list[str] = []
+    start = 0
+    quote_open = False
+    parentheses = 0
+    character_class = False
+    index = 0
+    while index < len(raw):
+        character = raw[index]
+        step_prefix = raw[start:index].strip()
+        colon_regex = step_prefix.startswith(("regex:", "extract:"))
+        if quote_open:
+            if character == '"':
+                if index + 1 < len(raw) and raw[index + 1] == '"':
+                    index += 2
+                    continue
+                quote_open = False
+            index += 1
+            continue
+        if character == "\\":
+            index += 2
+            continue
+        if character == '"' and parentheses:
+            quote_open = True
+        elif character == "[" and colon_regex:
+            character_class = True
+        elif character == "]" and character_class:
+            character_class = False
+        elif not character_class:
+            if character == "(":
+                if parentheses or colon_regex or re.fullmatch(r"\w+", step_prefix):
+                    parentheses += 1
+            elif character == ")":
+                if parentheses:
+                    parentheses -= 1
+            elif character == "|" and parentheses == 0:
+                steps.append(raw[start:index].strip())
+                start = index + 1
+        index += 1
+    if quote_open:
+        raise ValueError("Unbalanced quote in selector transform pipeline")
+    if parentheses:
+        raise ValueError("Unbalanced parentheses in selector transform pipeline")
+    if character_class:
+        raise ValueError("Unbalanced character class in selector transform pipeline")
+    steps.append(raw[start:].strip())
+    return steps
+
+
+def parse_transform_pipeline(raw: str) -> list[Callable[[str], str]]:
+    """Parse and enforce the configured limit for a complete pipeline."""
+
+    steps = split_transform_pipeline(raw)
+    limit = transform_pipeline_limit()
+    if len(steps) > limit:
+        raise ValueError(f"Selector transform pipeline exceeds {limit} steps")
+    if any(not step for step in steps):
+        raise ValueError("Selector transform steps must not be blank")
+    return [parse_transform(step) for step in steps]
+
+
 def _transform_value_limit() -> int:
     return int(
         getattr(
