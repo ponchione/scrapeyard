@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import re
 from functools import lru_cache
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from scrapeyard.engine.proxy import normalize_proxy_url
+
+
+_SECRET_REFERENCE_NAME_RE = re.compile(r"^SCRAPEYARD_SECRET_[A-Z0-9_]+$")
 
 
 class ServiceSettings(BaseSettings):
@@ -81,6 +86,7 @@ class ServiceSettings(BaseSettings):
 
     api_keys: str = ""
     api_credentials: str = ""
+    secret_reference_allowlist: str = ""
     encryption_keys: str = Field(default="", repr=False)
     encryption_active_key_id: str = ""
     max_request_bytes: int = Field(default=262144, ge=0)
@@ -132,10 +138,57 @@ class ServiceSettings(BaseSettings):
                 raise ValueError(
                     "qualification_crash_point must name a supported local checkpoint"
                 )
+        self.parsed_secret_reference_allowlist()
         return self
 
     def parsed_api_keys(self) -> set[str]:
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
+
+    def parsed_secret_reference_allowlist(self) -> dict[str, frozenset[str]]:
+        """Return the project-to-secret-name policy for submitted YAML references."""
+
+        if not self.secret_reference_allowlist.strip():
+            return {}
+        try:
+            parsed = json.loads(self.secret_reference_allowlist)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be valid JSON"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST must be a JSON object"
+            )
+
+        policy: dict[str, frozenset[str]] = {}
+        for project, names in parsed.items():
+            if not isinstance(project, str):
+                raise ValueError(
+                    "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST project names must be strings"
+                )
+            if project != "*":
+                from scrapeyard.common.paths import safe_path_part
+
+                safe_path_part(project, label="secret-reference project")
+            if not isinstance(names, list) or not all(
+                isinstance(name, str) for name in names
+            ):
+                raise ValueError(
+                    "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST values must be lists of names"
+                )
+            invalid_names = [
+                name for name in names if _SECRET_REFERENCE_NAME_RE.fullmatch(name) is None
+            ]
+            if invalid_names:
+                raise ValueError(
+                    "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST contains an invalid secret name"
+                )
+            if len(names) != len(set(names)):
+                raise ValueError(
+                    "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST contains duplicate secret names"
+                )
+            policy[project] = frozenset(names)
+        return policy
 
 
 @lru_cache(maxsize=1)

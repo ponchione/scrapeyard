@@ -65,7 +65,7 @@ from scrapeyard.api.serializers import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
-from scrapeyard.config.loader import load_config
+from scrapeyard.config.loader import load_config, load_config_project
 from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.engine.url_guard import redact_userinfo_in_text
 from scrapeyard.models.job import Job, JobStatus
@@ -181,12 +181,18 @@ def _format_config_error(exc: Exception) -> str:
     return redact_userinfo_in_text(str(exc)) or type(exc).__name__
 
 
-async def _read_valid_yaml_config(request: Request) -> ParsedYamlConfig:
+async def _read_valid_yaml_config(
+    request: Request,
+    *,
+    scope: AuthScope,
+) -> ParsedYamlConfig:
     if not _is_yaml_request(request):
         raise_json_error(415, "Content-Type must be application/x-yaml")
     try:
         body = await request.body()
         config_yaml = body.decode("utf-8")
+        project = await asyncio.to_thread(load_config_project, config_yaml)
+        authorize_request(request, scope, project=project)
         config = await asyncio.to_thread(load_config, config_yaml)
     except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
         raise_json_error(422, f"Invalid config: {_format_config_error(exc)}")
@@ -276,10 +282,10 @@ async def scrape(
     worker_pool: WorkerPool = Depends(get_worker_pool),
 ) -> Response:
     """Submit an ad-hoc scrape request."""
-    parsed = await _read_valid_yaml_config(request)
+    authorize_request(request, AuthScope.submit)
+    parsed = await _read_valid_yaml_config(request, scope=AuthScope.submit)
     config_yaml = parsed.config_yaml
     config = parsed.config
-    authorize_request(request, AuthScope.submit, project=config.project)
 
     settings = get_settings()
     idempotency = _idempotency_context(
@@ -337,13 +343,13 @@ async def create_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Any:
     """Create a scheduled job. Requires a schedule block in the config."""
-    parsed = await _read_valid_yaml_config(request)
+    authorize_request(request, AuthScope.schedule_admin)
+    parsed = await _read_valid_yaml_config(request, scope=AuthScope.schedule_admin)
     config_yaml = parsed.config_yaml
     config = parsed.config
 
     if config.schedule is None:
         raise_json_error(400, "A 'schedule' block is required for POST /jobs")
-    authorize_request(request, AuthScope.schedule_admin, project=config.project)
 
     job = Job(
         job_id=str(uuid.uuid4()),
@@ -385,13 +391,13 @@ async def update_job(
 ) -> Any:
     """Replace a scheduled job's future-run config and schedule atomically."""
 
-    parsed = await _read_valid_yaml_config(request)
+    authorize_request(request, AuthScope.schedule_admin)
+    existing = await _get_job_or_404(job_store, job_id)
+    authorize_request(request, AuthScope.schedule_admin, project=existing.project)
+    parsed = await _read_valid_yaml_config(request, scope=AuthScope.schedule_admin)
     config = parsed.config
     if config.schedule is None:
         raise_json_error(400, "A 'schedule' block is required for scheduled job updates")
-    existing = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.schedule_admin, project=existing.project)
-    authorize_request(request, AuthScope.schedule_admin, project=config.project)
     try:
         outcome = await job_store.update_scheduled_job(
             job_id,

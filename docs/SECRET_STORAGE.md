@@ -28,11 +28,21 @@ webhook:
     Authorization: ${SCRAPEYARD_SECRET_WEBHOOK_AUTH}
 ```
 
-Only names beginning `SCRAPEYARD_SECRET_` are resolved. Resolution happens
-each time YAML is validated/executed; the reference remains in persisted YAML.
-A missing reference fails closed. A terminal webhook stores an encrypted copy
-of the resolved retry request so an environment-secret rotation does not
-silently change an already accepted delivery.
+Only names beginning `SCRAPEYARD_SECRET_` are eligible for resolution. Configure
+`SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` as a JSON map from each project to the
+exact names it may use. The reserved `*` project adds explicitly shared names:
+
+```bash
+export SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='{"catalog":["SCRAPEYARD_SECRET_PROXY_URL","SCRAPEYARD_SECRET_WEBHOOK_AUTH"],"*":["SCRAPEYARD_SECRET_SHARED_CA"]}'
+```
+
+The default empty policy denies every secret reference. The config `project`
+must remain literal, so it cannot select its own policy through a reference.
+Resolution happens each time YAML is validated/executed; the reference remains
+in persisted YAML. A missing or unauthorized reference fails closed. A
+terminal webhook stores an encrypted copy of the resolved retry
+request so an environment-secret rotation does not silently change an already
+accepted delivery.
 
 ## Encryption envelope and key configuration
 

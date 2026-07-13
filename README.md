@@ -366,6 +366,7 @@ settings are:
 | --- | --- | --- |
 | `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
 | `SCRAPEYARD_API_KEYS` | empty | Deprecated full-admin migration allow-list; remove after converting to named credentials |
+| `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` | empty | JSON map of project names to permitted `SCRAPEYARD_SECRET_*` references; `*` defines explicitly shared names |
 | `SCRAPEYARD_ENCRYPTION_KEYS` | empty | JSON key-ID to base64 32-byte AES key map for persisted secrets |
 | `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Key ID used for new writes and startup rotation |
 | `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
