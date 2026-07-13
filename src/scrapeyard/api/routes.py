@@ -108,6 +108,8 @@ async def _apply_scheduler_mutation(
         raise_json_error(404, "Scheduled job not found")
     if outcome.action is ScheduledJobMutationAction.not_scheduled:
         raise_json_error(409, "Job is not a scheduled job")
+    if outcome.action is ScheduledJobMutationAction.project_conflict:
+        raise_json_error(409, "A scheduled job's project cannot be changed")
     if outcome.action is ScheduledJobMutationAction.active_conflict:
         raise_json_error(409, "Scheduled config cannot change while a run is queued or active")
     if outcome.action is ScheduledJobMutationAction.lifecycle_conflict:

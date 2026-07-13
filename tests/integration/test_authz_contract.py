@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.auth import AuthScope, authorize_request, parse_api_credentials
-from scrapeyard.api.dependencies import get_job_store
+from scrapeyard.api.dependencies import get_job_store, get_result_store
 from scrapeyard.api.middleware import APIKeyAuthMiddleware
 from scrapeyard.api.routes import router
 from scrapeyard.common.settings import get_settings
@@ -25,6 +25,8 @@ SECRETS = {
     "scheduler": "schedule-secret-000000000",
     "deleter": "delete-secret-0000000000",
     "monitor": "monitor-secret-000000000",
+    "multi-scheduler": "multi-schedule-secret-00000",
+    "beta-reader": "beta-reader-secret-000000",
 }
 
 
@@ -55,6 +57,16 @@ def _credentials():
                 "monitor": {
                     "secret": SECRETS["monitor"],
                     "scopes": ["health-detail"],
+                },
+                "multi-scheduler": {
+                    "secret": SECRETS["multi-scheduler"],
+                    "scopes": ["schedule-admin"],
+                    "projects": ["alpha", "beta"],
+                },
+                "beta-reader": {
+                    "secret": SECRETS["beta-reader"],
+                    "scopes": ["read"],
+                    "projects": ["beta"],
                 },
             }
         )
@@ -247,6 +259,45 @@ async def test_project_scoped_reader_cannot_enumerate_or_read_other_project(
     assert unfiltered.status_code == 403
     assert other.status_code == 403
     assert filtered.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_scheduled_job_cannot_transfer_historical_results_between_projects(
+    authorized_client,
+):
+    created = await authorized_client.post(
+        "/jobs",
+        content=_schedule_yaml("alpha"),
+        headers={
+            **_headers("multi-scheduler"),
+            "content-type": "application/x-yaml",
+        },
+    )
+    assert created.status_code == 201
+    job_id = created.json()["job_id"]
+    await get_result_store().save_result(
+        job_id,
+        [{"private": "alpha-result"}],
+        run_id="alpha-history",
+    )
+
+    moved = await authorized_client.put(
+        f"/jobs/{job_id}",
+        content=_schedule_yaml("beta"),
+        headers={
+            **_headers("multi-scheduler"),
+            "content-type": "application/x-yaml",
+        },
+    )
+
+    assert moved.status_code == 409
+    assert "project cannot be changed" in moved.json()["error"]
+    assert (await get_job_store().get_job(job_id)).project == "alpha"
+    denied = await authorized_client.get(
+        f"/results/{job_id}",
+        headers=_headers("beta-reader"),
+    )
+    assert denied.status_code == 403
 
 
 @pytest.mark.asyncio

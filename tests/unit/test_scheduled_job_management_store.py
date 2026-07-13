@@ -96,6 +96,29 @@ async def test_update_preserves_unique_project_name_contract(store):
         )
 
 
+async def test_update_rejects_project_change_without_mutating_job(store):
+    original = _job()
+    await store.save_job(original)
+
+    outcome = await store.update_scheduled_job(
+        original.job_id,
+        project="other-project",
+        name=original.name,
+        config_yaml="project: other-project\nname: daily",
+        schedule_cron="0 10 * * *",
+        schedule_timezone="UTC",
+        schedule_enabled=False,
+        updated_at=NOW,
+    )
+
+    assert outcome.action is ScheduledJobMutationAction.project_conflict
+    assert outcome.previous == outcome.current
+    stored = await store.get_job(original.job_id)
+    assert stored.project == original.project
+    assert stored.config_yaml == original.config_yaml
+    assert stored.schedule_cron == original.schedule_cron
+
+
 async def test_pause_resume_and_exact_compensation(store):
     await store.save_job(_job())
     paused = await store.set_schedule_enabled(
