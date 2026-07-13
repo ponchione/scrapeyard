@@ -1,5 +1,9 @@
 # Implement Real Queue Priority
 
+> **Status: completed for 0.6.0.** This file is a historical design record;
+> its Problem section describes the pre-implementation state. See the
+> [archive index](README.md) for completion evidence.
+
 Priority: P2
 
 ## Problem
