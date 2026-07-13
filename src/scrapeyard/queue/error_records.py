@@ -67,8 +67,7 @@ def build_target_result_error_records(
 ) -> list[ErrorRecord]:
     """Build one or more error records from a failed target result."""
     if combine_errors and result.errors:
-        combined = result.error_detail or "; ".join(result.errors)
-        messages = [combined for _ in result.errors]
+        messages = [result.error_detail or "; ".join(result.errors)]
     else:
         messages = result.errors or [result.error_detail or "unknown scrape failure"]
 

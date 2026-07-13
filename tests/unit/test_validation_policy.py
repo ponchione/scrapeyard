@@ -138,6 +138,44 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
 
 
 @pytest.mark.asyncio
+async def test_failed_validation_retry_combines_multiple_errors_once():
+    target = make_target("https://example.com")
+    first = TargetResult(url=target.url, status="success", data=[])
+    retried = TargetResult(
+        url=target.url,
+        status="failed",
+        errors=["timeout", "proxy refused"],
+    )
+    validator = MagicMock()
+    validator.validate.return_value = MagicMock(
+        passed=False,
+        action=OnEmptyAction.retry,
+        message="empty first pass",
+    )
+    pending_errors = []
+
+    validated = await apply_validation(
+        target_cfg=target,
+        domain="example.com",
+        adaptive=False,
+        result=first,
+        config=_config(),
+        adaptive_dir="/tmp/adaptive",
+        run_artifacts_dir=None,
+        recorder=_recorder(pending_errors),
+        rate_limiter=AsyncMock(),
+        validator=validator,
+        scrape=AsyncMock(return_value=retried),
+    )
+
+    assert validated is retried
+    assert [record.error_message for record in pending_errors] == [
+        "empty first pass",
+        "timeout; proxy refused",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_validation_retry_rate_limit_wait_uses_overall_deadline():
     target = make_target("https://example.com")
     result = TargetResult(url=target.url, status="success", data=[])
