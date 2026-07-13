@@ -242,6 +242,23 @@ class TestDetectPricingVisibilityMap:
         assert vis == "map"
         assert text == "Add to Cart to See Price"
 
+    @pytest.mark.parametrize(
+        "markup",
+        [
+            "Call for price<span>SKU 123</span>",
+            "<span>SKU 123</span>Call for price",
+            "<span>SKU 123</span>Call for price<span>Details</span>",
+        ],
+    )
+    def test_text_pattern_uses_all_mixed_content_on_real_adaptor(self, markup):
+        el = _adaptor_element(f'<div class="product">{markup}</div>', ".product")
+        config = MapDetectionConfig(text_patterns=["call for price"])
+
+        vis, text = detect_pricing_visibility({"price": None}, el, config)
+
+        assert vis == "call_for_price"
+        assert text is None
+
     def test_embedded_digits_in_price_are_not_treated_as_numeric(self):
         config = MapDetectionConfig(text_patterns=["map 0"])
         item = {"price": "MAP 0"}
@@ -442,6 +459,25 @@ class TestDetectStockStatus:
         config = StockDetectionConfig(
             in_stock=StockPatternConfig(text_patterns=["in stock"]),
         )
+        assert detect_stock_status({}, el, config) == "in_stock"
+
+    @pytest.mark.parametrize(
+        "markup",
+        [
+            "In Stock<span>SKU 123</span>",
+            "<span>SKU 123</span>In Stock",
+            "<span>SKU 123</span>In Stock<span>Ships Free</span>",
+        ],
+    )
+    def test_stock_detection_uses_all_mixed_content_on_real_adaptor(self, markup):
+        el = _adaptor_element(
+            f'<div class="availability">{markup}</div>',
+            ".availability",
+        )
+        config = StockDetectionConfig(
+            in_stock=StockPatternConfig(text_patterns=["in stock"]),
+        )
+
         assert detect_stock_status({}, el, config) == "in_stock"
 
 
