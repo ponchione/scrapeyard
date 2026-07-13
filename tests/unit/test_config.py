@@ -633,6 +633,11 @@ class TestParseTransform:
 
         assert apply_transforms("before|after", transforms) == "|("
 
+    def test_pipeline_parser_does_not_treat_regex_replacement_as_pattern(self):
+        transforms = parse_transform_pipeline("regex:a:[|trim")
+
+        assert apply_transforms(" a ", transforms) == "["
+
     @pytest.mark.parametrize(
         "pipeline",
         ['append("unterminated)|trim', "trim|", "trim||lowercase"],
