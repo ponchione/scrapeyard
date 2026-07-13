@@ -311,7 +311,7 @@ class ResultStore(Protocol):
     async def get_result_metadata(
         self,
         job_id: str,
-        run_id: str,
+        run_id: str | None = None,
     ) -> ResultMetadata | None:
         """Return metadata without requiring the result artifact to be readable."""
         ...

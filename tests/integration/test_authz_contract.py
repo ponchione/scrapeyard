@@ -17,6 +17,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.main import http_exception_handler, request_validation_exception_handler
 from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.storage.database import get_db
 
 
 SECRETS = {
@@ -27,6 +28,7 @@ SECRETS = {
     "monitor": "monitor-secret-000000000",
     "multi-scheduler": "multi-schedule-secret-00000",
     "beta-reader": "beta-reader-secret-000000",
+    "global-reader": "global-reader-secret-0000",
 }
 
 
@@ -67,6 +69,10 @@ def _credentials():
                     "secret": SECRETS["beta-reader"],
                     "scopes": ["read"],
                     "projects": ["beta"],
+                },
+                "global-reader": {
+                    "secret": SECRETS["global-reader"],
+                    "scopes": ["read"],
                 },
             }
         )
@@ -298,6 +304,51 @@ async def test_scheduled_job_cannot_transfer_historical_results_between_projects
         headers=_headers("beta-reader"),
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_retained_results_authorize_from_metadata_for_latest_and_explicit_runs(
+    authorized_client,
+):
+    job_id = "retained-alpha-job"
+    await get_job_store().save_job(
+        Job(
+            job_id=job_id,
+            project="alpha",
+            name="retained-results",
+            config_yaml=_scrape_yaml("alpha"),
+            status=JobStatus.complete,
+        )
+    )
+    result_store = get_result_store()
+    await result_store.save_result(job_id, [{"version": "old"}], run_id="run-old")
+    await result_store.save_result(job_id, [{"version": "new"}], run_id="run-new")
+    async with get_db("jobs.db") as db:
+        await db.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
+        await db.commit()
+
+    paths = (
+        f"/results/{job_id}",
+        f"/results/{job_id}?latest=false&run_id=run-old",
+    )
+    alpha = [
+        await authorized_client.get(path, headers=_headers("reader"))
+        for path in paths
+    ]
+    beta = [
+        await authorized_client.get(path, headers=_headers("beta-reader"))
+        for path in paths
+    ]
+    global_reader = [
+        await authorized_client.get(path, headers=_headers("global-reader"))
+        for path in paths
+    ]
+
+    assert [response.status_code for response in alpha] == [200, 200]
+    assert [response.status_code for response in global_reader] == [200, 200]
+    assert [response.status_code for response in beta] == [404, 404]
+    assert alpha[0].json()["run_id"] == "run-new"
+    assert alpha[1].json()["run_id"] == "run-old"
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,18 @@ async def test_get_latest_without_run_id(store):
     assert result.data == data2
 
 
+async def test_get_latest_metadata_includes_project_and_matches_payload_selection(store):
+    await store.save_result("j-1", [{"v": 1}], run_id="run-1")
+    await store.save_result("j-1", [{"v": 2}], run_id="run-2")
+
+    metadata = await store.get_result_metadata("j-1")
+    payload = await store.get_result("j-1")
+
+    assert metadata is not None
+    assert metadata.project == "acme"
+    assert metadata.run_id == payload.run_id == "run-2"
+
+
 async def test_get_result_not_found(store):
     with pytest.raises(KeyError, match="No results found"):
         await store.get_result("j-1")

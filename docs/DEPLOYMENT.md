@@ -480,6 +480,12 @@ of this ownership decision. Deleting a job with `delete_results=false` leaves
 its metadata and artifact authoritative and eligible for normal age/per-job
 retention, not orphan removal.
 
+The result API uses this stored project to authorize project-scoped credentials
+after the parent job has been intentionally removed. Both explicit run lookup
+and deterministic newest-result lookup authorize the metadata row before the
+artifact is opened; missing and cross-project retained IDs return the same
+`404` response.
+
 The periodic cleanup order is expired-result retention, per-job result
 pruning, artifact reconciliation, expired submission-idempotency deletion,
 then webhook tombstone scrubbing. Retention

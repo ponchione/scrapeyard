@@ -206,6 +206,7 @@ class ResultMetadata:
     """Cross-database result metadata used for webhook payload enrichment."""
 
     job_id: str
+    project: str
     run_id: str
     status: str
     record_count: int | None
