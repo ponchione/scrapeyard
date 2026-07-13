@@ -6,6 +6,7 @@ import pytest
 
 from scrapeyard.storage.filesystem import (
     ensure_directory,
+    read_bytes_file_no_follow,
     read_json_file,
     read_json_file_no_follow,
     remove_directories,
@@ -124,6 +125,17 @@ def test_read_json_no_follow_rejects_symlink(tmp_path):
         read_json_file_no_follow(link)
 
     assert target.read_text(encoding="utf-8") == '{"keep": true}'
+
+
+def test_read_bytes_no_follow_round_trips_and_rejects_symlink(tmp_path):
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"preserve-me")
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+
+    assert read_bytes_file_no_follow(target) == b"preserve-me"
+    with pytest.raises(OSError):
+        read_bytes_file_no_follow(link)
 
 
 def test_remove_directories_removes_existing(tmp_path):

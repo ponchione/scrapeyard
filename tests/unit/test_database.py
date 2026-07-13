@@ -327,6 +327,24 @@ async def test_db_transaction_rolls_back_on_exception(tmp_path):
         assert not db.in_transaction
 
 
+async def test_db_transaction_rolls_back_when_commit_fails(tmp_path, monkeypatch):
+    async with aiosqlite.connect(tmp_path / "transaction.db") as db:
+        await db.execute("CREATE TABLE values_table (value TEXT)")
+        await db.commit()
+
+        async def fail_commit() -> None:
+            raise OSError("commit failed")
+
+        monkeypatch.setattr(db, "commit", fail_commit)
+        with pytest.raises(OSError, match="commit failed"):
+            async with db_transaction(db):
+                await db.execute("INSERT INTO values_table VALUES ('rolled-back')")
+
+        cursor = await db.execute("SELECT COUNT(*) FROM values_table")
+        assert (await cursor.fetchone())[0] == 0
+        assert not db.in_transaction
+
+
 async def test_db_transaction_rolls_back_on_cancellation(tmp_path):
     async with aiosqlite.connect(tmp_path / "transaction.db") as db:
         await db.execute("CREATE TABLE values_table (value TEXT)")

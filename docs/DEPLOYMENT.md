@@ -675,7 +675,9 @@ also invokes terminal-intent repair before replacing the run.
 
 Result data has unavoidable cross-system boundaries. `results.json` is written
 on the filesystem before `results_meta.db` commits, and both precede the
-terminal `jobs.db` transaction. A crash can therefore leave an orphaned result
+terminal `jobs.db` transaction. A normal metadata-commit failure restores the
+previous same-run artifact (or removes a newly created artifact). A process
+crash can still leave an orphaned result
 artifact or a terminal run whose result metadata is absent. Periodic artifact
 reconciliation removes only sufficiently old, unowned filesystem orphans and
 reports metadata-backed failures without repairing them. Startup webhook repair reads result

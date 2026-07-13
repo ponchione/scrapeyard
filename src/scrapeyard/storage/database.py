@@ -396,7 +396,12 @@ async def db_transaction(
         raise
     else:
         if db.in_transaction:
-            await db.commit()
+            try:
+                await db.commit()
+            except BaseException:
+                if db.in_transaction:
+                    await db.rollback()
+                raise
 
 
 async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
