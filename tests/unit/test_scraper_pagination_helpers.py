@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -373,3 +375,211 @@ async def test_paginated_fetch_uses_one_overall_deadline():
         )
 
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
+
+
+@pytest.mark.asyncio
+async def test_blocking_pagination_dns_does_not_block_event_loop(monkeypatch):
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_resolver(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=1)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 0),
+            )
+        ]
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        blocking_resolver,
+    )
+    fetch_page = AsyncMock(
+        return_value=FetchOutcome(
+            page=_Page([]),
+            debug={"final_url": "https://example.com/page-2"},
+        )
+    )
+    task = asyncio.create_task(
+        paginate_target(
+            page=_Page([_Element("/page-2")]),
+            target=target,
+            result=TargetResult(url=target.url, debug={"final_url": target.url}),
+            fetch_target_page=fetch_page,
+            extract_page_data=MagicMock(return_value=[]),
+            retry_handler=MagicMock(),
+            fetcher_cls=object(),
+            adaptive=False,
+            retryable_status=set(),
+            adaptive_dir="/tmp/adaptive",
+            proxy_url=None,
+            artifacts_dir=None,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 0.2)
+        event_loop_progress = asyncio.Event()
+        asyncio.get_running_loop().call_soon(event_loop_progress.set)
+        await asyncio.wait_for(event_loop_progress.wait(), timeout=0.1)
+    finally:
+        release.set()
+    await asyncio.wait_for(task, timeout=1)
+    fetch_page.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pagination_resolver_error_stops_before_fetch(monkeypatch):
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+
+    def failed_resolver(*_args, **_kwargs):
+        raise socket.gaierror("resolver unavailable")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        failed_resolver,
+    )
+    fetch_page = AsyncMock()
+
+    await paginate_target(
+        page=_Page([_Element("https://unresolved.example.test/page-2")]),
+        target=target,
+        result=TargetResult(url=target.url, debug={"final_url": target.url}),
+        fetch_target_page=fetch_page,
+        extract_page_data=MagicMock(),
+        retry_handler=MagicMock(),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status=set(),
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pagination_dns_lookup_obeys_run_deadline(monkeypatch):
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+    release = threading.Event()
+
+    def blocking_resolver(*_args, **_kwargs):
+        release.wait(timeout=1)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 0),
+            )
+        ]
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        blocking_resolver,
+    )
+    budget = RunBudget(
+        max_duration_seconds=0.01,
+        max_fetched_bytes=1000,
+        max_extracted_records=10,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1000,
+    )
+    try:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await asyncio.wait_for(
+                paginate_target(
+                    page=_Page([_Element("/page-2")]),
+                    target=target,
+                    result=TargetResult(
+                        url=target.url,
+                        debug={"final_url": target.url},
+                    ),
+                    fetch_target_page=AsyncMock(),
+                    extract_page_data=MagicMock(),
+                    retry_handler=MagicMock(),
+                    fetcher_cls=object(),
+                    adaptive=False,
+                    retryable_status=set(),
+                    adaptive_dir="/tmp/adaptive",
+                    proxy_url=None,
+                    artifacts_dir=None,
+                    budget=budget,
+                ),
+                timeout=0.2,
+            )
+    finally:
+        release.set()
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
+
+
+@pytest.mark.asyncio
+async def test_pagination_dns_lookup_is_cancellable(monkeypatch):
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_resolver(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=1)
+        return []
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        blocking_resolver,
+    )
+    task = asyncio.create_task(
+        paginate_target(
+            page=_Page([_Element("/page-2")]),
+            target=target,
+            result=TargetResult(url=target.url, debug={"final_url": target.url}),
+            fetch_target_page=AsyncMock(),
+            extract_page_data=MagicMock(),
+            retry_handler=MagicMock(),
+            fetcher_cls=object(),
+            adaptive=False,
+            retryable_status=set(),
+            adaptive_dir="/tmp/adaptive",
+            proxy_url=None,
+            artifacts_dir=None,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 0.2)
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
