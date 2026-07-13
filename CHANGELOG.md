@@ -20,6 +20,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   references in submitted YAML.
 
 ### Changed
+- Updated Click from 8.3.1 to 8.4.2 after a newly published command-injection
+  advisory caused both development and production dependency gates to fail.
 - Restricted stealth browser `additional_arguments` to bounded, typed,
   YAML-safe Camoufox values (`locale`, `fonts`, `custom_fonts_only`, and
   `window`); Python-object fingerprint and screen controls are rejected.
@@ -27,6 +29,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Restored aggregate fetched-byte accounting for real Scrapling response
+  objects and made run deadlines return without waiting indefinitely for
+  cancellation-resistant awaitables.
+- Rejected final-component symlinks during normal result retrieval, matching
+  the artifact reconciliation safety policy.
+- Treated oversized numeric `Retry-After` headers as out of range, and checked
+  webhook delivery age before constructing a potentially overflowing retry
+  timestamp.
 - Authorized submit/schedule scopes before parsing secret-bearing YAML and
   prevented project-scoped callers from resolving another project's secrets.
 - Paced real target starts after concurrency admission, preserved pipes inside

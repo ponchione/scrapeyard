@@ -16,8 +16,8 @@ reliability and production-hardening work; they are not an active backlog.
 | 16-25 | Idempotency, schedule management, API contracts, scoped authentication, encrypted secrets, metrics/readiness, deployment hardening, full-source typing, packaging, and single-instance enforcement | API/runtime hardening commit `d76fd40`, the 0.6.0 changelog, and qualification tests |
 
 Subsequent commits on `main` refine these invariants. Dependency auditing is
-continuous rather than a one-time task; the lock was refreshed again on
-2026-07-13 after a new Click advisory appeared.
+continuous rather than a one-time task; commit `48cf0ab` refreshed the lock
+again on 2026-07-13 after a new Click advisory appeared.
 
 New work should be documented in a current issue, plan, or handoff rather than
 by interpreting the historical Problem sections below as present-tense state.
