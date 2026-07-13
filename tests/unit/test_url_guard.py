@@ -283,6 +283,23 @@ def test_url_host_label_strips_userinfo_and_preserves_port() -> None:
     assert url_host_label("https://user:pass@Example.COM:8443/products") == "example.com:8443"
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://EXAMPLE.com./path", "example.com"),
+        ("http://example.com:80/path", "example.com"),
+        ("https://example.com:443/path", "example.com"),
+        ("https://example.com:8443/path", "example.com:8443"),
+        ("https://bücher.example/path", "xn--bcher-kva.example"),
+        ("https://xn--bcher-kva.example/path", "xn--bcher-kva.example"),
+        ("https://[2001:0db8::1]:443/path", "[2001:db8::1]"),
+        ("https://[2001:db8::1]:8443/path", "[2001:db8::1]:8443"),
+    ],
+)
+def test_url_host_label_canonicalizes_logical_origin(url: str, expected: str) -> None:
+    assert url_host_label(url) == expected
+
+
 def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:
     value = {
         "headers": {"Authorization": "Bearer secret", "X-Test": "visible"},

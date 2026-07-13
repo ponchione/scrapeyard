@@ -49,6 +49,7 @@ from scrapeyard.engine.url_guard import (
     assert_public_url,
     redact_userinfo_in_text,
     resolve_public_url,
+    url_host_label,
 )
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -127,7 +128,7 @@ def _extract_page_data(
 def _normalized_adaptive_domain(target: TargetConfig) -> str:
     if target.adaptive_domain:
         return target.adaptive_domain.strip().lower()
-    return urlparse(target.url).hostname or "unknown-host"
+    return url_host_label(target.url)
 
 
 def _adaptive_storage_url(target: TargetConfig) -> str:

@@ -9,7 +9,7 @@ import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
-from scrapeyard.engine.pagination import paginate_target
+from scrapeyard.engine.pagination import paginate_target, pagination_url_key
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
 from scrapeyard.engine.url_guard import URLResolutionError
 
@@ -37,6 +37,27 @@ class _Page:
     def xpath(self, selector: str):
         assert selector == "//a[contains(., 'Next')]"
         return self._xpath_links
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("https://EXAMPLE.com./products", "https://example.com:443/products#top"),
+        (
+            "https://bücher.example/products?page=1",
+            "https://xn--bcher-kva.example/products?page=1#next",
+        ),
+        ("https://[2001:0db8::1]/products", "https://[2001:db8::1]:443/products"),
+    ],
+)
+def test_pagination_url_key_uses_canonical_url_identity(first: str, second: str):
+    assert pagination_url_key(first) == pagination_url_key(second)
+
+
+def test_pagination_url_key_keeps_non_default_ports_separate():
+    assert pagination_url_key("https://example.com/products") != pagination_url_key(
+        "https://example.com:8443/products"
+    )
 
 
 @pytest.mark.asyncio

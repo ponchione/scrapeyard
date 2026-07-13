@@ -350,6 +350,29 @@ def test_resolve_target_runtime_context_strips_userinfo_from_domain():
     assert context.artifacts_dir == "/tmp/artifacts/shop.example:8443"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://BÜCHER.example./products",
+        "https://xn--bcher-kva.example:443/products",
+    ],
+)
+def test_resolve_target_runtime_context_uses_canonical_protection_domain(url):
+    target_cfg = MagicMock(url=url, proxy=None)
+    config = MagicMock(adaptive=False, schedule=None, proxy=None)
+    settings = MagicMock(proxy_url="")
+
+    context = resolve_target_runtime_context(
+        target_cfg=target_cfg,
+        config=config,
+        settings=settings,
+        run_artifacts_dir="/tmp/artifacts",
+    )
+
+    assert context.domain == "xn--bcher-kva.example"
+    assert context.artifacts_dir == "/tmp/artifacts/xn--bcher-kva.example"
+
+
 def test_resolve_target_runtime_context_enables_adaptive_for_scheduled_jobs_when_unspecified():
     target_cfg = MagicMock(url="https://shop.example/products", proxy=None)
     config = MagicMock()
@@ -564,6 +587,28 @@ def test_format_output_keeps_same_domain_targets_separate():
 
     assert payload["results"]["shop.example"]["data"] == [{"sku": "a"}]
     assert payload["results"]["shop.example#2"]["data"] == [{"sku": "b"}]
+
+
+def test_format_output_uses_canonical_source_grouping():
+    config = MagicMock(project="test", name="job")
+    config.output.group_by = GroupBy.merge
+    results = [
+        TargetResult(
+            url="https://BÜCHER.example.:443/products",
+            status="success",
+            data=[{"sku": "a"}],
+        )
+    ]
+
+    payload = _format_output(
+        config,
+        results,
+        "job-1",
+        JobStatus.complete,
+        [],
+    )
+
+    assert payload["results"] == [{"sku": "a", "_source": "xn--bcher-kva.example"}]
 
 
 def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
