@@ -22,7 +22,11 @@ class TransformTimeoutError(ValueError):
 
 
 class TransformOutputLimitError(ValueError):
-    """Raised before a transform can allocate an oversized selector value."""
+    """Raised before extraction can retain an oversized selector value.
+
+    The historical exception name is retained for compatibility.  The limit
+    now applies to every selector value, whether or not it has transforms.
+    """
 
 
 def transform_pipeline_limit() -> int:
@@ -102,7 +106,9 @@ def parse_transform_pipeline(raw: str) -> list[Callable[[str], str]]:
     return [parse_transform(step) for step in steps]
 
 
-def _transform_value_limit() -> int:
+def selector_value_limit() -> int:
+    """Return the UTF-8 byte ceiling applied to every selector value."""
+
     return int(
         getattr(
             get_settings(),
@@ -114,13 +120,15 @@ def _transform_value_limit() -> int:
 
 def _raise_output_limit(observed: int, limit: int) -> None:
     raise TransformOutputLimitError(
-        f"Selector transform value exceeds {limit} UTF-8 bytes "
+        f"Selector value exceeds {limit} UTF-8 bytes "
         f"(predicted {observed})"
     )
 
 
-def _checked_utf8_size(value: str, *, limit: int | None = None) -> int:
-    resolved_limit = _transform_value_limit() if limit is None else limit
+def checked_selector_value_size(value: str, *, limit: int | None = None) -> int:
+    """Return a value's UTF-8 size, rejecting it before avoidable allocation."""
+
+    resolved_limit = selector_value_limit() if limit is None else limit
     # Every Unicode code point occupies at least one UTF-8 byte. Avoid making a
     # second large allocation merely to discover an already-over-limit value.
     if len(value) > resolved_limit:
@@ -131,27 +139,42 @@ def _checked_utf8_size(value: str, *, limit: int | None = None) -> int:
     return size
 
 
+def checked_combined_selector_value_size(
+    values: tuple[str, ...],
+    *,
+    separator_bytes: int = 0,
+) -> int:
+    """Validate a prospective concatenation before allocating the result."""
+
+    limit = selector_value_limit()
+    observed = sum(checked_selector_value_size(value, limit=limit) for value in values)
+    observed += separator_bytes * max(0, len(values) - 1)
+    if observed > limit:
+        _raise_output_limit(observed, limit)
+    return observed
+
+
 def _bounded(transform: Callable[[str], str]) -> Callable[[str], str]:
     def _apply(value: str) -> str:
-        _checked_utf8_size(value)
+        checked_selector_value_size(value)
         transformed = transform(value)
-        _checked_utf8_size(transformed)
+        checked_selector_value_size(transformed)
         return transformed
 
     return _apply
 
 
 def _bounded_concat(value: str, addition: str, *, prepend: bool) -> str:
-    limit = _transform_value_limit()
-    predicted = _checked_utf8_size(value, limit=limit) + len(addition.encode("utf-8"))
+    limit = selector_value_limit()
+    predicted = checked_selector_value_size(value, limit=limit) + len(addition.encode("utf-8"))
     if predicted > limit:
         _raise_output_limit(predicted, limit)
     return addition + value if prepend else value + addition
 
 
 def _bounded_literal_replace(value: str, old: str, new: str) -> str:
-    limit = _transform_value_limit()
-    current = _checked_utf8_size(value, limit=limit)
+    limit = selector_value_limit()
+    current = checked_selector_value_size(value, limit=limit)
     occurrences = value.count(old)
     predicted = current + occurrences * (
         len(new.encode("utf-8")) - len(old.encode("utf-8"))
@@ -168,8 +191,8 @@ def _bounded_regex_replace(
 ) -> str:
     """Build a regex replacement incrementally under the value byte ceiling."""
 
-    limit = _transform_value_limit()
-    _checked_utf8_size(value, limit=limit)
+    limit = selector_value_limit()
+    checked_selector_value_size(value, limit=limit)
     output = io.StringIO()
     output_bytes = 0
     last_end = 0
@@ -354,8 +377,8 @@ def parse_transform(raw: str) -> Callable[[str], str]:
 
 def apply_transforms(value: str, transforms: list[Callable[[str], str]]) -> str:
     """Chain transforms left-to-right, returning the final string."""
-    _checked_utf8_size(value)
+    checked_selector_value_size(value)
     for transform in transforms:
         value = transform(value)
-        _checked_utf8_size(value)
+        checked_selector_value_size(value)
     return value

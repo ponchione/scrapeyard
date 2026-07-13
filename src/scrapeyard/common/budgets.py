@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -85,7 +86,9 @@ class RunBudget:
         self._fetched_bytes = 0
         self._extracted_records = 0
         self._browser_debug_bytes = 0
+        self._estimated_result_bytes = 0
         self._counter_lock = asyncio.Lock()
+        self._result_counter_lock = threading.Lock()
         self._exhausted: BudgetExceeded | None = None
 
     @classmethod
@@ -145,6 +148,10 @@ class RunBudget:
     @property
     def browser_debug_bytes(self) -> int:
         return self._browser_debug_bytes
+
+    @property
+    def estimated_result_bytes(self) -> int:
+        return self._estimated_result_bytes
 
     @property
     def remaining_browser_debug_bytes(self) -> int:
@@ -244,6 +251,29 @@ class RunBudget:
                 amount,
             )
             raise self._exhausted
+
+    def reserve_estimated_result_bytes(self, amount: int) -> None:
+        """Reserve extracted JSON bytes before retaining another value.
+
+        Extraction is synchronous today, but a regular lock keeps this counter
+        safe if extraction later moves to worker threads.  Exact serialization
+        remains the final authority for non-extraction metadata and escaping.
+        """
+
+        if amount < 0:
+            raise ValueError("Estimated result byte amount cannot be negative")
+        self.check_deadline()
+        with self._result_counter_lock:
+            self.check_deadline()
+            observed = self._estimated_result_bytes + amount
+            if observed > self.max_serialized_result_bytes:
+                self._exhausted = BudgetExceeded(
+                    BudgetLimitName.serialized_result_bytes,
+                    self.max_serialized_result_bytes,
+                    observed,
+                )
+                raise self._exhausted
+            self._estimated_result_bytes = observed
 
     async def reserve_browser_debug_bytes(
         self,

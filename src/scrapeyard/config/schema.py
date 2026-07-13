@@ -59,6 +59,9 @@ MAX_PAGINATION_PAGES = 100
 MAX_RETRY_ATTEMPTS = 10
 MAX_RETRY_BACKOFF_SECONDS = 300
 MAX_RETRYABLE_STATUSES = 32
+MAX_SELECTORS_PER_TARGET = 100
+MAX_SELECTOR_FIELD_NAME_CHARS = 256
+MAX_SELECTOR_QUERY_CHARS = 4096
 MAX_TARGETS_PER_JOB = 100
 MAX_WEBHOOK_TIMEOUT_SECONDS = 60
 
@@ -224,7 +227,7 @@ class StockDetectionConfig(StrictConfigModel):
 class SelectorLong(StrictConfigModel):
     """Long-form selector with explicit type and optional transform."""
 
-    query: str
+    query: str = Field(min_length=1, max_length=MAX_SELECTOR_QUERY_CHARS)
     type: SelectorType = SelectorType.css
     transform: Optional[str] = None
 
@@ -242,6 +245,16 @@ class SelectorLong(StrictConfigModel):
 
 # A selector value is either a short-form string or a long-form object.
 SelectorValue = Union[str, SelectorLong]
+
+
+def _validate_short_selector_query(value: str) -> str:
+    if not value:
+        raise ValueError("Selector queries must not be blank")
+    if len(value) > MAX_SELECTOR_QUERY_CHARS:
+        raise ValueError(
+            f"Selector queries must not exceed {MAX_SELECTOR_QUERY_CHARS} characters"
+        )
+    return value
 
 
 def _validate_http_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -295,6 +308,13 @@ class PaginationConfig(StrictConfigModel):
         le=MAX_PAGINATION_PAGES,
         description="Maximum pages to scrape",
     )
+
+    @field_validator("next")
+    @classmethod
+    def _validate_next_selector(cls, value: SelectorValue) -> SelectorValue:
+        if isinstance(value, str):
+            _validate_short_selector_query(value)
+        return value
 
 
 class BrowserActionConfig(StrictConfigModel):
@@ -616,6 +636,7 @@ class TargetConfig(StrictConfigModel):
     selectors: dict[str, SelectorValue] = Field(
         ...,
         min_length=1,
+        max_length=MAX_SELECTORS_PER_TARGET,
         description="Named selector definitions",
     )
     pagination: Optional[PaginationConfig] = None
@@ -639,6 +660,29 @@ class TargetConfig(StrictConfigModel):
             assert_public_url(value)
         except UnsafeURLError as exc:
             raise ValueError(str(exc)) from exc
+        return value
+
+    @field_validator("item_selector")
+    @classmethod
+    def _validate_item_selector(cls, value: SelectorValue | None) -> SelectorValue | None:
+        if isinstance(value, str):
+            _validate_short_selector_query(value)
+        return value
+
+    @field_validator("selectors")
+    @classmethod
+    def _validate_selectors(
+        cls,
+        value: dict[str, SelectorValue],
+    ) -> dict[str, SelectorValue]:
+        for name, selector in value.items():
+            if not name or len(name) > MAX_SELECTOR_FIELD_NAME_CHARS:
+                raise ValueError(
+                    "Selector field names must contain between 1 and "
+                    f"{MAX_SELECTOR_FIELD_NAME_CHARS} characters"
+                )
+            if isinstance(selector, str):
+                _validate_short_selector_query(selector)
         return value
 
 

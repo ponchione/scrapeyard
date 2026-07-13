@@ -71,14 +71,33 @@ class ScrapePageResult:
     page_data: list[dict[str, Any]]
 
 
-def _extract_page_data(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
+def _extract_page_data(
+    page: Any,
+    target: TargetConfig,
+    *,
+    budget: RunBudget | None = None,
+) -> list[dict[str, Any]]:
     """Extract records and enrich with pricing visibility and stock status detection."""
+    reserve_output_bytes = budget.reserve_estimated_result_bytes if budget is not None else None
     if target.item_selector is not None:
         items = select_items_strict(page, target.item_selector)
-        data = [extract_selectors_strict(item, target.selectors) for item in items]
+        data = [
+            extract_selectors_strict(
+                item,
+                target.selectors,
+                reserve_output_bytes=reserve_output_bytes,
+            )
+            for item in items
+        ]
     else:
         items = [page]
-        data = [extract_selectors_strict(page, target.selectors)]
+        data = [
+            extract_selectors_strict(
+                page,
+                target.selectors,
+                reserve_output_bytes=reserve_output_bytes,
+            )
+        ]
 
     for item_data, element in zip(data, items, strict=False):
         enrich_item_detection(item_data, element, target.map_detection, target.stock_detection)
@@ -396,7 +415,7 @@ async def _scrape_first_page(
     )
     result.debug = outcome.debug
     result.debug.update(_selector_debug(outcome.page, target))
-    page_data = _extract_page_data(outcome.page, target)
+    page_data = _extract_page_data(outcome.page, target, budget=context.budget)
     if adaptive:
         log_adaptive_selector_gap(target, page_data)
     if context.budget is not None:
@@ -421,7 +440,11 @@ async def _scrape_paginated_pages(
         target=target,
         result=result,
         fetch_target_page=_fetch_target_page,
-        extract_page_data=_extract_page_data,
+        extract_page_data=lambda page, target: _extract_page_data(
+            page,
+            target,
+            budget=context.budget,
+        ),
         retry_handler=context.retry_handler,
         fetcher_cls=context.fetcher_cls,
         adaptive=adaptive,

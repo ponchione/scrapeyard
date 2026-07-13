@@ -130,6 +130,51 @@ webhook:
 
 
 @pytest.mark.asyncio
+async def test_estimated_result_growth_fails_before_persisting_oversized_artifact(
+    tmp_path,
+):
+    run_id = "run-result-byte-budget"
+    job_store, result_store, error_store = _stores(run_id)
+    config = """
+project: test
+name: budget-job
+target:
+  url: https://one.example.com
+  selectors:
+    title: h1
+"""
+
+    async def exceed_result_budget(target, *_args, budget, **_kwargs):
+        budget.reserve_estimated_result_bytes(4_000)
+        budget.reserve_estimated_result_bytes(200)
+        raise AssertionError("unreachable")
+
+    with patch("scrapeyard.queue.worker.scrape_target", exceed_result_budget), patch(
+        "scrapeyard.queue.worker.get_settings",
+        return_value=_settings(tmp_path, run_max_serialized_result_bytes=4096),
+    ):
+        await scrape_task(
+            "job-budget",
+            config,
+            run_id=run_id,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    budget_error = error_store.log_error.await_args.args[0]
+    assert budget_error.error_type is ErrorType.budget_exceeded
+    assert budget_error.budget.limit_name == "serialized_result_bytes"
+    result_store.save_result.assert_awaited_once()
+    terminal_data = result_store.save_result.await_args.args[1]
+    assert terminal_data["status"] == "failed"
+    assert terminal_data["results"] == {}
+    assert result_store.save_result.await_args.kwargs["record_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_deadline_cancels_browser_targets_and_releases_permit(tmp_path):
     run_id = "run-deadline"
     job_store, result_store, error_store = _stores(run_id)
