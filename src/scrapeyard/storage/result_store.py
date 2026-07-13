@@ -26,7 +26,6 @@ from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
-    read_json_file,
     read_json_file_no_follow,
     remove_directories,
     serialize_json_bytes,
@@ -326,7 +325,7 @@ class LocalResultStore:
         file_path = row["file_path"]
 
         path = self._checked_result_dir(str(file_path)) / "results.json"
-        data = await asyncio.to_thread(read_json_file, path)
+        data = await asyncio.to_thread(read_json_file_no_follow, path)
         return ResultPayload(run_id=result_run_id, data=data, status=status)
 
     async def get_result_metadata(
