@@ -965,6 +965,7 @@ class TestRetryAfter:
         [
             (429, "bogus", "malformed"),
             (429, "-1", "malformed"),
+            (429, "9" * 309, "out_of_range"),
             (
                 503,
                 "Fri, 10 Jul 2026 11:59:59 GMT",
@@ -990,6 +991,67 @@ class TestRetryAfter:
         )
         assert delay is None
         assert action == expected_action
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_retry_after_uses_normal_backoff(
+        self,
+        monkeypatch,
+    ) -> None:
+        created = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+        outbox = MemoryWebhookOutboxStore()
+        delivery = await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="retry-after-out-of-range",
+            created_at=created,
+        )
+        client = AsyncMock()
+        client.post.return_value = httpx.Response(
+            429,
+            headers={"Retry-After": "9" * 309},
+            request=httpx.Request("POST", "https://example.com"),
+        )
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            outbox_store=outbox,
+            backoff_base=1,
+        )
+        monkeypatch.setattr("scrapeyard.webhook.dispatcher.utc_now", lambda: created)
+
+        await dispatcher._process_delivery(delivery)
+
+        persisted = outbox.deliveries[delivery.delivery_id]
+        assert persisted.status is WebhookDeliveryStatus.pending
+        assert persisted.next_attempt_at == created + timedelta(seconds=1)
+
+    @pytest.mark.asyncio
+    async def test_large_finite_retry_after_exhausts_age_without_datetime_overflow(
+        self,
+        monkeypatch,
+    ) -> None:
+        created = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+        outbox = MemoryWebhookOutboxStore()
+        delivery = await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="retry-after-finite-overflow",
+            created_at=created,
+        )
+        client = AsyncMock()
+        client.post.return_value = httpx.Response(
+            503,
+            headers={"Retry-After": "9" * 308},
+            request=httpx.Request("POST", "https://example.com"),
+        )
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            outbox_store=outbox,
+        )
+        monkeypatch.setattr("scrapeyard.webhook.dispatcher.utc_now", lambda: created)
+
+        await dispatcher._process_delivery(delivery)
+
+        persisted = outbox.deliveries[delivery.delivery_id]
+        assert persisted.status is WebhookDeliveryStatus.failed
+        assert persisted.failure_reason is WebhookFailureReason.age_exhausted
 
     @pytest.mark.asyncio
     async def test_retry_after_cannot_extend_beyond_maximum_age(

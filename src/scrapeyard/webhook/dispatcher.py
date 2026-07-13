@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -272,7 +273,10 @@ class HttpWebhookDispatcher:
 
         value = raw_value.strip()
         if value.isdigit():
-            return float(int(value)), "accepted_delta_seconds"
+            delay = float(value)
+            if not math.isfinite(delay):
+                return None, "out_of_range"
+            return delay, "accepted_delta_seconds"
 
         try:
             parsed = parsedate_to_datetime(value)
@@ -768,8 +772,8 @@ class HttpWebhookDispatcher:
             self._backoff_delay(max(reserved.attempts - 1, 0)),
             result.retry_after_seconds or 0.0,
         )
-        retry_at = completed_at + timedelta(seconds=delay)
-        if self._as_utc(retry_at) >= deadline:
+        remaining_seconds = (deadline - self._as_utc(completed_at)).total_seconds()
+        if delay >= remaining_seconds:
             await self._fail_delivery(
                 reserved,
                 failed_at=completed_at,
@@ -777,6 +781,7 @@ class HttpWebhookDispatcher:
                 last_error="Next retry cannot occur before maximum delivery age",
             )
             return
+        retry_at = completed_at + timedelta(seconds=delay)
 
         await self._outbox_store.mark_retryable_failure(
             reserved.delivery_id,
