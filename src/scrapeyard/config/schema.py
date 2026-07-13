@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Optional, Union, get_args, get_origin
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     HttpUrl,
     PrivateAttr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -191,6 +192,41 @@ class StrictConfigModel(BaseModel):
     """Base for user-facing YAML config models; unknown keys are errors."""
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_boolean_numeric_values(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        """Keep YAML booleans from silently becoming numeric controls."""
+
+        def contains(annotation: object, expected: type[object]) -> bool:
+            if annotation is expected:
+                return True
+            return any(contains(arg, expected) for arg in get_args(annotation))
+
+        if info.field_name is None:
+            return value
+        field = cls.model_fields[info.field_name]
+        annotation = field.annotation
+        accepts_bool = contains(annotation, bool)
+        numeric = contains(annotation, int) or contains(annotation, float)
+        if isinstance(value, bool) and numeric and not accepts_bool:
+            raise ValueError("numeric configuration values must not be booleans")
+
+        origin = get_origin(annotation)
+        args = get_args(annotation)
+        if (
+            origin is list
+            and args
+            and contains(args[0], int)
+            and isinstance(value, list)
+            and any(isinstance(item, bool) for item in value)
+        ):
+            raise ValueError("numeric configuration values must not be booleans")
+        return value
 
 
 def _validate_pattern_list(
@@ -464,7 +500,7 @@ class BrowserActionConfig(StrictConfigModel):
     )
     wait_for_selector: str | None = Field(
         default=None,
-        description="Optional CSS selector to wait for after each repeat_click",
+        description="Optional CSS selector to wait for after click or repeat_click",
     )
 
     @field_validator("pixels")
@@ -488,6 +524,47 @@ class BrowserActionConfig(StrictConfigModel):
             raise ValueError(f"{self.type.value} action requires 'selector'")
         if self.type == BrowserActionType.wait_ms and self.wait_ms is None:
             raise ValueError("wait_ms action requires 'wait_ms'")
+
+        allowed_fields = {
+            BrowserActionType.click: {
+                "type",
+                "selector",
+                "optional",
+                "timeout_ms",
+                "wait_ms",
+                "wait_for_selector",
+            },
+            BrowserActionType.wait_for_selector: {
+                "type",
+                "selector",
+                "optional",
+                "timeout_ms",
+                "wait_ms",
+            },
+            BrowserActionType.wait_ms: {"type", "optional", "wait_ms"},
+            BrowserActionType.scroll: {
+                "type",
+                "optional",
+                "wait_ms",
+                "times",
+                "pixels",
+            },
+            BrowserActionType.repeat_click: {
+                "type",
+                "selector",
+                "optional",
+                "timeout_ms",
+                "wait_ms",
+                "max_times",
+                "wait_for_selector",
+            },
+        }
+        unsupported = sorted(self.model_fields_set - allowed_fields[self.type])
+        if unsupported:
+            raise ValueError(
+                f"{self.type.value} action does not use field(s): "
+                + ", ".join(unsupported)
+            )
         return self
 
 
@@ -793,6 +870,12 @@ class TargetConfig(StrictConfigModel):
             if isinstance(selector, str):
                 _validate_short_selector_query(selector)
         return value
+
+    @model_validator(mode="after")
+    def _reject_browser_config_for_basic_fetcher(self) -> TargetConfig:
+        if self.fetcher is FetcherType.basic and self.browser is not None:
+            raise ValueError("browser configuration requires a dynamic or stealthy fetcher")
+        return self
 
 
 class RetryConfig(StrictConfigModel):

@@ -42,9 +42,11 @@ from scrapeyard.config.schema import (
     MAX_TARGETS_PER_JOB,
     MAX_WEBHOOK_TIMEOUT_SECONDS,
     BrowserConfig,
+    BrowserActionConfig,
     ExecutionConfig,
     PaginationConfig,
     RetryConfig,
+    StrictConfigModel,
     StockPatternConfig,
     ValidationConfig,
 )
@@ -267,6 +269,7 @@ project: alpha
 name: shared
 target:
   url: https://example.com
+  fetcher: dynamic
   browser:
     extra_headers:
       X-Shared: ${SCRAPEYARD_SECRET_SHARED}
@@ -362,6 +365,7 @@ class TestResolvedTargets:
             **_tier1_config(
                 target=_target_dict(
                     adaptive_domain="example.com",
+                    fetcher="dynamic",
                     browser={
                         "timeout_ms": 90000,
                         "disable_resources": False,
@@ -391,6 +395,7 @@ class TestResolvedTargets:
         config = ScrapeConfig(
             **_tier1_config(
                 target=_target_dict(
+                    fetcher="dynamic",
                     browser={
                         "actions": [
                             {"type": "click", "selector": "#accept", "optional": True},
@@ -424,8 +429,61 @@ class TestResolvedTargets:
     def test_browser_action_missing_required_selector_raises(self):
         with pytest.raises(ValidationError, match="requires 'selector'"):
             ScrapeConfig(
-                **_tier1_config(target=_target_dict(browser={"actions": [{"type": "click"}]}))
+                **_tier1_config(
+                    target=_target_dict(
+                        fetcher="dynamic",
+                        browser={"actions": [{"type": "click"}]},
+                    )
+                )
             )
+
+    def test_basic_fetcher_rejects_browser_configuration(self):
+        with pytest.raises(ValidationError, match="dynamic or stealthy"):
+            TargetConfig(
+                url="https://example.com",
+                fetcher="basic",
+                selectors={"title": "h1"},
+                browser={"actions": [{"type": "scroll"}]},
+            )
+
+    @pytest.mark.parametrize(
+        ("action_type", "base", "field", "value"),
+        [
+            ("click", {"selector": "button"}, "times", 2),
+            ("click", {"selector": "button"}, "pixels", 900),
+            ("click", {"selector": "button"}, "max_times", 2),
+            ("wait_for_selector", {"selector": ".ready"}, "times", 2),
+            ("wait_for_selector", {"selector": ".ready"}, "pixels", 900),
+            ("wait_for_selector", {"selector": ".ready"}, "max_times", 2),
+            (
+                "wait_for_selector",
+                {"selector": ".ready"},
+                "wait_for_selector",
+                ".other",
+            ),
+            ("wait_ms", {"wait_ms": 1}, "selector", ".unused"),
+            ("wait_ms", {"wait_ms": 1}, "timeout_ms", 100),
+            ("wait_ms", {"wait_ms": 1}, "times", 2),
+            ("wait_ms", {"wait_ms": 1}, "pixels", 900),
+            ("wait_ms", {"wait_ms": 1}, "max_times", 2),
+            ("wait_ms", {"wait_ms": 1}, "wait_for_selector", ".unused"),
+            ("scroll", {}, "selector", ".unused"),
+            ("scroll", {}, "timeout_ms", 100),
+            ("scroll", {}, "max_times", 2),
+            ("scroll", {}, "wait_for_selector", ".unused"),
+            ("repeat_click", {"selector": "button"}, "times", 2),
+            ("repeat_click", {"selector": "button"}, "pixels", 900),
+        ],
+    )
+    def test_browser_action_rejects_fields_unused_by_type(
+        self,
+        action_type,
+        base,
+        field,
+        value,
+    ):
+        with pytest.raises(ValidationError, match=rf"{action_type} action.*{field}"):
+            BrowserActionConfig(type=action_type, **base, **{field: value})
 
     def test_browser_cdp_url_rejects_local_destinations(self):
         with pytest.raises(ValidationError, match="non-public"):
@@ -566,6 +624,83 @@ class TestResolvedTargets:
     def test_numeric_runtime_config_rejects_values_that_can_hang_or_spin(self, model, kwargs):
         with pytest.raises(ValidationError):
             model(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("model", "field"),
+        [
+            (PaginationConfig, "max_pages"),
+            (BrowserConfig, "timeout_ms"),
+            (RetryConfig, "max_attempts"),
+            (RetryConfig, "backoff_max"),
+            (ValidationConfig, "min_results"),
+            (ExecutionConfig, "concurrency"),
+            (ExecutionConfig, "delay_between"),
+            (ExecutionConfig, "domain_rate_limit"),
+            (WebhookConfig, "timeout"),
+        ],
+    )
+    @pytest.mark.parametrize("boolean", [False, True])
+    def test_numeric_runtime_config_rejects_yaml_booleans(
+        self,
+        model,
+        field,
+        boolean,
+    ):
+        kwargs = {field: boolean}
+        if model is PaginationConfig:
+            kwargs["next"] = "a.next"
+        if model is WebhookConfig:
+            kwargs["url"] = "https://example.com/hook"
+
+        with pytest.raises(ValidationError) as exc_info:
+            model(**kwargs)
+
+        assert exc_info.value.errors()[0]["loc"] == (field,)
+        assert "must not be booleans" in str(exc_info.value)
+
+    @pytest.mark.parametrize("boolean", [False, True])
+    def test_retryable_status_rejects_yaml_booleans(self, boolean):
+        with pytest.raises(ValidationError) as exc_info:
+            RetryConfig(retryable_status=[500, boolean])
+
+        assert exc_info.value.errors()[0]["loc"] == ("retryable_status",)
+        assert "must not be booleans" in str(exc_info.value)
+
+    @pytest.mark.parametrize("boolean", [False, True])
+    def test_strict_yaml_numeric_policy_rejects_booleans_for_float_controls(self, boolean):
+        class FloatControlConfig(StrictConfigModel):
+            delay: float
+
+        with pytest.raises(ValidationError) as exc_info:
+            FloatControlConfig(delay=boolean)
+
+        assert exc_info.value.errors()[0]["loc"] == ("delay",)
+        assert "must not be booleans" in str(exc_info.value)
+
+    @pytest.mark.parametrize("boolean", [False, True])
+    def test_loaded_yaml_reports_nested_boolean_numeric_field_path(self, boolean):
+        raw = f"""
+project: test
+name: bool-control
+execution:
+  domain_rate_limit: {str(boolean).lower()}
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+
+        with pytest.raises(ValidationError) as exc_info:
+            load_config(raw)
+
+        assert exc_info.value.errors()[0]["loc"] == (
+            "execution",
+            "domain_rate_limit",
+        )
+
+    @pytest.mark.parametrize("boolean", [False, True])
+    def test_explicit_boolean_or_float_control_keeps_boolean_semantics(self, boolean):
+        assert BrowserConfig(humanize=boolean).humanize is boolean
 
     @pytest.mark.parametrize(
         ("model", "kwargs"),
