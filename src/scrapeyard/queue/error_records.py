@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scrapeyard.engine.resilience import CircuitBreaker
+from scrapeyard.engine.resilience import CircuitBreaker, CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 from scrapeyard.models.job import ActionTaken, BudgetErrorDetails, ErrorRecord, ErrorType
@@ -114,8 +114,11 @@ class TargetErrorRecorder:
             )
         )
 
-    def record_success(self, domain: str) -> None:
-        self.circuit_breaker.record_success(domain)
+    def record_success(self, domain: str, *, probe: CircuitProbe | None = None) -> None:
+        if probe is None:
+            self.circuit_breaker.record_success(domain)
+        else:
+            self.circuit_breaker.record_success(domain, probe)
 
     def record_target_failure(
         self,
@@ -128,8 +131,8 @@ class TargetErrorRecorder:
         action: ActionTaken = ActionTaken.fail,
         default_error_type: ErrorType = ErrorType.http_error,
         combine_errors: bool = False,
+        probe: CircuitProbe | None = None,
     ) -> None:
-        self.circuit_breaker.record_failure(domain)
         self.pending_errors.extend(
             build_target_result_error_records(
                 job_id=self.job_id,
@@ -144,6 +147,15 @@ class TargetErrorRecorder:
                 combine_errors=combine_errors,
             )
         )
+        if circuit_breaker_failure(result):
+            if probe is None:
+                self.circuit_breaker.record_failure(domain)
+            else:
+                self.circuit_breaker.record_failure(domain, probe)
+        elif probe is not None:
+            # A non-transient failure still proves the upstream answered the
+            # half-open probe, so it closes the availability circuit.
+            self.circuit_breaker.record_success(domain, probe)
 
     def record_validation_failure(
         self,
@@ -169,3 +181,15 @@ class TargetErrorRecorder:
         )
         self.pending_errors.append(record)
         return record
+
+
+def circuit_breaker_failure(result: TargetResult) -> bool:
+    """Whether a target failure is evidence of upstream unavailability."""
+
+    if result.http_status is not None:
+        return result.http_status == 429 or 500 <= result.http_status <= 599
+    return result.error_type in {
+        ErrorType.network_error,
+        ErrorType.timeout,
+        ErrorType.navigation_timeout,
+    }

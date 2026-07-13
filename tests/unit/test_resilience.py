@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -12,10 +14,15 @@ from scrapeyard.config.schema import BackoffStrategy, OnEmptyAction, RetryConfig
 from scrapeyard.engine.resilience import (
     CircuitBreaker,
     CircuitOpenError,
+    CircuitProbe,
+    CircuitState,
     ResultValidator,
     RetryHandler,
     RetryableError,
 )
+from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import ErrorType
+from scrapeyard.queue.error_records import TargetErrorRecorder
 
 
 # --- RetryHandler ---
@@ -201,3 +208,185 @@ class TestCircuitBreaker:
         with pytest.raises(CircuitOpenError):
             cb.check("bad.com")
         cb.check("good.com")  # different domain, should not raise
+
+    def test_concurrent_post_cooldown_checks_grant_exactly_one_probe(self):
+        clock = [0.0]
+        cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+        cb.record_failure("example.com")
+        clock[0] = 10.0
+        barrier = threading.Barrier(8)
+
+        def check() -> CircuitProbe | CircuitOpenError | None:
+            barrier.wait()
+            try:
+                return cb.check("example.com")
+            except CircuitOpenError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            outcomes = list(executor.map(lambda _index: check(), range(8)))
+
+        probes = [outcome for outcome in outcomes if isinstance(outcome, CircuitProbe)]
+        rejected = [outcome for outcome in outcomes if isinstance(outcome, CircuitOpenError)]
+        assert len(probes) == 1
+        assert len(rejected) == 7
+        assert cb.state("example.com") is CircuitState.half_open
+
+    def test_successful_probe_closes_circuit(self):
+        clock = [0.0]
+        cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+        cb.record_failure("example.com")
+        clock[0] = 10.0
+        probe = cb.check("example.com")
+        assert isinstance(probe, CircuitProbe)
+
+        cb.record_success("example.com", probe)
+
+        assert cb.state("example.com") is CircuitState.closed
+        assert cb.check("example.com") is None
+
+    def test_failed_probe_reopens_for_a_fresh_cooldown(self):
+        clock = [0.0]
+        cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+        cb.record_failure("example.com")
+        clock[0] = 10.0
+        probe = cb.check("example.com")
+        assert isinstance(probe, CircuitProbe)
+
+        cb.record_failure("example.com", probe)
+
+        assert cb.state("example.com") is CircuitState.open
+        clock[0] = 19.0
+        with pytest.raises(CircuitOpenError):
+            cb.check("example.com")
+        clock[0] = 20.0
+        assert isinstance(cb.check("example.com"), CircuitProbe)
+
+    def test_aborted_probe_cannot_leave_circuit_half_open(self):
+        clock = [0.0]
+        cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+        cb.record_failure("example.com")
+        clock[0] = 10.0
+        probe = cb.check("example.com")
+        assert isinstance(probe, CircuitProbe)
+
+        cb.abort_probe("example.com", probe)
+
+        assert cb.state("example.com") is CircuitState.open
+        replacement = cb.check("example.com")
+        assert isinstance(replacement, CircuitProbe)
+        assert replacement.generation != probe.generation
+
+    def test_stale_completion_cannot_override_failed_probe(self):
+        clock = [0.0]
+        cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+        cb.record_failure("example.com")
+        clock[0] = 10.0
+        probe = cb.check("example.com")
+        assert isinstance(probe, CircuitProbe)
+        cb.record_failure("example.com", probe)
+
+        cb.record_success("example.com", probe)
+
+        assert cb.state("example.com") is CircuitState.open
+
+
+def _recorder(cb: CircuitBreaker) -> TargetErrorRecorder:
+    return TargetErrorRecorder(
+        job_id="job-1",
+        run_id="run-1",
+        project="test",
+        pending_errors=[],
+        circuit_breaker=cb,
+    )
+
+
+@pytest.mark.parametrize(
+    ("error_type", "http_status"),
+    [
+        (ErrorType.selector_engine_error, None),
+        (ErrorType.selector_miss, None),
+        (ErrorType.content_empty, None),
+        (ErrorType.http_not_found, 404),
+        (ErrorType.blocked_response, 403),
+        (ErrorType.budget_exceeded, None),
+    ],
+)
+def test_user_and_nontransient_failures_do_not_open_circuit(
+    error_type,
+    http_status,
+):
+    cb = CircuitBreaker(1, 60)
+    recorder = _recorder(cb)
+    result = TargetResult(
+        url="https://example.com",
+        status="failed",
+        error_type=error_type,
+        http_status=http_status,
+        errors=["failed"],
+    )
+
+    recorder.record_target_failure(
+        domain="example.com",
+        target_url=result.url,
+        fetcher_used="basic",
+        result=result,
+    )
+
+    assert cb.check("example.com") is None
+    assert len(recorder.pending_errors) == 1
+
+
+@pytest.mark.parametrize(
+    ("error_type", "http_status"),
+    [
+        (ErrorType.network_error, None),
+        (ErrorType.timeout, None),
+        (ErrorType.navigation_timeout, None),
+        (ErrorType.http_error, 500),
+        (ErrorType.http_error, 503),
+        (ErrorType.blocked_response, 429),
+    ],
+)
+def test_transient_failures_open_circuit(error_type, http_status):
+    cb = CircuitBreaker(1, 60)
+    result = TargetResult(
+        url="https://example.com",
+        status="failed",
+        error_type=error_type,
+        http_status=http_status,
+        errors=["failed"],
+    )
+
+    _recorder(cb).record_target_failure(
+        domain="example.com",
+        target_url=result.url,
+        fetcher_used="basic",
+        result=result,
+    )
+
+    with pytest.raises(CircuitOpenError):
+        cb.check("example.com")
+
+
+def test_shared_breaker_only_crosses_jobs_for_transient_same_domain_failure():
+    cb = CircuitBreaker(1, 60)
+    first_job = _recorder(cb)
+    second_job = _recorder(cb)
+    transient = TargetResult(
+        url="https://bad.example.com",
+        status="failed",
+        error_type=ErrorType.network_error,
+        errors=["connection reset"],
+    )
+    first_job.record_target_failure(
+        domain="bad.example.com",
+        target_url=transient.url,
+        fetcher_used="basic",
+        result=transient,
+    )
+
+    with pytest.raises(CircuitOpenError):
+        cb.check("bad.example.com")
+    assert cb.check("good.example.com") is None
+    assert second_job.pending_errors == []

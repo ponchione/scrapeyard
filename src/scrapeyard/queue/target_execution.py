@@ -13,6 +13,7 @@ from scrapeyard.config.schema import ScrapeConfig, TargetConfig
 from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
+from scrapeyard.engine.resilience import CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url, url_host_label
 from scrapeyard.models.job import ActionTaken, ErrorType
@@ -25,12 +26,13 @@ from scrapeyard.queue.cancellation import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass
 class TargetRuntimeContext:
     domain: str
     adaptive: bool
     proxy_url: str | None
     artifacts_dir: str | None
+    circuit_probe: CircuitProbe | None = None
 
 
 def resolve_target_runtime_context(
@@ -66,7 +68,8 @@ async def guard_target_execution(
     cancellation_guard: CancellationCheckpoint | None = None,
 ) -> CircuitOpenError | None:
     try:
-        circuit_breaker.check(runtime.domain)
+        probe = circuit_breaker.check(runtime.domain)
+        runtime.circuit_probe = probe if isinstance(probe, CircuitProbe) else None
     except CircuitOpenError as exc:
         logger.info("Circuit breaker open for %s", runtime.domain)
         recorder.record_circuit_break(target_cfg.url)
@@ -76,11 +79,16 @@ async def guard_target_execution(
         cancellation_guard,
         "before_rate_limit_wait",
     )
-    acquire = rate_limiter.acquire(runtime.domain, config.execution.domain_rate_limit)
-    if budget is None:
-        await acquire
-    else:
-        await budget.wait_for(acquire)
+    try:
+        acquire = rate_limiter.acquire(runtime.domain, config.execution.domain_rate_limit)
+        if budget is None:
+            await acquire
+        else:
+            await budget.wait_for(acquire)
+    except BaseException:
+        circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
+        runtime.circuit_probe = None
+        raise
     await cancellation_checkpoint(
         cancellation_guard,
         "after_rate_limit_wait",
@@ -126,4 +134,6 @@ def record_failed_target(
         fetcher_used=target_cfg.fetcher.value,
         action=ActionTaken.fail,
         result=result,
+        probe=runtime.circuit_probe,
     )
+    runtime.circuit_probe = None

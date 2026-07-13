@@ -341,7 +341,7 @@ async def test_scrape_task_converts_unexpected_target_exception_to_partial_resul
     assert logged_errors[0].error_type is not None
     assert logged_errors[0].error_message == "RuntimeError: browser closed"
 
-    circuit_breaker.record_failure.assert_called_with("bad.example")
+    circuit_breaker.record_failure.assert_not_called()
 
 
 @pytest.mark.asyncio
