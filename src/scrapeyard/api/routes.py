@@ -65,6 +65,7 @@ from scrapeyard.api.serializers import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
+from scrapeyard.common.yaml import MAX_YAML_NESTING
 from scrapeyard.config.loader import load_config, load_config_project
 from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.engine.url_guard import redact_userinfo_in_text
@@ -194,6 +195,11 @@ async def _read_valid_yaml_config(
         project = await asyncio.to_thread(load_config_project, config_yaml)
         authorize_request(request, scope, project=project)
         config = await asyncio.to_thread(load_config, config_yaml)
+    except RecursionError:
+        raise_json_error(
+            422,
+            f"Invalid config: YAML nesting exceeds {MAX_YAML_NESTING} levels",
+        )
     except (UnicodeDecodeError, ValidationError, TypeError, ValueError, YAMLError) as exc:
         raise_json_error(422, f"Invalid config: {_format_config_error(exc)}")
     return ParsedYamlConfig(config_yaml, config)

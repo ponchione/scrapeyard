@@ -1,7 +1,9 @@
 """Edge-case tests for config parsing."""
 
 import pytest
+import yaml
 
+from scrapeyard.common.yaml import MAX_YAML_NESTING, load_yaml_mapping
 from scrapeyard.config.transforms import parse_transform
 from scrapeyard.config.schema import PaginationConfig, SelectorLong, SelectorType
 
@@ -37,3 +39,25 @@ def test_pagination_next_accepts_long_form_xpath_selector():
     assert isinstance(cfg.next, SelectorLong)
     assert cfg.next.query == "//a[contains(., 'Next')]"
     assert cfg.next.type == SelectorType.xpath
+
+
+def _nested_mapping(collection_depth: int) -> str:
+    lines = [f"{'  ' * depth}level_{depth}:" for depth in range(collection_depth)]
+    lines.append(f"{'  ' * collection_depth}value: leaf")
+    return "\n".join(lines)
+
+
+def test_yaml_loader_accepts_collection_nesting_at_limit() -> None:
+    parsed = load_yaml_mapping(_nested_mapping(MAX_YAML_NESTING - 1))
+
+    assert "level_0" in parsed
+
+
+def test_yaml_loader_rejects_one_collection_over_limit_without_recursion_error() -> None:
+    with pytest.raises(
+        yaml.YAMLError,
+        match=rf"YAML nesting exceeds {MAX_YAML_NESTING} levels",
+    ) as exc_info:
+        load_yaml_mapping(_nested_mapping(MAX_YAML_NESTING))
+
+    assert not isinstance(exc_info.value, RecursionError)
