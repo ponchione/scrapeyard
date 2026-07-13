@@ -447,6 +447,41 @@ def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):
     assert get_settings().workers_queued_claim_timeout_seconds == 12
 
 
+def test_secret_reference_allowlist_defaults_to_deny_all():
+    settings = ServiceSettings(secret_reference_allowlist="")
+
+    assert settings.parsed_secret_reference_allowlist() == {}
+
+
+def test_secret_reference_allowlist_parses_project_and_shared_names():
+    settings = ServiceSettings(
+        secret_reference_allowlist=(
+            '{"catalog":["SCRAPEYARD_SECRET_PROXY"],'
+            '"*":["SCRAPEYARD_SECRET_SHARED"]}'
+        )
+    )
+
+    assert settings.parsed_secret_reference_allowlist() == {
+        "catalog": frozenset({"SCRAPEYARD_SECRET_PROXY"}),
+        "*": frozenset({"SCRAPEYARD_SECRET_SHARED"}),
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[]",
+        '{"catalog":"SCRAPEYARD_SECRET_PROXY"}',
+        '{"catalog":["NOT_A_SECRET"]}',
+        '{"../catalog":["SCRAPEYARD_SECRET_PROXY"]}',
+        '{"catalog":["SCRAPEYARD_SECRET_PROXY","SCRAPEYARD_SECRET_PROXY"]}',
+    ],
+)
+def test_secret_reference_allowlist_rejects_invalid_policies(raw):
+    with pytest.raises(ValidationError, match="SECRET_REFERENCE_ALLOWLIST|secret-reference"):
+        ServiceSettings(secret_reference_allowlist=raw)
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

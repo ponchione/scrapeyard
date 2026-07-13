@@ -16,6 +16,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ### Added
 - Added configurable transform pipeline-step and intermediate-value byte caps,
   with environment and Compose wiring.
+- Added a deny-by-default, project-scoped allowlist for deployment secret
+  references in submitted YAML.
 
 ### Changed
 - Restricted stealth browser `additional_arguments` to bounded, typed,
@@ -25,6 +27,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Authorized submit/schedule scopes before parsing secret-bearing YAML and
+  prevented project-scoped callers from resolving another project's secrets.
 - Restricted readiness project summaries to each monitoring credential's
   authorized projects.
 - Persisted accepted run trigger provenance across queued-delivery recovery,

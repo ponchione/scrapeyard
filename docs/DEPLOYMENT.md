@@ -190,11 +190,15 @@ sudo security/install-chromium-apparmor-profile.sh remove
   and path. Successful request audit logs include stable identity and
   credential name. Neither path logs the supplied secret.
 - Treat proxy URLs, webhook headers, and browser extra headers as secrets.
+- Set `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` to a JSON project-to-name map
+  before accepting YAML that uses `${SCRAPEYARD_SECRET_*}`. References are
+  denied by default; use the reserved `*` project only for deliberately shared
+  names. The setting contains names, never secret values.
 
 Persisted config and webhook retry state require the versioned encryption
 keyring described in [SECRET_STORAGE.md](SECRET_STORAGE.md). Store key material
 separately from database backups, test restore/decryption, and follow the
-overlap/re-encryption procedure before retiring a key. Prefer
+overlap/re-encryption procedure before retiring a key. Prefer allowlisted
 `${SCRAPEYARD_SECRET_*}` references in YAML so reusable values are resolved at
 execution instead of embedded in stored config.
 

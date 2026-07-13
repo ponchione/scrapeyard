@@ -10,12 +10,13 @@ from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.auth import AuthScope, authorize_request, parse_api_credentials
+from scrapeyard.api.dependencies import get_job_store
 from scrapeyard.api.middleware import APIKeyAuthMiddleware
 from scrapeyard.api.routes import router
+from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.main import http_exception_handler, request_validation_exception_handler
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.api.dependencies import get_job_store
 
 
 SECRETS = {
@@ -165,6 +166,60 @@ async def test_submit_scope_and_project_boundary_are_both_enforced(
 
     assert allowed.status_code == 202
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_missing_scope_is_rejected_before_secret_bearing_yaml_is_parsed(
+    authorized_client,
+):
+    response = await authorized_client.post(
+        "/scrape",
+        content="""
+project: alpha
+name: must-not-resolve
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      Authorization: ${SCRAPEYARD_SECRET_DO_NOT_RESOLVE}
+  selectors:
+    title: h1
+""",
+        headers={**_headers("reader"), "content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 403
+    assert "required scope" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_project_is_authorized_before_its_allowlisted_secret_is_resolved(
+    authorized_client,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+        '{"beta":["SCRAPEYARD_SECRET_BETA_ONLY"]}',
+    )
+    get_settings.cache_clear()
+    response = await authorized_client.post(
+        "/scrape",
+        content="""
+project: beta
+name: forbidden-project
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      Authorization: ${SCRAPEYARD_SECRET_BETA_ONLY}
+  selectors:
+    title: h1
+""",
+        headers={**_headers("submitter"), "content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 403
+    assert "not authorized for project 'beta'" in response.json()["error"]
 
 
 @pytest.mark.asyncio
