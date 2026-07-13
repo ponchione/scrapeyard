@@ -147,89 +147,89 @@ async def migrate_persisted_secrets() -> None:
 
     keyring = EncryptionKeyring.from_settings(required=False)
     legacy_migrated = False
-    async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+    async with get_db("jobs.db") as db:
         await db.execute("PRAGMA secure_delete = ON")
-        job_rows = await (
-            await db.execute("SELECT job_id, config_yaml FROM jobs ORDER BY job_id")
-        ).fetchall()
-        webhook_rows = await (
-            await db.execute(
-                """SELECT delivery_id, url, headers_json, payload_json,
-                          last_error, scrubbed_at
-                   FROM webhook_deliveries ORDER BY delivery_id"""
-            )
-        ).fetchall()
-        protected_state_exists = bool(job_rows) or any(
-            row[5] is None for row in webhook_rows
-        )
-        if keyring is None:
-            if protected_state_exists:
-                raise SecretKeyConfigurationError(
-                    "Persisted jobs or webhook requests require deployment encryption keys"
+        async with db_transaction(db):
+            job_rows = await (
+                await db.execute(
+                    "SELECT job_id, config_yaml, config_hash FROM jobs ORDER BY job_id"
                 )
-            return
-
-        for row in job_rows:
-            job_id = str(row[0])
-            stored = str(row[1])
-            purpose = f"jobs.config_yaml:{job_id}"
-            plaintext = keyring.reveal(stored, purpose=purpose)
-            legacy_migrated |= envelope_key_id(stored) is None
-            if envelope_key_id(stored) != keyring.active_key_id:
-                stored = keyring.protect(plaintext, purpose=purpose)
-            await db.execute(
-                "UPDATE jobs SET config_yaml = ?, config_hash = ? WHERE job_id = ?",
-                (
-                    stored,
-                    hashlib.sha256(plaintext.encode("utf-8")).hexdigest(),
-                    job_id,
-                ),
+            ).fetchall()
+            webhook_rows = await (
+                await db.execute(
+                    """SELECT delivery_id, url, headers_json, payload_json,
+                              last_error, scrubbed_at
+                       FROM webhook_deliveries ORDER BY delivery_id"""
+                )
+            ).fetchall()
+            protected_state_exists = bool(job_rows) or any(
+                row[5] is None for row in webhook_rows
             )
+            if keyring is None:
+                if protected_state_exists:
+                    raise SecretKeyConfigurationError(
+                        "Persisted jobs or webhook requests require deployment encryption keys"
+                    )
+                return
 
-        for row in webhook_rows:
-            if row[5] is not None:
-                continue
-            delivery_id = str(row[0])
-            updates: dict[str, str] = {}
-            for column, raw_value in (
-                ("url", row[1]),
-                ("headers_json", row[2]),
-                ("payload_json", row[3]),
-            ):
-                stored = str(raw_value)
-                purpose = f"webhook.{column}:{delivery_id}"
+            for row in job_rows:
+                job_id = str(row[0])
+                stored = str(row[1])
+                purpose = f"jobs.config_yaml:{job_id}"
+                key_id = envelope_key_id(stored)
                 plaintext = keyring.reveal(stored, purpose=purpose)
-                legacy_migrated |= envelope_key_id(stored) is None
-                updates[column] = (
+                expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+                legacy_migrated |= key_id is None
+                protected = (
                     stored
-                    if envelope_key_id(stored) == keyring.active_key_id
+                    if key_id == keyring.active_key_id
                     else keyring.protect(plaintext, purpose=purpose)
                 )
-            await db.execute(
-                """UPDATE webhook_deliveries
-                   SET url = ?, headers_json = ?, payload_json = ?
-                   WHERE delivery_id = ?""",
-                (
-                    updates["url"],
-                    updates["headers_json"],
-                    updates["payload_json"],
-                    delivery_id,
-                ),
-            )
-            if row[4] is not None:
-                stored_error = str(row[4])
-                purpose = f"webhook.last_error:{delivery_id}"
-                plaintext_error = keyring.reveal(stored_error, purpose=purpose)
-                legacy_migrated |= envelope_key_id(stored_error) is None
-                protected_error = (
-                    stored_error
-                    if envelope_key_id(stored_error) == keyring.active_key_id
-                    else keyring.protect(plaintext_error, purpose=purpose)
-                )
-                await db.execute(
-                    "UPDATE webhook_deliveries SET last_error = ? WHERE delivery_id = ?",
-                    (protected_error, delivery_id),
-                )
+                if protected != stored or str(row[2]) != expected_hash:
+                    await db.execute(
+                        "UPDATE jobs SET config_yaml = ?, config_hash = ? "
+                        "WHERE job_id = ?",
+                        (protected, expected_hash, job_id),
+                    )
+
+            for row in webhook_rows:
+                if row[5] is not None:
+                    continue
+                delivery_id = str(row[0])
+                updates: dict[str, str] = {}
+                for column, raw_value in (
+                    ("url", row[1]),
+                    ("headers_json", row[2]),
+                    ("payload_json", row[3]),
+                ):
+                    stored = str(raw_value)
+                    purpose = f"webhook.{column}:{delivery_id}"
+                    key_id = envelope_key_id(stored)
+                    plaintext = keyring.reveal(stored, purpose=purpose)
+                    legacy_migrated |= key_id is None
+                    if key_id != keyring.active_key_id:
+                        updates[column] = keyring.protect(
+                            plaintext,
+                            purpose=purpose,
+                        )
+                if row[4] is not None:
+                    stored_error = str(row[4])
+                    purpose = f"webhook.last_error:{delivery_id}"
+                    error_key_id = envelope_key_id(stored_error)
+                    plaintext_error = keyring.reveal(stored_error, purpose=purpose)
+                    legacy_migrated |= error_key_id is None
+                    if error_key_id != keyring.active_key_id:
+                        updates["last_error"] = keyring.protect(
+                            plaintext_error,
+                            purpose=purpose,
+                        )
+                if updates:
+                    assignments = ", ".join(f"{column} = ?" for column in updates)
+                    await db.execute(
+                        f"UPDATE webhook_deliveries SET {assignments} "
+                        "WHERE delivery_id = ?",
+                        (*updates.values(), delivery_id),
+                    )
 
     if legacy_migrated:
         async with get_db("jobs.db") as db:

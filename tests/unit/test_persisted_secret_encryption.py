@@ -170,6 +170,12 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
     outbox = SQLiteWebhookOutboxStore()
     await jobs.save_job(_job())
     await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await outbox.mark_retryable_failure(
+        "secret-delivery",
+        attempted_at=NOW,
+        next_attempt_at=NOW,
+        last_error="old-key retry error",
+    )
 
     _set_keys(
         monkeypatch,
@@ -180,7 +186,8 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
     async with get_db("jobs.db") as db:
         row = await (
             await db.execute(
-                "SELECT jobs.config_yaml, webhook_deliveries.headers_json "
+                "SELECT jobs.config_yaml, webhook_deliveries.headers_json, "
+                "webhook_deliveries.last_error "
                 "FROM jobs JOIN webhook_deliveries ON webhook_deliveries.job_id = jobs.job_id"
             )
         ).fetchone()
@@ -190,6 +197,7 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
     assert (await jobs.get_job("secret-job")).config_yaml == _job().config_yaml
     pending = await outbox.get_delivery("secret-delivery")
     assert pending is not None and pending.payload["secret"] == PAYLOAD_SECRET
+    assert pending.last_error == "old-key retry error"
 
 
 async def test_backup_restore_requires_intended_key_material(tmp_path, monkeypatch):
@@ -270,6 +278,125 @@ async def test_encrypted_pending_webhook_survives_normal_restart(tmp_path):
     assert restored is not None
     assert restored.url.endswith(URL_SECRET)
     assert restored.headers["Authorization"].endswith(HEADER_SECRET)
+
+
+async def test_second_startup_with_active_key_performs_no_row_updates(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    await SQLiteJobStore().save_job(_job())
+    outbox = SQLiteWebhookOutboxStore()
+    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await outbox.mark_retryable_failure(
+        "secret-delivery",
+        attempted_at=NOW,
+        next_attempt_at=NOW,
+        last_error="encrypted retry error",
+    )
+    async with get_db("jobs.db") as db:
+        before_job = tuple(
+            await (
+                await db.execute(
+                    "SELECT config_yaml, config_hash FROM jobs WHERE job_id = 'secret-job'"
+                )
+            ).fetchone()
+        )
+        before_webhook = tuple(
+            await (
+                await db.execute(
+                    """SELECT url, headers_json, payload_json, last_error
+                       FROM webhook_deliveries
+                       WHERE delivery_id = 'secret-delivery'"""
+                )
+            ).fetchone()
+        )
+        await db.execute("CREATE TABLE migration_update_audit (table_name TEXT)")
+        await db.execute(
+            """CREATE TRIGGER audit_job_secret_update AFTER UPDATE ON jobs
+               BEGIN
+                   INSERT INTO migration_update_audit VALUES ('jobs');
+               END"""
+        )
+        await db.execute(
+            """CREATE TRIGGER audit_webhook_secret_update
+               AFTER UPDATE ON webhook_deliveries
+               BEGIN
+                   INSERT INTO migration_update_audit VALUES ('webhook_deliveries');
+               END"""
+        )
+        await db.commit()
+
+    await migrate_persisted_secrets()
+
+    async with get_db("jobs.db") as db:
+        updates = await (
+            await db.execute("SELECT table_name FROM migration_update_audit")
+        ).fetchall()
+        after_job = tuple(
+            await (
+                await db.execute(
+                    "SELECT config_yaml, config_hash FROM jobs WHERE job_id = 'secret-job'"
+                )
+            ).fetchone()
+        )
+        after_webhook = tuple(
+            await (
+                await db.execute(
+                    """SELECT url, headers_json, payload_json, last_error
+                       FROM webhook_deliveries
+                       WHERE delivery_id = 'secret-delivery'"""
+                )
+            ).fetchone()
+        )
+
+    assert updates == []
+    assert after_job == before_job
+    assert after_webhook == before_webhook
+
+
+async def test_current_envelope_with_stale_hash_repairs_only_job_row(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    await SQLiteJobStore().save_job(_job())
+    await SQLiteWebhookOutboxStore().enqueue_delivery(_delivery(), now=NOW)
+    async with get_db("jobs.db") as db:
+        before_envelope = (
+            await (
+                await db.execute(
+                    "SELECT config_yaml FROM jobs WHERE job_id = 'secret-job'"
+                )
+            ).fetchone()
+        )[0]
+        await db.execute(
+            "UPDATE jobs SET config_hash = 'stale' WHERE job_id = 'secret-job'"
+        )
+        await db.execute("CREATE TABLE migration_update_audit (table_name TEXT)")
+        await db.execute(
+            """CREATE TRIGGER audit_job_secret_update AFTER UPDATE ON jobs
+               BEGIN
+                   INSERT INTO migration_update_audit VALUES ('jobs');
+               END"""
+        )
+        await db.execute(
+            """CREATE TRIGGER audit_webhook_secret_update
+               AFTER UPDATE ON webhook_deliveries
+               BEGIN
+                   INSERT INTO migration_update_audit VALUES ('webhook_deliveries');
+               END"""
+        )
+        await db.commit()
+
+    await migrate_persisted_secrets()
+
+    async with get_db("jobs.db") as db:
+        row = await (
+            await db.execute(
+                "SELECT config_yaml, config_hash FROM jobs WHERE job_id = 'secret-job'"
+            )
+        ).fetchone()
+        updates = await (
+            await db.execute("SELECT table_name FROM migration_update_audit")
+        ).fetchall()
+    assert row[0] == before_envelope
+    assert row[1] == hashlib.sha256(_job().config_yaml.encode()).hexdigest()
+    assert [update[0] for update in updates] == ["jobs"]
 
 
 async def test_migration_failure_rolls_back_without_destroying_plaintext(
