@@ -186,8 +186,7 @@ class TestScrapeConfigValidation:
         monkeypatch.setenv("SCRAPEYARD_SECRET_WEBHOOK_AUTH", "Bearer hook-secret")
         monkeypatch.setenv(
             "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
-            '{"secret-ref":["SCRAPEYARD_SECRET_PROXY_URL",'
-            '"SCRAPEYARD_SECRET_WEBHOOK_AUTH"]}',
+            '{"secret-ref":["SCRAPEYARD_SECRET_PROXY_URL","SCRAPEYARD_SECRET_WEBHOOK_AUTH"]}',
         )
         get_settings.cache_clear()
         config = load_config(
@@ -213,8 +212,7 @@ target:
 
     def test_missing_deployment_secret_reference_fails_closed(self, monkeypatch):
         monkeypatch.setenv(
-            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
-            '{"secret-ref":["SCRAPEYARD_SECRET_MISSING"]}'
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST", '{"secret-ref":["SCRAPEYARD_SECRET_MISSING"]}'
         )
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="SCRAPEYARD_SECRET_MISSING"):
@@ -333,9 +331,7 @@ target:
         with pytest.raises(ValidationError, match="must not be blank"):
             ScrapeConfig(
                 **_tier1_config(
-                    target=_target_dict(
-                        selectors={"title": {"query": "   ", "type": "css"}}
-                    )
+                    target=_target_dict(selectors={"title": {"query": "   ", "type": "css"}})
                 )
             )
 
@@ -631,6 +627,51 @@ class TestResolvedTargets:
 # --- Transform Parser ---
 
 
+_ZERO_ARGUMENT_TRANSFORMS = (
+    "trim",
+    "collapse_whitespace",
+    "lowercase",
+    "uppercase",
+)
+_ONE_ARGUMENT_TRANSFORMS = (
+    "prepend",
+    "append",
+    "remove",
+    "strip_prefix",
+    "strip_suffix",
+    "extract",
+    "default",
+)
+_TWO_ARGUMENT_TRANSFORMS = ("replace", "regex")
+_INVALID_TRANSFORM_ARITIES = (
+    *(
+        invalid
+        for name in _ZERO_ARGUMENT_TRANSFORMS
+        for invalid in (f"{name}:ignored", f'{name}("ignored")')
+    ),
+    *(
+        invalid
+        for name in _ONE_ARGUMENT_TRANSFORMS
+        for invalid in (
+            name,
+            f"{name}()",
+            f"{name}:one:two",
+            f'{name}("one", "two")',
+        )
+    ),
+    *(
+        invalid
+        for name in _TWO_ARGUMENT_TRANSFORMS
+        for invalid in (
+            name,
+            f"{name}:one",
+            f'{name}("one")',
+            f'{name}("one", "two", "three")',
+        )
+    ),
+)
+
+
 class TestParseTransform:
     """parse_transform() for all 8 transform types."""
 
@@ -679,9 +720,7 @@ class TestParseTransform:
         assert fn("item 42 and 7") == "item NUM and NUM"
 
     def test_pipeline_parser_preserves_regex_alternation_and_literal_pipe(self):
-        transforms = parse_transform_pipeline(
-            'regex("a|b", "X")|append("|done")'
-        )
+        transforms = parse_transform_pipeline('regex("a|b", "X")|append("|done")')
 
         assert apply_transforms("a b", transforms) == "X X|done"
 
@@ -774,6 +813,27 @@ class TestParseTransform:
     def test_prepend_missing_value_raises(self):
         with pytest.raises(ValueError, match="prepend requires"):
             parse_transform("prepend")
+
+    @pytest.mark.parametrize("raw", _INVALID_TRANSFORM_ARITIES)
+    def test_rejects_incorrect_argument_count(self, raw):
+        with pytest.raises(ValueError, match=r"requires exactly \d+ arguments?.*received"):
+            parse_transform(raw)
+
+    @pytest.mark.parametrize("raw", _INVALID_TRANSFORM_ARITIES)
+    def test_yaml_loading_rejects_incorrect_argument_count(self, raw):
+        yaml_str = f"""
+project: transform-arity
+name: invalid-transform
+target:
+  url: https://example.com
+  selectors:
+    title:
+      query: h1
+      transform: '{raw}'
+"""
+
+        with pytest.raises(ValidationError, match="received"):
+            load_config(yaml_str)
 
 
 class TestApplyTransforms:
@@ -1280,9 +1340,7 @@ target:
 
     def test_rejects_detection_pattern_over_item_limit(self):
         with pytest.raises(ValidationError, match="must not exceed"):
-            MapDetectionConfig(
-                text_patterns=["x" * (MAX_DETECTION_TEXT_PATTERN_CHARS + 1)]
-            )
+            MapDetectionConfig(text_patterns=["x" * (MAX_DETECTION_TEXT_PATTERN_CHARS + 1)])
 
 
 class TestStockDetectionConfig:

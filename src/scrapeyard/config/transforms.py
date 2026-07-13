@@ -120,8 +120,7 @@ def selector_value_limit() -> int:
 
 def _raise_output_limit(observed: int, limit: int) -> None:
     raise TransformOutputLimitError(
-        f"Selector value exceeds {limit} UTF-8 bytes "
-        f"(predicted {observed})"
+        f"Selector value exceeds {limit} UTF-8 bytes (predicted {observed})"
     )
 
 
@@ -176,9 +175,7 @@ def _bounded_literal_replace(value: str, old: str, new: str) -> str:
     limit = selector_value_limit()
     current = checked_selector_value_size(value, limit=limit)
     occurrences = value.count(old)
-    predicted = current + occurrences * (
-        len(new.encode("utf-8")) - len(old.encode("utf-8"))
-    )
+    predicted = current + occurrences * (len(new.encode("utf-8")) - len(old.encode("utf-8")))
     if predicted > limit:
         _raise_output_limit(predicted, limit)
     return value.replace(old, new)
@@ -200,9 +197,7 @@ def _bounded_regex_replace(
         for match in compiled.finditer(value, timeout=_regex_timeout_seconds()):
             unchanged = value[last_end : match.start()]
             expanded = match.expand(replacement)
-            output_bytes += len(unchanged.encode("utf-8")) + len(
-                expanded.encode("utf-8")
-            )
+            output_bytes += len(unchanged.encode("utf-8")) + len(expanded.encode("utf-8"))
             if output_bytes > limit:
                 _raise_output_limit(output_bytes, limit)
             output.write(unchanged)
@@ -249,10 +244,30 @@ def _parse_args(raw_args: str) -> list[str]:
         raise ValueError(f"Invalid transform arguments: {exc}") from exc
 
 
-def _require_arg(name: str, raw: str, args: list[str], label: str = "a value") -> str:
-    if not args:
-        raise ValueError(f"{name} requires {label}, got '{raw}'")
-    return args[0]
+_TRANSFORM_ARITY = {
+    "trim": 0,
+    "collapse_whitespace": 0,
+    "lowercase": 0,
+    "uppercase": 0,
+    "prepend": 1,
+    "append": 1,
+    "remove": 1,
+    "strip_prefix": 1,
+    "strip_suffix": 1,
+    "extract": 1,
+    "default": 1,
+    "replace": 2,
+    "regex": 2,
+}
+
+
+def _validate_arity(name: str, raw: str, args: list[str]) -> None:
+    expected = _TRANSFORM_ARITY.get(name)
+    if expected is not None and len(args) != expected:
+        noun = "argument" if expected == 1 else "arguments"
+        raise ValueError(
+            f"{name} requires exactly {expected} {noun}, received {len(args)} in '{raw}'"
+        )
 
 
 def parse_transform(raw: str) -> Callable[[str], str]:
@@ -272,11 +287,13 @@ def parse_transform(raw: str) -> Callable[[str], str]:
         parts = raw.split(":", 2)
         name = parts[0]
         args = parts[1:] if len(parts) > 1 else []
+    _validate_arity(name, raw, args)
 
     transform: Callable[[str], str]
     if name == "trim":
         transform = str.strip
     elif name == "collapse_whitespace":
+
         def _collapse_whitespace(value: str) -> str:
             return re.sub(r"\s+", " ", value).strip()
 
@@ -286,22 +303,20 @@ def parse_transform(raw: str) -> Callable[[str], str]:
     elif name == "uppercase":
         transform = str.upper
     elif name == "prepend":
-        prefix = _require_arg(name, raw, args)
+        prefix = args[0]
 
         def _prepend(value: str) -> str:
             return _bounded_concat(value, prefix, prepend=True)
 
         transform = _prepend
     elif name == "append":
-        suffix = _require_arg(name, raw, args)
+        suffix = args[0]
 
         def _append(value: str) -> str:
             return _bounded_concat(value, suffix, prepend=False)
 
         transform = _append
     elif name == "replace":
-        if len(args) < 2:
-            raise ValueError(f"replace requires old and new, got '{raw}'")
         old, new = args[0], args[1]
 
         def _replace(value: str) -> str:
@@ -309,28 +324,28 @@ def parse_transform(raw: str) -> Callable[[str], str]:
 
         transform = _replace
     elif name == "remove":
-        needle = _require_arg(name, raw, args)
+        needle = args[0]
 
         def _remove(value: str) -> str:
             return _bounded_literal_replace(value, needle, "")
 
         transform = _remove
     elif name == "strip_prefix":
-        prefix = _require_arg(name, raw, args)
+        prefix = args[0]
 
         def _strip_prefix(value: str, p: str = prefix) -> str:
             return value.removeprefix(p)
 
         transform = _strip_prefix
     elif name == "strip_suffix":
-        suffix = _require_arg(name, raw, args)
+        suffix = args[0]
 
         def _strip_suffix(value: str, sf: str = suffix) -> str:
             return value.removesuffix(sf)
 
         transform = _strip_suffix
     elif name == "extract":
-        compiled = _compile_regex(_require_arg(name, raw, args, "a pattern"))
+        compiled = _compile_regex(args[0])
 
         def _extract(value: str, c: regex.Pattern[str] = compiled) -> str:
             try:
@@ -345,19 +360,13 @@ def parse_transform(raw: str) -> Callable[[str], str]:
 
         transform = _extract
     elif name == "default":
-        fallback = _require_arg(name, raw, args)
+        fallback = args[0]
 
         def _default(value: str) -> str:
-            return (
-                value
-                if value.strip()
-                else _bounded_concat("", fallback, prepend=False)
-            )
+            return value if value.strip() else _bounded_concat("", fallback, prepend=False)
 
         transform = _default
     elif name == "regex":
-        if len(args) < 2:
-            raise ValueError(f"regex requires pattern and replacement, got '{raw}'")
         pattern, replacement = args[0], args[1]
         compiled = _compile_regex(pattern)
 
@@ -367,8 +376,7 @@ def parse_transform(raw: str) -> Callable[[str], str]:
         transform = _replace_regex
     elif name == "join":
         raise ValueError(
-            f"'join' is a list-level operation not supported as a per-value transform. "
-            f"Got '{raw}'"
+            f"'join' is a list-level operation not supported as a per-value transform. Got '{raw}'"
         )
     else:
         raise ValueError(f"Unknown transform: '{name}'")
