@@ -408,6 +408,8 @@ settings are:
 | `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` | `2048` | Maximum UTF-8 size of a selector regex pattern |
 | `SCRAPEYARD_TRANSFORM_MAX_PIPELINE_STEPS` | `32` | Maximum transforms in one selector pipeline |
 | `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` | `1048576` | Historical name for the maximum UTF-8 bytes of every selector value, with or without transforms |
+| `SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES` | `3` | Consecutive transient upstream failures before opening a domain circuit |
+| `SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Open interval before exactly one half-open probe is admitted |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
@@ -418,6 +420,13 @@ settings are:
 
 See [src/scrapeyard/common/settings.py](src/scrapeyard/common/settings.py) for
 the full settings surface.
+
+Circuit breakers count connection/network errors, timeouts, HTTP 429, and HTTP
+5xx responses. Selector, validation, budget, cancellation, local browser, and
+ordinary non-retryable HTTP 4xx failures remain observable errors but do not
+affect shared domain availability. After cooldown, one half-open probe is
+admitted; its transient failure starts a fresh cooldown and its successful
+upstream response closes the circuit.
 
 Run duration, fetched-byte, record, and serialized-result budget violations
 always finish the run as `failed`, regardless of `execution.fail_strategy`.

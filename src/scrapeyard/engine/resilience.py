@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, TypeVar
 
 from scrapeyard.common.budgets import RunBudget
@@ -161,6 +163,30 @@ class CircuitOpenError(Exception):
         super().__init__(f"Circuit open for {domain} ({cooldown_remaining:.0f}s remaining)")
 
 
+class CircuitState(str, Enum):
+    """Explicit lifecycle states for one domain circuit."""
+
+    closed = "closed"
+    open = "open"
+    half_open = "half_open"
+
+
+@dataclass(frozen=True, slots=True)
+class CircuitProbe:
+    """Capability granted to the sole caller admitted while half-open."""
+
+    domain: str
+    generation: int
+
+
+@dataclass(slots=True)
+class _DomainCircuit:
+    state: CircuitState = CircuitState.closed
+    failures: int = 0
+    opened_at: float = 0.0
+    generation: int = 0
+
+
 class CircuitBreaker:
     """Per-domain circuit breaker that trips after consecutive failures.
 
@@ -172,29 +198,101 @@ class CircuitBreaker:
         How long to stay open before allowing a probe request.
     """
 
-    def __init__(self, max_consecutive_failures: int, cooldown_seconds: int) -> None:
+    def __init__(
+        self,
+        max_consecutive_failures: int,
+        cooldown_seconds: int,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_consecutive_failures < 1:
+            raise ValueError("max_consecutive_failures must be positive")
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds cannot be negative")
         self._max_failures = max_consecutive_failures
         self._cooldown = cooldown_seconds
-        self._failures: dict[str, int] = {}
-        self._tripped_at: dict[str, float] = {}
+        self._clock = clock
+        self._circuits: dict[str, _DomainCircuit] = {}
+        self._lock = threading.RLock()
 
-    def check(self, domain: str) -> None:
-        """Raise :class:`CircuitOpenError` if the breaker is open for *domain*."""
-        if domain in self._tripped_at:
-            elapsed = time.monotonic() - self._tripped_at[domain]
-            if elapsed < self._cooldown:
-                raise CircuitOpenError(domain, self._cooldown - elapsed)
-            # Cooldown expired — allow probe, reset state.
-            del self._tripped_at[domain]
-            self._failures.pop(domain, None)
+    def check(self, domain: str) -> CircuitProbe | None:
+        """Admit closed work or atomically grant the sole half-open probe."""
 
-    def record_success(self, domain: str) -> None:
-        """Reset failure counter for *domain*."""
-        self._failures.pop(domain, None)
-        self._tripped_at.pop(domain, None)
+        with self._lock:
+            circuit = self._circuits.get(domain)
+            if circuit is None or circuit.state is CircuitState.closed:
+                return None
+            elapsed = self._clock() - circuit.opened_at
+            if circuit.state is CircuitState.open and elapsed >= self._cooldown:
+                circuit.state = CircuitState.half_open
+                circuit.generation += 1
+                return CircuitProbe(domain, circuit.generation)
+            remaining = max(0.0, self._cooldown - elapsed)
+            raise CircuitOpenError(domain, remaining)
 
-    def record_failure(self, domain: str) -> None:
-        """Increment failure counter; trip the breaker if threshold reached."""
-        self._failures[domain] = self._failures.get(domain, 0) + 1
-        if self._failures[domain] >= self._max_failures:
-            self._tripped_at[domain] = time.monotonic()
+    def record_success(self, domain: str, probe: CircuitProbe | None = None) -> None:
+        """Close a circuit after ordinary success or its authorized probe."""
+
+        with self._lock:
+            circuit = self._circuits.get(domain)
+            if circuit is None:
+                return
+            if circuit.state is CircuitState.closed:
+                self._circuits.pop(domain, None)
+                return
+            if circuit.state is CircuitState.half_open and self._probe_matches(
+                circuit,
+                domain,
+                probe,
+            ):
+                self._circuits.pop(domain, None)
+
+    def record_failure(self, domain: str, probe: CircuitProbe | None = None) -> None:
+        """Count a transient failure or reopen after a failed probe."""
+
+        with self._lock:
+            circuit = self._circuits.setdefault(domain, _DomainCircuit())
+            if circuit.state is CircuitState.half_open:
+                if not self._probe_matches(circuit, domain, probe):
+                    return
+                circuit.state = CircuitState.open
+                circuit.failures = self._max_failures
+                circuit.opened_at = self._clock()
+                return
+            if circuit.state is CircuitState.open:
+                return
+            circuit.failures += 1
+            if circuit.failures >= self._max_failures:
+                circuit.state = CircuitState.open
+                circuit.opened_at = self._clock()
+
+    def abort_probe(self, domain: str, probe: CircuitProbe | None) -> None:
+        """Release a cancelled/local-failure probe without penalizing the domain."""
+
+        with self._lock:
+            circuit = self._circuits.get(domain)
+            if circuit is None or not self._probe_matches(circuit, domain, probe):
+                return
+            circuit.state = CircuitState.open
+            # Preserve the already-expired cooldown so another caller may probe.
+            circuit.opened_at = self._clock() - self._cooldown
+
+    def state(self, domain: str) -> CircuitState:
+        """Return one domain's current state for diagnostics and tests."""
+
+        with self._lock:
+            circuit = self._circuits.get(domain)
+            return CircuitState.closed if circuit is None else circuit.state
+
+    @staticmethod
+    def _probe_matches(
+        circuit: _DomainCircuit,
+        domain: str,
+        probe: CircuitProbe | None,
+    ) -> bool:
+        return bool(
+            circuit.state is CircuitState.half_open
+            and probe is not None
+            and probe.domain == domain
+            and probe.generation == circuit.generation
+        )

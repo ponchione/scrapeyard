@@ -912,9 +912,17 @@ async def _fetch_and_validate_target(
             async with context.browser_limiter.slot():
                 return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
         return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+    except asyncio.CancelledError:
+        context.circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
+        runtime.circuit_probe = None
+        raise
     except RunOwnershipError:
+        context.circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
+        runtime.circuit_probe = None
         raise
     except BudgetExceeded:
+        recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
+        runtime.circuit_probe = None
         raise
     except Exception as exc:
         return _target_exception_result(
@@ -951,7 +959,8 @@ async def _scrape_and_validate_target(
         )
         return result
 
-    recorder.record_success(runtime.domain)
+    recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
+    runtime.circuit_probe = None
     return await apply_validation(
         target_cfg=target_cfg,
         domain=runtime.domain,
