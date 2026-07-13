@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, TypeVar
 
+from scrapeyard.common.async_tools import cancel_task_nowait
+
 
 T = TypeVar("T")
 NumericLimit = int | float
@@ -173,8 +175,7 @@ class RunBudget:
             self.check_deadline()
         except BaseException:
             if isinstance(awaitable, asyncio.Future):
-                awaitable.cancel()
-                await asyncio.gather(awaitable, return_exceptions=True)
+                cancel_task_nowait(awaitable)
             elif inspect.iscoroutine(awaitable):
                 awaitable.close()
             raise
@@ -182,17 +183,15 @@ class RunBudget:
         task = asyncio.ensure_future(awaitable)
         try:
             done, _ = await asyncio.wait({task}, timeout=self.remaining_seconds)
-            if task in done:
-                return task.result()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self._exhausted = self._duration_error()
-            raise self._exhausted
         except BaseException:
             if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                cancel_task_nowait(task)
             raise
+        if task in done:
+            return task.result()
+        cancel_task_nowait(task)
+        self._exhausted = self._duration_error()
+        raise self._exhausted
 
     async def sleep(self, delay_seconds: float) -> None:
         """Sleep under the one overall deadline."""

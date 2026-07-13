@@ -139,6 +139,23 @@ def _response_header(response: Any, name: str) -> str | None:
     return None
 
 
+def _measured_response_body_bytes(response: Any) -> int | None:
+    """Return the byte size of the body representation exposed by a fetcher."""
+
+    body = getattr(response, "body", None)
+    if isinstance(body, (bytes, bytearray, memoryview)):
+        return len(body)
+    if not isinstance(body, str):
+        return None
+    encoding = getattr(response, "encoding", None)
+    if not isinstance(encoding, str) or not encoding:
+        encoding = "utf-8"
+    try:
+        return len(body.encode(encoding))
+    except (LookupError, UnicodeEncodeError):
+        return len(body.encode("utf-8"))
+
+
 async def _fetch_basic_with_safe_redirects(
     fetcher_cls: Any,
     url: str,
@@ -180,9 +197,9 @@ async def _fetch_basic_with_safe_redirects(
             "after_fetch",
         )
         if budget is not None:
-            body = getattr(response, "body", None)
-            if isinstance(body, (bytes, bytearray, memoryview)):
-                await budget.consume_fetched_bytes(len(body))
+            measured_bytes = _measured_response_body_bytes(response)
+            if measured_bytes is not None:
+                await budget.consume_fetched_bytes(measured_bytes)
             else:
                 budget.check_deadline()
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:

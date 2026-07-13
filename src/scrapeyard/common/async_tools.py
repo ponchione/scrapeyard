@@ -24,6 +24,13 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
         task.result()
 
 
+def cancel_task_nowait(task: asyncio.Future[Any]) -> None:
+    """Request cancellation and consume the eventual result without blocking."""
+
+    task.cancel()
+    task.add_done_callback(_consume_task_result)
+
+
 async def await_with_timeout(
     awaitable: Awaitable[T],
     *,
@@ -59,12 +66,10 @@ async def await_with_timeout(
                 if task.cancelled():
                     raise AwaitableCancelled
                 return task.result()
-        task.cancel()
-        task.add_done_callback(lambda completed: _consume_task_result(completed))
+        cancel_task_nowait(task)
         raise asyncio.TimeoutError
     except asyncio.CancelledError:
-        task.cancel()
-        task.add_done_callback(lambda completed: _consume_task_result(completed))
+        cancel_task_nowait(task)
         raise
 
 

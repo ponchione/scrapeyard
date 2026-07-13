@@ -392,7 +392,7 @@ settings are:
 | `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` | `600` | Time since the last persisted run heartbeat before recovery is allowed |
 | `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
-| `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate reliably measured basic-response bytes |
+| `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate encoded basic-response body bytes, checked after each response |
 | `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
 | `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
