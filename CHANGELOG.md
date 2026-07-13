@@ -20,6 +20,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   references in submitted YAML.
 
 ### Changed
+- Browser configuration is now rejected for `fetcher: basic`, action fields
+  that do not apply to the selected browser action are rejected, and YAML
+  booleans are no longer coerced into numeric execution controls.
+- Result retention settings now require positive values; zero no longer means
+  immediate deletion of every eligible result.
+- URL grouping now canonicalizes IDNA hostnames and default ports while keeping
+  non-default ports as separate protection origins.
 - Updated Click from 8.3.1 to 8.4.2 after a newly published command-injection
   advisory caused both development and production dependency gates to fail.
 - Restricted stealth browser `additional_arguments` to bounded, typed,
@@ -29,6 +36,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Protected active runs during both age-based and per-job result retention,
+  and let webhook workers drain their already-queued batch during shutdown.
 - Restored aggregate fetched-byte accounting for real Scrapling response
   objects and made run deadlines return without waiting indefinitely for
   cancellation-resistant awaitables.

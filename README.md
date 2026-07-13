@@ -248,6 +248,11 @@ More examples:
 
 Exactly one of `target` or `targets` is required.
 
+Per-domain rate limits, circuit breakers, artifact directories, and result
+source labels share one canonical URL identity. Hostnames are lowercased and
+IDNA-encoded, trailing dots and explicit default HTTP/HTTPS ports are removed,
+and non-default ports remain separate origins.
+
 Configuration YAML rejects aliases, duplicate keys, and collection nesting
 beyond 50 levels. Excessive nesting is reported as a sanitized HTTP 422 rather
 than an internal parser error.
@@ -261,7 +266,7 @@ Common target fields:
 | `selectors` | Output fields mapped to CSS or XPath selectors |
 | `item_selector` | Optional repeated-item container selector |
 | `pagination` | Optional next-page selector and page limit |
-| `browser` | Optional browser runtime controls and pre-extraction actions for dynamic fetches |
+| `browser` | Optional browser runtime controls and pre-extraction actions for `dynamic` or `stealthy` fetches; rejected for `basic` |
 | `proxy` | Optional per-target proxy override |
 | `map_detection` | Optional pricing visibility detection rules |
 | `stock_detection` | Optional stock status detection rules |
@@ -319,6 +324,10 @@ pagination:
 Browser-backed targets may define an ordered `browser.actions` list with
 `click`, `wait_for_selector`, `wait_ms`, `scroll`, and `repeat_click` actions.
 Use hard limits such as `times` or `max_times` on repeating actions.
+Each action rejects fields it does not use: `times` and `pixels` belong to
+`scroll`, `max_times` belongs to `repeat_click`, and the post-click
+`wait_for_selector` is accepted by `click` and `repeat_click`. Numeric controls
+must be YAML numbers rather than booleans.
 For `fetcher: stealthy`, `browser.additional_arguments` deliberately accepts
 only YAML-safe Camoufox overrides: `locale` (one tag or a list), `fonts` (a
 bounded list of names), `custom_fonts_only` (which requires `fonts`), and
