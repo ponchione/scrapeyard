@@ -248,6 +248,10 @@ More examples:
 
 Exactly one of `target` or `targets` is required.
 
+Configuration YAML rejects aliases, duplicate keys, and collection nesting
+beyond 50 levels. Excessive nesting is reported as a sanitized HTTP 422 rather
+than an internal parser error.
+
 Common target fields:
 
 | Field | Purpose |

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from scrapeyard.common.yaml import MAX_YAML_NESTING
+
 from scrapeyard.api.dependencies import get_worker_pool
 
 
@@ -16,6 +18,55 @@ async def test_scrape_invalid_yaml_returns_422(client):
         headers={"content-type": "application/x-yaml"},
     )
     assert response.status_code == 422
+
+
+def _pathological_nested_config() -> str:
+    lines = [
+        "project: test",
+        "name: nested",
+        "password: must-not-be-echoed",
+        "pathological:",
+    ]
+    lines.extend(
+        f"{'  ' * (depth + 1)}level_{depth}:"
+        for depth in range(MAX_YAML_NESTING)
+    )
+    lines.append(f"{'  ' * (MAX_YAML_NESTING + 1)}value: leaf")
+    return "\n".join(lines)
+
+
+async def test_scrape_excessive_yaml_nesting_returns_sanitized_422(client):
+    response = await client.post(
+        "/scrape",
+        content=_pathological_nested_config(),
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    body = response.text
+    assert f"YAML nesting exceeds {MAX_YAML_NESTING} levels" in body
+    assert "must-not-be-echoed" not in body
+    assert "RecursionError" not in body
+    assert "maximum recursion" not in body
+
+
+async def test_scrape_defensively_translates_parser_recursion_error(
+    client,
+    monkeypatch,
+):
+    def _raise_recursion(_text: str) -> str:
+        raise RecursionError("interpreter detail must not escape")
+
+    monkeypatch.setattr("scrapeyard.api.routes.load_config_project", _raise_recursion)
+    response = await client.post(
+        "/scrape",
+        content="project: test\n",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    assert f"YAML nesting exceeds {MAX_YAML_NESTING} levels" in response.text
+    assert "interpreter detail" not in response.text
 
 
 @pytest.mark.asyncio

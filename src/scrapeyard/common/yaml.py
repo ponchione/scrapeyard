@@ -6,21 +6,42 @@ import re
 from typing import Any
 
 import yaml
-from yaml.events import AliasEvent
+from yaml.events import AliasEvent, MappingStartEvent, SequenceStartEvent
 from yaml.nodes import MappingNode
 
 _BOOL_TAG = "tag:yaml.org,2002:bool"
 _YAML_1_2_BOOL_RE = re.compile(r"^(?:true|false)$", re.IGNORECASE)
+MAX_YAML_NESTING = 50
+
+
+class YamlNestingError(yaml.YAMLError):
+    """Raised before user-controlled collection nesting reaches recursion limits."""
 
 
 class ScrapeyardSafeLoader(yaml.SafeLoader):
-    """SafeLoader variant that rejects YAML aliases."""
+    """SafeLoader variant that rejects aliases and excessive collection depth."""
 
     def compose_node(self, parent: Any, index: Any) -> Any:
         # PyYAML's parser methods remain untyped in types-PyYAML.
         if self.check_event(AliasEvent):  # type: ignore[no-untyped-call]
             raise yaml.YAMLError("YAML aliases are not supported")
-        return super().compose_node(parent, index)
+        is_collection = self.check_event(  # type: ignore[no-untyped-call]
+            MappingStartEvent,
+            SequenceStartEvent,
+        )
+        if not is_collection:
+            return super().compose_node(parent, index)
+
+        depth = int(getattr(self, "_scrapeyard_collection_depth", 0)) + 1
+        if depth > MAX_YAML_NESTING:
+            raise YamlNestingError(
+                f"YAML nesting exceeds {MAX_YAML_NESTING} levels"
+            )
+        self._scrapeyard_collection_depth = depth
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._scrapeyard_collection_depth = depth - 1
 
 
 def _construct_mapping_without_duplicates(
