@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.models.job import Job, JobRun, JobStatus
-from scrapeyard.scheduler.cron import SchedulerService
+from scrapeyard.queue.pool import QueueDeliveryState
+from scrapeyard.scheduler.cron import SchedulerService, SchedulerUnavailableError
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
@@ -34,7 +35,9 @@ def _job(
         status=status,
         config_yaml=CONFIG_YAML,
         updated_at=updated_at,
+        schedule_cron="*/5 * * * *",
         current_run_id=run_id,
+        current_trigger="scheduled" if run_id is not None else None,
     )
 
 
@@ -171,7 +174,7 @@ async def test_trigger_job_skips_if_running_heartbeat_is_fresh():
         run_id="run-active",
         heartbeat_at=NOW - timedelta(seconds=599),
     )
-    pool = MagicMock(enqueue=AsyncMock())
+    pool = MagicMock(enqueue=AsyncMock(), inspect_delivery=AsyncMock())
     svc = _make_service(worker_pool=pool, job_store=job_store)
 
     with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
@@ -287,7 +290,7 @@ async def test_trigger_job_skips_if_run_already_queued():
         run_id="run-queued",
         updated_at=NOW - timedelta(seconds=299),
     )
-    pool = MagicMock(enqueue=AsyncMock())
+    pool = MagicMock(enqueue=AsyncMock(), inspect_delivery=AsyncMock())
     svc = _make_service(worker_pool=pool, job_store=job_store)
 
     with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
@@ -295,18 +298,31 @@ async def test_trigger_job_skips_if_run_already_queued():
 
     job_store.get_job_run.assert_not_awaited()
     job_store.queue_run.assert_not_awaited()
+    pool.inspect_delivery.assert_not_awaited()
     pool.enqueue.assert_not_awaited()
 
 
-async def test_trigger_job_requeues_stale_queued_run_using_queued_timeout():
+@pytest.mark.parametrize(
+    "delivery_state",
+    [
+        QueueDeliveryState.queued,
+        QueueDeliveryState.deferred,
+        QueueDeliveryState.in_progress,
+    ],
+)
+async def test_trigger_job_preserves_stale_queued_run_present_in_redis(
+    delivery_state,
+):
     job_store = AsyncMock()
     job_store.get_job.return_value = _job(
         status=JobStatus.queued,
         run_id="run-stale",
         updated_at=NOW - timedelta(seconds=121),
     )
-    job_store.queue_run.return_value = True
-    pool = MagicMock(enqueue=AsyncMock())
+    pool = MagicMock(
+        enqueue=AsyncMock(),
+        inspect_delivery=AsyncMock(return_value=delivery_state),
+    )
     svc = _make_service(
         worker_pool=pool,
         job_store=job_store,
@@ -314,25 +330,99 @@ async def test_trigger_job_requeues_stale_queued_run_using_queued_timeout():
         running_heartbeat_timeout_seconds=600,
     )
 
-    with (
-        patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW),
-        patch("scrapeyard.scheduler.cron.generate_run_id", return_value="run-new"),
-    ):
+    with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
         await svc._trigger_job("job-1")
 
-    job_store.get_job_run.assert_not_awaited()
-    job_store.recover_stale_run.assert_not_awaited()
-    job_store.queue_run.assert_awaited_once_with(
-        "job-1",
-        expected_status=JobStatus.queued.value,
-        expected_run_id="run-stale",
-        new_run_id="run-new",
-        new_trigger="scheduled",
-        queued_at=NOW,
-        stale_before=NOW - timedelta(seconds=120),
-        expected_config_yaml=CONFIG_YAML,
+    pool.inspect_delivery.assert_awaited_once_with("run-stale")
+    job_store.reserve_queued_run_recovery.assert_not_awaited()
+    job_store.queue_run.assert_not_awaited()
+    pool.enqueue.assert_not_awaited()
+
+
+async def test_trigger_job_recovers_missing_delivery_with_original_run_id():
+    queued_at = NOW - timedelta(seconds=121)
+    job_store = AsyncMock()
+    job_store.get_job.return_value = _job(
+        status=JobStatus.queued,
+        run_id="run-stale",
+        updated_at=queued_at,
     )
-    pool.enqueue.assert_awaited_once()
+    job_store.reserve_queued_run_recovery.return_value = True
+    pool = MagicMock(
+        enqueue=AsyncMock(),
+        inspect_delivery=AsyncMock(return_value=QueueDeliveryState.missing),
+    )
+    svc = _make_service(
+        worker_pool=pool,
+        job_store=job_store,
+        queued_claim_timeout_seconds=120,
+        running_heartbeat_timeout_seconds=600,
+    )
+
+    with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
+        await svc._trigger_job("job-1")
+
+    job_store.reserve_queued_run_recovery.assert_awaited_once_with(
+        "job-1",
+        "run-stale",
+        expected_queued_at=queued_at,
+        stale_before=NOW - timedelta(seconds=120),
+        reserved_at=NOW,
+    )
+    pool.enqueue.assert_awaited_once_with(
+        "job-1",
+        CONFIG_YAML,
+        "normal",
+        False,
+        run_id="run-stale",
+        trigger="scheduled",
+    )
+    job_store.queue_run.assert_not_awaited()
+
+
+async def test_scheduled_trigger_fails_closed_and_records_redis_inspection_error():
+    job_store = AsyncMock()
+    job_store.get_job.return_value = _job(
+        status=JobStatus.queued,
+        run_id="run-stale",
+        updated_at=NOW - timedelta(seconds=301),
+    )
+    pool = MagicMock(
+        enqueue=AsyncMock(),
+        inspect_delivery=AsyncMock(side_effect=ConnectionError("redis unavailable")),
+    )
+    svc = _make_service(worker_pool=pool, job_store=job_store)
+
+    with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
+        assert await svc._trigger_job("job-1") is None
+
+    assert svc.background_ok is False
+    assert svc.background_detail == "scheduler Redis delivery inspection failed: ConnectionError"
+    job_store.queue_run.assert_not_awaited()
+    pool.enqueue.assert_not_awaited()
+
+
+async def test_manual_trigger_raises_unavailable_when_redis_inspection_fails():
+    job_store = AsyncMock()
+    job_store.get_job.return_value = _job(
+        status=JobStatus.queued,
+        run_id="run-stale",
+        updated_at=NOW - timedelta(seconds=301),
+    )
+    pool = MagicMock(
+        enqueue=AsyncMock(),
+        inspect_delivery=AsyncMock(side_effect=ConnectionError("redis unavailable")),
+    )
+    svc = _make_service(worker_pool=pool, job_store=job_store)
+
+    with (
+        patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW),
+        pytest.raises(SchedulerUnavailableError, match="temporarily unavailable"),
+    ):
+        await svc.trigger_job_now("job-1")
+
+    job_store.queue_run.assert_not_awaited()
+    pool.enqueue.assert_not_awaited()
 
 
 async def test_trigger_job_stops_when_queue_replacement_loses_race():

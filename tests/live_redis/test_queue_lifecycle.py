@@ -13,6 +13,7 @@ from arq.connections import RedisSettings
 
 from scrapeyard.api.dependencies import (
     get_job_store,
+    get_scheduler,
     get_webhook_dispatcher,
     get_webhook_outbox_store,
     get_worker_pool,
@@ -80,14 +81,14 @@ target:
 """
 
 
-def _scheduled_scrape_yaml() -> str:
-    return """
+def _scheduled_scrape_yaml(*, enabled: bool = False) -> str:
+    return f"""
 project: live-redis
 name: manual-schedule
 schedule:
   cron: "0 9 * * *"
   timezone: "America/New_York"
-  enabled: false
+  enabled: {str(enabled).lower()}
 target:
   url: https://example.com
   fetcher: basic
@@ -180,6 +181,62 @@ async def test_manual_scheduled_trigger_uses_real_redis_and_explicit_trigger(
     assert detail.status_code == 200
     assert detail.json()["runs"][0]["trigger"] == "manual"
     assert detail.json()["runs"][0]["config_hash"] == triggered.json()["config_hash"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_stale_sqlite_age_never_supersedes_present_redis_delivery(
+    client,
+):
+    yaml = _scheduled_scrape_yaml(enabled=True)
+    created = await client.post(
+        "/jobs",
+        content=yaml,
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert created.status_code == 201
+    job_id = created.json()["job_id"]
+    store = get_job_store()
+    pool = get_worker_pool()
+    scheduler = get_scheduler()
+    assert pool._worker is not None
+    queued_at = utc_now() - timedelta(
+        seconds=scheduler._queued_claim_timeout_seconds + 1
+    )
+    initial = await store.get_job(job_id)
+
+    pool._worker.allow_pick_jobs = False
+    try:
+        queued = await store.queue_run(
+            job_id,
+            expected_status=initial.status.value,
+            expected_run_id=None,
+            new_run_id="run-old-present",
+            new_trigger="scheduled",
+            queued_at=queued_at,
+        )
+        assert queued is True
+        await pool.enqueue(
+            job_id,
+            yaml,
+            "normal",
+            False,
+            run_id="run-old-present",
+            trigger="scheduled",
+        )
+        assert await pool.inspect_delivery("run-old-present") is QueueDeliveryState.queued
+
+        assert await scheduler._trigger_job(job_id) is None
+        manual = await client.post(f"/jobs/{job_id}/trigger")
+
+        assert manual.status_code == 409
+        stored = await store.get_job(job_id)
+        assert stored.current_run_id == "run-old-present"
+        assert stored.updated_at == queued_at
+        assert await pool.inspect_delivery("run-old-present") is QueueDeliveryState.queued
+        assert await pool.queue_depths() == {"high": 0, "normal": 1, "low": 0}
+    finally:
+        pool._worker.allow_pick_jobs = True
 
 
 @pytest.mark.asyncio

@@ -23,14 +23,23 @@ from scrapeyard.runtime.metrics import mark_last_success
 from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.job_state import run_lease_is_active
 from scrapeyard.queue.pool import WorkerPool
+from scrapeyard.queue.reconciliation import (
+    QueuedReconciliationError,
+    reconcile_stale_queued_job,
+)
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
 from scrapeyard.storage.protocols import JobStore, ResultStore
+from scrapeyard.storage.types import StaleQueuedJob
 
 logger = logging.getLogger(__name__)
 
 
 class ManualTriggerConflictError(RuntimeError):
     """Raised when an accepted/current run prevents a manual trigger."""
+
+
+class SchedulerUnavailableError(RuntimeError):
+    """Raised when authoritative queue state cannot be inspected safely."""
 
 
 class ScheduledJobLifecycleError(RuntimeError):
@@ -68,6 +77,7 @@ class SchedulerService:
         self._result_store = result_store
         self._misfire_grace_seconds = misfire_grace_seconds
         self._scheduler = AsyncIOScheduler()
+        self._background_error: str | None = None
 
     def register_job(
         self,
@@ -130,6 +140,7 @@ class SchedulerService:
             )
 
         self._scheduler.start()
+        self._background_error = None
         mark_last_success("scheduler")
 
     def shutdown(self) -> None:
@@ -141,10 +152,12 @@ class SchedulerService:
     def background_ok(self) -> bool:
         """Whether APScheduler's process-local loop is running."""
 
-        return bool(self._scheduler.running)
+        return bool(self._scheduler.running) and self._background_error is None
 
     @property
     def background_detail(self) -> str | None:
+        if self._background_error is not None:
+            return self._background_error
         return None if self.background_ok else "scheduler is stopped"
 
     async def trigger_job_now(self, job_id: str) -> tuple[str, str]:
@@ -210,7 +223,12 @@ class SchedulerService:
             return None
 
         now = utc_now()
-        if await self._job_has_active_run(job, now=now):
+        try:
+            if await self._job_has_active_run(job, now=now):
+                return None
+        except SchedulerUnavailableError:
+            if trigger == "manual" or raise_enqueue_errors:
+                raise
             return None
 
         if job.status == JobStatus.running:
@@ -261,9 +279,6 @@ class SchedulerService:
         config = await asyncio.to_thread(load_config, job.config_yaml)
         delivery = queue_delivery_metadata(config)
         run_id = generate_run_id()
-        stale_before = None
-        if job.status == JobStatus.queued and job.current_run_id is not None:
-            stale_before = now - timedelta(seconds=self._queued_claim_timeout_seconds)
         queued = await self._job_store.queue_run(
             job_id,
             expected_status=job.status.value,
@@ -271,7 +286,7 @@ class SchedulerService:
             new_run_id=run_id,
             new_trigger=trigger,
             queued_at=now,
-            stale_before=stale_before,
+            stale_before=None,
             expected_config_yaml=job.config_yaml,
         )
         if not queued:
@@ -306,6 +321,7 @@ class SchedulerService:
                 raise
             return None
         mark_last_success("scheduler")
+        self._background_error = None
         return run_id, hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest()
 
     def get_next_run_time(self, job_id: str) -> datetime | None:
@@ -320,6 +336,14 @@ class SchedulerService:
         if status == JobStatus.queued and job.current_run_id is None:
             return False
         if status == JobStatus.queued:
+            if job.updated_at is None:
+                logger.error(
+                    "Queued delivery lacks a persisted timestamp; failing closed "
+                    "job_id=%s run_id=%s recovery_action=skip_trigger",
+                    job.job_id,
+                    job.current_run_id,
+                )
+                return True
             active = run_lease_is_active(
                 job.updated_at,
                 lease_seconds=self._queued_claim_timeout_seconds,
@@ -333,7 +357,9 @@ class SchedulerService:
                     job.current_run_id,
                     self._queued_claim_timeout_seconds,
                 )
-            return active
+                return True
+            await self._reconcile_stale_queued_run(job, now=now)
+            return True
 
         run_id = job.current_run_id
         if run_id is None:
@@ -356,3 +382,48 @@ class SchedulerService:
                 self._running_heartbeat_timeout_seconds,
             )
         return active
+
+    async def _reconcile_stale_queued_run(self, job: Job, *, now: datetime) -> None:
+        """Recover one stale queued owner without changing its accepted run ID."""
+
+        run_id = job.current_run_id
+        queued_at = job.updated_at
+        if run_id is None or queued_at is None:
+            return
+        trigger = job.current_trigger
+        if trigger is None:
+            trigger = "scheduled" if job.schedule_cron is not None else "adhoc"
+        stale_before = now - timedelta(seconds=self._queued_claim_timeout_seconds)
+        queued_job = StaleQueuedJob(
+            job_id=job.job_id,
+            run_id=run_id,
+            config_yaml=job.config_yaml,
+            queued_at=queued_at,
+            trigger=trigger,
+            schedule_cron=job.schedule_cron,
+            schedule_enabled=job.schedule_enabled,
+        )
+        try:
+            await reconcile_stale_queued_job(
+                queued_job,
+                job_store=self._job_store,
+                worker_pool=self._pool,
+                queued_claim_timeout_seconds=self._queued_claim_timeout_seconds,
+                stale_before=stale_before,
+                inspected_at=now,
+            )
+        except QueuedReconciliationError as exc:
+            self._background_error = (
+                "scheduler Redis delivery inspection failed: "
+                f"{type(exc.__cause__).__name__ if exc.__cause__ is not None else type(exc).__name__}"
+            )
+            logger.error(
+                "Scheduled trigger could not inspect authoritative Redis state "
+                "job_id=%s run_id=%s recovery_action=fail_closed",
+                job.job_id,
+                run_id,
+            )
+            raise SchedulerUnavailableError(
+                "Authoritative queue state is temporarily unavailable"
+            ) from exc
+        self._background_error = None

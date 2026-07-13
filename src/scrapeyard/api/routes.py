@@ -75,6 +75,7 @@ from scrapeyard.scheduler.cron import (
     ManualTriggerConflictError,
     ScheduledJobLifecycleError,
     SchedulerService,
+    SchedulerUnavailableError,
 )
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
@@ -505,6 +506,8 @@ async def trigger_job(
         run_id, config_hash = await scheduler.trigger_job_now(job_id)
     except KeyError:
         raise_json_error(404, f"Job {job_id!r} not found")
+    except SchedulerUnavailableError as exc:
+        raise_json_error(503, str(exc))
     except (ManualTriggerConflictError, ScheduledJobLifecycleError) as exc:
         raise_json_error(409, str(exc))
     except Exception:
