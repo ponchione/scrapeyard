@@ -300,8 +300,11 @@ selection follows the zone rules above.
 it returns the SHA-256 `config_hash` that subsequent runs will record. An
 already queued or running delivery makes update return `409`, so accepted work
 never changes configuration underneath itself. The `(project, name)` unique
-constraint remains authoritative. `POST .../pause` and `.../resume` persist
-state and re-register the local scheduler, and therefore survive restart;
+constraint remains authoritative. A job's `project` namespace is immutable;
+an update that supplies a different project returns `409`, preserving the
+ownership of its historical runs, results, and errors. `POST .../pause` and
+`.../resume` persist state and re-register the local scheduler, and therefore
+survive restart;
 pause affects future fires, not a run already accepted. `POST .../trigger`
 works even while cron is paused, returns `202` with `trigger=manual`, `run_id`,
 and the exact config hash, and returns `409` when a run is already queued or

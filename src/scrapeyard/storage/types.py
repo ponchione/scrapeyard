@@ -35,6 +35,7 @@ class ScheduledJobMutationAction(str, Enum):
     unchanged = "unchanged"
     missing = "missing"
     not_scheduled = "not_scheduled"
+    project_conflict = "project_conflict"
     active_conflict = "active_conflict"
     lifecycle_conflict = "lifecycle_conflict"
 

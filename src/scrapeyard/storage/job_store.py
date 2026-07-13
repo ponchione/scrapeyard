@@ -320,6 +320,12 @@ class SQLiteJobStore:
                     previous,
                     previous,
                 )
+            if previous.project != project:
+                return ScheduledJobMutationOutcome(
+                    ScheduledJobMutationAction.project_conflict,
+                    previous,
+                    previous,
+                )
             if previous.status in {JobStatus.cancelled, JobStatus.deleting}:
                 return ScheduledJobMutationOutcome(
                     ScheduledJobMutationAction.lifecycle_conflict,
