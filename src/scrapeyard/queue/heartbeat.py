@@ -92,15 +92,17 @@ class RunHeartbeat:
             await task
         except asyncio.CancelledError:
             pass
-        except BaseException:
-            logger.exception(
+        except BaseException as exc:
+            logger.error(
                 "Heartbeat shutdown failed job_id=%s run_id=%s "
-                "last_heartbeat=%s failure_count=%d timeout_seconds=%s",
+                "last_heartbeat=%s failure_count=%d timeout_seconds=%s "
+                "error_type=%s",
                 self.job_id,
                 self.run_id,
                 self.last_success_at.isoformat(),
                 self.failure_count,
                 self.timeout_seconds,
+                type(exc).__name__,
             )
 
     def _mark_lost(self, reason: str, *, lease_elapsed: float) -> None:

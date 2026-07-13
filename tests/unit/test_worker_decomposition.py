@@ -538,7 +538,9 @@ def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debu
         result.errors,
     )
 
-    assert payload["targets"][0]["url"] == "https://example.com/products?api_key=<redacted>&page=2"
+    assert payload["targets"][0]["url"] == (
+        "https://example.com/products?api_key=<redacted>&page=<redacted>"
+    )
     assert payload["targets"][0]["error_detail"] == (
         "redirected to https://example.com/private?session_id=<redacted>"
     )
@@ -546,7 +548,7 @@ def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debu
         "failed at https://example.com/private?access_token=<redacted>"
     ]
     assert payload["targets"][0]["debug"]["final_url"] == (
-        "https://example.com/private?token=<redacted>&page=2"
+        "https://example.com/private?token=<redacted>&page=<redacted>"
     )
     assert payload["targets"][0]["debug"]["request_failures"][0]["url"] == (
         "https://example.com/api?signature=<redacted>"

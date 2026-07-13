@@ -28,6 +28,9 @@ from scrapeyard.config.schema import (
     MAX_BROWSER_ACTION_REPEAT,
     MAX_BROWSER_TIMEOUT_MS,
     MAX_BROWSER_WAIT_MS,
+    MAX_DETECTION_CSS_SELECTORS,
+    MAX_DETECTION_PATTERNS,
+    MAX_DETECTION_TEXT_PATTERN_CHARS,
     MAX_DOMAIN_RATE_LIMIT_SECONDS,
     MAX_EXECUTION_CONCURRENCY,
     MAX_EXECUTION_DELAY_SECONDS,
@@ -35,12 +38,14 @@ from scrapeyard.config.schema import (
     MAX_RETRY_ATTEMPTS,
     MAX_RETRY_BACKOFF_SECONDS,
     MAX_RETRYABLE_STATUSES,
+    MAX_REQUIRED_FIELDS,
     MAX_TARGETS_PER_JOB,
     MAX_WEBHOOK_TIMEOUT_SECONDS,
     BrowserConfig,
     ExecutionConfig,
     PaginationConfig,
     RetryConfig,
+    StockPatternConfig,
     ValidationConfig,
 )
 
@@ -270,6 +275,25 @@ target:
 """
             )
 
+    def test_name_cannot_be_derived_from_a_secret_reference(self, monkeypatch):
+        monkeypatch.setenv("SCRAPEYARD_SECRET_NAME", "hidden-name")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"alpha":["SCRAPEYARD_SECRET_NAME"]}',
+        )
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="name must be a literal string"):
+            load_config(
+                """
+project: alpha
+name: ${SCRAPEYARD_SECRET_NAME}
+target:
+  url: https://example.com
+  selectors:
+    title: h1
+"""
+            )
+
     def test_unknown_nested_config_key_raises(self):
         with pytest.raises(ValidationError, match="extra_forbidden"):
             ScrapeConfig(**_tier1_config(target=_target_dict(fetchre="dynamic")))
@@ -279,6 +303,16 @@ target:
             ScrapeConfig(
                 **_tier1_config(
                     target=_target_dict(selectors={"title": {"query": "h1", "unknown": True}})
+                )
+            )
+
+    def test_long_form_selector_rejects_whitespace_only_query(self):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            ScrapeConfig(
+                **_tier1_config(
+                    target=_target_dict(
+                        selectors={"title": {"query": "   ", "type": "css"}}
+                    )
                 )
             )
 
@@ -1182,6 +1216,51 @@ target:
         assert config.target.map_detection is not None
         assert "add to cart to see price" in config.target.map_detection.text_patterns
 
+    @pytest.mark.parametrize("field", ["text_patterns", "css_selectors"])
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_rejects_blank_match_patterns(self, field, value):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            MapDetectionConfig(**{field: [value]})
+
+    def test_preserves_explicit_empty_price_value_pattern(self):
+        config = MapDetectionConfig(price_value_patterns=[""])
+        assert config.price_value_patterns == [""]
+
+    @pytest.mark.parametrize(
+        ("field", "values"),
+        [
+            ("text_patterns", ["Call For Price", "call for price"]),
+            ("css_selectors", [".price", ".price"]),
+            ("price_value_patterns", ["hidden", "hidden"]),
+        ],
+    )
+    def test_rejects_semantic_duplicates(self, field, values):
+        with pytest.raises(ValidationError, match="must be unique"):
+            MapDetectionConfig(**{field: values})
+
+    def test_normalizes_case_insensitive_text_patterns_once(self):
+        config = MapDetectionConfig(text_patterns=["  CALL FOR PRICE  "])
+        assert config.text_patterns == ["call for price"]
+
+    @pytest.mark.parametrize(
+        ("field", "limit"),
+        [
+            ("text_patterns", MAX_DETECTION_PATTERNS),
+            ("css_selectors", MAX_DETECTION_CSS_SELECTORS),
+            ("price_value_patterns", MAX_DETECTION_PATTERNS),
+        ],
+    )
+    def test_rejects_detection_collections_over_limit(self, field, limit):
+        values = [f"pattern-{index}" for index in range(limit + 1)]
+        with pytest.raises(ValidationError, match="too_long|at most"):
+            MapDetectionConfig(**{field: values})
+
+    def test_rejects_detection_pattern_over_item_limit(self):
+        with pytest.raises(ValidationError, match="must not exceed"):
+            MapDetectionConfig(
+                text_patterns=["x" * (MAX_DETECTION_TEXT_PATTERN_CHARS + 1)]
+            )
+
 
 class TestStockDetectionConfig:
     """StockDetectionConfig schema parsing and validation."""
@@ -1240,3 +1319,26 @@ target:
         config = load_config(yaml_str)
         assert config.target.stock_detection is not None
         assert config.target.stock_detection.in_stock is not None
+
+    @pytest.mark.parametrize("field", ["text_patterns", "css_selectors"])
+    def test_stock_patterns_reject_blank_values(self, field):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            StockPatternConfig(**{field: ["  "]})
+
+    def test_stock_text_patterns_reject_case_insensitive_duplicates(self):
+        with pytest.raises(ValidationError, match="must be unique"):
+            StockPatternConfig(text_patterns=["In Stock", "in stock"])
+
+
+class TestValidationConfigBounds:
+    def test_required_fields_reject_blank_and_duplicate_values(self):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            ValidationConfig(required_fields=[" "])
+        with pytest.raises(ValidationError, match="must be unique"):
+            ValidationConfig(required_fields=["price", "price"])
+
+    def test_required_fields_rejects_collection_over_limit(self):
+        with pytest.raises(ValidationError, match="too_long|at most"):
+            ValidationConfig(
+                required_fields=[f"field-{index}" for index in range(MAX_REQUIRED_FIELDS + 1)]
+            )

@@ -71,6 +71,20 @@ class ScrapePageResult:
     page_data: list[dict[str, Any]]
 
 
+async def _run_page_cpu_work(
+    context: ScrapeContext,
+    function: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Keep selector/detection CPU work off the event loop and under deadline."""
+
+    work = asyncio.to_thread(function, *args, **kwargs)
+    if context.budget is None:
+        return await work
+    return await context.budget.wait_for(work)
+
+
 def _extract_page_data(
     page: Any,
     target: TargetConfig,
@@ -100,7 +114,13 @@ def _extract_page_data(
         ]
 
     for item_data, element in zip(data, items, strict=False):
-        enrich_item_detection(item_data, element, target.map_detection, target.stock_detection)
+        enrich_item_detection(
+            item_data,
+            element,
+            target.map_detection,
+            target.stock_detection,
+            budget=budget,
+        )
     return data
 
 
@@ -414,10 +434,27 @@ async def _scrape_first_page(
         "after_first_page_fetch",
     )
     result.debug = outcome.debug
-    result.debug.update(_selector_debug(outcome.page, target))
-    page_data = _extract_page_data(outcome.page, target, budget=context.budget)
+    selector_debug = await _run_page_cpu_work(
+        context,
+        _selector_debug,
+        outcome.page,
+        target,
+    )
+    result.debug.update(selector_debug)
+    page_data = await _run_page_cpu_work(
+        context,
+        _extract_page_data,
+        outcome.page,
+        target,
+        budget=context.budget,
+    )
     if adaptive:
-        log_adaptive_selector_gap(target, page_data)
+        await _run_page_cpu_work(
+            context,
+            log_adaptive_selector_gap,
+            target,
+            page_data,
+        )
     if context.budget is not None:
         await context.budget.consume_extracted_records(len(page_data))
     result.data.extend(page_data)
@@ -538,7 +575,12 @@ async def scrape_target(
             proxy_url=proxy_url,
             artifacts_dir=artifacts_dir,
         )
-        _finalize_target_success(result, target)
+        await _run_page_cpu_work(
+            context,
+            _finalize_target_success,
+            result,
+            target,
+        )
     except BudgetExceeded:
         raise
     except SelectorExecutionError as exc:

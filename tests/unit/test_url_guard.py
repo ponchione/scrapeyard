@@ -6,12 +6,15 @@ import pytest
 
 from scrapeyard.engine.url_guard import (
     UnsafeURLError,
+    activate_deployment_secret_redaction,
     assert_public_url,
+    redact_deployment_secrets,
     redact_sensitive_config_text,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
     resolve_public_url,
+    reset_deployment_secret_redaction,
     url_host_label,
 )
 
@@ -206,31 +209,31 @@ def test_redact_userinfo_in_text_handles_malformed_ipv6_without_raising() -> Non
 def test_redact_userinfo_in_url_masks_sensitive_query_values() -> None:
     assert redact_userinfo_in_url(
         "https://user:pass@example.com/path?api_key=secret&page=2&session_id=abc"
-    ) == "https://example.com/path?api_key=<redacted>&page=2&session_id=<redacted>"
+    ) == "https://example.com/path?api_key=<redacted>&page=<redacted>&session_id=<redacted>"
 
 
 def test_redact_userinfo_in_url_masks_semicolon_query_values() -> None:
     assert redact_userinfo_in_url(
         "https://example.com/path?page=2;api_key=secret;session_id=abc"
-    ) == "https://example.com/path?page=2;api_key=<redacted>;session_id=<redacted>"
+    ) == "https://example.com/path?page=<redacted>;api_key=<redacted>;session_id=<redacted>"
 
 
 def test_redact_userinfo_in_url_masks_sensitive_path_params() -> None:
     assert redact_userinfo_in_url(
         "https://example.com/products;jsessionid=abc/page;api_key=secret?ok=1"
-    ) == "https://example.com/products;jsessionid=<redacted>/page;api_key=<redacted>?ok=1"
+    ) == "https://example.com/products;jsessionid=<redacted>/page;api_key=<redacted>?ok=<redacted>"
 
 
 def test_redact_userinfo_in_url_masks_sensitive_fragment_values() -> None:
     assert redact_userinfo_in_url(
         "https://example.com/callback#access_token=secret&state=ok"
-    ) == "https://example.com/callback#access_token=<redacted>&state=ok"
+    ) == "https://example.com/callback#<redacted>"
 
 
 def test_redact_userinfo_in_url_masks_fragment_query_values() -> None:
     assert redact_userinfo_in_url(
         "https://example.com/app#/callback?session_id=abc&page=2"
-    ) == "https://example.com/app#/callback?session_id=<redacted>&page=2"
+    ) == "https://example.com/app#<redacted>"
 
 
 def test_redact_userinfo_in_url_masks_signed_url_query_values() -> None:
@@ -238,7 +241,7 @@ def test_redact_userinfo_in_url_masks_signed_url_query_values() -> None:
         "https://example.com/path?AWSAccessKeyId=akia&sig=abc&key=map-key&page=2"
     ) == (
         "https://example.com/path?"
-        "AWSAccessKeyId=<redacted>&sig=<redacted>&key=<redacted>&page=2"
+        "AWSAccessKeyId=<redacted>&sig=<redacted>&key=<redacted>&page=<redacted>"
     )
 
 
@@ -246,7 +249,7 @@ def test_redact_userinfo_in_text_masks_sensitive_query_values() -> None:
     text = "failed at https://example.com/path?access_token=secret&page=2"
 
     assert redact_userinfo_in_text(text) == (
-        "failed at https://example.com/path?access_token=<redacted>&page=2"
+        "failed at https://example.com/path?access_token=<redacted>&page=<redacted>"
     )
 
 
@@ -269,6 +272,25 @@ def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:
     }
     assert redacted["nested"] == {"api_token": "<redacted>"}
     assert redacted["proxy"] == "socks5://gate.example.com:7777"
+
+
+def test_run_scoped_redaction_masks_raw_encoded_and_nested_tuple_secrets() -> None:
+    secret = "Vendor Value/91"
+    token = activate_deployment_secret_redaction((secret,))
+    try:
+        assert redact_deployment_secrets(f"raw={secret}") == "raw=<redacted>"
+        assert redact_deployment_secrets("path=Vendor%20Value%2F91") == (
+            "path=<redacted>"
+        )
+        assert redact_deployment_secrets("query=Vendor+Value%2F91") == (
+            "query=<redacted>"
+        )
+        assert redact_sensitive_mapping({secret: (secret,), f"x-{secret}": secret}) == {
+            "<redacted>": ("<redacted>",),
+            "x-<redacted>": "<redacted>",
+        }
+    finally:
+        reset_deployment_secret_redaction(token)
 
 
 def test_redact_sensitive_config_text_masks_yaml_secrets() -> None:
@@ -296,7 +318,7 @@ target:
     assert "browser-secret" not in redacted
     assert "target-secret" not in redacted
     assert "user:pass" not in redacted
-    assert redacted.count("<redacted>") == 3
+    assert redacted.count("<redacted>") == 4
 
 
 def test_redact_sensitive_config_text_rejects_yaml_alias_expansion() -> None:

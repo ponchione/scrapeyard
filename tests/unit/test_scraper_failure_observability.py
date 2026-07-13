@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
 
+from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.scraper import FetchError, FetchOutcome, scrape_target
 from scrapeyard.models.job import ErrorType
@@ -35,6 +37,12 @@ class _FakeNode:
         return self.text
 
 
+class _BlockingTextNode(_FakeNode):
+    def get_all_text(self) -> str:
+        time.sleep(0.2)
+        return self.text
+
+
 def _target(fetcher: FetcherType = FetcherType.basic, **overrides: Any) -> TargetConfig:
     base: dict[str, Any] = {
         "url": "https://example.com",
@@ -43,6 +51,54 @@ def _target(fetcher: FetcherType = FetcherType.basic, **overrides: Any) -> Targe
     }
     base.update(overrides)
     return TargetConfig.model_validate(base)
+
+
+@pytest.mark.asyncio
+async def test_near_limit_detection_work_obeys_deadline_without_blocking_event_loop(
+    monkeypatch,
+    tmp_path,
+):
+    page = _BlockingTextNode(
+        text="ordinary listing content" * 100_000,
+        css_map={"h1": []},
+    )
+
+    async def _return_page(*_args, **_kwargs):
+        return FetchOutcome(
+            page=page,
+            debug={"fetcher": "basic", "final_url": "https://example.com"},
+        )
+
+    monkeypatch.setattr("scrapeyard.engine.scraper._fetch_page", _return_page)
+    target = _target(
+        map_detection={
+            "text_patterns": [f"missing-pattern-{index}" for index in range(100)]
+        }
+    )
+    budget = RunBudget(
+        max_duration_seconds=0.02,
+        max_fetched_bytes=10_000_000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=10_000_000,
+        max_browser_debug_bytes=1_000_000,
+    )
+
+    async def _event_loop_probe() -> float:
+        started = asyncio.get_running_loop().time()
+        await asyncio.sleep(0.005)
+        return asyncio.get_running_loop().time() - started
+
+    probe = asyncio.create_task(_event_loop_probe())
+    with pytest.raises(BudgetExceeded):
+        await scrape_target(
+            target,
+            adaptive=False,
+            retry=RetryConfig(max_attempts=1),
+            adaptive_dir=str(tmp_path),
+            budget=budget,
+        )
+
+    assert await probe < 0.08
 
 
 @pytest.mark.asyncio
@@ -289,8 +345,7 @@ async def test_scrape_target_distinguishes_selector_engine_failures_from_empty_r
     assert result.debug["selector_failure"] == {
         "operation": "count_selector_matches",
         "field_name": "price",
-        "query": ".price",
+        "query_sha256": "d1335122501cdba534fa846d3cc4ab0fb5282e4628f6da024248961203fc3b2a",
         "selector_type": "css",
         "exception_type": "RuntimeError",
-        "exception_message": "selector engine failed",
     }

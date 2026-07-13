@@ -125,10 +125,12 @@ async def handle_crash(
             JobStatus.failed.value,
         )
         return False
-    except Exception:
-        logger.exception(
-            "Failed conditional crash finalization job_id=%s run_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Failed conditional crash finalization job_id=%s run_id=%s "
+            "error_type=%s",
             job_id,
             run_id,
+            type(exc).__name__,
         )
         return False

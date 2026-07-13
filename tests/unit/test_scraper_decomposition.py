@@ -556,4 +556,7 @@ def test_log_adaptive_selector_gap_redacts_target_url_secrets(caplog):
 
     assert "user:pass" not in caplog.text
     assert "api_key=secret" not in caplog.text
-    assert "https://example.com/products?api_key=<redacted>&page=2" in caplog.text
+    assert (
+        "https://example.com/products?api_key=<redacted>&page=<redacted>"
+        in caplog.text
+    )

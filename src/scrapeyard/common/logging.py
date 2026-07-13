@@ -27,6 +27,11 @@ class _JsonFormatter(logging.Formatter):
             message = f"{message}\n{record.exc_text}"
         if record.stack_info:
             message = f"{message}\n{record.stack_info}"
+        # This formatter is the final defense for third-party exceptions emitted
+        # while a run-scoped deployment-secret redaction context is active.
+        from scrapeyard.engine.url_guard import redact_userinfo_in_text
+
+        message = redact_userinfo_in_text(message)
         return json.dumps(
             {
                 "time": self.formatTime(record, self.datefmt),

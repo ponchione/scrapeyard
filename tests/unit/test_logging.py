@@ -4,6 +4,10 @@ import json
 import logging
 
 from scrapeyard.common.logging import _JsonFormatter
+from scrapeyard.engine.url_guard import (
+    activate_deployment_secret_redaction,
+    reset_deployment_secret_redaction,
+)
 
 
 def _format_message(message: str, **kwargs) -> str:
@@ -77,3 +81,28 @@ def test_message_with_exc_info():
     parsed = json.loads(raw)
     assert "ValueError: boom" in parsed["message"]
     assert parsed["message"].startswith("failed\n")
+
+
+def test_formatter_redacts_run_scoped_secret_from_exception_traceback():
+    import sys
+
+    secret = "formatter-secret-sentinel"
+    token = activate_deployment_secret_redaction((secret,))
+    try:
+        try:
+            raise ValueError(secret)
+        except ValueError:
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname="test.py",
+                lineno=1,
+                msg="failed",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+        parsed = json.loads(_JsonFormatter().format(record))
+        assert secret not in parsed["message"]
+        assert "ValueError: <redacted>" in parsed["message"]
+    finally:
+        reset_deployment_secret_redaction(token)

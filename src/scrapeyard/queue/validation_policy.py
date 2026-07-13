@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -28,6 +29,17 @@ logger = logging.getLogger(__name__)
 ScrapeCallable = Callable[..., Awaitable[TargetResult]]
 
 
+async def _validate_result(
+    validator: ResultValidator,
+    data: list[dict[str, object]],
+    budget: RunBudget | None,
+):
+    work = asyncio.to_thread(validator.validate, data, budget=budget)
+    if budget is None:
+        return await work
+    return await budget.wait_for(work)
+
+
 async def apply_validation(
     *,
     target_cfg: TargetConfig,
@@ -50,7 +62,7 @@ async def apply_validation(
     if not result.is_success:
         return result
 
-    validation = validator.validate(result.data)
+    validation = await _validate_result(validator, result.data, budget)
     if validation.passed:
         return result
 
@@ -199,7 +211,7 @@ async def _retry_after_validation_failure(
         return retry_result
 
     recorder.record_success(domain)
-    retry_validation = validator.validate(retry_result.data)
+    retry_validation = await _validate_result(validator, retry_result.data, budget)
     if retry_validation.passed:
         retry_error.resolved = True
         return retry_result

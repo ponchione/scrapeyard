@@ -188,6 +188,17 @@ class TestDetectPricingVisibilityCallForPrice:
         assert vis == "call_for_price"
         assert text is None
 
+    @pytest.mark.parametrize("pattern", ["locally advertised price", "recall notice"])
+    def test_call_inside_an_unrelated_word_is_normal_map_text(self, pattern):
+        config = MapDetectionConfig(text_patterns=[pattern])
+        vis, text = detect_pricing_visibility(
+            {"price": None},
+            _mock_element(text=pattern.title()),
+            config,
+        )
+        assert vis == "map"
+        assert text == pattern.title()
+
 
 class TestDetectPricingVisibilityMap:
     """Pattern matches + display text captured -> map."""
