@@ -24,6 +24,10 @@ class UnsafeURLError(ValueError):
     """Raised when a URL points at a non-public address."""
 
 
+class URLResolutionError(OSError):
+    """Raised when DNS cannot currently provide a usable destination."""
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPublicURL:
     """A URL whose network connection is pinned to one validated public IP."""
@@ -227,7 +231,7 @@ def assert_public_url(
         raise UnsafeURLError("URL hostname is invalid") from exc
     except socket.gaierror as exc:
         if not allow_unresolved:
-            raise UnsafeURLError(f"Hostname {host!r} could not be resolved") from exc
+            raise URLResolutionError(f"Hostname {host!r} could not be resolved") from exc
         return
 
     seen: set[str] = set()
@@ -241,9 +245,7 @@ def assert_public_url(
         except ValueError:
             continue
         if _ip_is_blocked(addr):
-            raise UnsafeURLError(
-                f"Hostname {host!r} resolves to non-public address {ip_str}"
-            )
+            raise UnsafeURLError(f"Hostname {host!r} resolves to non-public address {ip_str}")
 
 
 def resolve_public_url(url: str) -> ResolvedPublicURL:
@@ -269,10 +271,10 @@ def resolve_public_url(url: str) -> ResolvedPublicURL:
     if literal is None:
         try:
             infos = socket.getaddrinfo(canonical_host, parsed.port, type=socket.SOCK_STREAM)
-        except (socket.gaierror, UnicodeError) as exc:
-            raise UnsafeURLError(
-                f"Hostname {canonical_host!r} could not be resolved"
-            ) from exc
+        except socket.gaierror as exc:
+            raise URLResolutionError(f"Hostname {canonical_host!r} could not be resolved") from exc
+        except UnicodeError as exc:
+            raise UnsafeURLError("URL hostname is invalid") from exc
         addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
         seen: set[str] = set()
         for *_head, sockaddr in infos:
@@ -289,7 +291,7 @@ def resolve_public_url(url: str) -> ResolvedPublicURL:
                 )
             addresses.append(address)
         if not addresses:
-            raise UnsafeURLError(f"Hostname {canonical_host!r} resolved to no usable address")
+            raise URLResolutionError(f"Hostname {canonical_host!r} resolved to no usable address")
         literal = addresses[0]
 
     ip_authority = f"[{literal}]" if isinstance(literal, ipaddress.IPv6Address) else str(literal)
@@ -300,11 +302,7 @@ def resolve_public_url(url: str) -> ResolvedPublicURL:
         userinfo = f"{parsed.netloc.rsplit('@', 1)[0]}@"
     connect_url = urlunparse(parsed._replace(netloc=f"{userinfo}{ip_authority}"))
 
-    host_authority = (
-        f"[{canonical_host}]"
-        if ":" in canonical_host
-        else canonical_host
-    )
+    host_authority = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
     if parsed.port is not None:
         host_authority = f"{host_authority}:{parsed.port}"
     return ResolvedPublicURL(connect_url, host_authority, canonical_host)
@@ -366,13 +364,11 @@ def redact_deployment_secrets_in_value(
         return redacted
     if isinstance(value, list):
         return [
-            redact_deployment_secrets_in_value(item, secret_values=secret_values)
-            for item in value
+            redact_deployment_secrets_in_value(item, secret_values=secret_values) for item in value
         ]
     if isinstance(value, tuple):
         return tuple(
-            redact_deployment_secrets_in_value(item, secret_values=secret_values)
-            for item in value
+            redact_deployment_secrets_in_value(item, secret_values=secret_values) for item in value
         )
     if isinstance(value, str):
         return redact_deployment_secrets(value, secret_values)
@@ -424,19 +420,11 @@ def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
                 )
         return redacted
     if isinstance(value, list):
-        return [
-            redact_sensitive_mapping(item, secret_values=secret_values)
-            for item in value
-        ]
+        return [redact_sensitive_mapping(item, secret_values=secret_values) for item in value]
     if isinstance(value, tuple):
-        return tuple(
-            redact_sensitive_mapping(item, secret_values=secret_values)
-            for item in value
-        )
+        return tuple(redact_sensitive_mapping(item, secret_values=secret_values) for item in value)
     if isinstance(value, str):
-        return redact_userinfo_in_text(
-            redact_deployment_secrets(value, secret_values)
-        )
+        return redact_userinfo_in_text(redact_deployment_secrets(value, secret_values))
     return value
 
 
@@ -447,7 +435,7 @@ def _redact_sensitive_yaml_lines(text: str) -> str:
     pending_sensitive_key_indent: int | None = None
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
-        newline = line[len(body):]
+        newline = line[len(body) :]
         stripped = body.lstrip()
         indent = len(body) - len(stripped)
 
@@ -493,7 +481,7 @@ def _yaml_fallback_key_name(raw_key: str) -> str:
     key = raw_key.strip()
     for prefix in ("- ", "? "):
         if key.startswith(prefix):
-            key = key[len(prefix):].lstrip()
+            key = key[len(prefix) :].lstrip()
     return key.strip("'\"")
 
 
@@ -522,8 +510,7 @@ def _redact_query(query: str) -> str:
         return query
     parts = _QUERY_SEPARATOR_RE.split(query)
     return "".join(
-        part if index % 2 else _redact_query_part(part)
-        for index, part in enumerate(parts)
+        part if index % 2 else _redact_query_part(part) for index, part in enumerate(parts)
     )
 
 
@@ -601,13 +588,15 @@ def redact_userinfo_in_url(url: str) -> str:
             port = None
         if port:
             netloc = f"{host}:{port}"
-    return urlunparse(parsed._replace(
-        netloc=netloc,
-        path=redacted_path,
-        params=redacted_params,
-        query=redacted_query,
-        fragment=redacted_fragment,
-    ))
+    return urlunparse(
+        parsed._replace(
+            netloc=netloc,
+            path=redacted_path,
+            params=redacted_params,
+            query=redacted_query,
+            fragment=redacted_fragment,
+        )
+    )
 
 
 def url_host_label(url: str) -> str:

@@ -29,7 +29,12 @@ from scrapeyard.config.schema import (
     FetcherType,
     TargetConfig,
 )
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, redact_sensitive_mapping
+from scrapeyard.engine.url_guard import (
+    URLResolutionError,
+    UnsafeURLError,
+    assert_public_url,
+    redact_sensitive_mapping,
+)
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
@@ -102,6 +107,11 @@ async def _guarded_async_intercept_route(route: Any) -> None:
                 request_url,
                 allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
             )
+        except URLResolutionError:
+            # Do not release an unvalidated subrequest. Aborting this browser
+            # attempt still lets the outer RetryHandler retry transient DNS.
+            await route.abort()
+            raise
         except UnsafeURLError:
             safe_request_url = truncate_text(
                 redact_userinfo_in_url(request_url),

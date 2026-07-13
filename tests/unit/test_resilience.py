@@ -21,6 +21,7 @@ from scrapeyard.engine.resilience import (
     RetryableError,
 )
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.engine.url_guard import URLResolutionError
 from scrapeyard.models.job import ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
 
@@ -52,6 +53,15 @@ class TestRetryHandler:
         assert result == "ok"
         assert fn.call_count == 3
 
+    async def test_retries_on_temporary_dns_resolution_failure(self):
+        handler = RetryHandler(self._config(max_attempts=2, backoff_max=0))
+        fn = AsyncMock(side_effect=[URLResolutionError("EAI_AGAIN"), "ok"])
+
+        result = await handler.execute(fn)
+
+        assert result == "ok"
+        assert fn.await_count == 2
+
     async def test_exhausts_retries(self):
         handler = RetryHandler(self._config(max_attempts=2, backoff=BackoffStrategy.fixed))
         fn = AsyncMock(side_effect=RetryableError(503))
@@ -62,7 +72,9 @@ class TestRetryHandler:
     async def test_exponential_backoff_delays(self):
         handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.exponential))
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])
-        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch(
+            "scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
             result = await handler.execute(fn)
         assert result == "ok"
         # exponential: 2^0=1s, 2^1=2s
@@ -72,7 +84,9 @@ class TestRetryHandler:
     async def test_linear_backoff_delays(self):
         handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.linear))
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])
-        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch(
+            "scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
             result = await handler.execute(fn)
         assert result == "ok"
         # linear: 1s, 2s
@@ -84,7 +98,9 @@ class TestRetryHandler:
             self._config(max_attempts=2, backoff=BackoffStrategy.exponential, backoff_max=1)
         )
         fn = AsyncMock(side_effect=[RetryableError(503), "ok"])
-        with patch("scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch(
+            "scrapeyard.engine.resilience.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
             result = await handler.execute(fn)
         assert result == "ok"
         # exponential 2^0=1.0, capped at backoff_max=1
