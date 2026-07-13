@@ -136,6 +136,68 @@ async def test_save_result_reuses_explicit_run_id(store):
     assert result.data == [{"price": 19.99}]
 
 
+async def test_save_result_restores_existing_artifact_when_metadata_commit_fails(
+    store,
+    monkeypatch,
+):
+    await store.save_result(
+        "j-1",
+        [{"version": "old"}],
+        run_id="run-1",
+        status="complete",
+        record_count=1,
+    )
+    async with get_db("results_meta.db") as db:
+        connection_type = type(db)
+
+    async def fail_commit(_connection) -> None:
+        raise OSError("commit failed")
+
+    with monkeypatch.context() as context:
+        context.setattr(connection_type, "commit", fail_commit)
+        with pytest.raises(OSError, match="commit failed"):
+            await store.save_result(
+                "j-1",
+                [{"version": "new"}],
+                run_id="run-1",
+                status="partial",
+                record_count=99,
+            )
+
+    result = await store.get_result("j-1", "run-1")
+    metadata = await store.get_result_metadata("j-1", "run-1")
+    assert result.data == [{"version": "old"}]
+    assert result.status == "complete"
+    assert metadata is not None
+    assert metadata.status == "complete"
+    assert metadata.record_count == 1
+
+
+async def test_save_result_removes_new_artifact_when_metadata_commit_fails(
+    store,
+    monkeypatch,
+):
+    async with get_db("results_meta.db") as db:
+        connection_type = type(db)
+
+    async def fail_commit(_connection) -> None:
+        raise OSError("commit failed")
+
+    with monkeypatch.context() as context:
+        context.setattr(connection_type, "commit", fail_commit)
+        with pytest.raises(OSError, match="commit failed"):
+            await store.save_result(
+                "j-1",
+                [{"version": "new"}],
+                run_id="run-new",
+            )
+
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-new"
+    assert not (run_dir / "results.json").exists()
+    with pytest.raises(KeyError):
+        await store.get_result("j-1", "run-new")
+
+
 async def test_run_id_format(store):
     meta = await store.save_result("j-1", [{"a": 1}])
     run_id = meta.run_id
@@ -197,6 +259,10 @@ async def test_save_result_offloads_filesystem_work(store):
     assert mock_to_thread.await_args_list == [
         call(result_store_module.serialize_json_bytes, data),
         call(result_store_module.ensure_directory, run_dir),
+        call(
+            result_store_module.read_bytes_file_no_follow,
+            run_dir / "results.json",
+        ),
         call(
             result_store_module.write_bytes_file,
             run_dir / "results.json",

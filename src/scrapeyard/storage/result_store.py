@@ -26,6 +26,7 @@ from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
+    read_bytes_file_no_follow,
     read_json_file_no_follow,
     remove_directories,
     serialize_json_bytes,
@@ -145,6 +146,7 @@ class LocalResultStore:
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
         self._active_run_lookup = active_run_lookup
+        self._save_lock = asyncio.Lock()
 
     def _checked_result_dir(self, file_path: str) -> Path:
         path = Path(file_path)
@@ -259,43 +261,57 @@ class LocalResultStore:
         run_dir = self._checked_result_dir(
             str(safe_join(self._results_dir, project, job_name, run_id))
         )
-        await cleanup_safe_to_thread(ensure_directory, run_dir)
-
-        path = run_dir / "results.json"
-        path_existed = path.exists()
-        metadata_committed = False
-        try:
-            await cleanup_safe_to_thread(write_bytes_file, path, payload)
-            qualification_checkpoint("after_result_artifact_write")
-            if budget is not None:
-                budget.check_deadline()
-
-            async with get_db("results_meta.db") as db, db_transaction(db):
-                # Single atomic statement — the UNIQUE index on (job_id, run_id)
-                # lets INSERT OR REPLACE handle the upsert without a separate DELETE.
-                await db.execute(
-                    """INSERT OR REPLACE INTO results_meta
-                           (job_id, project, run_id, status, record_count,
-                            file_path, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        job_id,
-                        project,
-                        run_id,
-                        status,
-                        record_count,
-                        str(run_dir),
-                        utc_now().isoformat(),
-                    ),
+        async with self._save_lock:
+            await cleanup_safe_to_thread(ensure_directory, run_dir)
+            path = run_dir / "results.json"
+            try:
+                previous_payload = await cleanup_safe_to_thread(
+                    read_bytes_file_no_follow,
+                    path,
                 )
+            except FileNotFoundError:
+                previous_payload = None
+
+            metadata_committed = False
+            try:
+                await cleanup_safe_to_thread(write_bytes_file, path, payload)
+                qualification_checkpoint("after_result_artifact_write")
+                if budget is not None:
+                    budget.check_deadline()
+
+                async with get_db("results_meta.db") as db, db_transaction(db):
+                    # Single atomic statement — the UNIQUE index on (job_id, run_id)
+                    # lets INSERT OR REPLACE handle the upsert without a separate DELETE.
+                    await db.execute(
+                        """INSERT OR REPLACE INTO results_meta
+                               (job_id, project, run_id, status, record_count,
+                                file_path, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            job_id,
+                            project,
+                            run_id,
+                            status,
+                            record_count,
+                            str(run_dir),
+                            utc_now().isoformat(),
+                        ),
+                    )
                 metadata_committed = True
-            if budget is not None:
-                budget.check_deadline()
-        except BaseException:
-            if not metadata_committed and not path_existed:
-                with suppress(FileNotFoundError):
-                    path.unlink()
-            raise
+                if budget is not None:
+                    budget.check_deadline()
+            except BaseException:
+                if not metadata_committed:
+                    if previous_payload is None:
+                        with suppress(FileNotFoundError):
+                            path.unlink()
+                    else:
+                        await cleanup_safe_to_thread(
+                            write_bytes_file,
+                            path,
+                            previous_payload,
+                        )
+                raise
 
         return SaveResultMeta(
             run_id=run_id,

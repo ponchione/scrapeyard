@@ -73,8 +73,8 @@ def read_json_file(path: str | Path) -> Any:
     return json.loads(target.read_text(encoding="utf-8"))
 
 
-def read_json_file_no_follow(path: str | Path) -> Any:
-    """Load a regular JSON file without following its final symlink component."""
+def read_bytes_file_no_follow(path: str | Path) -> bytes:
+    """Read a regular file as bytes without following its final symlink."""
 
     target = Path(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -82,13 +82,20 @@ def read_json_file_no_follow(path: str | Path) -> Any:
     try:
         file_stat = os.fstat(descriptor)
         if not stat.S_ISREG(file_stat.st_mode):
-            raise ValueError("JSON artifact is not a regular file")
-        with os.fdopen(descriptor, "r", encoding="utf-8") as fh:
+            raise ValueError("Artifact is not a regular file")
+        with os.fdopen(descriptor, "rb") as fh:
             descriptor = -1
-            return json.load(fh)
+            return fh.read()
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def read_json_file_no_follow(path: str | Path) -> Any:
+    """Load a regular JSON file without following its final symlink component."""
+
+    payload = read_bytes_file_no_follow(path)
+    return json.loads(payload.decode("utf-8"))
 
 
 def remove_directories(paths: Iterable[str | Path]) -> None:
