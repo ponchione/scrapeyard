@@ -529,10 +529,21 @@ async def _persist_job_results(
     context.budget.check_deadline()
     flat_data, all_errors = _collect_result_payload(all_results)
     final_status = _determine_final_status(context.config, all_results, flat_data)
-    if final_status == JobStatus.failed and context.config.execution.fail_strategy == FailStrategy.all_or_nothing:
+    publish_results = not (
+        final_status == JobStatus.failed
+        and context.config.execution.fail_strategy == FailStrategy.all_or_nothing
+    )
+    if not publish_results:
         flat_data.clear()
 
-    output_data = _format_output(context.config, all_results, flat_data, job_id, final_status, all_errors)
+    output_data = _format_output(
+        context.config,
+        all_results,
+        job_id,
+        final_status,
+        all_errors,
+        publish_results=publish_results,
+    )
     context.budget.check_deadline()
     save_meta = await save_run_result(
         job_id=job_id,
@@ -1029,13 +1040,18 @@ def _collect_result_payload(all_results: list[TargetResult]) -> tuple[list[dict[
     return flat_data, all_errors
 
 
-def _target_result_details(result: TargetResult) -> dict[str, Any]:
+def _target_result_details(
+    result: TargetResult,
+    *,
+    records_accepted: bool = True,
+) -> dict[str, Any]:
     debug = redact_sensitive_mapping(result.debug) if result.debug is not None else None
     if isinstance(debug, dict):
         debug["screenshot_path"] = None
     return {
         "status": result.status_value,
-        "count": len(result.data),
+        "count": len(result.data) if records_accepted else 0,
+        "observed_count": len(result.data),
         "debug": debug,
         "error_type": result.error_type.value if result.error_type else None,
         "error_detail": (
@@ -1081,10 +1097,11 @@ def _determine_final_status(
 def _format_output(
     config: ScrapeConfig,
     all_results: list[TargetResult],
-    flat_data: list[dict[str, Any]],
     job_id: str,
     final_status: JobStatus,
     all_errors: list[str],
+    *,
+    publish_results: bool = True,
 ) -> dict[str, Any]:
     """Build the output data dict for result storage."""
     redacted_errors = [redact_userinfo_in_text(error) for error in all_errors]
@@ -1098,13 +1115,21 @@ def _format_output(
         "targets": [
             {
                 "url": redact_userinfo_in_url(result.url),
-                **_target_result_details(result),
+                **_target_result_details(
+                    result,
+                    records_accepted=publish_results,
+                ),
                 "pages_scraped": result.pages_scraped,
                 "errors": [redact_userinfo_in_text(error) for error in result.errors],
             }
             for result in all_results
         ],
     }
+
+    if not publish_results:
+        empty_results: list[Any] | dict[str, Any]
+        empty_results = [] if config.output.group_by == GroupBy.merge else {}
+        return {**job_meta, "results": empty_results}
 
     if config.output.group_by == GroupBy.merge:
         merged: list[Any] = []

@@ -262,6 +262,11 @@ Common target fields:
 | `map_detection` | Optional pricing visibility detection rules |
 | `stock_detection` | Optional stock status detection rules |
 
+`execution.fail_strategy: all_or_nothing` publishes records only when every
+target succeeds. If any target fails, both grouping modes persist an empty
+`results` value and all database/webhook record counts are zero; redacted
+per-target diagnostics remain available under `targets`.
+
 Selector transforms can be chained with `|`. Supported string transforms are
 `trim`, `collapse_whitespace`, `lowercase`, `uppercase`, `prepend`, `append`,
 `replace`, `remove`, `strip_prefix`, `strip_suffix`, `regex`, `extract`, and

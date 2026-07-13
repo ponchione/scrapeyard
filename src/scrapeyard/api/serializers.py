@@ -171,13 +171,21 @@ def serialize_result_response(
         and "results" in artifact
         and isinstance(artifact.get("targets"), list)
     ):
+        targets: list[Any] = []
+        for target in artifact.get("targets") or []:
+            if isinstance(target, dict):
+                normalized = dict(target)
+                normalized.setdefault("observed_count", normalized.get("count", 0))
+                targets.append(normalized)
+            else:
+                targets.append(target)
         return {
             "job_id": job_id,
             "run_id": run_id,
             "status": status,
             "completed_at": _contract_datetime(artifact.get("completed_at")),
             "errors": artifact.get("errors") or [],
-            "targets": artifact.get("targets") or [],
+            "targets": targets,
             "budget_error": artifact.get("budget_error"),
             "results": artifact["results"],
         }

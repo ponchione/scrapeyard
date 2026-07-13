@@ -35,6 +35,45 @@ async def _success(*_args, **_kwargs):
     )
 
 
+def _atomic_yaml(*, group_by: str) -> str:
+    return f"""
+project: api-contract
+name: atomic-response-contract
+execution:
+  mode: async
+  concurrency: 2
+  delay_between: 0
+  domain_rate_limit: 0
+  fail_strategy: all_or_nothing
+output:
+  group_by: {group_by}
+targets:
+  - url: https://example.com/ok
+    selectors:
+      title: h1
+  - url: https://example.com/fail
+    selectors:
+      title: h1
+"""
+
+
+async def _mixed_atomic(target, *_args, **_kwargs):
+    if target.url.endswith("/ok"):
+        return TargetResult(
+            url=target.url,
+            status="success",
+            data=[{"title": "must-not-publish"}],
+            pages_scraped=1,
+        )
+    return TargetResult(
+        url=target.url,
+        status="failed",
+        data=[],
+        errors=["selector miss"],
+        pages_scraped=1,
+    )
+
+
 def _assert_error_envelope(payload: dict, status_code: int) -> None:
     assert set(payload) == {"error", "code", "status_code", "details"}
     assert payload["status_code"] == status_code
@@ -80,6 +119,41 @@ async def test_v1_result_has_one_record_location_for_each_grouping_mode(
         assert payload["results"]["example.com"]["data"] == [{"title": "Contract"}]
     else:
         assert payload["results"] == [{"title": "Contract", "_source": "example.com"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group_by", "empty_results"),
+    [("target", {}), ("merge", [])],
+)
+async def test_all_or_nothing_failure_has_zero_accepted_records_end_to_end(
+    client,
+    monkeypatch,
+    group_by,
+    empty_results,
+):
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _mixed_atomic)
+    submitted = await client.post(
+        "/scrape",
+        content=_atomic_yaml(group_by=group_by),
+        headers={"content-type": "application/x-yaml"},
+    )
+    result = await poll_until_ready(
+        lambda: client.get(f"/results/{submitted.json()['job_id']}"),
+        lambda response: response.status_code == 200,
+        failure_message="Timed out waiting for atomic failure result",
+    )
+    payload = result.json()
+    job = (await client.get(f"/jobs/{submitted.json()['job_id']}")).json()
+
+    assert payload["status"] == "failed"
+    assert payload["results"] == empty_results
+    successful_target = next(
+        target for target in payload["targets"] if target["status"] == "success"
+    )
+    assert successful_target["count"] == 0
+    assert successful_target["observed_count"] == 1
+    assert job["runs"][0]["record_count"] == 0
 
 
 @pytest.mark.asyncio

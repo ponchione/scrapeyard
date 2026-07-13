@@ -444,12 +444,16 @@ async def test_unexpected_target_exception_respects_all_or_nothing_strategy():
     output_data = result_store.save_result.call_args.args[1]
 
     assert output_data["status"] == JobStatus.failed.value
-    assert output_data["results"]["good.example"]["status"] == "success"
-    assert output_data["results"]["bad.example"]["status"] == "failed"
-
-    # Existing all_or_nothing behavior clears the flat persisted record count
-    # after any target failure, even though grouped diagnostics still show the
-    # per-target result details.
+    assert output_data["results"] == {}
+    assert {target["status"] for target in output_data["targets"]} == {
+        "success",
+        "failed",
+    }
+    assert next(
+        target
+        for target in output_data["targets"]
+        if target["url"] == "http://good.example"
+    )["observed_count"] == 1
     assert result_store.save_result.call_args.kwargs["record_count"] == 0
 
     assert finalized_status(job_store) == JobStatus.failed
