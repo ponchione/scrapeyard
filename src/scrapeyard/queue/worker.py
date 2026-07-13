@@ -23,6 +23,8 @@ from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
+    redact_deployment_secrets,
+    redact_deployment_secrets_in_value,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
@@ -193,7 +195,6 @@ async def scrape_task(
             run_id=context.run_id,
             persisted=persisted,
             job_store=job_store,
-            result_store=result_store,
             error_store=error_store,
             webhook_dispatcher=webhook_dispatcher,
         )
@@ -546,7 +547,8 @@ async def _persist_job_results(
     if not publish_results:
         flat_data.clear()
 
-    output_data = redact_sensitive_mapping(
+    output_data = _redact_output_artifact(
+        context.config,
         _format_output(
             context.config,
             all_results,
@@ -555,7 +557,6 @@ async def _persist_job_results(
             all_errors,
             publish_results=publish_results,
         ),
-        secret_values=context.config.resolved_secret_values,
     )
     context.budget.check_deadline()
     save_meta = await save_run_result(
@@ -585,7 +586,6 @@ async def _finalize_job_execution(
     run_id: str,
     persisted: PersistedJobResult,
     job_store: JobStore,
-    result_store: ResultStore,
     error_store: ErrorStore,
     webhook_dispatcher: WebhookNotifier | None,
 ) -> None:
@@ -1155,6 +1155,10 @@ def _format_output(
             source = url_host_label(result.url)
             for item in result.data:
                 if isinstance(item, dict):
+                    if "_source" in item:
+                        raise ValueError(
+                            "Extracted record contains reserved merge field '_source'"
+                        )
                     merged.append({**item, "_source": source})
                 else:
                     merged.append(item)
@@ -1168,6 +1172,51 @@ def _format_output(
             "data": result.data,
         }
     return {**job_meta, "results": grouped}
+
+
+def _redact_output_artifact(
+    config: ScrapeConfig,
+    output_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Redact diagnostics aggressively without corrupting extracted records."""
+    secret_values = config.resolved_secret_values
+    results = output_data["results"]
+    redacted_output: dict[str, Any] = redact_sensitive_mapping(
+        {key: value for key, value in output_data.items() if key != "results"},
+        secret_values=secret_values,
+    )
+
+    if config.output.group_by == GroupBy.merge:
+        redacted_output["results"] = redact_deployment_secrets_in_value(
+            results,
+            secret_values=secret_values,
+        )
+        return redacted_output
+
+    redacted_results: dict[str, Any] = {}
+    for group_key, target_result in results.items():
+        data = target_result["data"]
+        redacted_target = redact_sensitive_mapping(
+            {
+                key: value
+                for key, value in target_result.items()
+                if key != "data"
+            },
+            secret_values=secret_values,
+        )
+        redacted_target["data"] = redact_deployment_secrets_in_value(
+            data,
+            secret_values=secret_values,
+        )
+        redacted_group_key = redact_deployment_secrets(group_key, secret_values)
+        unique_group_key = redacted_group_key
+        suffix = 2
+        while unique_group_key in redacted_results:
+            unique_group_key = f"{redacted_group_key}#{suffix}"
+            suffix += 1
+        redacted_results[unique_group_key] = redacted_target
+    redacted_output["results"] = redacted_results
+    return redacted_output
 
 
 def _run_superseded(job: Job, run_id: str | None) -> bool:

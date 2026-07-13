@@ -9,6 +9,7 @@ from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
     assert_public_url,
     redact_deployment_secrets,
+    redact_deployment_secrets_in_value,
     redact_sensitive_config_text,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
@@ -288,6 +289,17 @@ def test_run_scoped_redaction_masks_raw_encoded_and_nested_tuple_secrets() -> No
         assert redact_sensitive_mapping({secret: (secret,), f"x-{secret}": secret}) == {
             "<redacted>": ("<redacted>",),
             "x-<redacted>": "<redacted>",
+        }
+        assert redact_deployment_secrets_in_value(
+            {
+                "api_token": "public-value",
+                "url": "https://example.com?q=public#public",
+                "secret": (secret, "Vendor%20Value%2F91"),
+            }
+        ) == {
+            "api_token": "public-value",
+            "url": "https://example.com?q=public#public",
+            "secret": ("<redacted>", "<redacted>"),
         }
     finally:
         reset_deployment_secret_redaction(token)

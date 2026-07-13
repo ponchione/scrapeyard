@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.common.budgets import RunBudget
-from scrapeyard.config.schema import FetcherType, GroupBy, OnEmptyAction
+from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, OnEmptyAction
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
@@ -17,8 +17,10 @@ from scrapeyard.queue.worker import (
     JobExecutionContext,
     _collect_result_payload,
     _format_output,
+    _persist_job_results,
     _process_all_targets,
 )
+from scrapeyard.storage.types import SaveResultMeta
 
 
 def _concurrent_target(url: str, fetcher: FetcherType) -> MagicMock:
@@ -412,6 +414,94 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
     ]
     assert payload["results"] == [{"sku": "a1", "_source": "a.example"}, "raw-item"]
     assert results[0].data == [{"sku": "a1"}]
+
+
+def test_format_output_rejects_reserved_source_field_in_merge_record():
+    config = MagicMock(project="test", name="job")
+    config.output.group_by = GroupBy.merge
+    results = [
+        TargetResult(
+            url="https://shop.example/products",
+            status="success",
+            data=[{"_source": "catalog-feed", "sku": "a1"}],
+        )
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="reserved merge field '_source'",
+    ):
+        _format_output(config, results, "job-1", JobStatus.complete, [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group_by", [GroupBy.merge, GroupBy.target])
+async def test_persisted_results_preserve_public_data_and_redact_resolved_secrets(
+    group_by: GroupBy,
+):
+    secret = "Vendor Value/91"
+    target = MagicMock(url="https://shop.example/items", fetcher=FetcherType.basic)
+    context = _job_execution_context([target])
+    context.config.output.group_by = group_by
+    context.config.execution.fail_strategy = FailStrategy.partial
+    context.config.resolved_secret_values = (secret,)
+    result_store = AsyncMock()
+    result_store.save_result.return_value = SaveResultMeta(
+        run_id="run-1",
+        file_path="/tmp/results/job-1/run-1.json",
+        record_count=1,
+        serialized_bytes=512,
+    )
+    extracted = {
+        "key": "product-key",
+        "session_name": "morning",
+        "api_token": "public-token",
+        "product_url": (
+            "https://shop.example/item?color=red&page=2#reviews"
+        ),
+        "deployment_secret": f"Bearer {secret}",
+        "encoded_secret": "Vendor%20Value%2F91",
+        "plus_encoded_secret": "Vendor+Value%2F91",
+    }
+    result = TargetResult(
+        url="https://shop.example/items?cursor=public#inventory",
+        status=TargetStatus.success,
+        data=[extracted],
+        debug={"session_name": "diagnostic-session"},
+    )
+
+    await _persist_job_results(
+        context=context,
+        job_id="job-1",
+        run_id="run-1",
+        all_results=[result],
+        result_store=result_store,
+    )
+
+    artifact = result_store.save_result.await_args.args[1]
+    if group_by == GroupBy.merge:
+        persisted_record = artifact["results"][0]
+        assert persisted_record["_source"] == "shop.example"
+    else:
+        persisted_record = artifact["results"]["shop.example"]["data"][0]
+        assert artifact["results"]["shop.example"]["debug"]["session_name"] == (
+            "<redacted>"
+        )
+
+    assert persisted_record == {
+        "key": "product-key",
+        "session_name": "morning",
+        "api_token": "public-token",
+        "product_url": "https://shop.example/item?color=red&page=2#reviews",
+        "deployment_secret": "Bearer <redacted>",
+        "encoded_secret": "<redacted>",
+        "plus_encoded_secret": "<redacted>",
+        **({"_source": "shop.example"} if group_by == GroupBy.merge else {}),
+    }
+    assert artifact["targets"][0]["url"] == (
+        "https://shop.example/items?cursor=<redacted>#<redacted>"
+    )
+    assert artifact["targets"][0]["debug"]["session_name"] == "<redacted>"
 
 
 def test_format_output_groups_results_by_domain_without_mutating_group_items():

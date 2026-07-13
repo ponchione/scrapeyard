@@ -341,6 +341,44 @@ def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
     return text
 
 
+def redact_deployment_secrets_in_value(
+    value: Any,
+    *,
+    secret_values: Any = None,
+) -> Any:
+    """Redact only resolved deployment-secret values in JSON-like caller data."""
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            redacted_key: Any = key
+            if isinstance(key, str):
+                redacted_key = redact_deployment_secrets(key, secret_values)
+                if redacted_key in redacted and redacted_key != key:
+                    base_key = redacted_key
+                    suffix = 2
+                    while redacted_key in redacted:
+                        redacted_key = f"{base_key}#{suffix}"
+                        suffix += 1
+            redacted[redacted_key] = redact_deployment_secrets_in_value(
+                item,
+                secret_values=secret_values,
+            )
+        return redacted
+    if isinstance(value, list):
+        return [
+            redact_deployment_secrets_in_value(item, secret_values=secret_values)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            redact_deployment_secrets_in_value(item, secret_values=secret_values)
+            for item in value
+        )
+    if isinstance(value, str):
+        return redact_deployment_secrets(value, secret_values)
+    return value
+
+
 def redact_userinfo_in_text(text: str) -> str:
     """Strip userinfo and sensitive query values from URLs embedded in *text*.
 

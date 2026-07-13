@@ -11,7 +11,7 @@ from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import ResultValidator
+from scrapeyard.engine.resilience import ResultValidator, ValidationResult
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.engine.url_guard import redact_userinfo_in_url
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
@@ -33,7 +33,7 @@ async def _validate_result(
     validator: ResultValidator,
     data: list[dict[str, object]],
     budget: RunBudget | None,
-):
+) -> ValidationResult:
     work = asyncio.to_thread(validator.validate, data, budget=budget)
     if budget is None:
         return await work
