@@ -341,9 +341,23 @@ async def test_get_result_offloads_json_read(store):
 
     assert payload.data == data
     assert mock_to_thread.await_args == call(
-        result_store_module.read_json_file,
+        result_store_module.read_json_file_no_follow,
         json_path,
     )
+
+
+async def test_get_result_rejects_symlinked_result_file(store, tmp_path):
+    meta = await store.save_result("j-1", [{"price": 9.99}], run_id="run-link")
+    result_path = Path(meta.file_path) / "results.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": true}', encoding="utf-8")
+    result_path.unlink()
+    result_path.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        await store.get_result("j-1", meta.run_id)
+
+    assert outside.read_text(encoding="utf-8") == '{"secret": true}'
 
 
 async def test_get_result_rejects_metadata_path_outside_results_dir(store, tmp_path):
