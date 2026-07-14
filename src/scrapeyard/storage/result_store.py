@@ -9,8 +9,8 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -75,6 +75,12 @@ class _RemovalCandidate:
     path: Path
     size: int
     recent: bool = False
+
+
+@dataclass(slots=True)
+class _SaveLockEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
 @dataclass(slots=True)
@@ -148,9 +154,30 @@ class LocalResultStore:
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
         self._active_run_lookup = active_run_lookup
-        self._save_lock = asyncio.Lock()
+        self._save_locks: dict[Path, _SaveLockEntry] = {}
         self._reconciliation_metadata_cursor = 0
         self._reconciliation_filesystem_cursor: tuple[str, str, str] | None = None
+
+    @asynccontextmanager
+    async def _save_guard(self, run_dir: Path) -> AsyncIterator[None]:
+        """Serialize replacement of one artifact without blocking other runs."""
+
+        entry = self._save_locks.get(run_dir)
+        if entry is None:
+            entry = _SaveLockEntry()
+            self._save_locks[run_dir] = entry
+        entry.users += 1
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            entry.users -= 1
+            if entry.users == 0 and self._save_locks.get(run_dir) is entry:
+                self._save_locks.pop(run_dir, None)
 
     def _checked_result_dir(self, file_path: str) -> Path:
         path = Path(file_path)
@@ -299,7 +326,7 @@ class LocalResultStore:
         run_dir = self._checked_result_dir(
             str(safe_join(self._results_dir, project, job_name, run_id))
         )
-        async with self._save_lock:
+        async with self._save_guard(run_dir):
             await cleanup_safe_to_thread(ensure_directory, run_dir)
             path = run_dir / "results.json"
             try:

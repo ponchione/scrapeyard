@@ -250,6 +250,43 @@ async def test_paginate_target_noops_without_pagination_config():
 
 
 @pytest.mark.asyncio
+async def test_paginate_target_max_pages_one_is_total_page_bound():
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com/page-1",
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 1},
+        }
+    )
+    fetch_page = AsyncMock()
+    result = TargetResult(
+        url=target.url,
+        status="success",
+        data=[{"title": "first"}],
+        pages_scraped=1,
+        debug={"final_url": target.url},
+    )
+
+    await paginate_target(
+        page=_Page([_Element("/page-2")]),
+        target=target,
+        result=result,
+        fetch_target_page=fetch_page,
+        extract_page_data=MagicMock(),
+        retry_handler=MagicMock(),
+        fetcher_cls=object(),
+        adaptive=False,
+        retryable_status=set(),
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    fetch_page.assert_not_awaited()
+    assert result.pages_scraped == 1
+
+
+@pytest.mark.asyncio
 async def test_paginate_target_supports_xpath_next_selector():
     target = TargetConfig.model_validate(
         {

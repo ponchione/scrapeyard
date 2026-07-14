@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import logging
 import re
+from collections.abc import Callable
 from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
@@ -630,11 +631,16 @@ async def fetch_browser_response(
     *,
     require_resolved_dns: bool = False,
     budget: RunBudget | None = None,
+    response_observer: Callable[[], None] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     capture: dict[str, Any] = {}
     browser = target_browser_config(target)
 
     async def _page_action(page: Any) -> Any:
+        # Scrapling invokes this only after navigation has produced a page, so
+        # availability is known even if local debug capture exhausts the run.
+        if response_observer is not None:
+            response_observer()
         try:
             return await capture_browser_state(
                 page,

@@ -265,7 +265,7 @@ Common target fields:
 | `fetcher` | `basic`, `stealthy`, or `dynamic` |
 | `selectors` | Output fields mapped to CSS or XPath selectors |
 | `item_selector` | Optional repeated-item container selector |
-| `pagination` | Optional next-page selector and page limit |
+| `pagination` | Optional next-page selector and total page limit (`max_pages` is at least 1) |
 | `browser` | Optional browser runtime controls and pre-extraction actions for `dynamic` or `stealthy` fetches; rejected for `basic` |
 | `proxy` | Optional per-target proxy override |
 | `map_detection` | Optional pricing visibility detection rules |
@@ -425,6 +425,9 @@ settings are:
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |
 | `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait for cancellation |
 | `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` | `300` | Age after which an unclaimed queued delivery may be replaced |
+| `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` | `604800` | Redis payload lifetime and maximum uninterrupted priority-queue residence before repair |
+| `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS` | `60` | Interval between bounded repairs of stale accepted queue deliveries |
+| `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_BATCH_SIZE` | `100` | Maximum stale queued SQLite runs inspected per periodic repair pass |
 | `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` | `600` | Time since the last persisted run heartbeat before recovery is allowed |
 | `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |

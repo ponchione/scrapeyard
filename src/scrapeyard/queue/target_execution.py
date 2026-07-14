@@ -33,6 +33,12 @@ class TargetRuntimeContext:
     proxy_url: str | None
     artifacts_dir: str | None
     circuit_probe: CircuitProbe | None = None
+    upstream_response_observed: bool = False
+
+    def mark_upstream_response(self) -> None:
+        """Record that this target received a response from its upstream."""
+
+        self.upstream_response_observed = True
 
 
 def resolve_target_runtime_context(

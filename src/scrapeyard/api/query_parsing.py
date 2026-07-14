@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from scrapeyard.api.response_utils import raise_json_error
+from scrapeyard.common.dt import parse_dt
 from scrapeyard.models.job import ErrorFilters, ErrorType
 
 
@@ -34,7 +35,8 @@ def parse_error_filters(
 def _parse_since(value: str | None) -> datetime | None:
     if not value:
         return None
-    parsed = datetime.fromisoformat(value)
+    parsed = parse_dt(value)
+    assert parsed is not None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)

@@ -295,6 +295,109 @@ async def test_save_result_preserves_existing_artifacts(store):
     assert screenshot.read_bytes() == b"png"
 
 
+async def test_save_result_writes_distinct_run_artifacts_concurrently(
+    store,
+    monkeypatch,
+):
+    real_write = result_store_module.write_bytes_file
+    state_lock = threading.Lock()
+    both_writing = threading.Event()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+
+    def blocking_write(path, payload):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+            if active == 2:
+                both_writing.set()
+        release.wait(timeout=10)
+        try:
+            real_write(path, payload)
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(result_store_module, "write_bytes_file", blocking_write)
+    tasks = [
+        asyncio.create_task(
+            store.save_result("j-1", {"run": run_id}, run_id=run_id)
+        )
+        for run_id in ("run-one", "run-two")
+    ]
+    try:
+        assert await asyncio.to_thread(both_writing.wait, 5)
+    finally:
+        release.set()
+    await asyncio.gather(*tasks)
+
+    assert max_active == 2
+    assert store._save_locks == {}
+
+
+async def test_save_result_serializes_same_run_and_releases_keyed_lock(
+    store,
+    monkeypatch,
+):
+    real_write = result_store_module.write_bytes_file
+    release_first = threading.Event()
+    first_writing = threading.Event()
+    state_lock = threading.Lock()
+    calls = 0
+    active = 0
+    max_active = 0
+
+    def blocking_first_write(path, payload):
+        nonlocal calls, active, max_active
+        with state_lock:
+            calls += 1
+            call_number = calls
+            active += 1
+            max_active = max(max_active, active)
+        if call_number == 1:
+            first_writing.set()
+            release_first.wait(timeout=10)
+        try:
+            real_write(path, payload)
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(
+        result_store_module,
+        "write_bytes_file",
+        blocking_first_write,
+    )
+    first = asyncio.create_task(
+        store.save_result("j-1", {"version": 1}, run_id="same-run")
+    )
+    assert await asyncio.to_thread(first_writing.wait, 5)
+    second = asyncio.create_task(
+        store.save_result("j-1", {"version": 2}, run_id="same-run")
+    )
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "same-run"
+    async def wait_for_second_user() -> None:
+        while True:
+            entry = store._save_locks.get(run_dir)
+            if entry is not None and entry.users == 2:
+                return
+            await asyncio.sleep(0.001)
+
+    try:
+        await asyncio.wait_for(wait_for_second_user(), timeout=5)
+        assert calls == 1
+    finally:
+        release_first.set()
+    await asyncio.gather(first, second)
+
+    assert calls == 2
+    assert max_active == 1
+    assert (await store.get_result("j-1", "same-run")).data == {"version": 2}
+    assert store._save_locks == {}
+
+
 async def test_save_result_allows_exact_serialized_byte_boundary(store):
     data = {"value": "café"}
     exact_size = len(result_store_module.serialize_json_bytes(data))

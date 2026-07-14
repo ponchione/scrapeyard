@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ class ScrapeContext:
     adaptive_dir: str
     budget: RunBudget | None
     cancellation_guard: CancellationCheckpoint | None
+    response_observer: Callable[[], None] | None
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ async def _fetch_basic_with_safe_redirects(
     require_resolved_dns: bool = False,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    response_observer: Callable[[], None] | None = None,
 ) -> Any:
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
@@ -228,6 +231,8 @@ async def _fetch_basic_with_safe_redirects(
                 require_resolved_dns=require_resolved_dns,
             )
         response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
+        if response_observer is not None:
+            response_observer()
         if request_url != current_url:
             # Parsing, redirect joining, and public diagnostics use the logical
             # URL, never the implementation-only pinned IP URL.
@@ -305,8 +310,19 @@ async def _fetch_page(
     artifacts_dir: str | None = None,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    response_observer: Callable[[], None] | None = None,
 ) -> FetchOutcome:
     """Fetch a single page using the appropriate Scrapling method."""
+    response_observed = False
+
+    def observe_response_once() -> None:
+        nonlocal response_observed
+        if response_observed:
+            return
+        response_observed = True
+        if response_observer is not None:
+            response_observer()
+
     call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
     debug = default_debug_blob(fetcher_type, target, url)
     require_resolved_dns = _requires_verified_dns(target, fetcher_type, proxy_url)
@@ -327,6 +343,7 @@ async def _fetch_page(
             require_resolved_dns=require_resolved_dns,
             budget=budget,
             cancellation_guard=cancellation_guard,
+            response_observer=observe_response_once,
         )
     else:
         await _assert_fetch_url(url, require_resolved_dns=require_resolved_dns)
@@ -340,7 +357,9 @@ async def _fetch_page(
             artifacts_dir,
             require_resolved_dns=require_resolved_dns,
             budget=budget,
+            response_observer=observe_response_once,
         )
+        observe_response_once()
         await cancellation_checkpoint(
             cancellation_guard,
             "after_fetch",
@@ -368,6 +387,7 @@ async def _fetch_target_page(
     artifacts_dir: str | None,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    response_observer: Callable[[], None] | None = None,
 ) -> FetchOutcome:
     return await retry_handler.execute(
         _fetch_page,
@@ -382,6 +402,7 @@ async def _fetch_target_page(
         artifacts_dir,
         budget,
         cancellation_guard,
+        response_observer,
     )
 
 
@@ -391,6 +412,7 @@ def _prepare_scrape_context(
     adaptive_dir: str | None,
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
+    response_observer: Callable[[], None] | None,
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
     Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
@@ -405,6 +427,7 @@ def _prepare_scrape_context(
         adaptive_dir=resolved_adaptive_dir,
         budget=budget,
         cancellation_guard=cancellation_guard,
+        response_observer=response_observer,
     )
 
 
@@ -429,6 +452,7 @@ async def _scrape_first_page(
         artifacts_dir,
         context.budget,
         context.cancellation_guard,
+        context.response_observer,
     )
     await cancellation_checkpoint(
         context.cancellation_guard,
@@ -547,6 +571,7 @@ async def scrape_target(
     artifacts_dir: str | None = None,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    response_observer: Callable[[], None] | None = None,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
@@ -556,6 +581,7 @@ async def scrape_target(
         adaptive_dir,
         budget,
         cancellation_guard,
+        response_observer,
     )
 
     try:

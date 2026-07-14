@@ -6,12 +6,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName
 from scrapeyard.config.schema import FailStrategy, FetcherType, WebhookConfig
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
+from scrapeyard.engine.resilience import CircuitBreaker, CircuitProbe, CircuitState
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
-from scrapeyard.queue.worker import scrape_task
+from scrapeyard.queue.error_records import TargetErrorRecorder
+from scrapeyard.queue.target_execution import TargetRuntimeContext
+from scrapeyard.queue.worker import _fetch_and_validate_target, scrape_task
 from scrapeyard.storage.types import RunOwnershipError
 from tests.unit.worker_helpers import (
     SIMPLE_YAML,
@@ -577,3 +581,118 @@ async def test_sustained_heartbeat_failure_cancels_targets_without_stale_mutatio
         and not pending.done()
         for pending in asyncio.all_tasks()
     )
+
+
+def _browser_budget_context(circuit_breaker: CircuitBreaker) -> tuple[MagicMock, MagicMock]:
+    target = make_target("https://browser.example")
+    target.fetcher = FetcherType.dynamic
+    recorder = TargetErrorRecorder(
+        job_id="job-budget-circuit",
+        run_id="run-budget-circuit",
+        project="test",
+        pending_errors=[],
+        circuit_breaker=circuit_breaker,
+    )
+    context = MagicMock()
+    context.recorder.return_value = recorder
+    context.circuit_breaker = circuit_breaker
+    context.config.retry = MagicMock()
+    context.browser_limiter = None
+    context.activity.checkpoint = AsyncMock()
+    return target, context
+
+
+@pytest.mark.asyncio
+async def test_browser_fetch_deadline_preserves_closed_circuit_failures():
+    circuit_breaker = CircuitBreaker(3, 60)
+    circuit_breaker.record_failure("browser.example")
+    circuit_breaker.record_failure("browser.example")
+    target, context = _browser_budget_context(circuit_breaker)
+    runtime = TargetRuntimeContext(
+        domain="browser.example",
+        adaptive=False,
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.resolve_target_runtime_context",
+            return_value=runtime,
+        ),
+        patch(
+            "scrapeyard.queue.worker.guard_target_execution",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(
+                side_effect=BudgetExceeded(
+                    BudgetLimitName.run_duration_seconds,
+                    1,
+                    1,
+                )
+            ),
+        ),
+    ):
+        with pytest.raises(BudgetExceeded):
+            await _fetch_and_validate_target(
+                target_cfg=target,
+                context=context,
+                pending_errors=[],
+            )
+
+    assert runtime.upstream_response_observed is False
+    assert circuit_breaker.state("browser.example") is CircuitState.closed
+    circuit_breaker.record_failure("browser.example")
+    assert circuit_breaker.state("browser.example") is CircuitState.open
+
+
+@pytest.mark.asyncio
+async def test_half_open_browser_fetch_deadline_aborts_probe_without_closing():
+    clock = [0.0]
+    circuit_breaker = CircuitBreaker(1, 10, clock=lambda: clock[0])
+    circuit_breaker.record_failure("browser.example")
+    clock[0] = 10.0
+    probe = circuit_breaker.check("browser.example")
+    assert isinstance(probe, CircuitProbe)
+    target, context = _browser_budget_context(circuit_breaker)
+    runtime = TargetRuntimeContext(
+        domain="browser.example",
+        adaptive=False,
+        proxy_url=None,
+        artifacts_dir=None,
+        circuit_probe=probe,
+    )
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.resolve_target_runtime_context",
+            return_value=runtime,
+        ),
+        patch(
+            "scrapeyard.queue.worker.guard_target_execution",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(
+                side_effect=BudgetExceeded(
+                    BudgetLimitName.run_duration_seconds,
+                    1,
+                    1,
+                )
+            ),
+        ),
+    ):
+        with pytest.raises(BudgetExceeded):
+            await _fetch_and_validate_target(
+                target_cfg=target,
+                context=context,
+                pending_errors=[],
+            )
+
+    assert circuit_breaker.state("browser.example") is CircuitState.open
+    replacement = circuit_breaker.check("browser.example")
+    assert isinstance(replacement, CircuitProbe)
+    assert replacement.generation != probe.generation

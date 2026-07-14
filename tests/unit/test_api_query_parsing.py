@@ -32,6 +32,18 @@ def test_parse_error_filters_normalizes_since_to_utc() -> None:
     assert parsed.since.isoformat() == "2026-03-01T12:00:00+00:00"
 
 
+def test_parse_error_filters_accepts_api_rfc3339_utc_timestamp() -> None:
+    parsed = parse_error_filters(
+        project=None,
+        job_id=None,
+        since="2026-07-14T12:00:00Z",
+        error_type=None,
+    )
+
+    assert parsed.since is not None
+    assert parsed.since.isoformat() == "2026-07-14T12:00:00+00:00"
+
+
 def test_parse_error_filters_returns_error_for_invalid_since() -> None:
     with pytest.raises(HTTPException) as exc_info:
         parse_error_filters(project=None, job_id=None, since="nope", error_type=None)

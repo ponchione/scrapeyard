@@ -21,9 +21,9 @@ def test_parse_transform_join_colon_syntax_raises():
 
 
 def test_pagination_max_pages_zero():
-    """max_pages=0 should be a valid PaginationConfig — doesn't raise."""
-    cfg = PaginationConfig(next=".next-page", max_pages=0)
-    assert cfg.max_pages == 0
+    """max_pages is a total-page bound, so zero cannot be honored."""
+    with pytest.raises(ValueError):
+        PaginationConfig(next=".next-page", max_pages=0)
 
 
 def test_pagination_max_pages_default():
