@@ -49,6 +49,9 @@ from scrapeyard.queue.reconciliation import (
     reconcile_stale_queued_jobs,
     start_queued_reconciliation_loop,
 )
+from scrapeyard.queue.running_reconciliation import (
+    start_running_reconciliation_loop,
+)
 from scrapeyard.queue.terminal_reconciliation import (
     reconcile_terminal_webhook_intents,
 )
@@ -62,6 +65,7 @@ from scrapeyard.runtime.health import (
     probe_result_storage,
     probe_sqlite,
 )
+from scrapeyard.runtime.background import BackgroundLoopMonitor
 from scrapeyard.runtime.instance_guard import (
     SingleInstanceLock,
     instance_identity,
@@ -103,7 +107,11 @@ async def _recover_stale_running_jobs() -> None:
     cutoff = recovered_at - timedelta(
         seconds=settings.workers_running_heartbeat_timeout_seconds
     )
-    recoveries = await get_job_store().recover_stale_running_jobs(cutoff, recovered_at)
+    recoveries = await get_job_store().recover_stale_running_jobs(
+        cutoff,
+        recovered_at,
+        limit=settings.workers_running_reconciliation_batch_size,
+    )
     for recovery in recoveries:
         logger.warning(
             "Recovered running state job_id=%s run_id=%s last_heartbeat=%s "
@@ -134,6 +142,7 @@ def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
 
 
 async def _startup_runtime_services(app: FastAPI) -> None:
+    settings = get_settings()
     services = build_runtime_services()
     _assign_runtime_services(app, services)
     app.state.terminal_intent_reconciliation = (
@@ -145,23 +154,46 @@ async def _startup_runtime_services(app: FastAPI) -> None:
     await services.webhook_dispatcher.startup()
     await services.worker_pool.start()
     init_rate_limiter(redis=services.worker_pool.redis)
+    running_monitor = BackgroundLoopMonitor(
+        "running_reconciliation",
+        interval_seconds=settings.workers_running_reconciliation_interval_seconds,
+    )
+    running_monitor.record_success()
+    app.state.running_reconciliation_monitor = running_monitor
+    queued_monitor = BackgroundLoopMonitor(
+        "queued_reconciliation",
+        interval_seconds=settings.workers_queued_reconciliation_interval_seconds,
+    )
     app.state.queued_reconciliation = await reconcile_stale_queued_jobs(
         job_store=get_job_store(),
         worker_pool=services.worker_pool,
         queued_claim_timeout_seconds=(
-            get_settings().workers_queued_claim_timeout_seconds
+            settings.workers_queued_claim_timeout_seconds
         ),
+        batch_size=settings.workers_queued_reconciliation_batch_size,
+    )
+    queued_monitor.record_success()
+    app.state.queued_reconciliation_monitor = queued_monitor
+    app.state.running_reconciliation_task = start_running_reconciliation_loop(
+        job_store=get_job_store(),
+        result_store=services.result_store,
+        heartbeat_timeout_seconds=settings.workers_running_heartbeat_timeout_seconds,
+        interval_seconds=settings.workers_running_reconciliation_interval_seconds,
+        batch_size=settings.workers_running_reconciliation_batch_size,
+        webhook_notifier=services.webhook_dispatcher,
+        monitor=running_monitor,
     )
     app.state.queued_reconciliation_task = start_queued_reconciliation_loop(
         job_store=get_job_store(),
         worker_pool=services.worker_pool,
         queued_claim_timeout_seconds=(
-            get_settings().workers_queued_claim_timeout_seconds
+            settings.workers_queued_claim_timeout_seconds
         ),
         interval_seconds=(
-            get_settings().workers_queued_reconciliation_interval_seconds
+            settings.workers_queued_reconciliation_interval_seconds
         ),
-        batch_size=get_settings().workers_queued_reconciliation_batch_size,
+        batch_size=settings.workers_queued_reconciliation_batch_size,
+        monitor=queued_monitor,
     )
     await services.scheduler.start()
     app.state.cleanup_task = start_cleanup_loop(
@@ -194,6 +226,10 @@ async def _shutdown_runtime_services(
         (
             "queued_reconciliation",
             getattr(app.state, "queued_reconciliation_task", None),
+        ),
+        (
+            "running_reconciliation",
+            getattr(app.state, "running_reconciliation_task", None),
         ),
     )
     for phase, task in background_tasks:
@@ -442,6 +478,14 @@ def _background_probes() -> dict[str, ProbeResult]:
         "webhook": probe_background_service(
             "webhook", getattr(app.state, "webhook_dispatcher", None)
         ),
+        "queued_reconciliation": probe_background_service(
+            "queued_reconciliation",
+            getattr(app.state, "queued_reconciliation_monitor", None),
+        ),
+        "running_reconciliation": probe_background_service(
+            "running_reconciliation",
+            getattr(app.state, "running_reconciliation_monitor", None),
+        ),
     }
 
 
@@ -459,7 +503,24 @@ async def health(
     pool = get_worker_pool()
 
     uptime = _health.uptime
-    projects = await _health.project_summary() if settings.health_include_projects else {}
+    timeout = settings.health_probe_timeout_seconds
+    project_summary_probe = ProbeResult(True)
+    projects = {}
+    if settings.health_include_projects:
+        try:
+            projects = await _health.project_summary(timeout=timeout)
+        except asyncio.TimeoutError:
+            projects = _health.cached_project_summary
+            project_summary_probe = ProbeResult(
+                False,
+                f"project summary probe timed out after {timeout:g}s",
+            )
+        except Exception as exc:
+            projects = _health.cached_project_summary
+            project_summary_probe = ProbeResult(
+                False,
+                f"project summary probe failed: {type(exc).__name__}",
+            )
     if allowed_projects is not None:
         projects = {
             project: summary
@@ -467,7 +528,6 @@ async def health(
             if project in allowed_projects
         }
 
-    timeout = settings.health_probe_timeout_seconds
     redis_probe = await _timed_async_probe("redis", probe_redis(pool), timeout)
     queue_depths: dict[str, int | None]
     try:
@@ -515,6 +575,10 @@ async def health(
         "sqlite_results": {"ok": sqlite_results[2].ok, "detail": sqlite_results[2].detail},
         "result_storage": {"ok": artifact_probe.ok, "detail": artifact_probe.detail},
         "disk": {"ok": disk_probe.ok, "detail": disk_probe.detail},
+        "project_summary": {
+            "ok": project_summary_probe.ok,
+            "detail": project_summary_probe.detail,
+        },
     }
 
     all_ok = (
@@ -522,6 +586,7 @@ async def health(
         and sqlite_probe.ok
         and artifact_probe.ok
         and disk_probe.ok
+        and project_summary_probe.ok
         and all(probe.ok for probe in background_probes.values())
     )
     if not all_ok:

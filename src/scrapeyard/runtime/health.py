@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -192,12 +193,9 @@ def build_project_summary(rows: ProjectSummaryRows) -> ProjectSummary:
 
 
 async def load_project_summary(get_job_store: JobStoreFactory) -> ProjectSummary:
-    rows: ProjectSummaryRows = []
-    try:
-        rows = await get_job_store().summary_by_project()
-    except Exception as exc:
-        logger.warning("Project summary unavailable for health response: %s", exc)
-        rows = []
+    """Load a project summary, allowing readiness to classify load failures."""
+
+    rows = await get_job_store().summary_by_project()
     return build_project_summary(rows)
 
 
@@ -214,6 +212,8 @@ class HealthCache:
         self._projects_cache: ProjectSummary = {}
         self._projects_cache_refreshed_at: float = 0.0
         self._cache_ttl = cache_ttl_seconds
+        self._projects_refresh_lock = asyncio.Lock()
+        self._projects_refresh_task: asyncio.Task[ProjectSummary] | None = None
 
     def mark_started(self) -> None:
         self.start_time = time.monotonic()
@@ -222,12 +222,46 @@ class HealthCache:
     def uptime(self) -> float:
         return time.monotonic() - self.start_time if self.start_time else 0.0
 
-    async def project_summary(self) -> ProjectSummary:
+    @property
+    def cached_project_summary(self) -> ProjectSummary:
+        """Return the last successful summary without starting database work."""
+
+        return self._projects_cache
+
+    async def _refresh_project_summary(
+        self,
+        timeout: float | None,
+    ) -> ProjectSummary:
+        load = load_project_summary(self._get_job_store)
+        summary = await load if timeout is None else await asyncio.wait_for(load, timeout)
+        self._projects_cache = summary
+        self._projects_cache_refreshed_at = time.monotonic()
+        return summary
+
+    def _refresh_finished(self, task: asyncio.Task[ProjectSummary]) -> None:
+        if self._projects_refresh_task is task:
+            self._projects_refresh_task = None
+        if not task.cancelled():
+            # Retrieve failures even when every HTTP caller timed out while the
+            # shielded refresh continued in the background.
+            task.exception()
+
+    async def project_summary(self, *, timeout: float | None = None) -> ProjectSummary:
         now = time.monotonic()
         if now - self._projects_cache_refreshed_at < self._cache_ttl:
             return self._projects_cache
 
-        summary = await load_project_summary(self._get_job_store)
-        self._projects_cache = summary
-        self._projects_cache_refreshed_at = now
-        return summary
+        async with self._projects_refresh_lock:
+            now = time.monotonic()
+            if now - self._projects_cache_refreshed_at < self._cache_ttl:
+                return self._projects_cache
+            refresh = self._projects_refresh_task
+            if refresh is None or refresh.done():
+                refresh = asyncio.create_task(
+                    self._refresh_project_summary(timeout),
+                    name="scrapeyard-health-project-summary",
+                )
+                self._projects_refresh_task = refresh
+                refresh.add_done_callback(self._refresh_finished)
+
+        return await asyncio.shield(refresh)

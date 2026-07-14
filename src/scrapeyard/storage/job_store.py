@@ -1262,12 +1262,12 @@ class SQLiteJobStore:
 
     async def list_terminal_webhook_candidates(
         self,
+        limit: int | None = None,
     ) -> list[TerminalWebhookCandidate]:
         """Return terminal runs and their current logical outbox state."""
 
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """SELECT job_runs.job_id,
+            query = """SELECT job_runs.job_id,
                           job_runs.run_id,
                           job_runs.status,
                           job_runs.config_hash,
@@ -1309,7 +1309,13 @@ class SQLiteJobStore:
                    ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at) ASC,
                             job_runs.job_id ASC,
                             job_runs.run_id ASC"""
-            )
+            parameters: tuple[int, ...] = ()
+            if limit is not None:
+                if limit < 1:
+                    raise ValueError("limit must be positive")
+                query += " LIMIT ?"
+                parameters = (limit,)
+            cursor = await db.execute(query, parameters)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
 
         candidates: list[TerminalWebhookCandidate] = []
@@ -1773,12 +1779,31 @@ class SQLiteJobStore:
         self,
         cutoff: datetime,
         recovered_at: datetime,
+        limit: int | None = None,
     ) -> list[RunRecovery]:
         """Recover stale/invalid running state under one SQLite write lock."""
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
-            cursor = await db.execute(
-                "SELECT job_id, current_run_id FROM jobs WHERE status = 'running'"
-            )
+            query = """SELECT jobs.job_id, jobs.current_run_id
+                       FROM jobs
+                       LEFT JOIN job_runs
+                         ON job_runs.job_id = jobs.job_id
+                        AND job_runs.run_id = jobs.current_run_id
+                       WHERE jobs.status = 'running'
+                         AND (
+                             job_runs.run_id IS NULL
+                             OR job_runs.status != 'running'
+                             OR job_runs.heartbeat_at IS NULL
+                             OR job_runs.heartbeat_at <= ?
+                         )
+                       ORDER BY COALESCE(job_runs.heartbeat_at, jobs.updated_at) ASC,
+                                jobs.job_id ASC"""
+            parameters: tuple[object, ...] = (fmt_dt(cutoff),)
+            if limit is not None:
+                if limit < 1:
+                    raise ValueError("limit must be positive")
+                query += " LIMIT ?"
+                parameters = (*parameters, limit)
+            cursor = await db.execute(query, parameters)
             rows = await cursor.fetchall()
             recoveries: list[RunRecovery] = []
             for row in rows:

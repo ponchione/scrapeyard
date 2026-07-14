@@ -6,6 +6,7 @@ import pytest
 
 from scrapeyard.models.job import JobStatus
 from scrapeyard.runtime.health import (
+    HealthCache,
     build_project_summary,
     load_project_summary,
     probe_asyncio_task,
@@ -97,17 +98,18 @@ def test_build_project_summary_classifies_project_statuses():
 
 
 @pytest.mark.asyncio
-async def test_load_project_summary_returns_empty_when_store_unavailable():
+async def test_load_project_summary_surfaces_store_unavailability():
     get_job_store = MagicMock(side_effect=RuntimeError("not ready"))
 
-    summary = await load_project_summary(get_job_store)
-
-    assert summary == {}
+    with pytest.raises(RuntimeError, match="not ready"):
+        await load_project_summary(get_job_store)
 
 
 @pytest.mark.asyncio
 async def test_load_project_summary_uses_store_summary_by_project():
-    fake_store = MagicMock(summary_by_project=AsyncMock(return_value=[("proj", JobStatus.complete.value, 1)]))
+    fake_store = MagicMock(
+        summary_by_project=AsyncMock(return_value=[("proj", JobStatus.complete.value, 1)])
+    )
 
     summary = await load_project_summary(lambda: fake_store)
 
@@ -126,3 +128,57 @@ async def test_load_project_summary_uses_store_summary_by_project():
             },
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_project_summary_refresh_is_single_flight_and_shielded_from_callers():
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    calls = 0
+
+    async def summary_by_project():
+        nonlocal calls
+        calls += 1
+        refresh_started.set()
+        await release_refresh.wait()
+        return [("proj", JobStatus.complete.value, 1)]
+
+    cache = HealthCache(
+        lambda: SimpleNamespace(summary_by_project=summary_by_project),
+        cache_ttl_seconds=60,
+    )
+    callers = [
+        asyncio.create_task(cache.project_summary(timeout=0.01))
+        for _ in range(5)
+    ]
+    await refresh_started.wait()
+    outcomes = await asyncio.gather(*callers, return_exceptions=True)
+
+    assert calls == 1
+    assert all(isinstance(outcome, asyncio.TimeoutError) for outcome in outcomes)
+
+    assert cache.cached_project_summary == {}
+
+    release_refresh.set()
+    summary = await cache.project_summary(timeout=0.5)
+    assert summary["proj"]["job_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_project_summary_refresh_failure_retains_last_successful_cache():
+    store = SimpleNamespace(
+        summary_by_project=AsyncMock(
+            side_effect=[
+                [("proj", JobStatus.complete.value, 1)],
+                RuntimeError("database busy"),
+            ]
+        )
+    )
+    cache = HealthCache(lambda: store, cache_ttl_seconds=60)
+    first = await cache.project_summary()
+    cache._projects_cache_refreshed_at = 0.0
+
+    with pytest.raises(RuntimeError, match="database busy"):
+        await cache.project_summary()
+
+    assert cache.cached_project_summary == first

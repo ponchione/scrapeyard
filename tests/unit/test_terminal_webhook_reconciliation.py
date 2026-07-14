@@ -97,9 +97,7 @@ async def _terminal_without_intent(
     # Simulate a pre-marker terminal row or a crash-recovered run whose terminal
     # webhook decision was not committed atomically.
     async with get_db("jobs.db") as db:
-        await db.execute(
-            "UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = 'run-1'"
-        )
+        await db.execute("UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = 'run-1'")
         await db.commit()
 
 
@@ -107,6 +105,20 @@ def _result_store(metadata: ResultMetadata | None = None) -> AsyncMock:
     store = AsyncMock()
     store.get_result_metadata.return_value = metadata
     return store
+
+
+async def test_periodic_terminal_reconciliation_applies_batch_limit() -> None:
+    store = AsyncMock()
+    store.list_terminal_webhook_candidates.return_value = []
+
+    summary = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=AsyncMock(),
+        batch_size=17,
+    )
+
+    assert summary.inspected == 0
+    store.list_terminal_webhook_candidates.assert_awaited_once_with(limit=17)
 
 
 async def test_startup_repairs_missing_intent_and_is_idempotent(
@@ -146,9 +158,7 @@ async def test_startup_repairs_missing_intent_and_is_idempotent(
     assert delivery.payload["delivery_id"] == delivery_id
     assert delivery.payload["result_path"] == metadata.file_path
     async with get_db("jobs.db") as db:
-        row = await (
-            await db.execute("SELECT COUNT(*) FROM webhook_deliveries")
-        ).fetchone()
+        row = await (await db.execute("SELECT COUNT(*) FROM webhook_deliveries")).fetchone()
     assert row is not None and row[0] == 1
 
 
@@ -265,9 +275,7 @@ async def test_reconciliation_converges_running_parent_to_terminal_run(
 ) -> None:
     await _terminal_without_intent(store, _yaml())
     async with get_db("jobs.db") as db:
-        await db.execute(
-            "UPDATE jobs SET status = 'running' WHERE job_id = 'job-1'"
-        )
+        await db.execute("UPDATE jobs SET status = 'running' WHERE job_id = 'job-1'")
         await db.commit()
 
     summary = await reconcile_terminal_webhook_intents(

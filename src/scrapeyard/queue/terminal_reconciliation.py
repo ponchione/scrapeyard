@@ -95,6 +95,7 @@ async def reconcile_terminal_webhook_intents(
     *,
     job_store: JobStore,
     result_store: ResultStore,
+    batch_size: int | None = None,
 ) -> TerminalIntentReconciliationSummary:
     """Ensure every applicable terminal run has one logical durable intent.
 
@@ -104,7 +105,11 @@ async def reconcile_terminal_webhook_intents(
     Result metadata is optional enrichment and never gates intent creation.
     """
 
-    candidates = await job_store.list_terminal_webhook_candidates()
+    candidates = (
+        await job_store.list_terminal_webhook_candidates()
+        if batch_size is None
+        else await job_store.list_terminal_webhook_candidates(limit=batch_size)
+    )
     counts = {
         "required": 0,
         "existing": 0,

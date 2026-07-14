@@ -235,6 +235,7 @@ class JobStore(Protocol):
 
     async def list_terminal_webhook_candidates(
         self,
+        limit: int | None = None,
     ) -> list[TerminalWebhookCandidate]:
         """Return terminal runs and current logical-intent state deterministically."""
         ...
@@ -318,6 +319,7 @@ class JobStore(Protocol):
         self,
         cutoff: datetime,
         recovered_at: datetime,
+        limit: int | None = None,
     ) -> list[RunRecovery]:
         """Conditionally repair stale running jobs and describe each mutation."""
         ...
