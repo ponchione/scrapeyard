@@ -82,7 +82,11 @@ class APIVersionHeaderMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         async def versioned_send(message: Message) -> None:
             if scope["type"] == "http" and message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"x-scrapeyard-api-version"
+                ]
                 headers.append((b"x-scrapeyard-api-version", self.version))
                 message = {**message, "headers": headers}
             await send(message)

@@ -259,6 +259,10 @@ async def test_unhandled_errors_use_safe_versioned_json_envelope(test_app):
 
     assert response.status_code == 500
     assert response.headers["X-Scrapeyard-API-Version"] == "1"
+    assert sum(
+        name.lower() == b"x-scrapeyard-api-version"
+        for name, _value in response.headers.raw
+    ) == 1
     assert response.headers["content-type"].startswith("application/json")
     _assert_error_envelope(response.json(), 500)
     assert response.json()["code"] == "internal_server_error"

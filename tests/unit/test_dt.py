@@ -38,3 +38,10 @@ def test_round_trip():
 def test_round_trip_with_timezone_offset():
     original = "2024-06-01T08:00:00+00:00"
     assert fmt_dt(parse_dt(original)) == original
+
+
+def test_parse_dt_accepts_rfc3339_utc_designator():
+    parsed = parse_dt("2026-07-14T12:00:00Z")
+
+    assert parsed is not None
+    assert parsed.isoformat() == "2026-07-14T12:00:00+00:00"

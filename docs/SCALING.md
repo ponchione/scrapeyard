@@ -32,8 +32,8 @@ database, and queue name. Sharing only some of those values is unsupported.
 
 | Scope | State and responsibility |
 | --- | --- |
-| Process-local | FastAPI lifespan and health uptime/cache; Prometheus process metrics; embedded arq runner; browser limiter; APScheduler runtime; cleanup loop; webhook coordinator; circuit-breaker state; and the local rate limiter when Redis sharing is disabled. |
-| Redis-shared | arq job payloads/results, priority admission/delivery state, queue cancellation state, and the domain rate limiter when `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED=true`. Redis does not make the scheduler, SQLite, files, or process counters distributed. |
+| Process-local | FastAPI lifespan and health uptime/cache; Prometheus process metrics; embedded arq runner; browser limiter; APScheduler runtime; cleanup and queued-reconciliation loops; webhook coordinator; circuit-breaker state; and the local rate limiter when Redis sharing is disabled. |
+| Redis-shared | arq job payloads/results, priority admission/delivery state, queue cancellation state, and the domain rate limiter when `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED=true`. The limiter uses Redis server time and clamps backward movement to one configured interval. Redis does not make the scheduler, SQLite, files, or process counters distributed. |
 | SQLite-shared | Job/run/config/idempotency state and webhook intents in `jobs.db`; error records in `errors.db`; result metadata in `results_meta.db`; migration ledgers and transaction boundaries for each database. |
 | Filesystem-shared | Result JSON/screenshots/debug artifacts, adaptive selector state, logs, and the single-instance lock. Filesystem writes are not atomic with SQLite or Redis transactions. |
 

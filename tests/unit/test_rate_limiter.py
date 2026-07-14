@@ -188,7 +188,7 @@ class TestRedisDomainRateLimiter:
         limiter, redis = self._make_limiter()
         await limiter.acquire("example.com", 0.5)
         call_args = redis.evalsha.call_args[0]
-        ttl_str = call_args[5]  # 6th positional arg
+        ttl_str = call_args[4]  # 5th positional arg
         assert int(ttl_str) == 2
 
     @pytest.mark.asyncio
@@ -197,7 +197,7 @@ class TestRedisDomainRateLimiter:
         limiter, redis = self._make_limiter()
         await limiter.acquire("example.com", 5.0)
         call_args = redis.evalsha.call_args[0]
-        ttl_str = call_args[5]
+        ttl_str = call_args[4]
         assert int(ttl_str) == 6  # int(5.0) + 1
 
     @pytest.mark.asyncio
@@ -216,3 +216,22 @@ class TestRedisDomainRateLimiter:
             mock_sleep.assert_any_await(0.2)
             mock_sleep.assert_any_await(0.05)
         assert redis.evalsha.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_backward_clock_wait_is_clamped_and_rechecked(self) -> None:
+        limiter, redis = self._make_limiter(
+            evalsha_side_effect=[
+                [0, 11_000],
+                [1, 0],
+            ],
+        )
+
+        with patch(
+            "scrapeyard.engine.rate_limiter.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep:
+            await limiter.acquire("example.com", 1.0)
+
+        mock_sleep.assert_awaited_once_with(1.0)
+        assert redis.evalsha.await_count == 2
+        assert len(redis.evalsha.await_args_list[0].args) == 5

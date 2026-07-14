@@ -950,7 +950,13 @@ async def _fetch_and_validate_target(
         runtime.circuit_probe = None
         raise
     except BudgetExceeded:
-        recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
+        if runtime.upstream_response_observed:
+            recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
+        else:
+            context.circuit_breaker.abort_probe(
+                runtime.domain,
+                runtime.circuit_probe,
+            )
         runtime.circuit_probe = None
         raise
     except Exception as exc:
@@ -977,6 +983,7 @@ async def _scrape_and_validate_target(
         artifacts_dir=runtime.artifacts_dir,
         budget=context.budget,
         cancellation_guard=context.activity.checkpoint,
+        response_observer=runtime.mark_upstream_response,
     )
     await context.activity.checkpoint("after_target_fetch")
     if not result.is_success:

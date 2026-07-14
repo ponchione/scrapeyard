@@ -79,20 +79,24 @@ class RedisDomainRateLimiter:
     # Lua script: atomic check-and-set for rate limiting.
     # KEYS[1] = rate-limit key
     # ARGV[1] = min_interval (float, seconds)
-    # ARGV[2] = now          (float, epoch seconds)
-    # ARGV[3] = ttl          (int, seconds for key expiry)
+    # ARGV[2] = ttl          (int, seconds for key expiry)
     # Returns {1} on success, {0, remaining_ms} when caller must wait.
     _LUA_ACQUIRE = """\
 local key = KEYS[1]
 local min_interval = tonumber(ARGV[1])
-local now = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[2])
+local redis_time = redis.call('TIME')
+local now = tonumber(redis_time[1]) + tonumber(redis_time[2]) / 1000000
 local last = redis.call('GET', key)
 if last == false then
     redis.call('SET', key, tostring(now), 'EX', ttl)
     return {1, 0}
 end
 local elapsed = now - tonumber(last)
+if elapsed < 0 then
+    redis.call('SET', key, tostring(now), 'EX', ttl)
+    return {0, math.ceil(min_interval * 1000)}
+end
 if elapsed >= min_interval then
     redis.call('SET', key, tostring(now), 'EX', ttl)
     return {1, 0}
@@ -119,10 +123,9 @@ return {0, remaining_ms}
         sha = await self._ensure_script()
 
         while True:
-            now = time.time()
             try:
                 eval_result = self._redis.evalsha(
-                    sha, 1, key, str(min_interval), str(now), str(ttl),
+                    sha, 1, key, str(min_interval), str(ttl),
                 )
                 result = await eval_result if inspect.isawaitable(eval_result) else eval_result
             except NoScriptError:
@@ -133,7 +136,7 @@ return {0, remaining_ms}
             if acquired:
                 return
             remaining_ms = int(result[1])
-            wait = remaining_ms / 1000.0
+            wait = min(min_interval, max(0.0, remaining_ms / 1000.0))
             logger.debug(
                 "Domain rate limit: waiting %.1fs for %s (cross-job)",
                 wait, domain,

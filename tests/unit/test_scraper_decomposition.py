@@ -316,6 +316,12 @@ async def test_browser_fetch_performs_one_navigation_without_http_preflight(monk
         )
     )
     basic_fetch = AsyncMock()
+    responses_observed = 0
+
+    def observe_response() -> None:
+        nonlocal responses_observed
+        responses_observed += 1
+
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", browser_fetch)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", basic_fetch)
 
@@ -327,11 +333,13 @@ async def test_browser_fetch_performs_one_navigation_without_http_preflight(monk
         adaptive=False,
         retryable_status={500},
         adaptive_dir="/tmp/adaptive",
+        response_observer=observe_response,
     )
 
     browser_fetch.assert_awaited_once()
     assert browser_fetch.await_args.args[1] == target.url
     basic_fetch.assert_not_awaited()
+    assert responses_observed == 1
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

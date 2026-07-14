@@ -9,6 +9,8 @@ def parse_dt(value: str | None) -> datetime | None:
     """Parse an ISO-format string to a datetime, or return None."""
     if value is None:
         return None
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
     return datetime.fromisoformat(value)
 
 

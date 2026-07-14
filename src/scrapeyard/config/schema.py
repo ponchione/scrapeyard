@@ -449,7 +449,7 @@ class PaginationConfig(StrictConfigModel):
     next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
     max_pages: int = Field(
         default=10,
-        ge=0,
+        ge=1,
         le=MAX_PAGINATION_PAGES,
         description="Maximum pages to scrape",
     )
