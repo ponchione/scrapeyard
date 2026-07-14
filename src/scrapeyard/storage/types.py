@@ -129,6 +129,14 @@ class DeletionFinalizationOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryPruneResult:
+    """Atomic scheduled-run/tombstone compaction outcome."""
+
+    pruned: bool
+    webhook_tombstones_deleted: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class RunRecovery:
     """One job/run state repaired by a conditional recovery pass."""
 

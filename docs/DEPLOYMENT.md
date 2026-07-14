@@ -201,6 +201,10 @@ separately from database backups, test restore/decryption, and follow the
 overlap/re-encryption procedure before retiring a key. Prefer allowlisted
 `${SCRAPEYARD_SECRET_*}` references in YAML so reusable values are resolved at
 execution instead of embedded in stored config.
+Startup validates both encryption settings and the active 32-byte key before
+opening the databases or starting Redis/workers/scheduler, including on a
+pristine deployment. Missing, partial, malformed, or inactive keyrings prevent
+the process from becoming ready.
 
 Use the cheap public `/health/live` endpoint only for process liveness. Route
 traffic only after the authenticated `/health/ready` endpoint succeeds; it
@@ -266,6 +270,14 @@ Set limits to match host capacity:
 - `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` (default `128`)
 - `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` (default `24`)
 - `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` (default `1000`)
+- `SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS` (default `30`)
+- `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_DAYS` (default `30`)
+- `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT` (default `100`)
+- `SCRAPEYARD_HISTORY_ERROR_RETENTION_DAYS` (default `30`)
+- `SCRAPEYARD_HISTORY_WEBHOOK_TOMBSTONE_RETENTION_DAYS` (default `30`)
+- `SCRAPEYARD_HISTORY_ADHOC_JOB_CLEANUP_BATCH_SIZE` (default `100`)
+- `SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE` (default `500`)
+- `SCRAPEYARD_HISTORY_ERROR_CLEANUP_BATCH_SIZE` (default `1000`)
 - `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` (default `60`)
 - `SCRAPEYARD_STORAGE_RETENTION_DAYS` (default `30`, must be positive)
 - `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB` (default `100`, must be positive)
@@ -691,9 +703,34 @@ and retried on a later pass without stopping workers or changing scrape state.
 Scrubbing deliberately keeps a minimal tombstone: `delivery_id`, `job_id`,
 `run_id`, event, terminal status/reason, attempts, and lifecycle timestamps.
 Item-05 reconciliation treats that tombstone as existing durable intent. It
-must not be deleted: removing the only logical job/run/event evidence would
-make reconciliation recreate and redeliver an old terminal event. Scrubbed
-rows cannot transition back to pending and are never selected for dispatch.
+must not be deleted independently while its terminal run remains: removing the
+only logical job/run/event evidence would make reconciliation recreate and
+redeliver an old terminal event. After
+`SCRAPEYARD_HISTORY_WEBHOOK_TOMBSTONE_RETENTION_DAYS`, cleanup may delete an old
+scheduled run and all of its terminal tombstones in the same `jobs.db`
+transaction. With the run absent, startup reconciliation has no event to
+recreate. Old terminal ad-hoc jobs use the same tombstone eligibility rule and
+the persisted, resumable job-deletion lifecycle. Scrubbed rows cannot
+transition back to pending and are never selected for dispatch.
+
+### Durable history retention
+
+Result retention and operational-history retention are intentionally separate.
+An ad-hoc job can be removed while `results_meta.db` and its artifact remain
+readable and authorized from retained project metadata. Cleanup never reserves
+queued/running jobs and never reserves a job with pending webhook work. It
+marks an eligible ad-hoc job `deleting`, removes `errors.db` rows in bounded
+batches, and only then removes its runs, terminal tombstones, idempotency rows,
+and parent in one `jobs.db` transaction. A crash or phase failure leaves the
+reservation visible for the next pass.
+
+Scheduled parents remain. Cleanup selects only terminal, non-current,
+webhook-reconciled runs beyond the configured age or retained-count window.
+It removes run errors first, then atomically rechecks eligibility and deletes
+the run plus its scrubbed tombstones. API `run_count` is a lifetime counter and
+`last_run_at` is a lifetime summary maintained on `jobs`; detailed history
+compaction therefore does not change either value or require a full-history
+aggregation for `GET /jobs`.
 
 At startup Scrapeyard first repairs stale running state, then scans terminal
 runs in deterministic completion/job/run order. Webhook applicability is

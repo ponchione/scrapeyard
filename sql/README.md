@@ -45,3 +45,4 @@ objects are verified.
 | `014_add_jobs_config_hash.sql` | Preserve plaintext-free config compare-and-set semantics. |
 | `015_add_jobs_current_trigger.sql` | Preserve accepted ad-hoc, scheduled, or manual trigger provenance through queued-delivery recovery. |
 | `016_add_webhook_decode_failure_reason.sql` | Add a terminal reason for quarantined malformed webhook outbox rows. |
+| `017_add_history_retention_summary.sql` | Add lifetime run summaries and bounded history-retention indexes. |

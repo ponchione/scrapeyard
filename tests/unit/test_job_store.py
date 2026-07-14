@@ -101,7 +101,7 @@ async def test_result_run_active_lookup_protects_exact_queued_or_running_owner(s
     )
 
 
-async def test_project_stats_query_uses_project_and_run_indexes(store):
+async def test_project_stats_query_uses_summary_without_scanning_runs(store):
     sql, params = build_list_jobs_with_stats_query("acme", limit=10, offset=0)
 
     async with get_db("jobs.db") as db:
@@ -109,7 +109,7 @@ async def test_project_stats_query_uses_project_and_run_indexes(store):
         plan = " ".join(str(row[3]) for row in await cursor.fetchall())
 
     assert "idx_jobs_project" in plan
-    assert "idx_job_runs_job_started" in plan
+    assert "job_runs" not in sql
 
 
 async def test_save_and_get_preserves_disabled_schedule(store):

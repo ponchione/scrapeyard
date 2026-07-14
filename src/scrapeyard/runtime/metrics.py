@@ -157,6 +157,12 @@ CLEANUP_ARTIFACT_FINDINGS = Counter(
     ("kind",),
     registry=REGISTRY,
 )
+CLEANUP_HISTORY_FAILURES = Counter(
+    "scrapeyard_cleanup_history_failures_total",
+    "Durable history cleanup failures by bounded phase.",
+    ("phase",),
+    registry=REGISTRY,
+)
 DISK_FREE_BYTES = Gauge(
     "scrapeyard_result_storage_free_bytes",
     "Free bytes on the result artifact filesystem.",
@@ -186,6 +192,16 @@ for _kind in ("jobs", "browsers"):
     WORK_CAPACITY.labels(_kind).set(0)
 for _kind in ("missing", "corrupt", "unreadable", "unsafe"):
     CLEANUP_ARTIFACT_FINDINGS.labels(_kind)
+for _phase in (
+    "error_retention",
+    "adhoc_selection",
+    "adhoc_errors",
+    "adhoc_finalization",
+    "scheduled_selection",
+    "scheduled_errors",
+    "scheduled_pruning",
+):
+    CLEANUP_HISTORY_FAILURES.labels(_phase)
 for _status in ("pending", "delivered", "failed"):
     WEBHOOK_BACKLOG.labels(_status).set(0)
 for _task in ("worker", "scheduler", "cleanup", "webhook"):

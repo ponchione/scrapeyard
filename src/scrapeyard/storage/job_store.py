@@ -34,6 +34,7 @@ from scrapeyard.storage.types import (
     DeletionFinalizationOutcome,
     DeletionReservationAction,
     DeletionReservationOutcome,
+    HistoryPruneResult,
     IdempotentJobAction,
     IdempotentJobOutcome,
     RunOwnershipError,
@@ -295,6 +296,175 @@ class SQLiteJobStore:
             (fmt_dt(expired_before), limit),
         )
         return cursor.rowcount
+
+    async def list_adhoc_jobs_for_retention(
+        self,
+        expired_before: datetime,
+        *,
+        tombstone_expired_before: datetime,
+        limit: int,
+    ) -> list[str]:
+        """Return aged ad-hoc jobs whose delivery history is safe to compact."""
+
+        if limit < 1:
+            raise ValueError("Ad-hoc job cleanup limit must be positive")
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT jobs.job_id
+                   FROM jobs
+                   WHERE jobs.schedule_cron IS NULL
+                     AND (
+                         (
+                             jobs.status IN ('complete', 'partial', 'failed', 'cancelled')
+                             AND COALESCE(jobs.updated_at, jobs.created_at) <= ?
+                         )
+                         OR (
+                             jobs.status = 'deleting'
+                             AND jobs.delete_results_on_delete = 0
+                         )
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM webhook_deliveries
+                         WHERE webhook_deliveries.job_id = jobs.job_id
+                           AND (
+                               webhook_deliveries.status NOT IN ('delivered', 'failed')
+                               OR webhook_deliveries.scrubbed_at IS NULL
+                               OR webhook_deliveries.scrubbed_at > ?
+                           )
+                     )
+                   ORDER BY COALESCE(
+                                jobs.deletion_requested_at,
+                                jobs.updated_at,
+                                jobs.created_at
+                            ),
+                            jobs.job_id
+                   LIMIT ?""",
+                (
+                    fmt_dt(expired_before),
+                    fmt_dt(tombstone_expired_before),
+                    limit,
+                ),
+            )
+            return [str(row["job_id"]) for row in await cursor.fetchall()]
+
+    @staticmethod
+    def _scheduled_history_eligibility_sql() -> str:
+        return """
+            jobs.schedule_cron IS NOT NULL
+            AND job_runs.status IN ('complete', 'partial', 'failed')
+            AND job_runs.run_id IS NOT jobs.current_run_id
+            AND job_runs.webhook_reconciled_at IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM webhook_deliveries
+                WHERE webhook_deliveries.job_id = job_runs.job_id
+                  AND webhook_deliveries.run_id = job_runs.run_id
+                  AND (
+                      webhook_deliveries.status NOT IN ('delivered', 'failed')
+                      OR webhook_deliveries.scrubbed_at IS NULL
+                      OR webhook_deliveries.scrubbed_at > ?
+                  )
+            )
+            AND (
+                COALESCE(job_runs.completed_at, job_runs.started_at) <= ?
+                OR (
+                    SELECT COUNT(*)
+                    FROM job_runs AS newer_runs
+                    WHERE newer_runs.job_id = job_runs.job_id
+                      AND newer_runs.status IN ('complete', 'partial', 'failed')
+                      AND (
+                          newer_runs.started_at > job_runs.started_at
+                          OR (
+                              newer_runs.started_at = job_runs.started_at
+                              AND newer_runs.run_id > job_runs.run_id
+                          )
+                      )
+                ) >= ?
+            )
+        """
+
+    async def list_scheduled_runs_for_retention(
+        self,
+        expired_before: datetime,
+        *,
+        tombstone_expired_before: datetime,
+        max_runs_per_job: int,
+        limit: int,
+    ) -> list[tuple[str, str]]:
+        """Return bounded scheduled run candidates after durable reconciliation."""
+
+        if max_runs_per_job < 1 or limit < 1:
+            raise ValueError("Scheduled run retention bounds must be positive")
+        query = (
+            "SELECT job_runs.job_id, job_runs.run_id "
+            "FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id WHERE "
+            + self._scheduled_history_eligibility_sql()
+            + " ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at), "
+            "job_runs.job_id, job_runs.run_id LIMIT ?"
+        )
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                query,
+                (
+                    fmt_dt(tombstone_expired_before),
+                    fmt_dt(expired_before),
+                    max_runs_per_job,
+                    limit,
+                ),
+            )
+            return [
+                (str(row["job_id"]), str(row["run_id"]))
+                for row in await cursor.fetchall()
+            ]
+
+    async def prune_scheduled_run_for_retention(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        expired_before: datetime,
+        tombstone_expired_before: datetime,
+        max_runs_per_job: int,
+    ) -> HistoryPruneResult:
+        """Atomically recheck and compact one run and its terminal tombstones."""
+
+        if max_runs_per_job < 1:
+            raise ValueError("Scheduled run retention count must be positive")
+        query = (
+            "SELECT 1 FROM job_runs "
+            "JOIN jobs ON jobs.job_id = job_runs.job_id "
+            "WHERE job_runs.job_id = ? AND job_runs.run_id = ? AND "
+            + self._scheduled_history_eligibility_sql()
+        )
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                query,
+                (
+                    job_id,
+                    run_id,
+                    fmt_dt(tombstone_expired_before),
+                    fmt_dt(expired_before),
+                    max_runs_per_job,
+                ),
+            )
+            if await cursor.fetchone() is None:
+                await db.rollback()
+                return HistoryPruneResult(False)
+            tombstones = await db.execute(
+                """DELETE FROM webhook_deliveries
+                   WHERE job_id = ? AND run_id = ?
+                     AND status IN ('delivered', 'failed')
+                     AND scrubbed_at <= ?""",
+                (job_id, run_id, fmt_dt(tombstone_expired_before)),
+            )
+            pruned = await db.execute(
+                """DELETE FROM job_runs
+                   WHERE job_id = ? AND run_id = ?
+                     AND status IN ('complete', 'partial', 'failed')""",
+                (job_id, run_id),
+            )
+            if pruned.rowcount != 1:
+                raise RuntimeError("Scheduled history pruning lost its selected run")
+            return HistoryPruneResult(True, tombstones.rowcount)
 
     async def update_scheduled_job(
         self,
@@ -768,6 +938,10 @@ class SQLiteJobStore:
                 "DELETE FROM webhook_deliveries WHERE job_id = ?",
                 (job_id,),
             )
+            await db.execute(
+                "DELETE FROM scrape_idempotency WHERE job_id = ?",
+                (job_id,),
+            )
             await db.execute("DELETE FROM job_runs WHERE job_id = ?", (job_id,))
             cursor = await db.execute(
                 """DELETE FROM jobs
@@ -811,11 +985,11 @@ class SQLiteJobStore:
         self,
         job_id: str,
     ) -> tuple[int, datetime | None]:
-        """Return (run_count, last_run_at) derived from job_runs."""
+        """Return lifetime run count and last start without scanning history."""
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                "SELECT COUNT(*) AS run_count, MAX(started_at) AS last_run_at "
-                "FROM job_runs WHERE job_id = ?",
+                "SELECT lifetime_run_count AS run_count, last_run_at "
+                "FROM jobs WHERE job_id = ?",
                 (job_id,),
             )
             row = await cursor.fetchone()
@@ -831,7 +1005,7 @@ class SQLiteJobStore:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[tuple[Job, int, datetime | None]]:
-        """List jobs with derived run_count and last_run_at, newest activity first."""
+        """List jobs with lifetime run summaries, newest activity first."""
         sql, params = build_list_jobs_with_stats_query(project, limit, offset)
         async with get_db("jobs.db") as db:
             cursor = await db.execute(sql, params)

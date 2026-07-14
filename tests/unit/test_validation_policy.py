@@ -75,25 +75,34 @@ async def test_successful_validation_retry_resolves_the_initial_error():
         MagicMock(passed=True),
     ]
     pending_errors = []
+    rate_limiter = AsyncMock()
+
+    async def scrape_at_request_boundary(*_args, **kwargs):
+        await kwargs["rate_limiter"].acquire(
+            "example.com",
+            kwargs["domain_rate_limit"],
+        )
+        return retried
 
     validated = await apply_validation(
         target_cfg=target,
         domain="example.com",
         adaptive=False,
         result=first,
-        config=_config(),
+        config=_config(domain_rate_limit=4),
         adaptive_dir="/tmp/adaptive",
         run_artifacts_dir=None,
         recorder=_recorder(pending_errors),
-        rate_limiter=AsyncMock(),
+        rate_limiter=rate_limiter,
         validator=validator,
-        scrape=AsyncMock(return_value=retried),
+        scrape=scrape_at_request_boundary,
     )
 
     assert validated is retried
     assert len(pending_errors) == 1
     assert pending_errors[0].action_taken == ActionTaken.retry
     assert pending_errors[0].resolved is True
+    rate_limiter.acquire.assert_awaited_once_with("example.com", 4)
 
 
 @pytest.mark.asyncio
