@@ -196,6 +196,7 @@ class _DomainCircuit:
     failures: int = 0
     opened_at: float = 0.0
     generation: int = 0
+    last_accessed_at: float = 0.0
 
 
 class CircuitBreaker:
@@ -214,14 +215,22 @@ class CircuitBreaker:
         max_consecutive_failures: int,
         cooldown_seconds: int,
         *,
+        max_domains: int = 10000,
+        inactive_ttl_seconds: float = 3600.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_consecutive_failures < 1:
             raise ValueError("max_consecutive_failures must be positive")
         if cooldown_seconds < 0:
             raise ValueError("cooldown_seconds cannot be negative")
+        if max_domains < 1:
+            raise ValueError("max_domains must be positive")
+        if inactive_ttl_seconds <= 0:
+            raise ValueError("inactive_ttl_seconds must be positive")
         self._max_failures = max_consecutive_failures
         self._cooldown = cooldown_seconds
+        self._max_domains = max_domains
+        self._inactive_ttl = inactive_ttl_seconds
         self._clock = clock
         self._circuits: dict[str, _DomainCircuit] = {}
         self._lock = threading.RLock()
@@ -230,10 +239,15 @@ class CircuitBreaker:
         """Admit closed work or atomically grant the sole half-open probe."""
 
         with self._lock:
+            now = self._clock()
+            self._prune_inactive_closed(now)
             circuit = self._circuits.get(domain)
             if circuit is None or circuit.state is CircuitState.closed:
+                if circuit is not None:
+                    circuit.last_accessed_at = now
                 return None
-            elapsed = self._clock() - circuit.opened_at
+            circuit.last_accessed_at = now
+            elapsed = now - circuit.opened_at
             if circuit.state is CircuitState.open and elapsed >= self._cooldown:
                 circuit.state = CircuitState.half_open
                 circuit.generation += 1
@@ -245,12 +259,15 @@ class CircuitBreaker:
         """Close a circuit after ordinary success or its authorized probe."""
 
         with self._lock:
+            now = self._clock()
+            self._prune_inactive_closed(now)
             circuit = self._circuits.get(domain)
             if circuit is None:
                 return
             if circuit.state is CircuitState.closed:
                 self._circuits.pop(domain, None)
                 return
+            circuit.last_accessed_at = now
             if circuit.state is CircuitState.half_open and self._probe_matches(
                 circuit,
                 domain,
@@ -262,38 +279,81 @@ class CircuitBreaker:
         """Count a transient failure or reopen after a failed probe."""
 
         with self._lock:
-            circuit = self._circuits.setdefault(domain, _DomainCircuit())
+            now = self._clock()
+            self._prune_inactive_closed(now)
+            circuit = self._circuits.get(domain)
+            if circuit is None:
+                self._make_room_for_closed_state()
+                if len(self._circuits) >= self._max_domains:
+                    # Open and half-open entries are deliberately protected. If
+                    # the cache is saturated with them, do not weaken those
+                    # admission decisions merely to remember a new first failure.
+                    return
+                circuit = _DomainCircuit(last_accessed_at=now)
+                self._circuits[domain] = circuit
+            else:
+                circuit.last_accessed_at = now
             if circuit.state is CircuitState.half_open:
                 if not self._probe_matches(circuit, domain, probe):
                     return
                 circuit.state = CircuitState.open
                 circuit.failures = self._max_failures
-                circuit.opened_at = self._clock()
+                circuit.opened_at = now
                 return
             if circuit.state is CircuitState.open:
                 return
             circuit.failures += 1
             if circuit.failures >= self._max_failures:
                 circuit.state = CircuitState.open
-                circuit.opened_at = self._clock()
+                circuit.opened_at = now
 
     def abort_probe(self, domain: str, probe: CircuitProbe | None) -> None:
         """Release a cancelled/local-failure probe without penalizing the domain."""
 
         with self._lock:
+            now = self._clock()
+            self._prune_inactive_closed(now)
             circuit = self._circuits.get(domain)
             if circuit is None or not self._probe_matches(circuit, domain, probe):
                 return
             circuit.state = CircuitState.open
+            circuit.last_accessed_at = now
             # Preserve the already-expired cooldown so another caller may probe.
-            circuit.opened_at = self._clock() - self._cooldown
+            circuit.opened_at = now - self._cooldown
 
     def state(self, domain: str) -> CircuitState:
         """Return one domain's current state for diagnostics and tests."""
 
         with self._lock:
+            self._prune_inactive_closed(self._clock())
             circuit = self._circuits.get(domain)
             return CircuitState.closed if circuit is None else circuit.state
+
+    def _prune_inactive_closed(self, now: float) -> None:
+        """Expire abandoned sub-threshold histories without touching open probes."""
+
+        expired = [
+            domain
+            for domain, circuit in self._circuits.items()
+            if circuit.state is CircuitState.closed
+            and now - circuit.last_accessed_at >= self._inactive_ttl
+        ]
+        for domain in expired:
+            self._circuits.pop(domain, None)
+
+    def _make_room_for_closed_state(self) -> None:
+        """Evict the least-recently-used sub-threshold entry at capacity."""
+
+        if len(self._circuits) < self._max_domains:
+            return
+        candidates = (
+            (circuit.last_accessed_at, domain)
+            for domain, circuit in self._circuits.items()
+            if circuit.state is CircuitState.closed
+        )
+        oldest = min(candidates, default=None)
+        if oldest is not None:
+            self._circuits.pop(oldest[1], None)
 
     @staticmethod
     def _probe_matches(

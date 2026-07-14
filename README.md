@@ -449,6 +449,8 @@ settings are:
 | `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS` | `60` | Interval between bounded repairs of stale accepted queue deliveries |
 | `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_BATCH_SIZE` | `100` | Maximum stale queued SQLite runs inspected per periodic repair pass |
 | `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` | `600` | Time since the last persisted run heartbeat before recovery is allowed |
+| `SCRAPEYARD_WORKERS_RUNNING_RECONCILIATION_INTERVAL_SECONDS` | `60` | Interval between bounded stale-running and terminal-intent repair passes |
+| `SCRAPEYARD_WORKERS_RUNNING_RECONCILIATION_BATCH_SIZE` | `100` | Maximum stale-running and terminal-intent rows processed per repair pass |
 | `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
 | `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate encoded basic-response body bytes, checked after each response |
@@ -461,10 +463,14 @@ settings are:
 | `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` | `1048576` | Historical name for the maximum UTF-8 bytes of every selector value, with or without transforms |
 | `SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES` | `3` | Consecutive transient upstream failures before opening a domain circuit |
 | `SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Open interval before exactly one half-open probe is admitted |
+| `SCRAPEYARD_CIRCUIT_BREAKER_MAX_DOMAINS` | `10000` | Maximum retained per-domain circuit states |
+| `SCRAPEYARD_CIRCUIT_BREAKER_INACTIVE_TTL_SECONDS` | `3600` | Idle lifetime for sub-threshold circuit history |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
 | `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE` | `100` | Maximum due rows loaded into one bounded dispatch batch |
+| `SCRAPEYARD_WEBHOOK_CLIENT_CACHE_MAX_SIZE` | `64` | Maximum hostname-isolated webhook HTTP client pools |
+| `SCRAPEYARD_WEBHOOK_CLIENT_CACHE_IDLE_TTL_SECONDS` | `300` | Idle lifetime for a cached webhook HTTP client pool |
 | `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS` | `7` | Full delivered-row inspection window before secret scrubbing |
 | `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS` | `30` | Full failed-row inspection window before secret scrubbing |
 | `SCRAPEYARD_MAX_REQUEST_BYTES` | `262144` | Max request body size |

@@ -23,8 +23,8 @@ from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
-    redact_deployment_secrets,
-    redact_deployment_secrets_in_value,
+    redact_deployment_secrets_with_count,
+    redact_deployment_secrets_in_value_with_count,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
@@ -834,7 +834,7 @@ async def _process_all_targets(
         activity=context.activity,
     )
 
-    async def _process_one(target_cfg: TargetConfig) -> TargetResult:
+    async def _process_one(target_index: int, target_cfg: TargetConfig) -> TargetResult:
         nonlocal next_start_at
         pending_errors: list[ErrorRecord] = []
         cancelled = False
@@ -859,6 +859,7 @@ async def _process_all_targets(
                 with active_target():
                     target_result = await _fetch_and_validate_target(
                         target_cfg=target_cfg,
+                        target_index=target_index,
                         context=target_context,
                         pending_errors=pending_errors,
                     )
@@ -891,8 +892,8 @@ async def _process_all_targets(
                 )
 
     tasks = [
-        asyncio.create_task(_process_one(target_cfg))
-        for target_cfg in targets
+        asyncio.create_task(_process_one(target_index, target_cfg))
+        for target_index, target_cfg in enumerate(targets)
     ]
     try:
         outcomes = await context.budget.wait_for(asyncio.gather(*tasks))
@@ -910,6 +911,7 @@ async def _fetch_and_validate_target(
     target_cfg: TargetConfig,
     context: TargetProcessingContext,
     pending_errors: list[ErrorRecord],
+    target_index: int = 0,
 ) -> TargetResult:
     """Fetch a single target and run validation. Returns the result."""
     recorder = context.recorder(pending_errors)
@@ -918,6 +920,7 @@ async def _fetch_and_validate_target(
         config=context.config,
         settings=context.settings,
         run_artifacts_dir=context.run_artifacts_dir,
+        target_index=target_index,
     )
     circuit_open = await guard_target_execution(
         runtime=runtime,
@@ -933,10 +936,28 @@ async def _fetch_and_validate_target(
         qualification_checkpoint("during_target_execution")
         if target_cfg.fetcher in (FetcherType.dynamic, FetcherType.stealthy):
             if context.browser_limiter is None:
-                return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+                return await _scrape_and_validate_target(
+                    target_cfg,
+                    context,
+                    runtime,
+                    recorder,
+                    target_index=target_index,
+                )
             async with context.browser_limiter.slot():
-                return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
-        return await _scrape_and_validate_target(target_cfg, context, runtime, recorder)
+                return await _scrape_and_validate_target(
+                    target_cfg,
+                    context,
+                    runtime,
+                    recorder,
+                    target_index=target_index,
+                )
+        return await _scrape_and_validate_target(
+            target_cfg,
+            context,
+            runtime,
+            recorder,
+            target_index=target_index,
+        )
     except asyncio.CancelledError:
         context.circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
         runtime.circuit_probe = None
@@ -969,6 +990,8 @@ async def _scrape_and_validate_target(
     context: TargetProcessingContext,
     runtime: TargetRuntimeContext,
     recorder: TargetErrorRecorder,
+    *,
+    target_index: int,
 ) -> TargetResult:
     result = await scrape_target(
         target_cfg,
@@ -1008,6 +1031,7 @@ async def _scrape_and_validate_target(
         validator=context.validator,
         scrape=scrape_target,
         proxy_url=runtime.proxy_url,
+        target_index=target_index,
         budget=context.budget,
         cancellation_guard=context.activity.checkpoint,
     )
@@ -1192,13 +1216,19 @@ def _redact_output_artifact(
     )
 
     if config.output.group_by == GroupBy.merge:
-        redacted_output["results"] = redact_deployment_secrets_in_value(
+        redacted_merged_results, redaction_count = redact_deployment_secrets_in_value_with_count(
             results,
             secret_values=secret_values,
         )
+        redacted_output["results"] = redacted_merged_results
+        if redaction_count:
+            redacted_output["result_redaction"] = {
+                "deployment_secret_matches": redaction_count,
+            }
         return redacted_output
 
     redacted_results: dict[str, Any] = {}
+    redaction_count = 0
     for group_key, target_result in results.items():
         data = target_result["data"]
         redacted_target = redact_sensitive_mapping(
@@ -1209,11 +1239,17 @@ def _redact_output_artifact(
             },
             secret_values=secret_values,
         )
-        redacted_target["data"] = redact_deployment_secrets_in_value(
+        redacted_data, data_count = redact_deployment_secrets_in_value_with_count(
             data,
             secret_values=secret_values,
         )
-        redacted_group_key = redact_deployment_secrets(group_key, secret_values)
+        redacted_target["data"] = redacted_data
+        redaction_count += data_count
+        redacted_group_key, group_key_count = redact_deployment_secrets_with_count(
+            group_key,
+            secret_values,
+        )
+        redaction_count += group_key_count
         unique_group_key = redacted_group_key
         suffix = 2
         while unique_group_key in redacted_results:
@@ -1221,6 +1257,10 @@ def _redact_output_artifact(
             suffix += 1
         redacted_results[unique_group_key] = redacted_target
     redacted_output["results"] = redacted_results
+    if redaction_count:
+        redacted_output["result_redaction"] = {
+            "deployment_secret_matches": redaction_count,
+        }
     return redacted_output
 
 

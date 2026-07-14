@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -106,10 +107,69 @@ async def test_successful_validation_retry_resolves_the_initial_error():
 
 
 @pytest.mark.asyncio
+async def test_validation_retry_preserves_both_attempt_screenshots(tmp_path):
+    target = make_target("https://example.com/products")
+    first_dir = tmp_path / "artifacts" / "example.com" / "target-0005" / "attempt-1"
+    first_dir.mkdir(parents=True)
+    first_screenshot = first_dir / "dynamic-main.png"
+    first_screenshot.write_bytes(b"first-attempt")
+    first = TargetResult(
+        url=target.url,
+        status="success",
+        data=[],
+        debug={"screenshot_path": str(first_screenshot)},
+    )
+    validator = MagicMock()
+    validator.validate.side_effect = [
+        MagicMock(passed=False, action=OnEmptyAction.retry, message="empty"),
+        MagicMock(passed=True),
+    ]
+
+    async def retry_scrape(*_args, **kwargs):
+        retry_dir = Path(kwargs["artifacts_dir"])
+        retry_dir.mkdir(parents=True)
+        retry_screenshot = retry_dir / "dynamic-main.png"
+        retry_screenshot.write_bytes(b"second-attempt")
+        return TargetResult(
+            url=target.url,
+            status="success",
+            data=[{"title": "ok"}],
+            debug={"screenshot_path": str(retry_screenshot)},
+        )
+
+    retried = await apply_validation(
+        target_cfg=target,
+        domain="example.com",
+        adaptive=False,
+        result=first,
+        config=_config(),
+        adaptive_dir="/tmp/adaptive",
+        run_artifacts_dir=str(tmp_path / "artifacts"),
+        recorder=_recorder([]),
+        rate_limiter=AsyncMock(),
+        validator=validator,
+        scrape=retry_scrape,
+        target_index=4,
+    )
+
+    retry_screenshot = Path(retried.debug["screenshot_path"])
+    assert first_screenshot != retry_screenshot
+    assert first_screenshot.read_bytes() == b"first-attempt"
+    assert retry_screenshot.read_bytes() == b"second-attempt"
+    assert retry_screenshot.parent.name == "attempt-2"
+
+
+@pytest.mark.asyncio
 async def test_apply_validation_retry_returns_failed_result_after_second_invalid_response():
     target = make_target("https://example.com")
     first = TargetResult(url=target.url, status="success", data=[], errors=[])
-    retried = TargetResult(url=target.url, status="success", data=[], errors=[], debug={"classification": "selector_miss"})
+    retried = TargetResult(
+        url=target.url,
+        status="success",
+        data=[],
+        errors=[],
+        debug={"classification": "selector_miss"},
+    )
     validator = MagicMock()
     validator.validate.side_effect = [
         MagicMock(passed=False, action=OnEmptyAction.retry, message="empty first pass"),
@@ -143,7 +203,10 @@ async def test_apply_validation_retry_returns_failed_result_after_second_invalid
     assert scrape.await_args.kwargs["rate_limiter"] is rate_limiter
     assert scrape.await_args.kwargs["domain_rate_limit"] == 4
     circuit_breaker.record_success.assert_called_once_with("example.com")
-    assert [record.action_taken for record in pending_errors] == [ActionTaken.retry, ActionTaken.fail]
+    assert [record.action_taken for record in pending_errors] == [
+        ActionTaken.retry,
+        ActionTaken.fail,
+    ]
     assert all(record.resolved is False for record in pending_errors)
 
 

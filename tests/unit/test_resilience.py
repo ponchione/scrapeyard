@@ -306,6 +306,62 @@ class TestCircuitBreaker:
 
         assert cb.state("example.com") is CircuitState.open
 
+    def test_unique_subthreshold_failures_are_capacity_bounded(self):
+        cb = CircuitBreaker(
+            3,
+            60,
+            max_domains=10,
+            inactive_ttl_seconds=3600,
+        )
+
+        for index in range(2000):
+            cb.record_failure(f"host-{index}.example")
+            assert len(cb._circuits) <= 10
+
+        assert len(cb._circuits) == 10
+        assert "host-1999.example" in cb._circuits
+
+    def test_inactive_subthreshold_history_expires(self):
+        clock = [0.0]
+        cb = CircuitBreaker(
+            3,
+            60,
+            max_domains=10,
+            inactive_ttl_seconds=5,
+            clock=lambda: clock[0],
+        )
+        cb.record_failure("abandoned.example")
+
+        clock[0] = 5.0
+        cb.record_failure("current.example")
+
+        assert "abandoned.example" not in cb._circuits
+        assert cb.state("current.example") is CircuitState.closed
+
+    def test_capacity_never_evicts_open_or_half_open_admission_state(self):
+        clock = [0.0]
+        cb = CircuitBreaker(
+            1,
+            10,
+            max_domains=2,
+            inactive_ttl_seconds=5,
+            clock=lambda: clock[0],
+        )
+        cb.record_failure("open-a.example")
+        cb.record_failure("open-b.example")
+        cb.record_failure("untracked.example")
+        assert set(cb._circuits) == {"open-a.example", "open-b.example"}
+
+        clock[0] = 10.0
+        probe = cb.check("open-a.example")
+        assert isinstance(probe, CircuitProbe)
+        cb.record_failure("still-untracked.example")
+
+        assert cb.state("open-a.example") is CircuitState.half_open
+        cb.record_success("open-a.example", probe)
+        cb.record_failure("now-tracked.example")
+        assert set(cb._circuits) == {"open-b.example", "now-tracked.example"}
+
 
 def _recorder(cb: CircuitBreaker) -> TargetErrorRecorder:
     return TargetErrorRecorder(

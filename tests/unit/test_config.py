@@ -232,6 +232,32 @@ target:
 """
             )
 
+    def test_short_deployment_secret_is_rejected_before_global_redaction(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SCRAPEYARD_SECRET_SHORT", "a")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"secret-ref":["SCRAPEYARD_SECRET_SHORT"]}',
+        )
+        get_settings.cache_clear()
+
+        with pytest.raises(ValueError, match="at least 8 characters"):
+            load_config(
+                """
+project: secret-ref
+name: short-secret
+target:
+  url: https://example.com
+  browser:
+    extra_headers:
+      Authorization: ${SCRAPEYARD_SECRET_SHORT}
+  selectors:
+    title: h1
+"""
+            )
+
     def test_deployment_secret_references_are_denied_without_project_allowlist(
         self,
         monkeypatch,

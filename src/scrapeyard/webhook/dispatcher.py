@@ -35,6 +35,8 @@ _DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
 _DEFAULT_MAX_DELIVERY_AGE_SECONDS = 86400
 _DEFAULT_DISPATCH_CONCURRENCY = 4
 _DEFAULT_DISPATCH_BATCH_SIZE = 100
+_DEFAULT_CLIENT_CACHE_MAX_SIZE = 64
+_DEFAULT_CLIENT_CACHE_IDLE_TTL_SECONDS = 300.0
 _COORDINATOR_ERROR_RETRY_SECONDS = 1.0
 _COORDINATOR_MIN_IDLE_DELAY_SECONDS = 0.05
 
@@ -46,6 +48,16 @@ class WebhookRequestConfig:
     url: str
     headers: dict[str, str]
     timeout: float
+
+
+@dataclass(slots=True)
+class _ClientCacheEntry:
+    """One hostname-isolated client and its eviction-safety state."""
+
+    client: httpx.AsyncClient
+    last_used_at: float
+    in_flight: int = 0
+    expiry_task: asyncio.Task[None] | None = None
 
 
 class WebhookDispatchStatus(str, Enum):
@@ -103,6 +115,8 @@ class HttpWebhookDispatcher:
         max_delivery_age_seconds: int = _DEFAULT_MAX_DELIVERY_AGE_SECONDS,
         dispatch_concurrency: int = _DEFAULT_DISPATCH_CONCURRENCY,
         dispatch_batch_size: int = _DEFAULT_DISPATCH_BATCH_SIZE,
+        client_cache_max_size: int = _DEFAULT_CLIENT_CACHE_MAX_SIZE,
+        client_cache_idle_ttl_seconds: float = _DEFAULT_CLIENT_CACHE_IDLE_TTL_SECONDS,
     ) -> None:
         if max_delivery_attempts < 1:
             raise ValueError("max_delivery_attempts must be positive")
@@ -112,10 +126,17 @@ class HttpWebhookDispatcher:
             raise ValueError("dispatch_concurrency must be positive")
         if dispatch_batch_size < dispatch_concurrency:
             raise ValueError("dispatch_batch_size must be >= dispatch_concurrency")
+        if client_cache_max_size < 1:
+            raise ValueError("client_cache_max_size must be positive")
+        if client_cache_idle_ttl_seconds <= 0:
+            raise ValueError("client_cache_idle_ttl_seconds must be positive")
 
         self._client_factory = client_factory or httpx.AsyncClient
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[str, _ClientCacheEntry] = {}
         self._client_lock = asyncio.Lock()
+        self._client_condition = asyncio.Condition(self._client_lock)
+        self._client_cache_max_size = client_cache_max_size
+        self._client_cache_idle_ttl_seconds = client_cache_idle_ttl_seconds
         self._startup_lock = asyncio.Lock()
         self._accepting_tasks = True
         self._started = False
@@ -151,6 +172,10 @@ class HttpWebhookDispatcher:
     @property
     def dispatch_concurrency(self) -> int:
         return self._dispatch_concurrency
+
+    @property
+    def client_cache_size(self) -> int:
+        return len(self._clients)
 
     @property
     def background_ok(self) -> bool:
@@ -309,9 +334,12 @@ class HttpWebhookDispatcher:
 
         url = str(config.url)
         start = time.monotonic()
+        acquired_hostname: str | None = None
+        client: httpx.AsyncClient | None = None
         try:
             resolved = await asyncio.to_thread(resolve_public_url, url)
-            client = await self._get_client(resolved.sni_hostname)
+            acquired_hostname = resolved.sni_hostname
+            client = await self._acquire_client(acquired_hostname)
             headers = dict(config.headers)
             headers["Host"] = resolved.host_header
             request = httpx.Request(
@@ -426,6 +454,9 @@ class HttpWebhookDispatcher:
                 f"Transport failure: {error_type}",
                 WebhookDispatchReason.transport_failure,
             )
+        finally:
+            if acquired_hostname is not None and client is not None:
+                await self._release_client(acquired_hostname, client)
 
     async def notify(self) -> None:
         """Wake bounded workers without recreating an already-durable intent."""
@@ -512,9 +543,14 @@ class HttpWebhookDispatcher:
         self._started = False
 
         async def _close_client() -> None:
-            async with self._client_lock:
-                clients = list({id(client): client for client in self._clients.values()}.values())
+            async with self._client_condition:
+                entries = list(self._clients.values())
                 self._clients.clear()
+                self._client_condition.notify_all()
+            for entry in entries:
+                if entry.expiry_task is not None:
+                    entry.expiry_task.cancel()
+            clients = list({id(entry.client): entry.client for entry in entries}.values())
             for client in clients:
                 await client.aclose()
 
@@ -539,20 +575,110 @@ class HttpWebhookDispatcher:
                 "Webhook shutdown deadline exceeded in phase(s): " + ", ".join(unresolved_phases)
             )
 
-    async def _get_client(self, logical_hostname: str) -> httpx.AsyncClient:
-        """Return a pool isolated to one certificate-authenticated hostname."""
+    async def _acquire_client(self, logical_hostname: str) -> httpx.AsyncClient:
+        """Lease a hostname-isolated pool without exceeding the cache bound."""
 
-        async with self._client_lock:
-            client = self._clients.get(logical_hostname)
-            if client is None:
+        evicted_client: httpx.AsyncClient | None = None
+        while True:
+            async with self._client_condition:
+                now = time.monotonic()
+                entry = self._clients.get(logical_hostname)
+                if entry is not None:
+                    if entry.expiry_task is not None:
+                        entry.expiry_task.cancel()
+                        entry.expiry_task = None
+                    entry.in_flight += 1
+                    entry.last_used_at = now
+                    client = entry.client
+                    break
+
+                if len(self._clients) >= self._client_cache_max_size:
+                    idle = [
+                        (candidate.last_used_at, hostname, candidate)
+                        for hostname, candidate in self._clients.items()
+                        if candidate.in_flight == 0
+                    ]
+                    if not idle:
+                        await self._client_condition.wait()
+                        continue
+                    _last_used, evicted_hostname, evicted = min(idle)
+                    self._clients.pop(evicted_hostname, None)
+                    if evicted.expiry_task is not None:
+                        evicted.expiry_task.cancel()
+                    evicted_client = evicted.client
+
                 client = self._client_factory()
-                if any(client is existing for existing in self._clients.values()):
+                if client is evicted_client:
+                    await client.aclose()
                     raise RuntimeError(
                         "Webhook client_factory must return a distinct client "
                         "for each logical hostname"
                     )
-                self._clients[logical_hostname] = client
-            return client
+                if any(client is existing.client for existing in self._clients.values()):
+                    raise RuntimeError(
+                        "Webhook client_factory must return a distinct client "
+                        "for each logical hostname"
+                    )
+                self._clients[logical_hostname] = _ClientCacheEntry(
+                    client=client,
+                    last_used_at=now,
+                    in_flight=1,
+                )
+                break
+
+        if evicted_client is not None:
+            try:
+                await asyncio.shield(evicted_client.aclose())
+            except asyncio.CancelledError:
+                await self._release_client(logical_hostname, client)
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to close evicted webhook client hostname=%s",
+                    logical_hostname,
+                )
+        return client
+
+    async def _release_client(
+        self,
+        logical_hostname: str,
+        client: httpx.AsyncClient,
+    ) -> None:
+        async with self._client_condition:
+            entry = self._clients.get(logical_hostname)
+            if entry is None or entry.client is not client:
+                return
+            entry.in_flight = max(0, entry.in_flight - 1)
+            entry.last_used_at = time.monotonic()
+            if entry.in_flight == 0:
+                entry.expiry_task = asyncio.create_task(
+                    self._expire_idle_client(logical_hostname, entry),
+                    name="scrapeyard-webhook-client-expiry",
+                )
+                self._client_condition.notify_all()
+
+    async def _expire_idle_client(
+        self,
+        logical_hostname: str,
+        entry: _ClientCacheEntry,
+    ) -> None:
+        try:
+            await asyncio.sleep(self._client_cache_idle_ttl_seconds)
+            async with self._client_condition:
+                current = self._clients.get(logical_hostname)
+                if current is not entry or entry.in_flight != 0:
+                    return
+                self._clients.pop(logical_hostname, None)
+                entry.expiry_task = None
+                self._client_condition.notify_all()
+            await entry.client.aclose()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception(
+                "Failed to close expired webhook client hostname=%s",
+                logical_hostname,
+            )
 
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)

@@ -13,6 +13,7 @@ from scrapeyard.config.schema import ScrapeConfig
 
 
 _SECRET_REFERENCE_RE = re.compile(r"\$\{(SCRAPEYARD_SECRET_[A-Z0-9_]+)\}")
+MIN_DEPLOYMENT_SECRET_LENGTH = 8
 
 
 def _secret_references(value: Any) -> set[str]:
@@ -93,6 +94,11 @@ def load_config(yaml_str: str) -> ScrapeConfig:
             resolved = os.environ.get(reference)
             if resolved is None:
                 raise ValueError(f"Missing deployment secret reference {reference}")
+            if len(resolved) < MIN_DEPLOYMENT_SECRET_LENGTH:
+                raise ValueError(
+                    f"Deployment secret reference {reference} must contain at least "
+                    f"{MIN_DEPLOYMENT_SECRET_LENGTH} characters"
+                )
             resolved_secrets[reference] = resolved
     try:
         config = ScrapeConfig(**_resolve_secret_references(data, resolved_secrets))

@@ -429,6 +429,108 @@ class TestSendOnce:
         }
 
     @pytest.mark.asyncio
+    async def test_hostname_client_cache_is_bounded_and_closes_lru_entries(
+        self,
+    ) -> None:
+        clients: list[AsyncMock] = []
+
+        def make_client() -> AsyncMock:
+            client = AsyncMock()
+            client.send.return_value = _ok_response()
+            clients.append(client)
+            return client
+
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=make_client,
+            client_cache_max_size=3,
+            client_cache_idle_ttl_seconds=60,
+        )
+
+        for index in range(12):
+            result = await dispatcher.send_once(
+                _webhook_config(f"https://host-{index}.example.com/hook"),
+                {},
+            )
+            assert result.status is WebhookDispatchStatus.delivered
+            assert dispatcher.client_cache_size <= 3
+
+        assert len(clients) == 12
+        assert all(client.aclose.await_count == 1 for client in clients[:-3])
+        assert all(client.aclose.await_count == 0 for client in clients[-3:])
+        await dispatcher.shutdown()
+        assert all(client.aclose.await_count == 1 for client in clients)
+
+    @pytest.mark.asyncio
+    async def test_capacity_wait_does_not_evict_an_in_flight_client(self) -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        clients: list[AsyncMock] = []
+
+        def make_client() -> AsyncMock:
+            client = AsyncMock()
+            if not clients:
+
+                async def hold_request(*_args, **_kwargs):
+                    first_started.set()
+                    await release_first.wait()
+                    return _ok_response()
+
+                client.send.side_effect = hold_request
+            else:
+                client.send.return_value = _ok_response()
+            clients.append(client)
+            return client
+
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=make_client,
+            client_cache_max_size=1,
+            client_cache_idle_ttl_seconds=60,
+        )
+        first = asyncio.create_task(
+            dispatcher.send_once(
+                _webhook_config("https://first.example.com/hook"),
+                {},
+            )
+        )
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        second = asyncio.create_task(
+            dispatcher.send_once(
+                _webhook_config("https://second.example.com/hook"),
+                {},
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert len(clients) == 1
+        assert clients[0].aclose.await_count == 0
+        assert not second.done()
+
+        release_first.set()
+        first_result, second_result = await asyncio.wait_for(
+            asyncio.gather(first, second),
+            timeout=1,
+        )
+        assert first_result.status is WebhookDispatchStatus.delivered
+        assert second_result.status is WebhookDispatchStatus.delivered
+        assert clients[0].aclose.await_count == 1
+        await dispatcher.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_idle_hostname_client_expires_and_closes_promptly(self) -> None:
+        client = AsyncMock()
+        client.send.return_value = _ok_response()
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            client_cache_max_size=2,
+            client_cache_idle_ttl_seconds=0.01,
+        )
+
+        await dispatcher.send_once(_webhook_config(), {})
+        await _wait_until(lambda: dispatcher.client_cache_size == 0)
+
+        client.aclose.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_send_once_treats_dns_availability_failure_as_retryable(
         self,
         monkeypatch,

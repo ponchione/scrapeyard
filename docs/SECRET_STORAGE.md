@@ -47,7 +47,11 @@ The default empty policy denies every secret reference. The config `project`
 and `name` must remain literal, so neither authorization policy nor plaintext
 storage paths can be derived from a secret reference.
 Resolution happens each time YAML is validated/executed; the reference remains
-in persisted YAML. A missing or unauthorized reference fails closed. A
+in persisted YAML. A missing, unauthorized, empty, or shorter-than-eight-character
+secret fails closed because deployment-secret output protection uses exact
+substring redaction. Persisted results include a non-sensitive
+`result_redaction.deployment_secret_matches` count whenever extracted result
+values or group keys were changed by that protection. A
 terminal webhook stores an encrypted copy of the resolved retry
 request so an environment-secret rotation does not silently change an already
 accepted delivery.
