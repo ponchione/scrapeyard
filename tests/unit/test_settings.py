@@ -54,6 +54,9 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.workers_cancellation_grace_seconds == 10.0
         assert settings.workers_queued_claim_timeout_seconds == 300
+        assert settings.workers_queue_payload_ttl_seconds == 604800
+        assert settings.workers_queued_reconciliation_interval_seconds == 60.0
+        assert settings.workers_queued_reconciliation_batch_size == 100
         assert settings.workers_running_heartbeat_timeout_seconds == 600
         assert settings.workers_heartbeat_interval_seconds == 30
 
@@ -223,6 +226,9 @@ class TestServiceSettingsFromEnv:
         values = {
             "SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS": "7.5",
             "SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS": "45",
+            "SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS": "7200",
+            "SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS": "15",
+            "SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_BATCH_SIZE": "25",
             "SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS": "180",
             "SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS": "20",
         }
@@ -230,6 +236,9 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
         assert settings.workers_cancellation_grace_seconds == 7.5
         assert settings.workers_queued_claim_timeout_seconds == 45
+        assert settings.workers_queue_payload_ttl_seconds == 7200
+        assert settings.workers_queued_reconciliation_interval_seconds == 15
+        assert settings.workers_queued_reconciliation_batch_size == 25
         assert settings.workers_running_heartbeat_timeout_seconds == 180
         assert settings.workers_heartbeat_interval_seconds == 20
 
@@ -432,6 +441,18 @@ def test_heartbeat_interval_must_be_safely_shorter_than_running_timeout(monkeypa
     monkeypatch.setenv("SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS", "31")
 
     with pytest.raises(ValidationError, match="one third"):
+        ServiceSettings()
+
+
+def test_queue_payload_ttl_must_cover_claim_and_reconciliation_window(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv(
+        "SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS",
+        "60",
+    )
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS", "360")
+
+    with pytest.raises(ValidationError, match="payload_ttl"):
         ServiceSettings()
 
 

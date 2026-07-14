@@ -44,7 +44,10 @@ from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
-from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
+from scrapeyard.queue.reconciliation import (
+    reconcile_stale_queued_jobs,
+    start_queued_reconciliation_loop,
+)
 from scrapeyard.queue.terminal_reconciliation import (
     reconcile_terminal_webhook_intents,
 )
@@ -144,6 +147,17 @@ async def _startup_runtime_services(app: FastAPI) -> None:
             get_settings().workers_queued_claim_timeout_seconds
         ),
     )
+    app.state.queued_reconciliation_task = start_queued_reconciliation_loop(
+        job_store=get_job_store(),
+        worker_pool=services.worker_pool,
+        queued_claim_timeout_seconds=(
+            get_settings().workers_queued_claim_timeout_seconds
+        ),
+        interval_seconds=(
+            get_settings().workers_queued_reconciliation_interval_seconds
+        ),
+        batch_size=get_settings().workers_queued_reconciliation_batch_size,
+    )
     await services.scheduler.start()
     app.state.cleanup_task = start_cleanup_loop(
         services.result_store,
@@ -169,17 +183,25 @@ async def _shutdown_runtime_services(
         failures.append((phase, exc))
         logger.exception("Runtime shutdown phase failed phase=%s", phase)
 
-    cleanup_task = getattr(app.state, "cleanup_task", None)
-    if cleanup_task is not None:
-        cleanup_task.cancel()
+    background_tasks = (
+        ("cleanup", getattr(app.state, "cleanup_task", None)),
+        (
+            "queued_reconciliation",
+            getattr(app.state, "queued_reconciliation_task", None),
+        ),
+    )
+    for phase, task in background_tasks:
+        if task is None:
+            continue
+        task.cancel()
         try:
-            await deadline.run(cleanup_task)
+            await deadline.run(task)
         except AwaitableCancelled:
             pass
         except asyncio.TimeoutError as exc:
-            record_failure("cleanup", exc)
+            record_failure(phase, exc)
         except Exception as exc:
-            record_failure("cleanup", exc)
+            record_failure(phase, exc)
     scheduler = getattr(app.state, "scheduler", None)
     if scheduler is not None:
         try:
@@ -192,6 +214,12 @@ async def _shutdown_runtime_services(
             await worker_pool.stop(timeout=remaining())
         except Exception as exc:
             record_failure("worker", exc)
+            if bool(getattr(worker_pool, "shutdown_pending", False)):
+                phases = ", ".join(phase for phase, _exc in failures)
+                raise RuntimeError(
+                    f"Runtime shutdown failed for phase(s): {phases}; "
+                    "shared services retained for live worker tasks"
+                ) from exc
     try:
         await close_webhook_dispatcher(timeout=remaining())
     except Exception as exc:
@@ -242,15 +270,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         yield
     finally:
+        release_instance_lock = True
         try:
             await _shutdown_runtime_services(
                 app,
                 shutdown_grace_seconds=settings.workers_shutdown_grace_seconds,
             )
+        except BaseException:
+            worker_pool = getattr(app.state, "worker_pool", None)
+            release_instance_lock = not bool(
+                getattr(worker_pool, "shutdown_pending", False)
+            )
+            raise
         finally:
-            instance_lock.release()
-            app.state.instance_lock = None
-            logger.info("Released single-instance guard path=%s", instance_lock.path)
+            if release_instance_lock:
+                instance_lock.release()
+                app.state.instance_lock = None
+                logger.info("Released single-instance guard path=%s", instance_lock.path)
+            else:
+                logger.critical(
+                    "Retaining single-instance guard for unresolved worker shutdown path=%s",
+                    instance_lock.path,
+                )
 
 
 app = FastAPI(
@@ -337,6 +378,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     return JSONResponse(
         status_code=500,
         content=error_content(500, "Internal server error"),
+        # Starlette's outer error middleware sends this response outside the
+        # user-middleware stack. The version middleware deduplicates the field
+        # whenever a response does traverse that stack.
         headers={"X-Scrapeyard-API-Version": "1"},
     )
 

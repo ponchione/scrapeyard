@@ -369,6 +369,8 @@ async def test_stop_reports_active_job_that_resists_cancellation(monkeypatch):
     pool = _make_pool()
     pool._started = True
     pool._worker = worker
+    redis = MagicMock()
+    pool._redis = redis
     pool._runner_task = asyncio.create_task(asyncio.sleep(0))
     monkeypatch.setattr(
         "scrapeyard.queue.pool.get_settings",
@@ -380,8 +382,23 @@ async def test_stop_reports_active_job_that_resists_cancellation(monkeypatch):
 
     await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
     assert not pending.done()
+    assert pool.shutdown_pending is True
+    assert pool._started is True
+    assert pool._worker is worker
+    assert pool.redis is redis
+    with pytest.raises(RuntimeError, match="shutdown is unresolved"):
+        await pool.start()
+    with pytest.raises(RuntimeError, match="shutdown is unresolved"):
+        await pool.enqueue("job-2", "config: yaml", run_id="run-2")
+
     release.set()
     await asyncio.wait_for(pending, timeout=1)
+    await pool.stop(timeout=1)
+
+    assert pool.shutdown_pending is False
+    assert pool._started is False
+    assert pool._worker is None
+    assert pool.redis is None
 
 
 @pytest.mark.asyncio
@@ -430,7 +447,7 @@ async def test_enqueue_raises_memory_error_when_pool_cannot_accept():
 
 @pytest.mark.asyncio
 async def test_enqueue_starts_pool_and_enqueues_job():
-    pool = _make_pool()
+    pool = _make_pool(payload_ttl_seconds=123)
     fake_redis = MagicMock(
         eval=AsyncMock(return_value=1),
         job_serializer=None,
@@ -450,6 +467,7 @@ async def test_enqueue_starts_pool_and_enqueues_job():
     assert hasattr(result, "result")
     fake_redis.eval.assert_awaited_once()
     assert "test-queue:priority:high" in fake_redis.eval.await_args.args
+    assert "123000" in fake_redis.eval.await_args.args
     assert "_defer_until" not in fake_redis.eval.await_args.kwargs
 
 

@@ -242,6 +242,9 @@ Set limits to match host capacity:
 - `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` (default `30`, shared by worker and webhook shutdown)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
+- `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` (default `604800`)
+- `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS` (default `60`)
+- `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_BATCH_SIZE` (default `100`)
 - `SCRAPEYARD_WORKERS_RUNNING_HEARTBEAT_TIMEOUT_SECONDS` (default `600`)
 - `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` (default `30`)
 - `SCRAPEYARD_MAX_REQUEST_BYTES`
@@ -383,8 +386,9 @@ would not provide one shared fairness cursor.
 
 `/health/ready` exposes `workers.queue_depths` with the exact keys `high`, `normal`,
 and `low`. Each value is a direct `ZCARD` of its known intake queue and includes
-waiting/deferred members, including an orphaned member until reconciliation,
-but excludes admitted base-queue and in-progress work. `active_tasks` remains
+waiting/deferred members, including an orphaned member until the next admission
+attempt removes it, but excludes admitted base-queue and in-progress work.
+`active_tasks` remains
 the separate running-handler count. If Redis cannot provide these bounded
 depth reads, all three values are `null`, the Redis dependency is unhealthy,
 and `/health/ready` returns 503.
@@ -400,8 +404,9 @@ or startup pass. Recovery and finalization update the run and parent job in one
 SQLite transaction, so a racing successful heartbeat or terminal update turns
 recovery into a no-op.
 
-Startup also reconciles queued SQLite ownership after Redis connects and before
-APScheduler starts. Only queued rows older than
+Startup reconciles queued SQLite ownership after Redis connects and before
+APScheduler starts, and the same repair runs periodically in bounded batches.
+Only queued rows older than
 `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` with a persisted
 `current_run_id` are inspected. Scrapeyard directly checks that run ID through
 arq's global result, in-progress, and payload keys plus the fixed four-queue
@@ -419,6 +424,9 @@ arq record paired with queued SQLite state, an invalid stored config, or a
 recovery enqueue failure conditionally fails only that still-current queued
 run. Redis inspection failure aborts startup before the scheduler can fire,
 because continuing without authoritative queue state could duplicate work.
+Priority admission atomically discards a sorted-set member whose arq payload
+has expired instead of moving an unexecutable delivery to the worker queue.
+The periodic pass then restores the accepted run with its original run ID.
 
 Size browser concurrency for the host independently from job concurrency. The
 limit applies to active `dynamic` and `stealthy` targets across all jobs; basic

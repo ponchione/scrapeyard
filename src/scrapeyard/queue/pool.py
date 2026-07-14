@@ -61,14 +61,25 @@ return 1
 """
 
 _ADMIT_ONE_LUA = """
+local orphans_removed = 0
+local orphan_limit = tonumber(ARGV[3])
 for index = 1, 3 do
-    local candidate = redis.call(
-        'ZRANGEBYSCORE', KEYS[index], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1
-    )
-    if #candidate > 0 then
+    while true do
+        local candidate = redis.call(
+            'ZRANGEBYSCORE', KEYS[index], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1
+        )
+        if #candidate == 0 then
+            break
+        end
         redis.call('ZREM', KEYS[index], candidate[1])
-        redis.call('ZADD', KEYS[4], candidate[2], candidate[1])
-        return {candidate[1], KEYS[index]}
+        if redis.call('EXISTS', ARGV[2] .. candidate[1]) == 1 then
+            redis.call('ZADD', KEYS[4], candidate[2], candidate[1])
+            return {candidate[1], KEYS[index]}
+        end
+        orphans_removed = orphans_removed + 1
+        if orphans_removed >= orphan_limit then
+            return {}
+        end
     end
 end
 return {}
@@ -162,6 +173,8 @@ class _PriorityWorker(Worker):
                 *queue_order,
                 self.queue_name,
                 str(timestamp_ms()),
+                job_key_prefix,
+                "100",
             ),
         )
         if not admitted:
@@ -207,6 +220,7 @@ class WorkerPool:
         queue_name: str,
         task_handler: QueueTaskHandler | None = None,
         cancellation_grace_seconds: float = 10.0,
+        payload_ttl_seconds: int = 604800,
         job_timeout_seconds: float = 300.0,
     ) -> None:
         self._max_concurrent = max_concurrent
@@ -221,6 +235,7 @@ class WorkerPool:
         )
         self._task_handler = task_handler
         self._cancellation_grace_seconds = cancellation_grace_seconds
+        self._payload_ttl_ms = payload_ttl_seconds * 1000
         self._job_timeout_seconds = job_timeout_seconds
 
         self._browser_limiter = BrowserExecutionLimiter(max_browsers)
@@ -229,6 +244,7 @@ class WorkerPool:
         self._runner_task: asyncio.Task[None] | None = None
         self._active_tasks = 0
         self._started = False
+        self._stopping = False
 
     def _check_memory(self) -> bool:
         """Return True if current RSS is within limits."""
@@ -241,6 +257,10 @@ class WorkerPool:
 
     async def start(self) -> None:
         """Start the Redis connection and embedded arq worker."""
+        if self._stopping:
+            raise RuntimeError(
+                "WorkerPool cannot start while a previous shutdown is unresolved"
+            )
         if self._started:
             return
 
@@ -292,6 +312,7 @@ class WorkerPool:
         if self._worker is None:
             raise RuntimeError("WorkerPool.stop() called but worker was never started")
 
+        self._stopping = True
         self._worker.allow_pick_jobs = False
         grace_seconds = (
             get_settings().workers_shutdown_grace_seconds
@@ -316,6 +337,10 @@ class WorkerPool:
                     if not task.done():
                         task.cancel()
 
+        # Let cancellation reach active jobs before deciding whether their
+        # Redis and worker dependencies are safe to close.
+        await asyncio.sleep(0)
+
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
         if self._runner_task is not None:
@@ -326,33 +351,36 @@ class WorkerPool:
             except asyncio.TimeoutError:
                 unresolved_phases.append("runner")
 
-        try:
-            await deadline.run(self._worker.close())
-        except asyncio.TimeoutError:
-            unresolved_phases.append("redis_close")
-
         active_jobs_unresolved = any(not task.done() for task in pending)
         if active_jobs_unresolved:
             unresolved_phases.append("active_jobs")
+
+        if unresolved_phases:
+            if drain_timed_out and active_jobs_unresolved:
+                logger.warning(
+                    "Worker shutdown grace expired; active-job cancellation "
+                    "remains unresolved"
+                )
+            raise asyncio.TimeoutError(
+                "Worker shutdown deadline exceeded in phase(s): "
+                + ", ".join(unresolved_phases)
+            )
+
+        try:
+            await deadline.run(self._worker.close())
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError(
+                "Worker shutdown deadline exceeded in phase(s): redis_close"
+            ) from None
 
         self._redis = None
         self._worker = None
         self._runner_task = None
         self._started = False
+        self._stopping = False
         if drain_timed_out:
-            if active_jobs_unresolved:
-                logger.warning(
-                    "Worker shutdown grace expired; active-job cancellation "
-                    "remains unresolved"
-                )
-            else:
-                logger.info(
-                    "Worker shutdown grace expired; active-job cancellation completed"
-                )
-        if unresolved_phases:
-            raise asyncio.TimeoutError(
-                "Worker shutdown deadline exceeded in phase(s): "
-                + ", ".join(unresolved_phases)
+            logger.info(
+                "Worker shutdown grace expired; active-job cancellation completed"
             )
 
     async def enqueue(
@@ -369,6 +397,10 @@ class WorkerPool:
         if not self._check_memory():
             raise MemoryError(
                 f"Process memory exceeds {self._memory_limit_mb}MB limit — rejecting task"
+            )
+        if self._stopping:
+            raise RuntimeError(
+                "WorkerPool cannot enqueue while a previous shutdown is unresolved"
             )
         if not self._started:
             await self.start()
@@ -405,7 +437,7 @@ class WorkerPool:
                 queue_name,
                 f"{queue_name}:fifo-score",
                 str(enqueue_time_ms),
-                str(self._redis.expires_extra_ms),
+                str(self._payload_ttl_ms),
                 cast(str, payload),
                 run_id,
             ),
@@ -713,6 +745,12 @@ class WorkerPool:
     def redis(self) -> ArqRedis | None:
         """Return the active Redis pool, if the worker pool is started."""
         return self._redis
+
+    @property
+    def shutdown_pending(self) -> bool:
+        """Whether shutdown still owns live worker resources or tasks."""
+
+        return self._stopping
 
     async def ping(self) -> None:
         """Verify the queue's Redis adapter is connected and responsive."""

@@ -1372,6 +1372,9 @@ class SQLiteJobStore:
     async def list_stale_queued_jobs(
         self,
         stale_before: datetime,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[StaleQueuedJob]:
         """Return stale queued deliveries with all reconciliation inputs.
 
@@ -1380,17 +1383,19 @@ class SQLiteJobStore:
         no owned run or no queued timestamp are deliberately excluded.
         """
         async with get_db("jobs.db") as db:
-            cursor = await db.execute(
-                """SELECT job_id, current_run_id, current_trigger, config_yaml, updated_at,
+            query = """SELECT job_id, current_run_id, current_trigger, config_yaml, updated_at,
                           schedule_cron, schedule_enabled
                    FROM jobs
                    WHERE status = 'queued'
                      AND current_run_id IS NOT NULL
                      AND updated_at IS NOT NULL
                      AND updated_at <= ?
-                   ORDER BY updated_at ASC, job_id ASC""",
-                (fmt_dt(stale_before),),
-            )
+                   ORDER BY updated_at ASC, job_id ASC"""
+            params: tuple[object, ...] = (fmt_dt(stale_before),)
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params += (limit, offset)
+            cursor = await db.execute(query, params)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
 
         stale_jobs: list[StaleQueuedJob] = []

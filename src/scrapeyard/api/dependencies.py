@@ -202,6 +202,7 @@ def get_worker_pool() -> WorkerPool:
         queue_name=settings.queue_name,
         task_handler=_task_handler,
         cancellation_grace_seconds=settings.workers_cancellation_grace_seconds,
+        payload_ttl_seconds=settings.workers_queue_payload_ttl_seconds,
         job_timeout_seconds=(
             settings.run_max_duration_seconds
             + settings.workers_cancellation_grace_seconds

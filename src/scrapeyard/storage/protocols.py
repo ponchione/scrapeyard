@@ -240,6 +240,9 @@ class JobStore(Protocol):
     async def list_stale_queued_jobs(
         self,
         stale_before: datetime,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[StaleQueuedJob]:
         """Return complete persisted context for stale owned queued deliveries."""
         ...

@@ -30,6 +30,9 @@ class ServiceSettings(BaseSettings):
     workers_shutdown_grace_seconds: int = Field(default=30, ge=0)
     workers_cancellation_grace_seconds: float = Field(default=10.0, gt=0)
     workers_queued_claim_timeout_seconds: int = Field(default=300, gt=0)
+    workers_queue_payload_ttl_seconds: int = Field(default=604800, gt=0)
+    workers_queued_reconciliation_interval_seconds: float = Field(default=60.0, gt=0)
+    workers_queued_reconciliation_batch_size: int = Field(default=100, ge=1)
     workers_running_heartbeat_timeout_seconds: int = Field(default=600, gt=0)
     workers_heartbeat_interval_seconds: int = Field(default=30, gt=0)
     workers_redis_connect_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -122,6 +125,14 @@ class ServiceSettings(BaseSettings):
             raise ValueError(
                 "workers_heartbeat_interval_seconds must be no more than one third "
                 "of workers_running_heartbeat_timeout_seconds"
+            )
+        if self.workers_queue_payload_ttl_seconds <= (
+            self.workers_queued_claim_timeout_seconds
+            + self.workers_queued_reconciliation_interval_seconds
+        ):
+            raise ValueError(
+                "workers_queue_payload_ttl_seconds must exceed the queued claim "
+                "timeout plus one reconciliation interval"
             )
         if self.webhook_dispatch_batch_size < self.webhook_dispatch_concurrency:
             raise ValueError("webhook_dispatch_batch_size must be >= webhook_dispatch_concurrency")
