@@ -17,26 +17,26 @@ def test_build_list_jobs_with_stats_query_filters_and_paginates() -> None:
         offset=10,
     )
 
-    assert "WITH job_stats AS" in sql
-    assert "JOIN jobs filtered_jobs" in sql
-    assert "WHERE filtered_jobs.project = ?" in sql
+    assert "WITH job_stats AS" not in sql
+    assert "job_runs" not in sql
+    assert "j.lifetime_run_count AS run_count" in sql
     assert "WHERE j.project = ?" in sql
     assert "LIMIT ? OFFSET ?" in sql
-    assert params == ["acme", "acme", 5, 10]
+    assert params == ["acme", 5, 10]
 
 
 def test_build_list_jobs_with_stats_query_filters_empty_project() -> None:
     sql, params = build_list_jobs_with_stats_query(project="", limit=5, offset=0)
 
     assert "WHERE j.project = ?" in sql
-    assert params == ["", "", 5, 0]
+    assert params == ["", 5, 0]
 
 
 def test_build_list_jobs_with_stats_query_supports_offset_without_limit() -> None:
     sql, params = build_list_jobs_with_stats_query(project=None, limit=None, offset=3)
 
     assert "LIMIT -1 OFFSET ?" in sql
-    assert "JOIN jobs filtered_jobs" not in sql
+    assert "job_runs" not in sql
     assert params == [3]
 
 

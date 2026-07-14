@@ -108,6 +108,17 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.storage_retention_days == 30
 
+    def test_history_retention_defaults(self):
+        settings = ServiceSettings()
+        assert settings.history_adhoc_job_retention_days == 30
+        assert settings.history_scheduled_run_retention_days == 30
+        assert settings.history_scheduled_run_retention_count == 100
+        assert settings.history_error_retention_days == 30
+        assert settings.history_webhook_tombstone_retention_days == 30
+        assert settings.history_adhoc_job_cleanup_batch_size == 100
+        assert settings.history_scheduled_run_cleanup_batch_size == 500
+        assert settings.history_error_cleanup_batch_size == 1000
+
     def test_storage_results_dir_default(self, monkeypatch):
         settings = self._make_clean_settings(monkeypatch)
         assert settings.storage_results_dir == "/data/results"
@@ -299,6 +310,30 @@ class TestServiceSettingsFromEnv:
 
         assert settings.storage_cleanup_batch_size == 37
 
+    def test_reads_history_retention_settings(self):
+        values = {
+            "SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS": "11",
+            "SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_DAYS": "12",
+            "SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT": "13",
+            "SCRAPEYARD_HISTORY_ERROR_RETENTION_DAYS": "14",
+            "SCRAPEYARD_HISTORY_WEBHOOK_TOMBSTONE_RETENTION_DAYS": "15",
+            "SCRAPEYARD_HISTORY_ADHOC_JOB_CLEANUP_BATCH_SIZE": "16",
+            "SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE": "17",
+            "SCRAPEYARD_HISTORY_ERROR_CLEANUP_BATCH_SIZE": "18",
+        }
+
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+
+        assert settings.history_adhoc_job_retention_days == 11
+        assert settings.history_scheduled_run_retention_days == 12
+        assert settings.history_scheduled_run_retention_count == 13
+        assert settings.history_error_retention_days == 14
+        assert settings.history_webhook_tombstone_retention_days == 15
+        assert settings.history_adhoc_job_cleanup_batch_size == 16
+        assert settings.history_scheduled_run_cleanup_batch_size == 17
+        assert settings.history_error_cleanup_batch_size == 18
+
     def test_reads_circuit_breaker_cooldown_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS": "600"}):
             settings = ServiceSettings()
@@ -481,6 +516,24 @@ def test_webhook_batch_size_must_cover_dispatch_concurrency(monkeypatch):
 
     with pytest.raises(ValidationError, match="batch_size"):
         ServiceSettings()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "history_adhoc_job_retention_days",
+        "history_scheduled_run_retention_days",
+        "history_scheduled_run_retention_count",
+        "history_error_retention_days",
+        "history_webhook_tombstone_retention_days",
+        "history_adhoc_job_cleanup_batch_size",
+        "history_scheduled_run_cleanup_batch_size",
+        "history_error_cleanup_batch_size",
+    ],
+)
+def test_history_retention_settings_reject_zero(field):
+    with pytest.raises(ValidationError):
+        ServiceSettings(**{field: 0})
 
 
 def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):

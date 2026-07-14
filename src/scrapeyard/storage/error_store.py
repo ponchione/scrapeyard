@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from typing import cast
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
@@ -156,3 +157,78 @@ class SQLiteErrorStore:
         """Delete all error records for a job."""
         async with get_db("errors.db") as db, db_transaction(db):
             await db.execute("DELETE FROM errors WHERE job_id=?", (job_id,))
+
+    async def delete_errors_for_run(self, run_id: str) -> None:
+        """Delete all error records for one run as an idempotent cleanup phase."""
+
+        async with get_db("errors.db") as db, db_transaction(db):
+            await db.execute("DELETE FROM errors WHERE run_id = ?", (run_id,))
+
+    @staticmethod
+    async def _delete_error_batch(
+        column: str,
+        value: str,
+        *,
+        limit: int,
+    ) -> tuple[int, bool]:
+        if column not in {"job_id", "run_id"}:  # pragma: no cover - internal defense
+            raise ValueError("Unsupported error retention key")
+        if limit < 1:
+            raise ValueError("Error cleanup limit must be positive")
+        async with get_db("errors.db") as db, db_transaction(db):
+            cursor = await db.execute(
+                f"""DELETE FROM errors
+                    WHERE id IN (
+                        SELECT id FROM errors
+                        WHERE {column} = ?
+                        ORDER BY timestamp, id
+                        LIMIT ?
+                    )""",
+                (value, limit),
+            )
+            deleted = cursor.rowcount
+            remaining_cursor = await db.execute(
+                f"SELECT 1 FROM errors WHERE {column} = ? LIMIT 1",
+                (value,),
+            )
+            remaining = await remaining_cursor.fetchone() is not None
+            return deleted, remaining
+
+    async def delete_errors_for_job_batch(
+        self,
+        job_id: str,
+        *,
+        limit: int,
+    ) -> tuple[int, bool]:
+        return await self._delete_error_batch("job_id", job_id, limit=limit)
+
+    async def delete_errors_for_run_batch(
+        self,
+        run_id: str,
+        *,
+        limit: int,
+    ) -> tuple[int, bool]:
+        return await self._delete_error_batch("run_id", run_id, limit=limit)
+
+    async def delete_expired_errors(
+        self,
+        expired_before: datetime,
+        *,
+        limit: int,
+    ) -> int:
+        """Delete a deterministic bounded batch of aged error rows."""
+
+        if limit < 1:
+            raise ValueError("Error cleanup limit must be positive")
+        async with get_db("errors.db") as db, db_transaction(db):
+            cursor = await db.execute(
+                """DELETE FROM errors
+                   WHERE id IN (
+                       SELECT id FROM errors
+                       WHERE timestamp <= ?
+                       ORDER BY timestamp, id
+                       LIMIT ?
+                   )""",
+                (fmt_dt(expired_before), limit),
+            )
+            return cursor.rowcount

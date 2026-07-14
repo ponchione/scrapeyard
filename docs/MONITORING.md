@@ -37,8 +37,9 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
 - Retry, rate-limit wait, extracted-record, and serialized-byte totals show
   work amplification and output pressure.
 - Durable webhook status counts and oldest-pending age expose retry backlog.
-- Cleanup pass/item/removed-byte totals and scheduler, cleanup, and webhook
-  last-success timestamps expose stalled maintenance.
+- Cleanup pass/item/removed-byte totals, artifact finding counts, durable
+  history phase failures, and scheduler/cleanup/webhook last-success timestamps
+  expose stalled maintenance and retained-data integrity.
 - Background-task gauges report the embedded worker, scheduler, cleanup loop,
   and webhook dispatcher. Result-filesystem free bytes expose disk pressure.
 
@@ -81,6 +82,10 @@ Tune the bounded probes with:
   This signal means retained result metadata no longer validates against its
   artifact. Restore the artifact, intentionally delete its metadata, or record
   an explicit decision to accept the loss; cleanup does not make that decision.
+- Alert on any increase in `scrapeyard_cleanup_history_failures_total`; the
+  bounded `phase` label identifies whether selection, cross-database error
+  deletion, or final jobs/run compaction needs investigation. Persisted
+  deletion reservations are retried automatically.
 - Track run/target failure ratios, retry amplification, API tail latency, output
   bytes, and cleanup failures as dashboard trends rather than per-ID series.
 

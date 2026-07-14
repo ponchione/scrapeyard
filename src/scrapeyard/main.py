@@ -20,6 +20,7 @@ from scrapeyard.api.dependencies import (
     RuntimeServices,
     build_runtime_services,
     close_webhook_dispatcher,
+    get_error_store,
     get_job_store,
     get_worker_pool,
     init_rate_limiter,
@@ -168,6 +169,7 @@ async def _startup_runtime_services(app: FastAPI) -> None:
         services.webhook_outbox_store,
         interval_hours=get_settings().storage_cleanup_interval_seconds / 3600,
         job_store=get_job_store(),
+        error_store=get_error_store(),
     )
 
 
@@ -318,7 +320,7 @@ async def _secret_key_configuration_error_handler(
     logger.error("Encryption key configuration became invalid after startup")
     return JSONResponse(
         status_code=503,
-        content=error_content("Service encryption configuration is unavailable"),
+        content=error_content(503, "Service encryption configuration is unavailable"),
     )
 
 _settings_for_middleware = get_settings()

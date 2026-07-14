@@ -150,7 +150,9 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     monkeypatch.setattr(
         main_module,
         "start_cleanup_loop",
-        lambda _result_store, _outbox_store, *, interval_hours, job_store: cleanup_task,
+        lambda _result_store, _outbox_store, *, interval_hours, job_store, error_store: (
+            cleanup_task
+        ),
     )
     monkeypatch.setattr(
         main_module,
@@ -244,6 +246,18 @@ async def test_lifespan_rejects_invalid_keyring_before_database_start(
             pytest.fail("invalid encryption settings must prevent serving")
 
     init_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_keyring_failure_returns_sanitized_service_unavailable():
+    response = await main_module._secret_key_configuration_error_handler(
+        MagicMock(),
+        main_module.SecretKeyConfigurationError("sensitive key detail"),
+    )
+
+    assert response.status_code == 503
+    assert b"Service encryption configuration is unavailable" in response.body
+    assert b"sensitive key detail" not in response.body
 
 @pytest.mark.asyncio
 async def test_shutdown_attempts_every_phase_after_independent_failures(monkeypatch):

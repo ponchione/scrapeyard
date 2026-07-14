@@ -374,6 +374,11 @@ Common job fields:
 | `output` | Result grouping |
 | `webhook` | Completion notification target |
 
+`execution.domain_rate_limit` is the minimum interval between top-level
+fetch/navigation attempts to the same canonical host. It applies to initial
+fetches, retries, redirect hops, pagination, and validation retries. Browser
+subresources are not throttled by this setting.
+
 Terminal webhook intent is durable before a run is reported complete. Each
 logical event uses a stable `whv1_<sha256>` delivery ID derived only from its
 job ID, run ID, and event, and the same ID is sent to the receiver for
@@ -392,6 +397,13 @@ files are reported as storage failures and are not repaired or deleted. See
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#result-artifact-reconciliation) before
 enabling destructive reconciliation.
 
+The same pass bounds operational history. Old terminal ad-hoc jobs are removed
+through resumable deletion while their result metadata/artifacts follow the
+separate result policy. Scheduled run rows, their reconciled webhook
+tombstones, and error rows are pruned in bounded batches. API `run_count` and
+`last_run_at` are lifetime summaries and do not shrink when detailed run
+history is compacted.
+
 ## Settings
 
 All service settings use the `SCRAPEYARD_` prefix. The most commonly changed
@@ -402,8 +414,8 @@ settings are:
 | `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
 | `SCRAPEYARD_API_KEYS` | empty | Deprecated full-admin migration allow-list; remove after converting to named credentials |
 | `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` | empty | JSON map of project names to permitted `SCRAPEYARD_SECRET_*` references; `*` defines explicitly shared names |
-| `SCRAPEYARD_ENCRYPTION_KEYS` | empty | JSON key-ID to base64 32-byte AES key map for persisted secrets |
-| `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Key ID used for new writes and startup rotation |
+| `SCRAPEYARD_ENCRYPTION_KEYS` | empty | Required JSON key-ID to base64 32-byte AES key map for persisted secrets; startup fails while empty |
+| `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Required key ID used for new writes and startup rotation |
 | `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
 | `SCRAPEYARD_METRICS_REFRESH_INTERVAL_SECONDS` | `5` | Minimum interval between durable Prometheus gauge refreshes |
 | `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection for `arq` |
@@ -420,6 +432,14 @@ settings are:
 | `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` | `128` | Maximum visible-ASCII idempotency key length |
 | `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` | `24` | Caller/key replay and conflict window |
 | `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` | `1000` | Maximum expired key records removed per cleanup pass |
+| `SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS` | `30` | Terminal ad-hoc job history window before resumable metadata deletion |
+| `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_DAYS` | `30` | Scheduled run history age window |
+| `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT` | `100` | Maximum newest scheduled runs retained per job; age expiry may retain fewer |
+| `SCRAPEYARD_HISTORY_ERROR_RETENTION_DAYS` | `30` | Structured error history window |
+| `SCRAPEYARD_HISTORY_WEBHOOK_TOMBSTONE_RETENTION_DAYS` | `30` | Scrubbed tombstone window before atomic run/tombstone compaction |
+| `SCRAPEYARD_HISTORY_ADHOC_JOB_CLEANUP_BATCH_SIZE` | `100` | Maximum ad-hoc jobs selected per cleanup pass |
+| `SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE` | `500` | Maximum scheduled runs selected per cleanup pass |
+| `SCRAPEYARD_HISTORY_ERROR_CLEANUP_BATCH_SIZE` | `1000` | Maximum error rows removed per cleanup operation |
 | `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` | `60` | Maximum lateness for one coalesced in-process cron fire |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |

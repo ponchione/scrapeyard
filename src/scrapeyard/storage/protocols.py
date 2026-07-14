@@ -11,6 +11,7 @@ from scrapeyard.storage.types import (
     CancellationOutcome,
     DeletionFinalizationOutcome,
     DeletionReservationOutcome,
+    HistoryPruneResult,
     IdempotentJobOutcome,
     ResultMetadata,
     ResultPayload,
@@ -56,6 +57,39 @@ class JobStore(Protocol):
         limit: int,
     ) -> int:
         """Delete a bounded batch of expired submission records."""
+        ...
+
+    async def list_adhoc_jobs_for_retention(
+        self,
+        expired_before: datetime,
+        *,
+        tombstone_expired_before: datetime,
+        limit: int,
+    ) -> list[str]:
+        """Select a deterministic bounded batch safe to reserve for deletion."""
+        ...
+
+    async def list_scheduled_runs_for_retention(
+        self,
+        expired_before: datetime,
+        *,
+        tombstone_expired_before: datetime,
+        max_runs_per_job: int,
+        limit: int,
+    ) -> list[tuple[str, str]]:
+        """Select terminal non-current scheduled runs eligible for compaction."""
+        ...
+
+    async def prune_scheduled_run_for_retention(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        expired_before: datetime,
+        tombstone_expired_before: datetime,
+        max_runs_per_job: int,
+    ) -> HistoryPruneResult:
+        """Atomically recheck and remove one scheduled run with its tombstones."""
         ...
 
     async def update_scheduled_job(
@@ -368,6 +402,35 @@ class ErrorStore(Protocol):
     async def count_errors_for_run(self, run_id: str) -> int: ...
 
     async def delete_errors_for_job(self, job_id: str) -> None: ...
+
+    async def delete_errors_for_run(self, run_id: str) -> None: ...
+
+    async def delete_errors_for_job_batch(
+        self,
+        job_id: str,
+        *,
+        limit: int,
+    ) -> tuple[int, bool]:
+        """Delete one bounded job-error batch and report whether rows remain."""
+        ...
+
+    async def delete_errors_for_run_batch(
+        self,
+        run_id: str,
+        *,
+        limit: int,
+    ) -> tuple[int, bool]:
+        """Delete one bounded run-error batch and report whether rows remain."""
+        ...
+
+    async def delete_expired_errors(
+        self,
+        expired_before: datetime,
+        *,
+        limit: int,
+    ) -> int:
+        """Delete a deterministic bounded batch of aged error rows."""
+        ...
 
 
 class WebhookOutboxStore(Protocol):

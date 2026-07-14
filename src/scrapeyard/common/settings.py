@@ -70,6 +70,15 @@ class ServiceSettings(BaseSettings):
     webhook_delivered_retention_days: int = Field(default=7, ge=1)
     webhook_failed_retention_days: int = Field(default=30, ge=1)
 
+    history_adhoc_job_retention_days: int = Field(default=30, ge=1)
+    history_scheduled_run_retention_days: int = Field(default=30, ge=1)
+    history_scheduled_run_retention_count: int = Field(default=100, ge=1)
+    history_error_retention_days: int = Field(default=30, ge=1)
+    history_webhook_tombstone_retention_days: int = Field(default=30, ge=1)
+    history_adhoc_job_cleanup_batch_size: int = Field(default=100, ge=1)
+    history_scheduled_run_cleanup_batch_size: int = Field(default=500, ge=1)
+    history_error_cleanup_batch_size: int = Field(default=1000, ge=1)
+
     storage_retention_days: int = Field(default=30, ge=1)
     db_dir: str = "/data/db"
     storage_results_dir: str = "/data/results"

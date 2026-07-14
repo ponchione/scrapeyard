@@ -49,6 +49,7 @@ REQUIRED_MIGRATION_FILES = {
         "014_add_jobs_config_hash.sql",
         "015_add_jobs_current_trigger.sql",
         "016_add_webhook_decode_failure_reason.sql",
+        "017_add_history_retention_summary.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -78,6 +79,8 @@ REQUIRED_COLUMNS = {
             "schedule_timezone",
             "config_hash",
             "current_trigger",
+            "lifetime_run_count",
+            "last_run_at",
         },
         "job_runs": {
             "run_id",
@@ -169,6 +172,8 @@ REQUIRED_INDEXES = {
         "idx_webhook_deliveries_created",
         "idx_webhook_deliveries_job_run",
         "idx_webhook_deliveries_job_status",
+        "idx_jobs_adhoc_history_retention",
+        "idx_job_runs_scheduled_history_retention",
     },
     "errors.db": {
         "idx_errors_project",

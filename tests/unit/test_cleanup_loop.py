@@ -114,3 +114,54 @@ async def test_cleanup_loop_wires_webhook_retention_settings(monkeypatch):
     assert calls[0]["result_cleanup_batch_size"] == 50
     assert calls[0]["orphan_grace_seconds"] == 86400
     assert calls[0]["reconciliation_dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_loop_wires_durable_history_policy(monkeypatch):
+    calls = []
+    settings = SimpleNamespace(
+        storage_retention_days=7,
+        storage_max_results_per_job=20,
+        storage_cleanup_batch_size=50,
+        storage_orphan_grace_seconds=86400,
+        storage_reconciliation_dry_run=True,
+        idempotency_cleanup_batch_size=30,
+        history_adhoc_job_retention_days=31,
+        history_scheduled_run_retention_days=32,
+        history_scheduled_run_retention_count=33,
+        history_error_retention_days=34,
+        history_webhook_tombstone_retention_days=35,
+        history_adhoc_job_cleanup_batch_size=36,
+        history_scheduled_run_cleanup_batch_size=37,
+        history_error_cleanup_batch_size=38,
+    )
+
+    async def fake_run_cleanup(**kwargs):
+        calls.append(kwargs)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("scrapeyard.storage.cleanup.get_settings", lambda: settings)
+    monkeypatch.setattr("scrapeyard.storage.cleanup.run_cleanup", fake_run_cleanup)
+    job_store = MagicMock()
+    error_store = MagicMock()
+
+    task = start_cleanup_loop(
+        MagicMock(),
+        interval_hours=0,
+        job_store=job_store,
+        error_store=error_store,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    policy = calls[0]["history_policy"]
+    assert calls[0]["job_store"] is job_store
+    assert calls[0]["error_store"] is error_store
+    assert policy.adhoc_job_retention_days == 31
+    assert policy.scheduled_run_retention_days == 32
+    assert policy.scheduled_run_retention_count == 33
+    assert policy.error_retention_days == 34
+    assert policy.webhook_tombstone_retention_days == 35
+    assert policy.adhoc_job_batch_size == 36
+    assert policy.scheduled_run_batch_size == 37
+    assert policy.error_batch_size == 38

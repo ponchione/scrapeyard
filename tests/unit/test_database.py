@@ -131,6 +131,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "014",
         "015",
         "016",
+        "017",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [
@@ -205,6 +206,61 @@ async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path)
             "WHERE delivery_id = 'existing'"
         )
         await db.commit()
+
+
+async def test_history_summary_migration_backfills_and_tracks_lifetime_runs(tmp_path):
+    sql_dir = _resolve_sql_dir()
+    migrations = _load_migrations(sql_dir)["jobs.db"]
+    migration = next(item for item in migrations if item.migration_id == "017")
+    async with aiosqlite.connect(tmp_path / "history-upgrade.db") as db:
+        await db.executescript((sql_dir / "001_create_jobs.sql").read_text())
+        await db.executescript((sql_dir / "004_create_job_runs.sql").read_text())
+        await db.execute(
+            """CREATE TABLE schema_migrations (
+                   migration_id TEXT PRIMARY KEY,
+                   filename TEXT NOT NULL UNIQUE,
+                   checksum TEXT NOT NULL,
+                   applied_at TEXT NOT NULL
+               )"""
+        )
+        await db.execute(
+            """INSERT INTO jobs
+               (job_id, project, name, config_yaml, created_at)
+               VALUES ('job', 'project', 'name', 'config', '2026-01-01')"""
+        )
+        await db.executemany(
+            """INSERT INTO job_runs
+               (run_id, job_id, trigger, config_hash, started_at, heartbeat_at)
+               VALUES (?, 'job', 'scheduled', 'hash', ?, ?)""",
+            [
+                ("run-1", "2026-01-01", "2026-01-01"),
+                ("run-2", "2026-01-03", "2026-01-03"),
+            ],
+        )
+        await db.commit()
+
+        await _apply_migration(db, migration)
+
+        row = await (
+            await db.execute(
+                "SELECT lifetime_run_count, last_run_at FROM jobs WHERE job_id = 'job'"
+            )
+        ).fetchone()
+        assert tuple(row) == (2, "2026-01-03")
+        await db.execute(
+            """INSERT INTO job_runs
+               (run_id, job_id, trigger, config_hash, started_at, heartbeat_at)
+               VALUES ('run-3', 'job', 'scheduled', 'hash',
+                       '2026-01-02', '2026-01-02')"""
+        )
+        await db.execute("DELETE FROM job_runs WHERE run_id = 'run-1'")
+        await db.commit()
+        row = await (
+            await db.execute(
+                "SELECT lifetime_run_count, last_run_at FROM jobs WHERE job_id = 'job'"
+            )
+        ).fetchone()
+        assert tuple(row) == (3, "2026-01-03")
 
 
 async def test_init_db_rejects_checksum_drift(tmp_path):
