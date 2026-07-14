@@ -6,22 +6,16 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import ScrapeConfig, TargetConfig
 from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
-from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
 from scrapeyard.engine.resilience import CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url, url_host_label
 from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
-from scrapeyard.queue.cancellation import (
-    CancellationCheckpoint,
-    cancellation_checkpoint,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +59,9 @@ def resolve_target_runtime_context(
 async def guard_target_execution(
     *,
     runtime: TargetRuntimeContext,
-    config: ScrapeConfig,
     target_cfg: TargetConfig,
     circuit_breaker: CircuitBreaker,
-    rate_limiter: DomainRateLimiter,
     recorder: TargetErrorRecorder,
-    budget: RunBudget | None = None,
-    cancellation_guard: CancellationCheckpoint | None = None,
 ) -> CircuitOpenError | None:
     try:
         probe = circuit_breaker.check(runtime.domain)
@@ -81,24 +71,6 @@ async def guard_target_execution(
         recorder.record_circuit_break(target_cfg.url)
         return exc
 
-    await cancellation_checkpoint(
-        cancellation_guard,
-        "before_rate_limit_wait",
-    )
-    try:
-        acquire = rate_limiter.acquire(runtime.domain, config.execution.domain_rate_limit)
-        if budget is None:
-            await acquire
-        else:
-            await budget.wait_for(acquire)
-    except BaseException:
-        circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
-        runtime.circuit_probe = None
-        raise
-    await cancellation_checkpoint(
-        cancellation_guard,
-        "after_rate_limit_wait",
-    )
     return None
 
 

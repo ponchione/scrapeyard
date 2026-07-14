@@ -151,6 +151,12 @@ CLEANUP_BYTES = Counter(
     "Artifact bytes removed by cleanup reconciliation.",
     registry=REGISTRY,
 )
+CLEANUP_ARTIFACT_FINDINGS = Counter(
+    "scrapeyard_cleanup_artifact_findings_total",
+    "Metadata-backed result artifacts that failed validation by bounded kind.",
+    ("kind",),
+    registry=REGISTRY,
+)
 DISK_FREE_BYTES = Gauge(
     "scrapeyard_result_storage_free_bytes",
     "Free bytes on the result artifact filesystem.",
@@ -178,6 +184,8 @@ for _kind in ("jobs", "targets", "browsers"):
     ACTIVE_WORK.labels(_kind).set(0)
 for _kind in ("jobs", "browsers"):
     WORK_CAPACITY.labels(_kind).set(0)
+for _kind in ("missing", "corrupt", "unreadable", "unsafe"):
+    CLEANUP_ARTIFACT_FINDINGS.labels(_kind)
 for _status in ("pending", "delivered", "failed"):
     WEBHOOK_BACKLOG.labels(_status).set(0)
 for _task in ("worker", "scheduler", "cleanup", "webhook"):

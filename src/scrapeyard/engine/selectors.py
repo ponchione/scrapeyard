@@ -174,7 +174,7 @@ def _json_string_serialized_size(value: str) -> int:
         codepoint = ord(character)
         if character in {'"', "\\"} or character in "\b\t\n\f\r":
             size += 2
-        elif codepoint < 0x20 or codepoint <= 0xFFFF and codepoint > 0x7F:
+        elif codepoint < 0x20 or 0x7F <= codepoint <= 0xFFFF:
             size += 6
         elif codepoint > 0xFFFF:
             size += 12

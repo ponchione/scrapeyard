@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from scrapeyard.storage.cleanup import CleanupIncompleteError, run_cleanup
+from scrapeyard.runtime.metrics import CLEANUP_ARTIFACT_FINDINGS
 from scrapeyard.storage.types import (
+    ResultArtifactFailure,
+    ResultArtifactFailureKind,
     ReconciliationOperationFailure,
     ResultReconciliationReport,
 )
@@ -176,6 +179,65 @@ async def test_reconciliation_operation_failures_mark_cleanup_incomplete(caplog)
 
     outbox.scrub_terminal_deliveries.assert_awaited_once()
     assert "completed with operation failures" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_artifact_findings_increment_bounded_metrics_and_warn(caplog):
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.return_value = ResultReconciliationReport(
+        dry_run=True,
+        missing_result_files=1,
+        corrupt_result_files=1,
+        unreadable_result_files=1,
+        unsafe_metadata_paths=1,
+        artifact_failures=tuple(
+            ResultArtifactFailure(
+                job_id="job",
+                run_id=f"run-{kind.value}",
+                kind=kind,
+            )
+            for kind in ResultArtifactFailureKind
+        ),
+    )
+    before = {
+        kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
+        for kind in ResultArtifactFailureKind
+    }
+
+    await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
+
+    after = {
+        kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
+        for kind in ResultArtifactFailureKind
+    }
+    assert after == {kind: value + 1 for kind, value in before.items()}
+    assert "retained-result integrity failures" in caplog.text
+    assert "job" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_clean_artifact_scan_does_not_increment_finding_metrics(caplog):
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.return_value = ResultReconciliationReport(
+        dry_run=True,
+        valid_artifacts=3,
+    )
+    before = {
+        kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
+        for kind in ResultArtifactFailureKind
+    }
+
+    await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
+
+    assert {
+        kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
+        for kind in ResultArtifactFailureKind
+    } == before
+    assert "retained-result integrity failures" not in caplog.text
 
 
 @pytest.mark.asyncio

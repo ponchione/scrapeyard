@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.runtime.metrics import (
+    CLEANUP_ARTIFACT_FINDINGS,
     CLEANUP_BYTES,
     CLEANUP_ITEMS,
     CLEANUP_RUNS,
@@ -100,6 +101,25 @@ async def run_cleanup(
             type(exc).__name__,
         )
     else:
+        artifact_findings = {
+            "missing": reconciliation.missing_result_files,
+            "corrupt": reconciliation.corrupt_result_files,
+            "unreadable": reconciliation.unreadable_result_files,
+            "unsafe": reconciliation.unsafe_metadata_paths,
+        }
+        for kind, count in artifact_findings.items():
+            if count:
+                CLEANUP_ARTIFACT_FINDINGS.labels(kind).inc(count)
+        if reconciliation.artifact_failures:
+            logger.warning(
+                "Result artifact validation found retained-result integrity failures "
+                "missing=%s corrupt=%s unreadable=%s unsafe=%s "
+                "recovery_action=restore_artifact_or_delete_metadata_or_accept_loss",
+                artifact_findings["missing"],
+                artifact_findings["corrupt"],
+                artifact_findings["unreadable"],
+                artifact_findings["unsafe"],
+            )
         if reconciliation.operation_failures:
             failed_phases.append("artifact_reconciliation")
             logger.error(

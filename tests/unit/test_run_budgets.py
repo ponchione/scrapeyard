@@ -9,7 +9,7 @@ from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import BrowserActionConfig, RetryConfig
 from scrapeyard.engine.browser_debug import run_browser_actions
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
-from scrapeyard.queue.target_execution import guard_target_execution
+from scrapeyard.engine.scraper import _acquire_request_rate_limit
 
 
 def _budget(**overrides) -> RunBudget:
@@ -150,19 +150,13 @@ async def test_rate_limit_wait_uses_overall_deadline():
         await asyncio.Event().wait()
 
     rate_limiter.acquire.side_effect = block_rate_limit
-    runtime = MagicMock(domain="example.com")
-    config = MagicMock()
-    config.execution.domain_rate_limit = 5
-
     with pytest.raises(BudgetExceeded) as exc_info:
-        await guard_target_execution(
-            runtime=runtime,
-            config=config,
-            target_cfg=MagicMock(url="https://example.com"),
-            circuit_breaker=MagicMock(),
+        await _acquire_request_rate_limit(
+            "https://example.com",
             rate_limiter=rate_limiter,
-            recorder=MagicMock(),
+            min_interval=5,
             budget=budget,
+            cancellation_guard=None,
         )
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
 

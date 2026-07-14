@@ -28,6 +28,7 @@ from scrapeyard.engine.fetch_classifier import (
     classify_rendered_outcome,
 )
 from scrapeyard.engine.pagination import paginate_target
+from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
 from scrapeyard.engine.scrape_models import (
     FetchError,
@@ -65,6 +66,8 @@ class ScrapeContext:
     budget: RunBudget | None
     cancellation_guard: CancellationCheckpoint | None
     response_observer: Callable[[], None] | None
+    rate_limiter: DomainRateLimiter | None
+    domain_rate_limit: float
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,8 @@ async def _fetch_basic_with_safe_redirects(
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
     response_observer: Callable[[], None] | None = None,
+    rate_limiter: DomainRateLimiter | None = None,
+    domain_rate_limit: float = 0,
 ) -> Any:
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
@@ -230,6 +235,13 @@ async def _fetch_basic_with_safe_redirects(
                 current_url,
                 require_resolved_dns=require_resolved_dns,
             )
+        await _acquire_request_rate_limit(
+            current_url,
+            rate_limiter=rate_limiter,
+            min_interval=domain_rate_limit,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+        )
         response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
         if response_observer is not None:
             response_observer()
@@ -268,6 +280,27 @@ async def _assert_fetch_url(url: str, *, require_resolved_dns: bool) -> None:
         url,
         allow_unresolved=not require_resolved_dns,
     )
+
+
+async def _acquire_request_rate_limit(
+    url: str,
+    *,
+    rate_limiter: DomainRateLimiter | None,
+    min_interval: float,
+    budget: RunBudget | None,
+    cancellation_guard: CancellationCheckpoint | None,
+) -> None:
+    """Throttle one top-level network attempt at its actual request boundary."""
+
+    if rate_limiter is None:
+        return
+    await cancellation_checkpoint(cancellation_guard, "before_rate_limit_wait")
+    acquire = rate_limiter.acquire(url_host_label(url), min_interval)
+    if budget is None:
+        await acquire
+    else:
+        await budget.wait_for(acquire)
+    await cancellation_checkpoint(cancellation_guard, "after_rate_limit_wait")
 
 
 def _requires_verified_dns(target: TargetConfig, fetcher_type: FetcherType, proxy_url: str | None) -> bool:
@@ -311,6 +344,8 @@ async def _fetch_page(
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
     response_observer: Callable[[], None] | None = None,
+    rate_limiter: DomainRateLimiter | None = None,
+    domain_rate_limit: float = 0,
 ) -> FetchOutcome:
     """Fetch a single page using the appropriate Scrapling method."""
     response_observed = False
@@ -344,10 +379,19 @@ async def _fetch_page(
             budget=budget,
             cancellation_guard=cancellation_guard,
             response_observer=observe_response_once,
+            rate_limiter=rate_limiter,
+            domain_rate_limit=domain_rate_limit,
         )
     else:
         await _assert_fetch_url(url, require_resolved_dns=require_resolved_dns)
         call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
+        await _acquire_request_rate_limit(
+            url,
+            rate_limiter=rate_limiter,
+            min_interval=domain_rate_limit,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+        )
         response, capture = await fetch_browser_response(
             fetcher_cls,
             url,
@@ -388,6 +432,8 @@ async def _fetch_target_page(
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
     response_observer: Callable[[], None] | None = None,
+    rate_limiter: DomainRateLimiter | None = None,
+    domain_rate_limit: float = 0,
 ) -> FetchOutcome:
     return await retry_handler.execute(
         _fetch_page,
@@ -403,6 +449,8 @@ async def _fetch_target_page(
         budget,
         cancellation_guard,
         response_observer,
+        rate_limiter,
+        domain_rate_limit,
     )
 
 
@@ -413,6 +461,8 @@ def _prepare_scrape_context(
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
     response_observer: Callable[[], None] | None,
+    rate_limiter: DomainRateLimiter | None,
+    domain_rate_limit: float,
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
     Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
@@ -428,6 +478,8 @@ def _prepare_scrape_context(
         budget=budget,
         cancellation_guard=cancellation_guard,
         response_observer=response_observer,
+        rate_limiter=rate_limiter,
+        domain_rate_limit=domain_rate_limit,
     )
 
 
@@ -453,6 +505,8 @@ async def _scrape_first_page(
         context.budget,
         context.cancellation_guard,
         context.response_observer,
+        context.rate_limiter,
+        context.domain_rate_limit,
     )
     await cancellation_checkpoint(
         context.cancellation_guard,
@@ -516,6 +570,8 @@ async def _scrape_paginated_pages(
         artifacts_dir=artifacts_dir,
         budget=context.budget,
         cancellation_guard=context.cancellation_guard,
+        rate_limiter=context.rate_limiter,
+        domain_rate_limit=context.domain_rate_limit,
     )
 
 
@@ -572,6 +628,8 @@ async def scrape_target(
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
     response_observer: Callable[[], None] | None = None,
+    rate_limiter: DomainRateLimiter | None = None,
+    domain_rate_limit: float = 0,
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
@@ -582,6 +640,8 @@ async def scrape_target(
         budget,
         cancellation_guard,
         response_observer,
+        rate_limiter,
+        domain_rate_limit,
     )
 
     try:

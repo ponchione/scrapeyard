@@ -954,7 +954,10 @@ class ExecutionConfig(StrictConfigModel):
         default=3,
         ge=0,
         le=MAX_DOMAIN_RATE_LIMIT_SECONDS,
-        description="Minimum seconds between requests to same domain",
+        description=(
+            "Minimum seconds between top-level fetch/navigation attempts to the same host; "
+            "browser subresources are outside this limit"
+        ),
     )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")
     priority: Priority = Field(default=Priority.normal, description="Queue priority")

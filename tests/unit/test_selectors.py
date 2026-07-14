@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import random
 import warnings
 
 import pytest
@@ -20,10 +22,73 @@ from scrapeyard.config.schema import (
 from scrapeyard.engine.scraper import _extract_page_data
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
+    _json_string_serialized_size,
     count_selector_matches_strict,
     extract_selectors_strict,
     select_items_strict,
 )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\x1f",
+        " ",
+        '"',
+        "\\",
+        "~",
+        "\x7f",
+        "\x80",
+        "\uffff",
+        "\U00010000",
+        "\U0001f600",
+        "\ud800",
+        "\udfff",
+    ],
+)
+def test_json_string_size_matches_ascii_json_boundaries(value: str) -> None:
+    expected = len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+
+    assert _json_string_serialized_size(value) == expected
+
+
+def test_json_string_size_matches_deterministic_random_values() -> None:
+    randomizer = random.Random(20260714)
+    codepoints = [
+        0,
+        0x1F,
+        0x20,
+        ord('"'),
+        ord("\\"),
+        0x7E,
+        0x7F,
+        0x80,
+        0xD800,
+        0xDFFF,
+        0xFFFF,
+        0x10000,
+        0x10FFFF,
+    ]
+    codepoints.extend(randomizer.randrange(0x110000) for _ in range(500))
+    value = "".join(chr(codepoint) for codepoint in codepoints)
+
+    assert _json_string_serialized_size(value) == len(
+        json.dumps(value, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def test_del_heavy_extraction_exhausts_budget_during_estimation() -> None:
+    budget = _value_budget(30)
+    page = _Node(css_map={"h1": [_Node(text="\x7f" * 5)]})
+
+    with pytest.raises(BudgetExceeded) as raised:
+        extract_selectors_strict(
+            page,
+            {"title": "h1"},
+            reserve_output_bytes=budget.reserve_estimated_result_bytes,
+        )
+
+    assert raised.value.limit_name is BudgetLimitName.serialized_result_bytes
 
 
 def _value_budget(max_serialized_result_bytes: int) -> RunBudget:
