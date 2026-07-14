@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +13,9 @@ from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.pool import QueueDeliveryState
 from scrapeyard.queue.reconciliation import (
     QueuedReconciliationError,
+    QueuedReconciliationSummary,
     reconcile_stale_queued_jobs,
+    start_queued_reconciliation_loop,
 )
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
@@ -143,6 +146,55 @@ async def test_stale_queued_query_returns_typed_context_in_deterministic_order(
     assert rows[1].trigger == "scheduled"
     assert rows[1].config_yaml == CONFIG_YAML
     assert rows[1].schedule_enabled is False
+
+    bounded = await store.list_stale_queued_jobs(
+        NOW - timedelta(seconds=TIMEOUT),
+        limit=2,
+    )
+    assert [row.job_id for row in bounded] == ["job-a", "job-b"]
+
+
+async def test_periodic_reconciliation_uses_bounded_batches(monkeypatch) -> None:
+    two_passes = asyncio.Event()
+    calls = 0
+
+    async def reconcile_batch(**_kwargs) -> QueuedReconciliationSummary:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            two_passes.set()
+        return QueuedReconciliationSummary(inspected=17)
+
+    reconcile = AsyncMock(side_effect=reconcile_batch)
+    monkeypatch.setattr(
+        "scrapeyard.queue.reconciliation.reconcile_stale_queued_jobs",
+        reconcile,
+    )
+    store = MagicMock()
+    pool = MagicMock()
+
+    task = start_queued_reconciliation_loop(
+        job_store=store,
+        worker_pool=pool,
+        queued_claim_timeout_seconds=300,
+        interval_seconds=0.001,
+        batch_size=17,
+    )
+    try:
+        await asyncio.wait_for(two_passes.wait(), timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert reconcile.await_count >= 2
+    assert reconcile.await_args_list[0].kwargs == {
+        "job_store": store,
+        "worker_pool": pool,
+        "queued_claim_timeout_seconds": 300,
+        "batch_size": 17,
+        "batch_offset": 0,
+    }
+    assert reconcile.await_args_list[1].kwargs["batch_offset"] == 17
 
 
 @pytest.mark.parametrize(

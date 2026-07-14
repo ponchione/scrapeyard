@@ -652,3 +652,71 @@ async def test_missing_delivery_recovery_runs_through_real_arq_worker(
         now=now,
     )
     assert repeated.inspected == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_expired_priority_payload_is_not_admitted_and_run_is_repaired(
+    client,
+    monkeypatch,
+):
+    calls = 0
+
+    async def _success(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "repaired"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _success)
+    pool = get_worker_pool()
+    store = get_job_store()
+    assert pool.redis is not None
+    assert pool._worker is not None
+    original_ttl_ms = pool._payload_ttl_ms
+    pool._payload_ttl_ms = 50
+    pool._worker.allow_pick_jobs = False
+    try:
+        response = await client.post(
+            "/scrape",
+            content=_async_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        run_id = response.json()["run_id"]
+        priority_queue = f"{get_settings().queue_name}:priority:normal"
+
+        for _ in range(100):
+            if not await pool.redis.exists(f"arq:job:{run_id}"):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Short-lived arq payload did not expire")
+        assert await pool.redis.zscore(priority_queue, run_id) is not None
+
+        admitted = await pool._worker._admit_one()
+
+        assert admitted is False
+        assert await pool.redis.zscore(priority_queue, run_id) is None
+        assert calls == 0
+        assert (await store.get_job(job_id)).status is JobStatus.queued
+
+        pool._payload_ttl_ms = original_ttl_ms
+        summary = await reconcile_stale_queued_jobs(
+            job_store=store,
+            worker_pool=pool,
+            queued_claim_timeout_seconds=1,
+            now=utc_now() + timedelta(seconds=2),
+        )
+        assert summary.recovered == 1
+        pool._worker.allow_pick_jobs = True
+        assert await _await_terminal_status(client, job_id) == "complete"
+        assert calls == 1
+    finally:
+        pool._payload_ttl_ms = original_ttl_ms
+        pool._worker.allow_pick_jobs = True

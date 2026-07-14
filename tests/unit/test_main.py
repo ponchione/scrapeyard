@@ -83,6 +83,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         browser_debug_enabled=False,
         workers_shutdown_grace_seconds=7,
         workers_queued_claim_timeout_seconds=300,
+        workers_queued_reconciliation_interval_seconds=60,
+        workers_queued_reconciliation_batch_size=100,
         workers_running_heartbeat_timeout_seconds=600,
         storage_cleanup_interval_seconds=21600,
     )
@@ -114,6 +116,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
             return _wait().__await__()
 
     cleanup_task = _CleanupTask()
+    queued_reconciliation_task = _CleanupTask()
 
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "utc_now", lambda: now)
@@ -149,6 +152,11 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         "start_cleanup_loop",
         lambda _result_store, _outbox_store, *, interval_hours, job_store: cleanup_task,
     )
+    monkeypatch.setattr(
+        main_module,
+        "start_queued_reconciliation_loop",
+        lambda **_kwargs: queued_reconciliation_task,
+    )
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
 
@@ -161,6 +169,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         assert app.state.worker_pool is pool
         assert app.state.scheduler is scheduler
         assert app.state.cleanup_task is cleanup_task
+        assert app.state.queued_reconciliation_task is queued_reconciliation_task
         assert (tmp_path / "results").is_dir()
         assert (tmp_path / "adaptive").is_dir()
         assert not (tmp_path / "browser-debug").exists()
@@ -186,6 +195,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     )
     scheduler.start.assert_awaited_once()
     cleanup_task.cancel.assert_called_once()
+    queued_reconciliation_task.cancel.assert_called_once()
     scheduler.shutdown.assert_called_once()
     pool.stop.assert_awaited_once()
     worker_timeout = pool.stop.await_args.kwargs["timeout"]
@@ -256,6 +266,30 @@ async def test_shutdown_passes_remaining_shared_budget_to_later_phases(monkeypat
     await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0.2)
 
     assert 0 < observed["webhook"] < observed["worker"] <= 0.2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retains_shared_services_for_unresolved_worker(monkeypatch):
+    app = FastAPI()
+    worker = SimpleNamespace(
+        stop=AsyncMock(side_effect=asyncio.TimeoutError),
+        shutdown_pending=True,
+    )
+    app.state.worker_pool = worker
+    close_webhook = AsyncMock()
+    close_database = AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    with pytest.raises(RuntimeError, match="shared services retained"):
+        await main_module._shutdown_runtime_services(
+            app,
+            shutdown_grace_seconds=0.01,
+        )
+
+    worker.stop.assert_awaited_once()
+    close_webhook.assert_not_awaited()
+    close_database.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -417,6 +451,60 @@ async def test_lifespan_rejects_second_instance_before_database_start(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_lifespan_retains_instance_guard_for_unresolved_worker(
+    monkeypatch,
+    tmp_path,
+):
+    app = FastAPI()
+    settings = SimpleNamespace(
+        log_dir=str(tmp_path / "logs"),
+        log_level="INFO",
+        db_dir=str(tmp_path / "db"),
+        redis_dsn="redis://redis:6379/0",
+        queue_name="retained-worker",
+        workers_shutdown_grace_seconds=0,
+    )
+    worker = SimpleNamespace(shutdown_pending=True)
+
+    async def startup(target_app: FastAPI) -> None:
+        target_app.state.worker_pool = worker
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(main_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
+    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
+    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
+    monkeypatch.setattr(main_module, "_startup_runtime_services", startup)
+    monkeypatch.setattr(
+        main_module,
+        "_shutdown_runtime_services",
+        AsyncMock(side_effect=RuntimeError("worker still live")),
+    )
+
+    with pytest.raises(RuntimeError, match="worker still live"):
+        async with main_module.lifespan(app):
+            pass
+
+    retained_lock = app.state.instance_lock
+    assert retained_lock is not None
+    contender = main_module.SingleInstanceLock(
+        main_module.instance_lock_path(settings.db_dir),
+        main_module.instance_identity(
+            db_dir=settings.db_dir,
+            queue_name=settings.queue_name,
+            redis_dsn=settings.redis_dsn,
+        ),
+    )
+    try:
+        with pytest.raises(SingleInstanceError):
+            contender.acquire()
+    finally:
+        retained_lock.release()
+        app.state.instance_lock = None
+
+
+@pytest.mark.asyncio
 async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypatch):
     app = FastAPI()
     events: list[str] = []
@@ -463,6 +551,8 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         "get_settings",
         lambda: SimpleNamespace(
             workers_queued_claim_timeout_seconds=300,
+            workers_queued_reconciliation_interval_seconds=60,
+            workers_queued_reconciliation_batch_size=100,
             storage_cleanup_interval_seconds=21600,
         ),
     )
@@ -473,6 +563,12 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         _reconcile_terminal,
     )
     monkeypatch.setattr(main_module, "reconcile_stale_queued_jobs", _reconcile)
+    reconciliation_loop = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        main_module,
+        "start_queued_reconciliation_loop",
+        reconciliation_loop,
+    )
     monkeypatch.setattr(main_module, "start_cleanup_loop", MagicMock())
 
     await main_module._startup_runtime_services(app)
@@ -484,6 +580,13 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         "queued_reconciled",
         "scheduler_started",
     ]
+    reconciliation_loop.assert_called_once_with(
+        job_store=job_store,
+        worker_pool=pool,
+        queued_claim_timeout_seconds=300,
+        interval_seconds=60,
+        batch_size=100,
+    )
 
 
 @pytest.mark.asyncio

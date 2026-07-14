@@ -285,6 +285,8 @@ async def reconcile_stale_queued_jobs(
     worker_pool: WorkerPool,
     queued_claim_timeout_seconds: int,
     now: datetime | None = None,
+    batch_size: int | None = None,
+    batch_offset: int = 0,
 ) -> QueuedReconciliationSummary:
     """Reconcile stale SQLite queue ownership against direct arq state.
 
@@ -294,7 +296,11 @@ async def reconcile_stale_queued_jobs(
     """
     inspected_at = now or utc_now()
     stale_before = inspected_at - timedelta(seconds=queued_claim_timeout_seconds)
-    stale_jobs = await job_store.list_stale_queued_jobs(stale_before)
+    stale_jobs = await job_store.list_stale_queued_jobs(
+        stale_before,
+        limit=batch_size,
+        offset=batch_offset,
+    )
     logger.info(
         "Queued reconciliation inspected stale_count=%s timeout_seconds=%s "
         "recovery_action=inspection_complete",
@@ -346,3 +352,41 @@ async def reconcile_stale_queued_jobs(
         queued_claim_timeout_seconds,
     )
     return summary
+
+
+def start_queued_reconciliation_loop(
+    *,
+    job_store: JobStore,
+    worker_pool: WorkerPool,
+    queued_claim_timeout_seconds: int,
+    interval_seconds: float,
+    batch_size: int,
+) -> asyncio.Task[None]:
+    """Periodically repair a bounded batch of stale accepted deliveries."""
+
+    async def _loop() -> None:
+        batch_offset = 0
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                summary = await reconcile_stale_queued_jobs(
+                    job_store=job_store,
+                    worker_pool=worker_pool,
+                    queued_claim_timeout_seconds=queued_claim_timeout_seconds,
+                    batch_size=batch_size,
+                    batch_offset=batch_offset,
+                )
+                batch_offset = (
+                    batch_offset + summary.inspected
+                    if summary.inspected == batch_size
+                    else 0
+                )
+            except Exception:
+                logger.exception(
+                    "Periodic queued reconciliation failed; retrying next interval"
+                )
+
+    return asyncio.create_task(
+        _loop(),
+        name="scrapeyard-queued-reconciliation",
+    )
