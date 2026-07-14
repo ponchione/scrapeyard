@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,7 +31,9 @@ async def test_scrape_target_passes_proxy_to_fetch_page(tmp_path):
         resp.css = MagicMock(return_value=[MagicMock(text="Title")])
         return resp
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher, patch(
+        "scrapeyard.engine.scraper._assert_connection_endpoint", new_callable=AsyncMock
+    ):
         mock_fetcher.get = fake_get
         result = await scrape_target(
             target, adaptive=False, retry=retry,
@@ -56,7 +58,9 @@ async def test_scrape_target_no_proxy_by_default(tmp_path):
         resp.css = MagicMock(return_value=[MagicMock(text="Title")])
         return resp
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher, patch(
+        "scrapeyard.engine.scraper._assert_connection_endpoint", new_callable=AsyncMock
+    ):
         mock_fetcher.get = fake_get
         result = await scrape_target(
             target, adaptive=False, retry=retry,
@@ -74,7 +78,9 @@ async def test_scrape_target_redacts_proxy_userinfo_in_error_detail(tmp_path):
     def fake_get(_url, **_kwargs):
         raise RuntimeError("proxy http://user:pass@proxy.example:8080 refused")
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher, patch(
+        "scrapeyard.engine.scraper._assert_connection_endpoint", new_callable=AsyncMock
+    ):
         mock_fetcher.get = fake_get
         result = await scrape_target(
             target,
@@ -116,7 +122,9 @@ async def test_proxy_passed_to_pagination_fetches(tmp_path):
         resp.css = MagicMock(side_effect=_css)
         return resp
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher, patch(
+        "scrapeyard.engine.scraper._assert_connection_endpoint", new_callable=AsyncMock
+    ):
         mock_fetcher.get = fake_get
         result = await scrape_target(
             target, adaptive=False, retry=retry,

@@ -46,7 +46,11 @@ def normalize_public_proxy_url(value: str) -> str:
     """Normalize a user-supplied proxy URL and reject non-public destinations."""
     proxy_url = normalize_proxy_url(value)
     if proxy_url != _DIRECT_PROXY:
-        assert_public_url(proxy_url, allowed_schemes=tuple(_ALLOWED_PROXY_SCHEMES))
+        assert_public_url(
+            proxy_url,
+            allowed_schemes=tuple(_ALLOWED_PROXY_SCHEMES),
+            resolve_dns=False,
+        )
     return proxy_url
 
 

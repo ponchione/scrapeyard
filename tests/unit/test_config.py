@@ -77,6 +77,37 @@ def _tier2_config(**overrides) -> dict:
     return base
 
 
+def test_config_validation_is_lexical_and_performs_no_dns(monkeypatch):
+    calls = 0
+
+    def blocked_resolver(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("config parsing must not enter the resolver")
+
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo",
+        blocked_resolver,
+    )
+    targets = [
+        _target_dict(
+            url=f"https://host-{index % 10}.example/path",
+            proxy={"url": f"http://proxy-{index % 3}.example:8080"},
+        )
+        for index in range(MAX_TARGETS_PER_JOB)
+    ]
+
+    config = ScrapeConfig(
+        project="test",
+        name="dns-free",
+        targets=targets,
+        webhook={"url": "https://hooks.example/callback"},
+    )
+
+    assert len(config.resolved_targets()) == MAX_TARGETS_PER_JOB
+    assert calls == 0
+
+
 # --- Schema Validation ---
 
 
