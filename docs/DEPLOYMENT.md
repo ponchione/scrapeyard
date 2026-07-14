@@ -63,6 +63,13 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
 App-level URL guards are a backstop, not the only control. Enforce outbound
 network policy for the Scrapeyard container or pod:
 
+Config parsing performs only bounded lexical, scheme, hostname, and literal-IP
+checks; it never performs DNS resolution in Pydantic validators. Hostnames are
+resolved and checked freshly immediately before transport use. Direct basic
+HTTP requests connect to the validated address with the original Host header
+and TLS SNI, while browser, CDP, and proxy traffic still depends on the egress
+boundary below to close resolver/connection races.
+
 - Allow Redis.
 - Allow the configured proxy gateway if scraping through a proxy.
 - Allow public HTTP/HTTPS destinations needed for scraping.
@@ -316,6 +323,18 @@ SQLite rather than persisted separately, process downtime is not backfilled:
 restart registers each job at its next future wall-time occurrence. Clock/DST
 selection follows the zone rules above.
 
+Every cron fire runs inside a failure boundary and receives a run ID before
+persisted configuration is loaded. A failure before Redis acceptance creates a
+terminal scheduled attempt with a bounded `failure_code`, and records
+`schedule_failure_at`, `schedule_failure_code`, and
+`schedule_consecutive_failures` on the parent. Those fields are returned by the
+job APIs, survive restart, and make scheduler readiness fail until that same
+enabled schedule accepts a later cron run. Pausing a broken schedule removes it
+from readiness while preserving its durable failure fields; resuming exposes
+the failure again until a successful fire. Exception messages and resolved
+secret values are never persisted. Manual triggers retain their synchronous
+error contract instead of being contained as cron callbacks.
+
 `PUT /jobs/{job_id}` replaces the complete YAML and schedule for future runs;
 it returns the SHA-256 `config_hash` that subsequent runs will record. An
 already queued or running delivery makes update return `409`, so accepted work
@@ -457,10 +476,17 @@ representative production results, then leave headroom for normal catalog
 growth; do not set the serialized-result ceiling below 4096 bytes because a
 compact terminal diagnostic must remain persistable.
 
-The fetched-byte ceiling counts the encoded body representation exposed by
-Scrapling for `basic` requests,
-including redirects and retry responses. It is checked after each complete
-response because Scrapling's basic API is not streaming. Browser-backed
+Production `basic` requests use an asynchronous streaming transport. The
+fetched-byte ceiling counts decoded body chunks as they are read, including
+redirect and application-level retry responses against one shared run budget.
+A single valid `Content-Length` is checked before reading as an optimization,
+but decoded chunks remain authoritative for compressed, chunked, missing, or
+misleading lengths. Crossing the byte ceiling or monotonic run deadline closes
+and awaits the socket task before the structured budget failure is returned;
+only a bounded body is handed to Scrapling's parser. The Compose admission
+threshold is 3072 MiB under a 4 GiB cgroup ceiling, leaving an explicit 1 GiB
+reserve for active response bodies, browser processes, serialization, SQLite,
+and interpreter overhead. Browser-backed
 `dynamic` and `stealthy` fetches do not expose reliable total transfer size and
 are therefore excluded. Their stored debug excerpts and screenshots are
 instead bounded by `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES`; omitted or
@@ -489,8 +515,12 @@ non-idempotent behavior.
 Records expire after `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` (24 hours by
 default). The first reuse after expiry removes that caller/key record lazily
 and creates a new submission. The cleanup loop additionally deletes at most
-`SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` expired rows each pass. Job deletion
-and failed-enqueue rollback remove associated records by foreign-key cascade.
+`SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` expired rows each pass. Automated
+ad-hoc history retention excludes jobs with a future expiry and rechecks that
+condition in its final write transaction, so independently configured history
+retention cannot shorten the replay window. Explicit job deletion and
+failed-enqueue rollback retain their documented behavior and remove associated
+records by foreign-key cascade.
 A crash after the SQLite transaction but before Redis acceptance leaves the
 persisted queued run for the existing stale-queue reconciler; a retry never
 risks a second enqueue merely to close that cross-system window.
@@ -737,12 +767,18 @@ compaction therefore does not change either value or require a full-history
 aggregation for `GET /jobs`.
 
 At startup Scrapeyard first repairs stale running state, then scans terminal
-runs in deterministic completion/job/run order. Webhook applicability is
-parsed from the `config_yaml` persisted in `jobs.db` and must match the
-run's persisted configuration hash. Each repair transaction rechecks that
-exact terminal/config snapshot, converges a still-current parent left as
-`running`, and inserts a missing deterministic intent. A config parse or hash
-mismatch fails the recovery pass rather than silently guessing. Repaired rows
+runs in deterministic retry/completion/job/run order. Every accepted run owns
+an encrypted immutable `job_runs.config_yaml` snapshot whose SHA-256 must match
+the run's persisted configuration hash; webhook applicability is parsed from
+that snapshot rather than the mutable scheduled parent. Legacy rows are
+backfilled only when the current parent hash proves it is the same config.
+Each repair transaction rechecks the exact terminal/config snapshot, converges
+a still-current parent left as `running`, and inserts a missing deterministic
+intent. A config parse or hash mismatch fails closed rather than silently
+guessing, but the candidate receives a durable retry timestamp and processing
+continues through the batch. Untouched candidates sort ahead on the next
+bounded pass, so one damaged row cannot indefinitely block later repair.
+Repaired rows
 are committed before webhook dispatcher startup reads and schedules pending
 deliveries. Redis then connects, stale queued deliveries are reconciled, and
 only then does APScheduler start. Scheduler-triggered stale-running recovery

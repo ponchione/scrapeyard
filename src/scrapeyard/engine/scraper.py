@@ -221,8 +221,10 @@ async def _fetch_basic_with_safe_redirects(
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
         request_url = current_url
         request_kwargs = dict(call_kwargs)
-        if fetcher_cls is Fetcher and request_kwargs.get("proxy") is None:
-            resolved = await asyncio.to_thread(resolve_public_url, current_url)
+        production_stream = fetcher_cls is Fetcher
+        if production_stream and request_kwargs.get("proxy") is None:
+            resolve = asyncio.to_thread(resolve_public_url, current_url)
+            resolved = await resolve if budget is None else await budget.wait_for(resolve)
             request_url = resolved.connect_url
             headers = dict(request_kwargs.get("headers") or {})
             headers["Host"] = resolved.host_header
@@ -242,7 +244,15 @@ async def _fetch_basic_with_safe_redirects(
             budget=budget,
             cancellation_guard=cancellation_guard,
         )
-        response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
+        if production_stream:
+            response = await fetch_basic_response(
+                fetcher_cls,
+                request_url,
+                request_kwargs,
+                budget=budget,
+            )
+        else:
+            response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
         if response_observer is not None:
             response_observer()
         if request_url != current_url:
@@ -253,7 +263,7 @@ async def _fetch_basic_with_safe_redirects(
             cancellation_guard,
             "after_fetch",
         )
-        if budget is not None:
+        if budget is not None and not production_stream:
             measured_bytes = _measured_response_body_bytes(response)
             if measured_bytes is not None:
                 await budget.consume_fetched_bytes(measured_bytes)
@@ -280,6 +290,26 @@ async def _assert_fetch_url(url: str, *, require_resolved_dns: bool) -> None:
         url,
         allow_unresolved=not require_resolved_dns,
     )
+
+
+async def _assert_connection_endpoint(
+    url: str,
+    *,
+    allowed_schemes: tuple[str, ...],
+    budget: RunBudget | None,
+) -> None:
+    """Resolve a remote transport endpoint immediately before it is used."""
+
+    lookup = asyncio.to_thread(
+        assert_public_url,
+        url,
+        allowed_schemes=allowed_schemes,
+        allow_unresolved=False,
+    )
+    if budget is None:
+        await lookup
+    else:
+        await budget.wait_for(lookup)
 
 
 async def _acquire_request_rate_limit(
@@ -361,6 +391,18 @@ async def _fetch_page(
     call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
     debug = default_debug_blob(fetcher_type, target, url)
     require_resolved_dns = _requires_verified_dns(target, fetcher_type, proxy_url)
+    if proxy_url is not None:
+        await _assert_connection_endpoint(
+            proxy_url,
+            allowed_schemes=("http", "https", "socks4", "socks4a", "socks5", "socks5h"),
+            budget=budget,
+        )
+    if target.browser is not None and target.browser.cdp_url is not None:
+        await _assert_connection_endpoint(
+            target.browser.cdp_url,
+            allowed_schemes=("http", "https", "ws", "wss"),
+            budget=budget,
+        )
 
     if fetcher_type == FetcherType.basic:
         fetch_timeout = get_settings().basic_fetch_timeout_seconds

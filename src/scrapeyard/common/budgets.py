@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, TypeVar
+from typing import Any, Awaitable, NoReturn, TypeVar
 
 from scrapeyard.common.async_tools import cancel_task_nowait
 
@@ -157,6 +157,10 @@ class RunBudget:
     def remaining_browser_debug_bytes(self) -> int:
         return max(0, self.max_browser_debug_bytes - self._browser_debug_bytes)
 
+    @property
+    def remaining_fetched_bytes(self) -> int:
+        return max(0, self.max_fetched_bytes - self._fetched_bytes)
+
     def _duration_error(self) -> BudgetExceeded:
         return BudgetExceeded(
             BudgetLimitName.run_duration_seconds,
@@ -171,6 +175,29 @@ class RunBudget:
         if float(self._clock()) >= self.deadline_monotonic:
             self._exhausted = self._duration_error()
             raise self._exhausted
+
+    def exhaust_duration(self) -> NoReturn:
+        """Persist and raise the stable duration failure after transport cleanup."""
+
+        if self._exhausted is None:
+            self._exhausted = self._duration_error()
+        raise self._exhausted
+
+    async def check_fetched_capacity(self, amount: int) -> None:
+        """Reject a trustworthy declared body size without reserving it."""
+
+        if amount < 0:
+            raise ValueError("Fetched byte amount cannot be negative")
+        self.check_deadline()
+        async with self._counter_lock:
+            observed = self._fetched_bytes + amount
+            if observed > self.max_fetched_bytes:
+                self._exhausted = BudgetExceeded(
+                    BudgetLimitName.fetched_bytes,
+                    self.max_fetched_bytes,
+                    observed,
+                )
+                raise self._exhausted
 
     async def wait_for(self, awaitable: Awaitable[T]) -> T:
         """Await work only for the remaining overall run duration.

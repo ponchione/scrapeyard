@@ -13,7 +13,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
-from scrapling import PlayWrightFetcher, StealthyFetcher
+from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 from scrapling.engines import camo as scrapling_camo_engine
 from scrapling.engines import pw as scrapling_pw_engine
 from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
@@ -37,6 +37,7 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
 )
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
+from scrapeyard.engine.basic_fetch import fetch_streaming_response
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -617,7 +618,20 @@ async def capture_browser_state(
     return page
 
 
-async def fetch_basic_response(fetcher_cls: Any, url: str, call_kwargs: dict[str, Any]) -> Any:
+async def fetch_basic_response(
+    fetcher_cls: Any,
+    url: str,
+    call_kwargs: dict[str, Any],
+    *,
+    budget: RunBudget | None = None,
+) -> Any:
+    if fetcher_cls is Fetcher:
+        return await fetch_streaming_response(
+            fetcher_cls,
+            url,
+            call_kwargs,
+            budget=budget,
+        )
     return await asyncio.to_thread(fetcher_cls.get, url, **call_kwargs)
 
 

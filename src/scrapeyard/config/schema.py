@@ -759,7 +759,11 @@ class BrowserConfig(StrictConfigModel):
         if value is None:
             return value
         try:
-            assert_public_url(value, allowed_schemes=("http", "https", "ws", "wss"))
+            assert_public_url(
+                value,
+                allowed_schemes=("http", "https", "ws", "wss"),
+                resolve_dns=False,
+            )
         except UnsafeURLError as exc:
             raise ValueError(str(exc)) from exc
         return value
@@ -843,7 +847,7 @@ class TargetConfig(StrictConfigModel):
     @classmethod
     def _reject_unsafe_url(cls, value: str) -> str:
         try:
-            assert_public_url(value)
+            assert_public_url(value, resolve_dns=False)
         except UnsafeURLError as exc:
             raise ValueError(str(exc)) from exc
         return value
@@ -1026,7 +1030,7 @@ class WebhookConfig(StrictConfigModel):
     @classmethod
     def _reject_unsafe_url(cls, value: HttpUrl) -> HttpUrl:
         try:
-            assert_public_url(str(value))
+            assert_public_url(str(value), resolve_dns=False)
         except UnsafeURLError as exc:
             raise ValueError(str(exc)) from exc
         return value

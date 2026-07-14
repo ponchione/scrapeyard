@@ -21,6 +21,14 @@ def _yaml(path: str) -> dict[str, Any]:
     return value
 
 
+def test_compose_memory_admission_leaves_explicit_cgroup_reserve() -> None:
+    compose = _yaml("docker-compose.yml")
+    service = compose["services"]["scrapeyard"]
+    assert service["mem_limit"] == "4g"
+    admission_mb = int(service["environment"]["SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB"])
+    assert 4096 - admission_mb >= 1024
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         return None
