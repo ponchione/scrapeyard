@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,6 +31,7 @@ def _job_execution_context(
     targets: list[MagicMock],
     *,
     concurrency: int | None = None,
+    run_artifacts_dir: str | None = None,
 ) -> JobExecutionContext:
     config = MagicMock()
     config.project = "test"
@@ -50,7 +52,7 @@ def _job_execution_context(
         settings=MagicMock(proxy_url=""),
         started_at=datetime.now(timezone.utc),
         adaptive_dir="/tmp/adaptive",
-        run_artifacts_dir=None,
+        run_artifacts_dir=run_artifacts_dir,
         budget=RunBudget(
             max_duration_seconds=60,
             max_fetched_bytes=1_000_000,
@@ -124,6 +126,48 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
 
 
 @pytest.mark.asyncio
+async def test_same_domain_targets_keep_distinct_screenshot_artifacts(tmp_path):
+    limiter = BrowserExecutionLimiter(2)
+    targets = [
+        _concurrent_target(
+            f"https://shop.example/products/{index}",
+            FetcherType.dynamic,
+        )
+        for index in range(2)
+    ]
+    context = _job_execution_context(
+        targets,
+        run_artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    async def _scrape(target, *_args, **kwargs) -> TargetResult:
+        artifacts_dir = Path(kwargs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        screenshot = artifacts_dir / "dynamic-main.png"
+        screenshot.write_bytes(target.url.encode())
+        return TargetResult(
+            url=target.url,
+            status=TargetStatus.success,
+            data=[{"url": target.url}],
+            debug={"screenshot_path": str(screenshot)},
+        )
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+        results = await _run_targets(context, limiter, job_id="same-domain")
+
+    screenshots = [Path(result.debug["screenshot_path"]) for result in results]
+    assert len(set(screenshots)) == 2
+    assert {path.parent.name for path in screenshots} == {"attempt-1"}
+    assert {path.parent.parent.name for path in screenshots} == {
+        "target-0001",
+        "target-0002",
+    }
+    assert [path.read_bytes().decode() for path in screenshots] == [
+        target.url for target in targets
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
     limiter = BrowserExecutionLimiter(2)
     targets = [
@@ -165,12 +209,11 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
 
     assert len(results) == 4
     assert [
-        later - earlier
-        for earlier, later in zip(started, started[1:], strict=False)
+        later - earlier for earlier, later in zip(started, started[1:], strict=False)
     ] == pytest.approx([0.02, 0.02, 0.02])
-    assert [
-        call.args[0] for call in context.budget.sleep.await_args_list
-    ] == pytest.approx([0.02, 0.02, 0.02])
+    assert [call.args[0] for call in context.budget.sleep.await_args_list] == pytest.approx(
+        [0.02, 0.02, 0.02]
+    )
 
 
 @pytest.mark.asyncio
@@ -353,7 +396,7 @@ def test_resolve_target_runtime_context_uses_explicit_adaptive_override_and_prox
     assert context.domain == "shop.example"
     assert context.adaptive is True
     assert context.proxy_url == "http://service-proxy:8080"
-    assert context.artifacts_dir == "/tmp/artifacts/shop.example"
+    assert context.artifacts_dir == ("/tmp/artifacts/shop.example/target-0001/attempt-1")
 
 
 def test_resolve_target_runtime_context_strips_userinfo_from_domain():
@@ -369,7 +412,7 @@ def test_resolve_target_runtime_context_strips_userinfo_from_domain():
     )
 
     assert context.domain == "shop.example:8443"
-    assert context.artifacts_dir == "/tmp/artifacts/shop.example:8443"
+    assert context.artifacts_dir == ("/tmp/artifacts/shop.example:8443/target-0001/attempt-1")
 
 
 @pytest.mark.parametrize(
@@ -392,7 +435,7 @@ def test_resolve_target_runtime_context_uses_canonical_protection_domain(url):
     )
 
     assert context.domain == "xn--bcher-kva.example"
-    assert context.artifacts_dir == "/tmp/artifacts/xn--bcher-kva.example"
+    assert context.artifacts_dir == ("/tmp/artifacts/xn--bcher-kva.example/target-0001/attempt-1")
 
 
 def test_resolve_target_runtime_context_enables_adaptive_for_scheduled_jobs_when_unspecified():
@@ -420,8 +463,20 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
     config = MagicMock(project="test", name="job")
     config.output.group_by = GroupBy.merge
     results = [
-        TargetResult(url="https://a.example/products", status="success", data=[{"sku": "a1"}], errors=[], pages_scraped=1),
-        TargetResult(url="https://b.example/products", status="failed", data=["raw-item"], errors=["boom"], pages_scraped=1),
+        TargetResult(
+            url="https://a.example/products",
+            status="success",
+            data=[{"sku": "a1"}],
+            errors=[],
+            pages_scraped=1,
+        ),
+        TargetResult(
+            url="https://b.example/products",
+            status="failed",
+            data=["raw-item"],
+            errors=["boom"],
+            pages_scraped=1,
+        ),
     ]
 
     payload = _format_output(
@@ -501,9 +556,7 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
         "key": "product-key",
         "session_name": "morning",
         "api_token": "public-token",
-        "product_url": (
-            "https://shop.example/item?color=red&page=2#reviews"
-        ),
+        "product_url": ("https://shop.example/item?color=red&page=2#reviews"),
         "deployment_secret": f"Bearer {secret}",
         "encoded_secret": "Vendor%20Value%2F91",
         "plus_encoded_secret": "Vendor+Value%2F91",
@@ -529,9 +582,7 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
         assert persisted_record["_source"] == "shop.example"
     else:
         persisted_record = artifact["results"]["shop.example"]["data"][0]
-        assert artifact["results"]["shop.example"]["debug"]["session_name"] == (
-            "<redacted>"
-        )
+        assert artifact["results"]["shop.example"]["debug"]["session_name"] == ("<redacted>")
 
     assert persisted_record == {
         "key": "product-key",
@@ -547,6 +598,9 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
         "https://shop.example/items?cursor=<redacted>#<redacted>"
     )
     assert artifact["targets"][0]["debug"]["session_name"] == "<redacted>"
+    assert artifact["result_redaction"] == {
+        "deployment_secret_matches": 3,
+    }
 
 
 def test_format_output_groups_results_by_domain_without_mutating_group_items():
@@ -555,8 +609,12 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
     first_item = {"sku": "a1"}
     second_item = {"sku": "b1"}
     results = [
-        TargetResult(url="https://a.example/products", status="success", data=[first_item], errors=[]),
-        TargetResult(url="https://b.example/products", status="failed", data=[second_item], errors=["boom"]),
+        TargetResult(
+            url="https://a.example/products", status="success", data=[first_item], errors=[]
+        ),
+        TargetResult(
+            url="https://b.example/products", status="failed", data=[second_item], errors=["boom"]
+        ),
     ]
 
     payload = _format_output(

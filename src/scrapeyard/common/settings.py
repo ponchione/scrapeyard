@@ -34,6 +34,8 @@ class ServiceSettings(BaseSettings):
     workers_queued_reconciliation_interval_seconds: float = Field(default=60.0, gt=0)
     workers_queued_reconciliation_batch_size: int = Field(default=100, ge=1)
     workers_running_heartbeat_timeout_seconds: int = Field(default=600, gt=0)
+    workers_running_reconciliation_interval_seconds: float = Field(default=60.0, gt=0)
+    workers_running_reconciliation_batch_size: int = Field(default=100, ge=1)
     workers_heartbeat_interval_seconds: int = Field(default=30, gt=0)
     workers_redis_connect_timeout_seconds: float = Field(default=10.0, gt=0)
 
@@ -67,6 +69,8 @@ class ServiceSettings(BaseSettings):
     webhook_max_delivery_age_seconds: int = Field(default=86400, ge=1)
     webhook_dispatch_concurrency: int = Field(default=4, ge=1)
     webhook_dispatch_batch_size: int = Field(default=100, ge=1)
+    webhook_client_cache_max_size: int = Field(default=64, ge=1)
+    webhook_client_cache_idle_ttl_seconds: float = Field(default=300.0, gt=0)
     webhook_delivered_retention_days: int = Field(default=7, ge=1)
     webhook_failed_retention_days: int = Field(default=30, ge=1)
 
@@ -93,6 +97,8 @@ class ServiceSettings(BaseSettings):
 
     circuit_breaker_max_failures: int = Field(default=3, ge=1)
     circuit_breaker_cooldown_seconds: int = Field(default=300, ge=0)
+    circuit_breaker_max_domains: int = Field(default=10000, ge=1)
+    circuit_breaker_inactive_ttl_seconds: float = Field(default=3600.0, gt=0)
     proxy_url: str = ""
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True

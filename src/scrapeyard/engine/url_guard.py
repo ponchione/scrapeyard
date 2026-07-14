@@ -325,6 +325,15 @@ def reset_deployment_secret_redaction(token: Token[tuple[str, ...]]) -> None:
 def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
     """Replace raw and URL-encoded forms of resolved deployment secrets."""
 
+    return redact_deployment_secrets_with_count(text, secret_values)[0]
+
+
+def redact_deployment_secrets_with_count(
+    text: str,
+    secret_values: Any = None,
+) -> tuple[str, int]:
+    """Redact resolved secrets and return the number of replaced substrings."""
+
     values = (
         _ACTIVE_DEPLOYMENT_SECRETS.get()
         if secret_values is None
@@ -333,10 +342,12 @@ def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
     variants: set[str] = set()
     for value in values:
         variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
+    redaction_count = 0
     for variant in sorted(variants, key=len, reverse=True):
         if variant:
+            redaction_count += text.count(variant)
             text = text.replace(variant, _REDACTED_VALUE)
-    return text
+    return text, redaction_count
 
 
 def redact_deployment_secrets_in_value(
@@ -345,34 +356,70 @@ def redact_deployment_secrets_in_value(
     secret_values: Any = None,
 ) -> Any:
     """Redact only resolved deployment-secret values in JSON-like caller data."""
+    return redact_deployment_secrets_in_value_with_count(
+        value,
+        secret_values=secret_values,
+    )[0]
+
+
+def redact_deployment_secrets_in_value_with_count(
+    value: Any,
+    *,
+    secret_values: Any = None,
+) -> tuple[Any, int]:
+    """Redact JSON-like caller data and report how many matches were changed."""
+
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
+        redaction_count = 0
         for key, item in value.items():
             redacted_key: Any = key
             if isinstance(key, str):
-                redacted_key = redact_deployment_secrets(key, secret_values)
-                if redacted_key in redacted and redacted_key != key:
+                redacted_key, key_count = redact_deployment_secrets_with_count(
+                    key,
+                    secret_values,
+                )
+                redaction_count += key_count
+                if redacted_key in redacted:
                     base_key = redacted_key
                     suffix = 2
                     while redacted_key in redacted:
                         redacted_key = f"{base_key}#{suffix}"
                         suffix += 1
-            redacted[redacted_key] = redact_deployment_secrets_in_value(
+            redacted_item, item_count = redact_deployment_secrets_in_value_with_count(
                 item,
                 secret_values=secret_values,
             )
-        return redacted
+            redacted[redacted_key] = redacted_item
+            redaction_count += item_count
+        return redacted, redaction_count
     if isinstance(value, list):
-        return [
-            redact_deployment_secrets_in_value(item, secret_values=secret_values) for item in value
+        redacted_list_items = [
+            redact_deployment_secrets_in_value_with_count(
+                item,
+                secret_values=secret_values,
+            )
+            for item in value
         ]
+        return (
+            [item for item, _count in redacted_list_items],
+            sum(count for _item, count in redacted_list_items),
+        )
     if isinstance(value, tuple):
-        return tuple(
-            redact_deployment_secrets_in_value(item, secret_values=secret_values) for item in value
+        redacted_tuple_items = tuple(
+            redact_deployment_secrets_in_value_with_count(
+                item,
+                secret_values=secret_values,
+            )
+            for item in value
+        )
+        return (
+            tuple(item for item, _count in redacted_tuple_items),
+            sum(count for _item, count in redacted_tuple_items),
         )
     if isinstance(value, str):
-        return redact_deployment_secrets(value, secret_values)
-    return value
+        return redact_deployment_secrets_with_count(value, secret_values)
+    return value, 0
 
 
 def redact_userinfo_in_text(text: str) -> str:
@@ -402,7 +449,7 @@ def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
             redacted_key: Any = key
             if isinstance(key, str):
                 redacted_key = redact_deployment_secrets(key, secret_values)
-                if redacted_key in redacted and redacted_key != key:
+                if redacted_key in redacted:
                     base_key = redacted_key
                     suffix = 2
                     while redacted_key in redacted:

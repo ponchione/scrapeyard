@@ -41,12 +41,20 @@ def resolve_target_runtime_context(
     config: ScrapeConfig,
     settings: ServiceSettings,
     run_artifacts_dir: str | None,
+    target_index: int = 0,
 ) -> TargetRuntimeContext:
     domain = url_host_label(target_cfg.url)
     adaptive = config.adaptive if config.adaptive is not None else config.schedule is not None
     proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
-    artifacts_dir = None if run_artifacts_dir is None else str(
-        Path(run_artifacts_dir) / safe_path_part(domain, label="target domain")
+    artifacts_dir = (
+        None
+        if run_artifacts_dir is None
+        else str(
+            Path(run_artifacts_dir)
+            / safe_path_part(domain, label="target domain")
+            / f"target-{target_index + 1:04d}"
+            / "attempt-1"
+        )
     )
     return TargetRuntimeContext(
         domain=domain,

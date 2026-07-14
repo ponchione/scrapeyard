@@ -54,6 +54,7 @@ async def apply_validation(
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None = None,
+    target_index: int = 0,
     attempt: int = 1,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
@@ -103,6 +104,7 @@ async def apply_validation(
         validator=validator,
         scrape=scrape,
         proxy_url=proxy_url,
+        target_index=target_index,
         budget=budget,
         cancellation_guard=cancellation_guard,
         retry_error=retry_error,
@@ -164,6 +166,7 @@ async def _retry_after_validation_failure(
     validator: ResultValidator,
     scrape: ScrapeCallable,
     proxy_url: str | None,
+    target_index: int,
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
     retry_error: ErrorRecord,
@@ -174,7 +177,11 @@ async def _retry_after_validation_failure(
         config.retry,
         adaptive_dir=adaptive_dir,
         proxy_url=proxy_url,
-        artifacts_dir=_build_retry_artifacts_dir(run_artifacts_dir, domain),
+        artifacts_dir=_build_retry_artifacts_dir(
+            run_artifacts_dir,
+            domain,
+            target_index,
+        ),
         budget=budget,
         cancellation_guard=cancellation_guard,
         rate_limiter=rate_limiter,
@@ -232,7 +239,18 @@ def _build_validation_failed_result(
     )
 
 
-def _build_retry_artifacts_dir(run_artifacts_dir: str | None, domain: str) -> str | None:
-    return None if run_artifacts_dir is None else str(
-        Path(run_artifacts_dir) / safe_path_part(domain, label="target domain")
+def _build_retry_artifacts_dir(
+    run_artifacts_dir: str | None,
+    domain: str,
+    target_index: int,
+) -> str | None:
+    return (
+        None
+        if run_artifacts_dir is None
+        else str(
+            Path(run_artifacts_dir)
+            / safe_path_part(domain, label="target domain")
+            / f"target-{target_index + 1:04d}"
+            / "attempt-2"
+        )
     )

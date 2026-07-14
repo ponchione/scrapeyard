@@ -85,6 +85,8 @@ class TestServiceSettingsDefaults:
         assert settings.webhook_max_delivery_age_seconds == 86400
         assert settings.webhook_dispatch_concurrency == 4
         assert settings.webhook_dispatch_batch_size == 100
+        assert settings.webhook_client_cache_max_size == 64
+        assert settings.webhook_client_cache_idle_ttl_seconds == 300.0
         assert settings.webhook_delivered_retention_days == 7
         assert settings.webhook_failed_retention_days == 30
 
@@ -160,6 +162,13 @@ class TestServiceSettingsDefaults:
     def test_circuit_breaker_cooldown_seconds_default(self):
         settings = ServiceSettings()
         assert settings.circuit_breaker_cooldown_seconds == 300
+        assert settings.circuit_breaker_max_domains == 10000
+        assert settings.circuit_breaker_inactive_ttl_seconds == 3600.0
+
+    def test_running_reconciliation_defaults(self):
+        settings = ServiceSettings()
+        assert settings.workers_running_reconciliation_interval_seconds == 60.0
+        assert settings.workers_running_reconciliation_batch_size == 100
 
     def test_health_include_projects_default(self):
         settings = ServiceSettings()
@@ -289,6 +298,8 @@ class TestServiceSettingsFromEnv:
             "SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS": "7200",
             "SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY": "3",
             "SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE": "25",
+            "SCRAPEYARD_WEBHOOK_CLIENT_CACHE_MAX_SIZE": "9",
+            "SCRAPEYARD_WEBHOOK_CLIENT_CACHE_IDLE_TTL_SECONDS": "45",
             "SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS": "2",
             "SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS": "14",
         }
@@ -298,6 +309,8 @@ class TestServiceSettingsFromEnv:
         assert settings.webhook_max_delivery_age_seconds == 7200
         assert settings.webhook_dispatch_concurrency == 3
         assert settings.webhook_dispatch_batch_size == 25
+        assert settings.webhook_client_cache_max_size == 9
+        assert settings.webhook_client_cache_idle_ttl_seconds == 45.0
         assert settings.webhook_delivered_retention_days == 2
         assert settings.webhook_failed_retention_days == 14
 

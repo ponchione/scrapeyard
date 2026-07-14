@@ -11,6 +11,7 @@ from scrapeyard.engine.url_guard import (
     assert_public_url,
     redact_deployment_secrets,
     redact_deployment_secrets_in_value,
+    redact_deployment_secrets_in_value_with_count,
     redact_sensitive_config_text,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
@@ -19,6 +20,25 @@ from scrapeyard.engine.url_guard import (
     reset_deployment_secret_redaction,
     url_host_label,
 )
+
+
+def test_counted_secret_redaction_handles_encoded_values_and_key_collisions() -> None:
+    secret = "Vendor Value/91"
+    value = {
+        f"prefix-{secret}": "raw Vendor Value/91",
+        "prefix-<redacted>": "Vendor%20Value%2F91 and Vendor+Value%2F91",
+    }
+
+    redacted, count = redact_deployment_secrets_in_value_with_count(
+        value,
+        secret_values=(secret,),
+    )
+
+    assert redacted == {
+        "prefix-<redacted>": "raw <redacted>",
+        "prefix-<redacted>#2": "<redacted> and <redacted>",
+    }
+    assert count == 4
 
 
 def test_assert_public_url_rejects_non_global_cgnat_address() -> None:

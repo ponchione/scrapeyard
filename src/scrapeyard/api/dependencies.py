@@ -66,6 +66,8 @@ def get_circuit_breaker() -> CircuitBreaker:
     return CircuitBreaker(
         max_consecutive_failures=settings.circuit_breaker_max_failures,
         cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
+        max_domains=settings.circuit_breaker_max_domains,
+        inactive_ttl_seconds=settings.circuit_breaker_inactive_ttl_seconds,
     )
 
 
@@ -83,6 +85,8 @@ def get_webhook_dispatcher() -> HttpWebhookDispatcher:
         max_delivery_age_seconds=settings.webhook_max_delivery_age_seconds,
         dispatch_concurrency=settings.webhook_dispatch_concurrency,
         dispatch_batch_size=settings.webhook_dispatch_batch_size,
+        client_cache_max_size=settings.webhook_client_cache_max_size,
+        client_cache_idle_ttl_seconds=settings.webhook_client_cache_idle_ttl_seconds,
     )
 
 
