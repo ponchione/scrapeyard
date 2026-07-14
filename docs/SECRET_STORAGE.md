@@ -11,9 +11,12 @@ contain a URL. Those job/outbox fields are the durable secret-bearing boundary.
 The config `project` and `name` must remain literal and cannot be derived from
 a secret reference.
 
-New writes encrypt the complete YAML and the complete outbox URL, headers,
-payload, and non-null retry error. Encrypting complete values avoids relying on
-an incomplete sensitive-key list. During execution, resolved references also
+New writes encrypt the complete parent YAML, the immutable YAML snapshot owned
+by every accepted `job_runs` row, and the complete outbox URL, headers, payload,
+and non-null retry error. The run snapshot is bound to its run ID with distinct
+associated data, allowing terminal webhook repair after a scheduled parent is
+updated without exposing the old configuration. Encrypting complete values
+avoids relying on an incomplete sensitive-key list. During execution, resolved references also
 form a run-scoped redaction set. Result/API/error/webhook serializers remove
 raw and URL-encoded occurrences from the complete diagnostic payload,
 including extracted records. Diagnostic URLs preserve query keys but redact
@@ -86,8 +89,10 @@ After schema migrations and before workers/scheduler start, one atomic
 
 1. authenticates every existing envelope;
 2. encrypts every legacy job config and unsanitized outbox request;
-3. writes a SHA-256 config fingerprint used only for compare-and-set behavior;
-4. rotates old envelopes to the configured active key.
+3. backfills a legacy run snapshot only when its hash proves the current parent
+   is the exact configuration that run accepted;
+4. writes a SHA-256 config fingerprint used only for compare-and-set behavior;
+5. rotates parent, run-snapshot, and outbox envelopes to the configured active key.
 
 Already-current envelopes are still authenticated and their config hashes are
 verified, but their rows are not rewritten. A no-change restart therefore

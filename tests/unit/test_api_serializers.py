@@ -46,6 +46,9 @@ def test_serialize_job_summary_includes_run_stats_and_schedule_fields():
         "schedule_cron": "*/5 * * * *",
         "schedule_timezone": "UTC",
         "schedule_enabled": False,
+        "schedule_failure_at": None,
+        "schedule_failure_code": None,
+        "schedule_consecutive_failures": 0,
         "run_count": 7,
         "last_run_at": last_run_at.isoformat(),
     }

@@ -85,6 +85,19 @@ class Job(BaseModel):
         default=None,
         description="Immutable result-retention policy for a deleting job",
     )
+    schedule_failure_at: Optional[datetime] = Field(
+        default=None,
+        description="Most recent unresolved scheduled callback failure",
+    )
+    schedule_failure_code: Optional[str] = Field(
+        default=None,
+        description="Sanitized failure classification for the scheduled callback",
+    )
+    schedule_consecutive_failures: int = Field(
+        default=0,
+        ge=0,
+        description="Consecutive scheduled callback failures since the last accepted run",
+    )
 
 
 class JobRun(BaseModel):
@@ -109,6 +122,10 @@ class JobRun(BaseModel):
     completed_at: Optional[datetime] = None
     record_count: Optional[int] = None
     error_count: int = Field(default=0)
+    failure_code: Optional[str] = Field(
+        default=None,
+        description="Sanitized infrastructure failure classification, when applicable",
+    )
 
 
 class BudgetErrorDetails(BaseModel):

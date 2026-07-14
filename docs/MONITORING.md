@@ -42,6 +42,8 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
   last-success timestamps expose stalled maintenance and retained-data integrity.
 - Background-task gauges report the embedded worker, scheduler, cleanup loop,
   webhook dispatcher, queued-delivery reconciler, and stale-running reconciler.
+  Scheduler readiness also includes durable per-schedule callback failures;
+  one healthy schedule cannot mask another schedule that fails before enqueue.
   Reconciliation pass counters distinguish success from failure. Result-filesystem
   free bytes expose disk pressure.
 
@@ -83,6 +85,10 @@ Tune the bounded probes with:
   readiness floor; keep a separate host-volume inode alert.
 - Alert when cleanup or scheduler last-success age exceeds twice its expected
   interval. A zero timestamp means that subsystem has not yet succeeded.
+- Page on scheduler readiness details beginning `scheduled callback failures`.
+  Inspect the affected job's `schedule_failure_code`, failure timestamp,
+  consecutive count, and synthetic failed run. Codes are bounded
+  classifications; raw exception or secret text is intentionally unavailable.
 - Alert on any increase in
   `scrapeyard_cleanup_artifact_findings_total{kind=~"missing|corrupt|unreadable|unsafe"}`.
   This signal means retained result metadata no longer validates against its

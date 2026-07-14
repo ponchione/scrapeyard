@@ -36,6 +36,7 @@ def serialize_job_run(run: JobRun) -> dict[str, Any]:
         "completed_at": _isoformat(run.completed_at),
         "record_count": run.record_count,
         "error_count": run.error_count,
+        "failure_code": run.failure_code,
     }
 
 
@@ -55,6 +56,9 @@ def serialize_job_summary(
         "schedule_cron": job.schedule_cron,
         "schedule_timezone": job.schedule_timezone,
         "schedule_enabled": job.schedule_enabled,
+        "schedule_failure_at": _isoformat(job.schedule_failure_at),
+        "schedule_failure_code": job.schedule_failure_code,
+        "schedule_consecutive_failures": job.schedule_consecutive_failures,
         "run_count": run_count,
         "last_run_at": _isoformat(last_run_at),
     }
@@ -79,6 +83,9 @@ def serialize_job_detail(
         "schedule_cron": job.schedule_cron,
         "schedule_timezone": job.schedule_timezone,
         "schedule_enabled": job.schedule_enabled,
+        "schedule_failure_at": _isoformat(job.schedule_failure_at),
+        "schedule_failure_code": job.schedule_failure_code,
+        "schedule_consecutive_failures": job.schedule_consecutive_failures,
         "next_run_at": _isoformat(next_run_at),
         "run_count": run_count,
         "last_run_at": _isoformat(last_run_at),

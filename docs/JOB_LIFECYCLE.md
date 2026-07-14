@@ -16,6 +16,12 @@ resumable cleanup operation for cancelled or terminal work.
 - `running -> complete|partial|failed`: normal terminal finalization remains an
   ownership-checked transaction. Cancellation and finalization serialize, so
   exactly one can win.
+- `scheduled fire -> failed attempt`: a cron callback that fails before Redis
+  acceptance persists a synthetic terminal `JobRun` with a sanitized
+  `failure_code` and degrades that schedule's durable health. It may converge
+  the parent only when no other queued/running owner exists. A later accepted
+  cron run clears the schedule failure state; success by a different schedule
+  does not.
 - `cancelled|complete|partial|failed -> deleting`: deletion reserves an
   immutable `delete_results` policy after confirming that the job has no
   pending webhook delivery.

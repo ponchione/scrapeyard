@@ -22,7 +22,11 @@ from scrapeyard.storage.cleanup import (
     HistoryRetentionPolicy,
     run_cleanup,
 )
-from scrapeyard.storage.types import ResultReconciliationReport
+from scrapeyard.storage.types import (
+    DeletionFinalizationAction,
+    DeletionReservationAction,
+    ResultReconciliationReport,
+)
 
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
@@ -125,6 +129,24 @@ async def _insert_delivery(
         await db.commit()
 
 
+async def _insert_idempotency(job_id: str, *, expires_at: datetime) -> None:
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            """INSERT INTO scrape_idempotency
+               (caller_scope, key_digest, request_hash, job_id, run_id,
+                response_mode, created_at, expires_at)
+               VALUES (?, ?, 'request', ?, 'run', 'async', ?, ?)""",
+            (
+                f"scope-{job_id}",
+                f"key-{job_id}",
+                job_id,
+                OLD.isoformat(),
+                expires_at.isoformat(),
+            ),
+        )
+        await db.commit()
+
+
 async def test_adhoc_candidates_exclude_active_fresh_and_unsafe_webhooks(stores):
     jobs, _errors = stores
     await _save_job(jobs, "eligible")
@@ -155,6 +177,7 @@ async def test_adhoc_candidates_exclude_active_fresh_and_unsafe_webhooks(stores)
 
     candidates = await jobs.list_adhoc_jobs_for_retention(
         NOW - timedelta(days=30),
+        idempotency_observed_at=NOW,
         tombstone_expired_before=NOW - timedelta(days=30),
         limit=20,
     )
@@ -169,11 +192,63 @@ async def test_adhoc_candidate_selection_is_bounded(stores):
 
     candidates = await jobs.list_adhoc_jobs_for_retention(
         NOW - timedelta(days=30),
+        idempotency_observed_at=NOW,
         tombstone_expired_before=NOW - timedelta(days=30),
         limit=3,
     )
 
     assert candidates == ["job-0", "job-1", "job-2"]
+
+
+async def test_adhoc_retention_preserves_unexpired_idempotency_boundary(stores):
+    jobs, _errors = stores
+    await _save_job(jobs, "future-key")
+    await _insert_idempotency("future-key", expires_at=NOW + timedelta(days=5))
+    await _save_job(jobs, "boundary-key")
+    await _insert_idempotency("boundary-key", expires_at=NOW)
+    await _save_job(jobs, "expired-key")
+    await _insert_idempotency("expired-key", expires_at=NOW - timedelta(seconds=1))
+
+    assert await jobs.delete_expired_idempotency_records(NOW, limit=10) == 2
+
+    candidates = await jobs.list_adhoc_jobs_for_retention(
+        NOW - timedelta(days=30),
+        idempotency_observed_at=NOW,
+        tombstone_expired_before=NOW - timedelta(days=30),
+        limit=10,
+    )
+
+    assert "future-key" not in candidates
+    assert "boundary-key" in candidates
+    assert "expired-key" in candidates
+
+
+async def test_adhoc_finalization_rechecks_live_idempotency_reservation(stores):
+    jobs, _errors = stores
+    await _save_job(jobs, "raced-key")
+    reservation = await jobs.reserve_job_deletion(
+        "raced-key",
+        delete_results=False,
+        requested_at=NOW,
+    )
+    assert reservation.action is DeletionReservationAction.created
+    await _insert_idempotency("raced-key", expires_at=NOW + timedelta(hours=1))
+
+    guarded = await jobs.finalize_job_deletion(
+        "raced-key",
+        delete_results=False,
+        preserve_idempotency_after=NOW,
+    )
+    explicit = await jobs.finalize_job_deletion(
+        "raced-key",
+        delete_results=False,
+    )
+
+    assert (
+        guarded.action
+        is DeletionFinalizationAction.unexpired_idempotency_conflict
+    )
+    assert explicit.action is DeletionFinalizationAction.deleted
 
 
 async def test_scheduled_pruning_is_atomic_and_preserves_lifetime_stats(stores):

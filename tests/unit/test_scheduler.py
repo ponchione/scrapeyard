@@ -5,10 +5,14 @@ from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
+from scrapeyard.common.settings import get_settings
 from scrapeyard.models.job import Job, JobRun, JobStatus
 from scrapeyard.queue.pool import QueueDeliveryState
 from scrapeyard.scheduler.cron import SchedulerService, SchedulerUnavailableError
+from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.job_store import SQLiteJobStore
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
@@ -66,6 +70,13 @@ def _make_service(**overrides):
     )
     defaults.update(overrides)
     return SchedulerService(**defaults)
+
+
+def test_yaml_parser_errors_have_a_bounded_config_failure_code():
+    assert (
+        SchedulerService._failure_code(yaml.YAMLError("sensitive parser detail"))
+        == "persisted_config_invalid"
+    )
 
 
 def test_register_job_adds_a_job():
@@ -178,7 +189,7 @@ async def test_trigger_job_skips_if_running_heartbeat_is_fresh():
     svc = _make_service(worker_pool=pool, job_store=job_store)
 
     with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
-        await svc._trigger_job("job-1")
+        await svc._run_scheduled_callback("job-1")
 
     job_store.get_job_run.assert_awaited_once_with("job-1", "run-active")
     job_store.recover_stale_run.assert_not_awaited()
@@ -393,11 +404,23 @@ async def test_scheduled_trigger_fails_closed_and_records_redis_inspection_error
     )
     svc = _make_service(worker_pool=pool, job_store=job_store)
 
-    with patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW):
-        assert await svc._trigger_job("job-1") is None
+    with (
+        patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW),
+        patch("scrapeyard.scheduler.cron.generate_run_id", return_value="failed-fire"),
+    ):
+        assert await svc._run_scheduled_callback("job-1") is None
 
     assert svc.background_ok is False
-    assert svc.background_detail == "scheduler Redis delivery inspection failed: ConnectionError"
+    assert svc.background_detail == (
+        "scheduled callback failures: count=1 "
+        "job_id=job-1 code=queue_state_unavailable"
+    )
+    job_store.record_scheduled_trigger_failure.assert_awaited_once_with(
+        "job-1",
+        "failed-fire",
+        failed_at=NOW,
+        failure_code="queue_state_unavailable",
+    )
     job_store.queue_run.assert_not_awaited()
     pool.enqueue.assert_not_awaited()
 
@@ -462,6 +485,7 @@ async def test_start_registers_jobs_from_store():
         ("cron-a", "*/10 * * * *", "UTC", True),
         ("cron-b", "0 3 * * *", "America/New_York", False),
     ]
+    job_store.list_scheduled_trigger_failures.return_value = []
     svc = _make_service(job_store=job_store)
     await svc.start()
     try:
@@ -473,7 +497,6 @@ async def test_start_registers_jobs_from_store():
         assert str(job_b.trigger.timezone) == "America/New_York"
     finally:
         svc.shutdown()
-
 
 async def test_trigger_job_enqueues_queued_job():
     """_trigger_job reserves a run before enqueueing it into the worker pool."""
@@ -487,7 +510,7 @@ async def test_trigger_job_enqueues_queued_job():
         patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW),
         patch("scrapeyard.scheduler.cron.generate_run_id", return_value="run-new"),
     ):
-        await svc._trigger_job("job-1")
+        await svc._run_scheduled_callback("job-1")
 
     job_store.queue_run.assert_awaited_once_with(
         "job-1",
@@ -514,10 +537,144 @@ async def test_trigger_job_marks_owned_queued_run_failed_when_enqueue_fails():
         patch("scrapeyard.scheduler.cron.utc_now", return_value=NOW),
         patch("scrapeyard.scheduler.cron.generate_run_id", return_value="run-new"),
     ):
-        await svc._trigger_job("job-1")
+        await svc._run_scheduled_callback("job-1")
 
     pool.enqueue.assert_awaited_once()
     job_store.fail_queued_run.assert_awaited_once_with("job-1", "run-new", NOW)
+    job_store.record_scheduled_trigger_failure.assert_awaited_once_with(
+        "job-1",
+        "run-new",
+        failed_at=NOW,
+        failure_code="enqueue_resource_exhausted",
+    )
+
+
+async def test_scheduled_config_failure_is_durable_and_not_masked_by_other_success(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+        '{"test":["SCRAPEYARD_SECRET_MISSING_TOKEN"]}',
+    )
+    monkeypatch.delenv("SCRAPEYARD_SECRET_MISSING_TOKEN", raising=False)
+    get_settings.cache_clear()
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteJobStore()
+    broken_yaml = """project: test
+name: broken-schedule
+target:
+  url: https://${SCRAPEYARD_SECRET_MISSING_TOKEN}
+  selectors:
+    title: h1
+"""
+    await store.save_job(
+        Job(
+            job_id="broken-job",
+            project="test",
+            name="broken-schedule",
+            config_yaml=broken_yaml,
+            schedule_cron="*/5 * * * *",
+        )
+    )
+    pool = MagicMock(enqueue=AsyncMock(), inspect_delivery=AsyncMock())
+    svc = _make_service(worker_pool=pool, job_store=store)
+    await svc.start()
+    try:
+        with patch("scrapeyard.scheduler.cron.generate_run_id", return_value="broken-fire"):
+            await svc._run_scheduled_callback("broken-job")
+
+        broken = await store.get_job("broken-job")
+        runs = await store.get_job_runs("broken-job")
+        assert broken.status is JobStatus.failed
+        assert broken.schedule_failure_code == "persisted_config_invalid"
+        assert broken.schedule_consecutive_failures == 1
+        assert runs[0].failure_code == "persisted_config_invalid"
+        assert "SCRAPEYARD_SECRET_MISSING_TOKEN" not in (svc.background_detail or "")
+
+        await store.save_job(
+            Job(
+                job_id="healthy-job",
+                project="test",
+                name="healthy-schedule",
+                config_yaml=CONFIG_YAML.replace("scheduled-job", "healthy-schedule"),
+                schedule_cron="*/10 * * * *",
+            )
+        )
+        svc.register_job("healthy-job", "*/10 * * * *")
+        with patch("scrapeyard.scheduler.cron.generate_run_id", return_value="healthy-fire"):
+            await svc._run_scheduled_callback("healthy-job")
+
+        assert pool.enqueue.await_count == 1
+        assert svc.background_ok is False
+        assert "job_id=broken-job" in (svc.background_detail or "")
+    finally:
+        svc.shutdown()
+
+    restarted = _make_service(worker_pool=pool, job_store=store)
+    await restarted.start()
+    try:
+        assert restarted.background_ok is False
+        assert "job_id=broken-job" in (restarted.background_detail or "")
+    finally:
+        restarted.shutdown()
+
+
+async def test_job_store_failure_before_queue_degrades_scheduled_callback_health():
+    job_store = AsyncMock()
+    job_store.get_job.side_effect = RuntimeError("secret-looking store detail")
+    svc = _make_service(job_store=job_store)
+
+    with patch("scrapeyard.scheduler.cron.generate_run_id", return_value="failed-fire"):
+        await svc._run_scheduled_callback("job-1")
+
+    assert svc.background_detail == (
+        "scheduled callback failures: count=1 "
+        "job_id=job-1 code=scheduled_callback_failed"
+    )
+    assert "secret-looking" not in (svc.background_detail or "")
+
+
+async def test_decrypt_failure_persists_sanitized_schedule_health(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    store = SQLiteJobStore()
+    await store.save_job(
+        Job(
+            job_id="decrypt-job",
+            project="test",
+            name="decrypt-schedule",
+            config_yaml=CONFIG_YAML.replace("scheduled-job", "decrypt-schedule"),
+            schedule_cron="*/5 * * * *",
+        )
+    )
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE jobs SET config_yaml = 'syenc:v1:test-v1:invalid' "
+            "WHERE job_id = 'decrypt-job'"
+        )
+        await db.commit()
+    svc = _make_service(worker_pool=MagicMock(enqueue=AsyncMock()), job_store=store)
+    await svc.start()
+    try:
+        with patch("scrapeyard.scheduler.cron.generate_run_id", return_value="decrypt-fire"):
+            await svc._run_scheduled_callback("decrypt-job")
+        async with get_db("jobs.db") as db:
+            health = await (
+                await db.execute(
+                    "SELECT schedule_failure_code, schedule_consecutive_failures "
+                    "FROM jobs WHERE job_id = 'decrypt-job'"
+                )
+            ).fetchone()
+            run = await (
+                await db.execute(
+                    "SELECT failure_code FROM job_runs WHERE run_id = 'decrypt-fire'"
+                )
+            ).fetchone()
+        assert tuple(health) == ("persisted_config_unavailable", 1)
+        assert run["failure_code"] == "persisted_config_unavailable"
+        assert "invalid" not in (svc.background_detail or "")
+    finally:
+        svc.shutdown()
 
 
 async def test_register_job_disabled_pauses():
@@ -529,6 +686,30 @@ async def test_register_job_disabled_pauses():
         aps_job = svc._scheduler.get_job("job-1")
         assert aps_job is not None
         assert aps_job.next_run_time is None
+    finally:
+        svc.shutdown()
+
+
+async def test_paused_failure_is_hidden_and_resume_restores_degraded_health():
+    svc = _make_service()
+    svc._scheduler.start()
+    try:
+        svc.register_job(
+            "job-1",
+            "*/5 * * * *",
+            enabled=False,
+            failure_code="persisted_config_invalid",
+        )
+        assert svc.background_ok is True
+
+        svc.register_job(
+            "job-1",
+            "*/5 * * * *",
+            enabled=True,
+            failure_code="persisted_config_invalid",
+        )
+        assert svc.background_ok is False
+        assert "job_id=job-1" in (svc.background_detail or "")
     finally:
         svc.shutdown()
 

@@ -9,6 +9,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import yaml
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.schedulers.base import SchedulerNotRunningError
@@ -29,6 +30,10 @@ from scrapeyard.queue.reconciliation import (
 )
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
 from scrapeyard.storage.protocols import JobStore, ResultStore
+from scrapeyard.storage.secret_envelope import (
+    SecretDecryptionError,
+    SecretKeyConfigurationError,
+)
 from scrapeyard.storage.types import StaleQueuedJob
 
 logger = logging.getLogger(__name__)
@@ -78,6 +83,7 @@ class SchedulerService:
         self._misfire_grace_seconds = misfire_grace_seconds
         self._scheduler = AsyncIOScheduler()
         self._background_error: str | None = None
+        self._schedule_failures: dict[str, str] = {}
 
     def register_job(
         self,
@@ -86,6 +92,7 @@ class SchedulerService:
         *,
         timezone_name: str = "UTC",
         enabled: bool = True,
+        failure_code: str | None = None,
     ) -> None:
         """Add or replace a cron-triggered job in the scheduler.
 
@@ -109,7 +116,7 @@ class SchedulerService:
             self._scheduler.remove_job(job_id)
 
         self._scheduler.add_job(
-            self._trigger_job,
+            self._run_scheduled_callback,
             trigger=trigger,
             id=job_id,
             args=[job_id],
@@ -121,11 +128,17 @@ class SchedulerService:
 
         if not enabled:
             self._scheduler.pause_job(job_id)
+            self._schedule_failures.pop(job_id, None)
+        elif failure_code is None:
+            self._schedule_failures.pop(job_id, None)
+        else:
+            self._schedule_failures[job_id] = failure_code
 
     def remove_job(self, job_id: str) -> None:
         """Remove a scheduled job. Silent if the job doesn't exist."""
         with suppress(JobLookupError):
             self._scheduler.remove_job(job_id)
+        self._schedule_failures.pop(job_id, None)
 
     async def start(self) -> None:
         """Start the scheduler and re-register all enabled scheduled jobs from the store."""
@@ -138,6 +151,10 @@ class SchedulerService:
                 timezone_name=timezone_name,
                 enabled=schedule_enabled,
             )
+
+        self._schedule_failures = dict(
+            await self._job_store.list_scheduled_trigger_failures()
+        )
 
         self._scheduler.start()
         self._background_error = None
@@ -152,13 +169,103 @@ class SchedulerService:
     def background_ok(self) -> bool:
         """Whether APScheduler's process-local loop is running."""
 
-        return bool(self._scheduler.running) and self._background_error is None
+        return (
+            bool(self._scheduler.running)
+            and self._background_error is None
+            and not self._schedule_failures
+        )
 
     @property
     def background_detail(self) -> str | None:
         if self._background_error is not None:
             return self._background_error
+        if self._schedule_failures:
+            job_id = sorted(self._schedule_failures)[0]
+            return (
+                "scheduled callback failures: "
+                f"count={len(self._schedule_failures)} "
+                f"job_id={job_id} code={self._schedule_failures[job_id]}"
+            )
         return None if self.background_ok else "scheduler is stopped"
+
+    @staticmethod
+    def _failure_code(exc: Exception) -> str:
+        if isinstance(exc, SchedulerUnavailableError):
+            return "queue_state_unavailable"
+        if isinstance(exc, MemoryError):
+            return "enqueue_resource_exhausted"
+        if isinstance(exc, (SecretDecryptionError, SecretKeyConfigurationError)):
+            return "persisted_config_unavailable"
+        if isinstance(exc, (ValueError, yaml.YAMLError)):
+            return "persisted_config_invalid"
+        return "scheduled_callback_failed"
+
+    async def _run_scheduled_callback(self, job_id: str) -> None:
+        """Contain, sanitize, and durably record one APScheduler callback."""
+
+        run_id = generate_run_id()
+        try:
+            result = await self._trigger_job(
+                job_id,
+                trigger="scheduled",
+                new_run_id=run_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure_code = self._failure_code(exc)
+            try:
+                persisted = await self._job_store.record_scheduled_trigger_failure(
+                    job_id,
+                    run_id,
+                    failed_at=utc_now(),
+                    failure_code=failure_code,
+                )
+            except Exception as persistence_exc:
+                self._schedule_failures[job_id] = failure_code
+                logger.error(
+                    "Scheduled callback failure state could not be persisted "
+                    "job_id=%s run_id=%s failure_code=%s callback_error_type=%s "
+                    "persistence_error_type=%s recovery_action=retry_next_fire",
+                    job_id,
+                    run_id,
+                    failure_code,
+                    type(exc).__name__,
+                    type(persistence_exc).__name__,
+                )
+            else:
+                if persisted:
+                    self._schedule_failures[job_id] = failure_code
+                else:
+                    self._schedule_failures.pop(job_id, None)
+                logger.error(
+                    "Scheduled callback failed job_id=%s run_id=%s failure_code=%s "
+                    "error_type=%s persisted=%s recovery_action=retry_next_fire",
+                    job_id,
+                    run_id,
+                    failure_code,
+                    type(exc).__name__,
+                    persisted,
+                )
+            return
+
+        if result is None:
+            return
+        try:
+            await self._job_store.clear_scheduled_trigger_failure(job_id)
+        except Exception as exc:
+            self._schedule_failures[job_id] = "schedule_health_persistence_failed"
+            logger.error(
+                "Accepted scheduled run but failed to clear degraded health "
+                "job_id=%s run_id=%s error_type=%s recovery_action=retry_next_fire",
+                job_id,
+                result[0],
+                type(exc).__name__,
+            )
+            return
+        self._schedule_failures.pop(job_id, None)
+        self._background_error = None
+        mark_last_success("scheduler")
 
     async def trigger_job_now(self, job_id: str) -> tuple[str, str]:
         """Queue one manual run and return its run/config version identity."""
@@ -192,6 +299,7 @@ class SchedulerService:
         *,
         trigger: str = "scheduled",
         raise_enqueue_errors: bool = False,
+        new_run_id: str | None = None,
     ) -> tuple[str, str] | None:
         """Called by APScheduler when a cron trigger fires.
 
@@ -227,9 +335,7 @@ class SchedulerService:
             if await self._job_has_active_run(job, now=now):
                 return None
         except SchedulerUnavailableError:
-            if trigger == "manual" or raise_enqueue_errors:
-                raise
-            return None
+            raise
 
         if job.status == JobStatus.running:
             run_id = job.current_run_id
@@ -278,7 +384,7 @@ class SchedulerService:
 
         config = await asyncio.to_thread(load_config, job.config_yaml)
         delivery = queue_delivery_metadata(config)
-        run_id = generate_run_id()
+        run_id = new_run_id or generate_run_id()
         queued = await self._job_store.queue_run(
             job_id,
             expected_status=job.status.value,
@@ -307,8 +413,13 @@ class SchedulerService:
                 run_id=run_id,
                 trigger=trigger,
             )
-        except Exception:
-            logger.exception("Failed to enqueue scheduled job %s", job.job_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to enqueue scheduled job job_id=%s run_id=%s error_type=%s",
+                job.job_id,
+                run_id,
+                type(exc).__name__,
+            )
             failed = await self._job_store.fail_queued_run(job_id, run_id, utc_now())
             if not failed:
                 logger.info(
@@ -317,11 +428,9 @@ class SchedulerService:
                     job_id,
                     run_id,
                 )
-            if raise_enqueue_errors:
+            if trigger == "scheduled" or raise_enqueue_errors:
                 raise
             return None
-        mark_last_success("scheduler")
-        self._background_error = None
         return run_id, hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest()
 
     def get_next_run_time(self, job_id: str) -> datetime | None:
@@ -413,10 +522,6 @@ class SchedulerService:
                 inspected_at=now,
             )
         except QueuedReconciliationError as exc:
-            self._background_error = (
-                "scheduler Redis delivery inspection failed: "
-                f"{type(exc.__cause__).__name__ if exc.__cause__ is not None else type(exc).__name__}"
-            )
             logger.error(
                 "Scheduled trigger could not inspect authoritative Redis state "
                 "job_id=%s run_id=%s recovery_action=fail_closed",
@@ -426,4 +531,3 @@ class SchedulerService:
             raise SchedulerUnavailableError(
                 "Authoritative queue state is temporarily unavailable"
             ) from exc
-        self._background_error = None

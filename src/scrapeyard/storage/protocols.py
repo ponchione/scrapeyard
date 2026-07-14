@@ -63,6 +63,7 @@ class JobStore(Protocol):
         self,
         expired_before: datetime,
         *,
+        idempotency_observed_at: datetime,
         tombstone_expired_before: datetime,
         limit: int,
     ) -> list[str]:
@@ -159,6 +160,7 @@ class JobStore(Protocol):
         job_id: str,
         *,
         delete_results: bool,
+        preserve_idempotency_after: datetime | None = None,
     ) -> DeletionFinalizationOutcome:
         """Atomically remove terminal webhook rows, runs, intent, and parent."""
         ...
@@ -192,6 +194,25 @@ class JobStore(Protocol):
         started_at: datetime,
     ) -> bool:
         """Atomically claim a queued delivery and create its active run."""
+        ...
+
+    async def record_scheduled_trigger_failure(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        failed_at: datetime,
+        failure_code: str,
+    ) -> bool:
+        """Persist sanitized per-schedule health and one failed fire record."""
+        ...
+
+    async def clear_scheduled_trigger_failure(self, job_id: str) -> bool:
+        """Clear degraded schedule health after a run is durably accepted."""
+        ...
+
+    async def list_scheduled_trigger_failures(self) -> list[tuple[str, str]]:
+        """Return unresolved per-schedule failure classifications."""
         ...
 
     async def heartbeat_run(
@@ -246,6 +267,15 @@ class JobStore(Protocol):
         webhook_delivery: WebhookDeliveryCreate | None,
     ) -> TerminalIntentReconcileResult:
         """Recheck terminal/config state, converge parent, and ensure intent."""
+        ...
+
+    async def mark_terminal_webhook_reconciliation_failure(
+        self,
+        job_id: str,
+        run_id: str,
+        failed_at: datetime,
+    ) -> bool:
+        """Move a failed candidate behind candidates not yet attempted."""
         ...
 
     async def queue_run(

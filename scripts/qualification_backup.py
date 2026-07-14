@@ -50,6 +50,7 @@ REQUIRED_MIGRATION_FILES = {
         "015_add_jobs_current_trigger.sql",
         "016_add_webhook_decode_failure_reason.sql",
         "017_add_history_retention_summary.sql",
+        "018_add_run_snapshots_and_schedule_health.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -81,6 +82,9 @@ REQUIRED_COLUMNS = {
             "current_trigger",
             "lifetime_run_count",
             "last_run_at",
+            "schedule_failure_at",
+            "schedule_failure_code",
+            "schedule_consecutive_failures",
         },
         "job_runs": {
             "run_id",
@@ -94,6 +98,9 @@ REQUIRED_COLUMNS = {
             "record_count",
             "error_count",
             "webhook_reconciled_at",
+            "config_yaml",
+            "failure_code",
+            "webhook_reconciliation_failed_at",
         },
         "scrape_idempotency": {
             "caller_scope",
@@ -174,6 +181,8 @@ REQUIRED_INDEXES = {
         "idx_webhook_deliveries_job_status",
         "idx_jobs_adhoc_history_retention",
         "idx_job_runs_scheduled_history_retention",
+        "idx_jobs_schedule_failures",
+        "idx_job_runs_terminal_reconciliation_retry",
     },
     "errors.db": {
         "idx_errors_project",

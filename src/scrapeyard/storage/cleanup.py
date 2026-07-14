@@ -90,6 +90,7 @@ async def _cleanup_durable_history(
     try:
         adhoc_jobs = await job_store.list_adhoc_jobs_for_retention(
             observed_at - timedelta(days=policy.adhoc_job_retention_days),
+            idempotency_observed_at=observed_at,
             tombstone_expired_before=tombstone_before,
             limit=policy.adhoc_job_batch_size,
         )
@@ -128,7 +129,18 @@ async def _cleanup_durable_history(
             finalized = await job_store.finalize_job_deletion(
                 job_id,
                 delete_results=False,
+                preserve_idempotency_after=observed_at,
             )
+            if (
+                finalized.action
+                is DeletionFinalizationAction.unexpired_idempotency_conflict
+            ):
+                logger.info(
+                    "Ad-hoc history deletion deferred for live idempotency reservation "
+                    "job_id=%s recovery_action=retry_after_idempotency_expiry",
+                    job_id,
+                )
+                continue
             if finalized.action not in {
                 DeletionFinalizationAction.deleted,
                 DeletionFinalizationAction.missing,

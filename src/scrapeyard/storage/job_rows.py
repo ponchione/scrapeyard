@@ -56,6 +56,17 @@ def row_to_job(row: RowMapping) -> Job:
             if _optional_row_value(row, "delete_results_on_delete") is None
             else bool(_optional_row_value(row, "delete_results_on_delete"))
         ),
+        schedule_failure_at=parse_dt(
+            cast(str | None, _optional_row_value(row, "schedule_failure_at"))
+        ),
+        schedule_failure_code=cast(
+            str | None,
+            _optional_row_value(row, "schedule_failure_code"),
+        ),
+        schedule_consecutive_failures=cast(
+            int,
+            _optional_row_value(row, "schedule_consecutive_failures") or 0,
+        ),
     )
 
 
@@ -77,6 +88,7 @@ def row_to_job_run(row: RowMapping) -> JobRun:
         completed_at=parse_dt(cast(str | None, row["completed_at"])),
         record_count=cast(int | None, row["record_count"]),
         error_count=cast(int, row["error_count"]),
+        failure_code=cast(str | None, _optional_row_value(row, "failure_code")),
     )
 
 

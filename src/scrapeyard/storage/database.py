@@ -28,6 +28,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "015_add_jobs_current_trigger.sql",
         "016_add_webhook_decode_failure_reason.sql",
         "017_add_history_retention_summary.sql",
+        "018_add_run_snapshots_and_schedule_health.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -243,6 +244,8 @@ async def _migration_is_reflected(
     if migration_id == "016":
         return False
     if migration_id == "017":
+        return False
+    if migration_id == "018":
         return False
     return False
 
