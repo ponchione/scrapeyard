@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from scrapling import Fetcher
@@ -123,6 +123,44 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
     assert seen_urls == ["https://example.com", "https://example.com/next"]
     assert outcome.debug["redirects"] == ["https://example.com/next"]
     assert outcome.debug["final_url"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_basic_redirect_hops_rate_limit_actual_destination_hosts(monkeypatch):
+    responses = iter(
+        [
+            SimpleNamespace(
+                status=302,
+                url="https://example.com/start",
+                headers={"Location": "https://other.example/next"},
+            ),
+            SimpleNamespace(
+                status=200,
+                url="https://other.example/next",
+                headers={},
+            ),
+        ]
+    )
+    limiter = AsyncMock()
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.fetch_basic_response",
+        AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+
+    await _fetch_basic_with_safe_redirects(
+        object(),
+        "https://example.com/start",
+        {},
+        {},
+        rate_limiter=limiter,
+        domain_rate_limit=7,
+    )
+
+    assert limiter.acquire.await_args_list == [
+        call("example.com", 7),
+        call("other.example", 7),
+    ]
 
 
 @pytest.mark.asyncio
@@ -340,6 +378,43 @@ async def test_browser_fetch_performs_one_navigation_without_http_preflight(monk
     assert browser_fetch.await_args.args[1] == target.url
     basic_fetch.assert_not_awaited()
     assert responses_observed == 1
+
+
+@pytest.mark.asyncio
+async def test_browser_navigation_rate_limits_immediately_before_fetch(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com/products",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    events: list[str] = []
+    limiter = AsyncMock()
+
+    async def acquire(*_args):
+        events.append("acquire")
+
+    async def browser_fetch(*_args, **_kwargs):
+        events.append("navigate")
+        return SimpleNamespace(status=200, url=target.url), {}
+
+    limiter.acquire.side_effect = acquire
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", browser_fetch)
+
+    await _fetch_page(
+        object(),
+        target.url,
+        target,
+        FetcherType.dynamic,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        rate_limiter=limiter,
+        domain_rate_limit=4,
+    )
+
+    assert events == ["acquire", "navigate"]
+    limiter.acquire.assert_awaited_once_with("example.com", 4)
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

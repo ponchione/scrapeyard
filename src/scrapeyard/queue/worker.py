@@ -921,13 +921,9 @@ async def _fetch_and_validate_target(
     )
     circuit_open = await guard_target_execution(
         runtime=runtime,
-        config=context.config,
         target_cfg=target_cfg,
         circuit_breaker=context.circuit_breaker,
-        rate_limiter=context.rate_limiter,
         recorder=recorder,
-        budget=context.budget,
-        cancellation_guard=context.activity.checkpoint,
     )
     if circuit_open is not None:
         return TargetResult(url=target_cfg.url, status=TargetStatus.failed, errors=[str(circuit_open)])
@@ -984,6 +980,8 @@ async def _scrape_and_validate_target(
         budget=context.budget,
         cancellation_guard=context.activity.checkpoint,
         response_observer=runtime.mark_upstream_response,
+        rate_limiter=context.rate_limiter,
+        domain_rate_limit=context.config.execution.domain_rate_limit,
     )
     await context.activity.checkpoint("after_target_fetch")
     if not result.is_success:

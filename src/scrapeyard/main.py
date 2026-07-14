@@ -83,6 +83,10 @@ from scrapeyard.runtime.metrics import (
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 from scrapeyard.storage.secret_envelope import migrate_persisted_secrets
+from scrapeyard.storage.secret_envelope import (
+    EncryptionKeyring,
+    SecretKeyConfigurationError,
+)
 
 
 _health = HealthCache(get_job_store)
@@ -262,6 +266,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             getattr(settings, "qualification_crash_point", "") or "none",
         )
     try:
+        # Validate write capability even when every durable table is empty.
+        EncryptionKeyring.from_settings(required=True)
         await init_db(settings.db_dir)
         await migrate_persisted_secrets()
         _ensure_runtime_directories()
@@ -300,6 +306,20 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(SecretKeyConfigurationError)
+async def _secret_key_configuration_error_handler(
+    _request: Request,
+    _exc: SecretKeyConfigurationError,
+) -> JSONResponse:
+    """Keep a post-start keyring failure sanitized and explicitly unavailable."""
+
+    logger.error("Encryption key configuration became invalid after startup")
+    return JSONResponse(
+        status_code=503,
+        content=error_content("Service encryption configuration is unavailable"),
+    )
 
 _settings_for_middleware = get_settings()
 _credentials_for_middleware = parse_api_credentials(

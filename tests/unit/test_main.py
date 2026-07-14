@@ -217,6 +217,35 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_keys", "active_key"),
+    [
+        ("", ""),
+        ('{"v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}', ""),
+        ("not-json", "v1"),
+        ('{"v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}', "missing"),
+    ],
+)
+async def test_lifespan_rejects_invalid_keyring_before_database_start(
+    monkeypatch,
+    raw_keys,
+    active_key,
+):
+    monkeypatch.setenv("SCRAPEYARD_ENCRYPTION_KEYS", raw_keys)
+    monkeypatch.setenv("SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID", active_key)
+    main_module.get_settings.cache_clear()
+    init_db = AsyncMock()
+    monkeypatch.setattr(main_module, "init_db", init_db)
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(main_module, "_shutdown_runtime_services", AsyncMock())
+
+    with pytest.raises(main_module.SecretKeyConfigurationError):
+        async with main_module.lifespan(FastAPI()):
+            pytest.fail("invalid encryption settings must prevent serving")
+
+    init_db.assert_not_awaited()
+
+@pytest.mark.asyncio
 async def test_shutdown_attempts_every_phase_after_independent_failures(monkeypatch):
     app = FastAPI()
     cleanup_task = asyncio.create_task(asyncio.Event().wait())

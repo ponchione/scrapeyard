@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import FetchOutcome, TargetResult
+from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.selectors import select_elements_strict
 from scrapeyard.engine.url_guard import (
     URLResolutionError,
@@ -114,6 +115,8 @@ async def paginate_target(
     artifacts_dir: str | None,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    rate_limiter: DomainRateLimiter | None = None,
+    domain_rate_limit: float = 0,
 ) -> None:
     if target.pagination is None:
         return
@@ -160,15 +163,28 @@ async def paginate_target(
             proxy_url,
             artifacts_dir,
         )
+        rate_limit_kwargs = (
+            {}
+            if rate_limiter is None
+            else {
+                "rate_limiter": rate_limiter,
+                "domain_rate_limit": domain_rate_limit,
+            }
+        )
         if budget is None and cancellation_guard is None:
-            next_outcome = await fetch_target_page(*fetch_args)
+            next_outcome = await fetch_target_page(*fetch_args, **rate_limit_kwargs)
         elif cancellation_guard is None:
-            next_outcome = await fetch_target_page(*fetch_args, budget)
+            next_outcome = await fetch_target_page(
+                *fetch_args,
+                budget,
+                **rate_limit_kwargs,
+            )
         else:
             next_outcome = await fetch_target_page(
                 *fetch_args,
                 budget,
                 cancellation_guard,
+                **rate_limit_kwargs,
             )
         await cancellation_checkpoint(
             cancellation_guard,

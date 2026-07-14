@@ -76,6 +76,11 @@ Tune the bounded probes with:
   readiness floor; keep a separate host-volume inode alert.
 - Alert when cleanup or scheduler last-success age exceeds twice its expected
   interval. A zero timestamp means that subsystem has not yet succeeded.
+- Alert on any increase in
+  `scrapeyard_cleanup_artifact_findings_total{kind=~"missing|corrupt|unreadable|unsafe"}`.
+  This signal means retained result metadata no longer validates against its
+  artifact. Restore the artifact, intentionally delete its metadata, or record
+  an explicit decision to accept the loss; cleanup does not make that decision.
 - Track run/target failure ratios, retry amplification, API tail latency, output
   bytes, and cleanup failures as dashboard trends rather than per-ID series.
 

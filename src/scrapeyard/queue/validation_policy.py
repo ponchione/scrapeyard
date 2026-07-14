@@ -168,20 +168,6 @@ async def _retry_after_validation_failure(
     cancellation_guard: CancellationCheckpoint | None,
     retry_error: ErrorRecord,
 ) -> TargetResult:
-    await cancellation_checkpoint(
-        cancellation_guard,
-        "before_validation_rate_limit_wait",
-    )
-    if budget is None:
-        acquire = rate_limiter.acquire(domain, config.execution.domain_rate_limit)
-        await acquire
-    else:
-        acquire = rate_limiter.acquire(domain, config.execution.domain_rate_limit)
-        await budget.wait_for(acquire)
-    await cancellation_checkpoint(
-        cancellation_guard,
-        "after_validation_rate_limit_wait",
-    )
     retry_result = await scrape(
         target_cfg,
         adaptive,
@@ -191,6 +177,8 @@ async def _retry_after_validation_failure(
         artifacts_dir=_build_retry_artifacts_dir(run_artifacts_dir, domain),
         budget=budget,
         cancellation_guard=cancellation_guard,
+        rate_limiter=rate_limiter,
+        domain_rate_limit=config.execution.domain_rate_limit,
     )
     await cancellation_checkpoint(
         cancellation_guard,
