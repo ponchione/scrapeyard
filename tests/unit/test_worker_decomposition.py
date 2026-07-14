@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -133,22 +132,45 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
     ]
     context = _job_execution_context(targets, concurrency=2)
     context.config.execution.delay_between = 0.02
+    clock = 100.0
     started: list[float] = []
+    first_wave_started = 0
+    release_first_wave = asyncio.Event()
+
+    async def _paced_sleep(delay_seconds: float) -> None:
+        nonlocal clock
+        clock += delay_seconds
+        await asyncio.sleep(0)
+
+    context.budget.sleep = AsyncMock(side_effect=_paced_sleep)
 
     async def _scrape(target, *_args, **_kwargs) -> TargetResult:
-        started.append(time.monotonic())
+        nonlocal first_wave_started
+        started.append(clock)
         index = int(target.url.split("-")[1].split(".")[0])
-        await asyncio.sleep({0: 0.1, 1: 0.08}.get(index, 0))
+        if index < 2:
+            first_wave_started += 1
+            if first_wave_started == 2:
+                release_first_wave.set()
+            await release_first_wave.wait()
         return TargetResult(url=target.url, status=TargetStatus.success)
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+    worker_time = MagicMock()
+    worker_time.monotonic.side_effect = lambda: clock
+    with (
+        patch("scrapeyard.queue.worker.time", worker_time),
+        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
+    ):
         results = await _run_targets(context, limiter, job_id="paced")
 
     assert len(results) == 4
-    assert all(
-        later - earlier >= 0.015
+    assert [
+        later - earlier
         for earlier, later in zip(started, started[1:], strict=False)
-    )
+    ] == pytest.approx([0.02, 0.02, 0.02])
+    assert [
+        call.args[0] for call in context.budget.sleep.await_args_list
+    ] == pytest.approx([0.02, 0.02, 0.02])
 
 
 @pytest.mark.asyncio
