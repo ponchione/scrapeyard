@@ -78,6 +78,7 @@ class JobRunResponse(APIResponseModel):
     completed_at: datetime | None
     record_count: int | None
     error_count: int
+    failure_code: str | None
 
 
 class JobSummaryResponse(APIResponseModel):
@@ -90,6 +91,9 @@ class JobSummaryResponse(APIResponseModel):
     schedule_cron: str | None
     schedule_timezone: str
     schedule_enabled: bool
+    schedule_failure_at: datetime | None
+    schedule_failure_code: str | None
+    schedule_consecutive_failures: int
     run_count: int
     last_run_at: datetime | None
 

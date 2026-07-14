@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import NoReturn, cast
@@ -59,6 +60,7 @@ _TERMINAL_RUN_STATUSES = {
     JobStatus.failed.value,
 }
 logger = logging.getLogger(__name__)
+_SCHEDULE_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class DuplicateJobError(Exception):
@@ -102,8 +104,10 @@ class SQLiteJobStore:
             """INSERT INTO jobs (job_id, project, name, status,
                config_yaml, config_hash, created_at, updated_at, schedule_cron,
                schedule_timezone, schedule_enabled, current_run_id, current_trigger,
-               deletion_requested_at, delete_results_on_delete)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               deletion_requested_at, delete_results_on_delete,
+               schedule_failure_at, schedule_failure_code,
+               schedule_consecutive_failures)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.job_id,
                 job.project,
@@ -124,6 +128,9 @@ class SQLiteJobStore:
                     if job.delete_results_on_delete is None
                     else int(job.delete_results_on_delete)
                 ),
+                fmt_dt(job.schedule_failure_at),
+                job.schedule_failure_code,
+                job.schedule_consecutive_failures,
             ),
         )
 
@@ -301,6 +308,7 @@ class SQLiteJobStore:
         self,
         expired_before: datetime,
         *,
+        idempotency_observed_at: datetime,
         tombstone_expired_before: datetime,
         limit: int,
     ) -> list[str]:
@@ -330,7 +338,12 @@ class SQLiteJobStore:
                                webhook_deliveries.status NOT IN ('delivered', 'failed')
                                OR webhook_deliveries.scrubbed_at IS NULL
                                OR webhook_deliveries.scrubbed_at > ?
-                           )
+                             )
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM scrape_idempotency
+                         WHERE scrape_idempotency.job_id = jobs.job_id
+                           AND scrape_idempotency.expires_at > ?
                      )
                    ORDER BY COALESCE(
                                 jobs.deletion_requested_at,
@@ -342,6 +355,7 @@ class SQLiteJobStore:
                 (
                     fmt_dt(expired_before),
                     fmt_dt(tombstone_expired_before),
+                    fmt_dt(idempotency_observed_at),
                     limit,
                 ),
             )
@@ -891,6 +905,7 @@ class SQLiteJobStore:
         job_id: str,
         *,
         delete_results: bool,
+        preserve_idempotency_after: datetime | None = None,
     ) -> DeletionFinalizationOutcome:
         """Delete all jobs.db state only while the reservation still matches."""
 
@@ -933,6 +948,19 @@ class SQLiteJobStore:
                     DeletionFinalizationAction.pending_webhook_conflict,
                     job_id,
                 )
+            if preserve_idempotency_after is not None:
+                cursor = await db.execute(
+                    """SELECT 1 FROM scrape_idempotency
+                           WHERE job_id = ? AND expires_at > ?
+                           LIMIT 1""",
+                    (job_id, fmt_dt(preserve_idempotency_after)),
+                )
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return DeletionFinalizationOutcome(
+                        DeletionFinalizationAction.unexpired_idempotency_conflict,
+                        job_id,
+                    )
 
             await db.execute(
                 "DELETE FROM webhook_deliveries WHERE job_id = ?",
@@ -1042,14 +1070,163 @@ class SQLiteJobStore:
             if cursor.rowcount != 1:
                 await db.rollback()
                 return False
+            cursor = await db.execute(
+                "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            config_row = await cursor.fetchone()
+            if config_row is None or config_row["config_hash"] != config_hash:
+                await db.rollback()
+                return False
+            config_yaml = reveal_text(
+                cast(str, config_row["config_yaml"]),
+                purpose=f"jobs.config_yaml:{job_id}",
+            )
             await db.execute(
                 """INSERT INTO job_runs
-                       (run_id, job_id, status, trigger, config_hash,
+                       (run_id, job_id, status, trigger, config_hash, config_yaml,
                         started_at, heartbeat_at)
-                       VALUES (?, ?, 'running', ?, ?, ?, ?)""",
-                (run_id, job_id, trigger, config_hash, timestamp, timestamp),
+                       VALUES (?, ?, 'running', ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    job_id,
+                    trigger,
+                    config_hash,
+                    protect_text(
+                        config_yaml,
+                        purpose=f"job_runs.config_yaml:{run_id}",
+                    ),
+                    timestamp,
+                    timestamp,
+                ),
             )
             return True
+
+    async def record_scheduled_trigger_failure(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        failed_at: datetime,
+        failure_code: str,
+    ) -> bool:
+        """Persist one sanitized missed fire and the schedule's degraded state."""
+
+        if _SCHEDULE_FAILURE_CODE_RE.fullmatch(failure_code) is None:
+            raise ValueError("Scheduled failure code must be a bounded safe identifier")
+        failed_text = fmt_dt(failed_at)
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """SELECT config_hash, status, current_run_id
+                   FROM jobs
+                   WHERE job_id = ?
+                     AND schedule_cron IS NOT NULL
+                     AND schedule_enabled = 1
+                     AND status NOT IN ('cancelled', 'deleting')""",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return False
+            cursor = await db.execute(
+                """INSERT OR IGNORE INTO job_runs
+                       (run_id, job_id, status, trigger, config_hash, config_yaml,
+                        started_at, heartbeat_at, completed_at, record_count,
+                        error_count, webhook_reconciled_at, failure_code)
+                       VALUES (?, ?, 'failed', 'scheduled', ?, NULL, ?, ?, ?, 0, 1, ?, ?)""",
+                (
+                    run_id,
+                    job_id,
+                    cast(str, row["config_hash"]),
+                    failed_text,
+                    failed_text,
+                    failed_text,
+                    failed_text,
+                    failure_code,
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing = await (
+                    await db.execute(
+                        "SELECT status FROM job_runs WHERE job_id = ? AND run_id = ?",
+                        (job_id, run_id),
+                    )
+                ).fetchone()
+                if existing is None or existing["status"] != JobStatus.failed.value:
+                    await db.rollback()
+                    return False
+
+            parent_can_converge = (
+                row["status"]
+                not in {
+                    JobStatus.queued.value,
+                    JobStatus.running.value,
+                    JobStatus.cancelled.value,
+                    JobStatus.deleting.value,
+                }
+                or (
+                    row["status"] == JobStatus.queued.value
+                    and row["current_run_id"] in {None, run_id}
+                )
+            )
+            await db.execute(
+                """UPDATE jobs
+                   SET schedule_failure_at = ?,
+                       schedule_failure_code = ?,
+                       schedule_consecutive_failures = schedule_consecutive_failures + 1,
+                       status = CASE WHEN ? THEN 'failed' ELSE status END,
+                       current_run_id = CASE WHEN ? THEN ? ELSE current_run_id END,
+                       current_trigger = CASE WHEN ? THEN 'scheduled' ELSE current_trigger END,
+                       updated_at = CASE WHEN ? THEN ? ELSE updated_at END
+                   WHERE job_id = ?""",
+                (
+                    failed_text,
+                    failure_code,
+                    int(parent_can_converge),
+                    int(parent_can_converge),
+                    run_id,
+                    int(parent_can_converge),
+                    int(parent_can_converge),
+                    failed_text,
+                    job_id,
+                ),
+            )
+            return True
+
+    async def clear_scheduled_trigger_failure(self, job_id: str) -> bool:
+        """Clear degraded schedule state after a fire is accepted by Redis."""
+
+        cursor = await self._execute_write(
+            """UPDATE jobs
+               SET schedule_failure_at = NULL,
+                   schedule_failure_code = NULL,
+                   schedule_consecutive_failures = 0
+               WHERE job_id = ?
+                 AND schedule_cron IS NOT NULL
+                 AND schedule_failure_at IS NOT NULL""",
+            (job_id,),
+        )
+        return cursor.rowcount == 1
+
+    async def list_scheduled_trigger_failures(self) -> list[tuple[str, str]]:
+        """Return unresolved failures for enabled, locally runnable schedules."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT job_id, schedule_failure_code
+                   FROM jobs
+                   WHERE schedule_cron IS NOT NULL
+                     AND schedule_enabled = 1
+                     AND status NOT IN ('cancelled', 'deleting')
+                     AND schedule_failure_at IS NOT NULL
+                     AND schedule_failure_code IS NOT NULL
+                   ORDER BY schedule_failure_at, job_id"""
+            )
+            return [
+                (str(row["job_id"]), str(row["schedule_failure_code"]))
+                for row in await cursor.fetchall()
+            ]
 
     async def heartbeat_run(
         self,
@@ -1271,14 +1448,16 @@ class SQLiteJobStore:
                           job_runs.run_id,
                           job_runs.status,
                           job_runs.config_hash,
+                          job_runs.config_yaml AS run_config_yaml,
                           job_runs.started_at,
                           job_runs.heartbeat_at,
                           job_runs.completed_at,
                           job_runs.record_count,
                           job_runs.error_count,
+                          job_runs.webhook_reconciliation_failed_at,
                           jobs.project,
                           jobs.name,
-                          jobs.config_yaml,
+                          jobs.config_yaml AS parent_config_yaml,
                           jobs.status AS parent_status,
                           jobs.current_run_id,
                           webhook_deliveries.delivery_id AS existing_delivery_id,
@@ -1306,7 +1485,16 @@ class SQLiteJobStore:
                              AND jobs.current_run_id = job_runs.run_id
                          )
                      )
-                   ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at) ASC,
+                   ORDER BY
+                            CASE
+                                WHEN job_runs.webhook_reconciliation_failed_at IS NULL
+                                THEN 0 ELSE 1
+                            END ASC,
+                            COALESCE(
+                                job_runs.webhook_reconciliation_failed_at,
+                                job_runs.completed_at,
+                                job_runs.started_at
+                            ) ASC,
                             job_runs.job_id ASC,
                             job_runs.run_id ASC"""
             parameters: tuple[int, ...] = ()
@@ -1327,6 +1515,17 @@ class SQLiteJobStore:
                     "Terminal run is missing required lifecycle timestamps "
                     f"for job_id={row['job_id']!r} run_id={row['run_id']!r}"
                 )
+            stored_snapshot = cast(str | None, row["run_config_yaml"])
+            if stored_snapshot is None:
+                config_yaml = reveal_text(
+                    cast(str, row["parent_config_yaml"]),
+                    purpose=f"jobs.config_yaml:{cast(str, row['job_id'])}",
+                )
+            else:
+                config_yaml = reveal_text(
+                    stored_snapshot,
+                    purpose=f"job_runs.config_yaml:{cast(str, row['run_id'])}",
+                )
             candidates.append(
                 TerminalWebhookCandidate(
                     job_id=cast(str, row["job_id"]),
@@ -1334,12 +1533,8 @@ class SQLiteJobStore:
                     status=JobStatus(cast(str, row["status"])),
                     project=cast(str, row["project"]),
                     name=cast(str, row["name"]),
-                    config_yaml=reveal_text(
-                        cast(str, row["config_yaml"]),
-                        purpose=(
-                            f"jobs.config_yaml:{cast(str, row['job_id'])}"
-                        ),
-                    ),
+                    config_yaml=config_yaml,
+                    has_config_snapshot=stored_snapshot is not None,
                     config_hash=cast(str, row["config_hash"]),
                     started_at=started_at,
                     heartbeat_at=heartbeat_at,
@@ -1374,9 +1569,10 @@ class SQLiteJobStore:
             cursor = await db.execute(
                 """SELECT job_runs.status AS run_status,
                               job_runs.config_hash,
+                              job_runs.config_yaml AS run_config_yaml,
                               jobs.status AS parent_status,
                               jobs.current_run_id,
-                              jobs.config_yaml
+                              jobs.config_yaml AS parent_config_yaml
                        FROM job_runs
                        JOIN jobs ON jobs.job_id = job_runs.job_id
                        WHERE job_runs.job_id = ? AND job_runs.run_id = ?""",
@@ -1388,12 +1584,23 @@ class SQLiteJobStore:
                 or row["run_status"] != candidate.status.value
                 or row["run_status"] not in _TERMINAL_RUN_STATUSES
                 or row["config_hash"] != candidate.config_hash
-                or reveal_text(
-                    cast(str, row["config_yaml"]),
-                    purpose=f"jobs.config_yaml:{candidate.job_id}",
-                ) != candidate.config_yaml
                 or row["parent_status"] == JobStatus.deleting.value
             ):
+                await db.rollback()
+                return TerminalIntentReconcileResult(TerminalIntentAction.race_noop)
+
+            stored_snapshot = cast(str | None, row["run_config_yaml"])
+            if candidate.has_config_snapshot:
+                config_matches = stored_snapshot is not None and reveal_text(
+                    stored_snapshot,
+                    purpose=f"job_runs.config_yaml:{candidate.run_id}",
+                ) == candidate.config_yaml
+            else:
+                config_matches = stored_snapshot is None and reveal_text(
+                    cast(str, row["parent_config_yaml"]),
+                    purpose=f"jobs.config_yaml:{candidate.job_id}",
+                ) == candidate.config_yaml
+            if not config_matches:
                 await db.rollback()
                 return TerminalIntentReconcileResult(TerminalIntentAction.race_noop)
 
@@ -1482,6 +1689,24 @@ class SQLiteJobStore:
                 parent_converged=parent_converged,
                 delivery_id=webhook_delivery.delivery_id,
             )
+
+    async def mark_terminal_webhook_reconciliation_failure(
+        self,
+        job_id: str,
+        run_id: str,
+        failed_at: datetime,
+    ) -> bool:
+        """Persist retry order so one bad candidate cannot monopolize a batch."""
+
+        cursor = await self._execute_write(
+            """UPDATE job_runs
+               SET webhook_reconciliation_failed_at = ?
+               WHERE job_id = ? AND run_id = ?
+                 AND status IN ('complete', 'partial', 'failed')
+                 AND webhook_reconciled_at IS NULL""",
+            (fmt_dt(failed_at), job_id, run_id),
+        )
+        return cursor.rowcount == 1
 
     async def queue_run(
         self,

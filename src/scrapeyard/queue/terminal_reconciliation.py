@@ -7,6 +7,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.storage.protocols import JobStore, ResultStore
 from scrapeyard.storage.types import (
@@ -99,9 +100,9 @@ async def reconcile_terminal_webhook_intents(
 ) -> TerminalIntentReconciliationSummary:
     """Ensure every applicable terminal run has one logical durable intent.
 
-    Applicability comes from the raw YAML currently persisted with the job.
-    Its SHA-256 must match the hash captured by the run; otherwise this pass
-    fails closed because the current schema cannot reconstruct an older config.
+    Applicability comes from the immutable YAML snapshot persisted with the run.
+    Its SHA-256 must match the hash captured by the same run. Legacy rows can
+    fall back to the parent only when startup migration can prove the hash.
     Result metadata is optional enrichment and never gates intent creation.
     """
 
@@ -119,6 +120,7 @@ async def reconcile_terminal_webhook_intents(
         "metadata_missing": 0,
         "parent_converged": 0,
     }
+    first_failure: tuple[TerminalWebhookCandidate, Exception] | None = None
 
     for candidate in candidates:
         event = _event(candidate)
@@ -268,7 +270,7 @@ async def reconcile_terminal_webhook_intents(
             logger.error(
                 "Terminal webhook reconciliation failed "
                 "job_id=%s run_id=%s event=%s delivery_id=%s "
-                "terminal_status=%s recovery_action=abort_recovery_pass "
+                "terminal_status=%s recovery_action=continue_recovery_pass "
                 "error_type=%s",
                 candidate.job_id,
                 candidate.run_id,
@@ -277,10 +279,30 @@ async def reconcile_terminal_webhook_intents(
                 candidate.status.value,
                 type(exc).__name__,
             )
-            raise TerminalIntentReconciliationError(
-                "Terminal webhook intent reconciliation failed "
-                f"for job_id={candidate.job_id!r} run_id={candidate.run_id!r}"
-            ) from exc
+            if first_failure is None:
+                first_failure = candidate, exc
+            try:
+                marked = await job_store.mark_terminal_webhook_reconciliation_failure(
+                    candidate.job_id,
+                    candidate.run_id,
+                    utc_now(),
+                )
+            except Exception as mark_exc:
+                logger.error(
+                    "Terminal webhook reconciliation failure ordering could not be "
+                    "persisted job_id=%s run_id=%s error_type=%s",
+                    candidate.job_id,
+                    candidate.run_id,
+                    type(mark_exc).__name__,
+                )
+            else:
+                logger.info(
+                    "Terminal webhook reconciliation retry ordered job_id=%s "
+                    "run_id=%s persisted=%s",
+                    candidate.job_id,
+                    candidate.run_id,
+                    marked,
+                )
 
     summary = TerminalIntentReconciliationSummary(
         inspected=len(candidates),
@@ -307,4 +329,10 @@ async def reconcile_terminal_webhook_intents(
         summary.metadata_missing,
         summary.parent_converged,
     )
+    if first_failure is not None:
+        failed_candidate, failure = first_failure
+        raise TerminalIntentReconciliationError(
+            "Terminal webhook intent reconciliation failed after inspecting the full batch "
+            f"for job_id={failed_candidate.job_id!r} run_id={failed_candidate.run_id!r}"
+        ) from failure
     return summary

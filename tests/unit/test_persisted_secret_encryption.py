@@ -106,7 +106,15 @@ async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
     await init_db(str(tmp_path / "db"))
     jobs = SQLiteJobStore()
     outbox = SQLiteWebhookOutboxStore()
-    await jobs.save_job(_job())
+    job = _job().model_copy(update={"current_run_id": "run-1"})
+    await jobs.save_job(job)
+    assert await jobs.claim_run(
+        "run-1",
+        job.job_id,
+        "adhoc",
+        hashlib.sha256(job.config_yaml.encode()).hexdigest(),
+        NOW,
+    )
     await outbox.enqueue_delivery(_delivery(), now=NOW)
 
     async with get_db("jobs.db") as db:
@@ -118,11 +126,15 @@ async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
                 "SELECT url, headers_json, payload_json FROM webhook_deliveries"
             )
         ).fetchone()
-    raw_values = " ".join(str(value) for value in (*job_row, *webhook_row))
+        run_row = await (
+            await db.execute("SELECT config_yaml FROM job_runs WHERE run_id = 'run-1'")
+        ).fetchone()
+    raw_values = " ".join(str(value) for value in (*job_row, *run_row, *webhook_row))
     for sentinel in (CONFIG_SECRET, HEADER_SECRET, URL_SECRET, PAYLOAD_SECRET):
         assert sentinel not in raw_values
     assert job_row[0].startswith("syenc:v1:test-v1:")
     assert job_row[1] == hashlib.sha256(_job().config_yaml.encode()).hexdigest()
+    assert run_row[0].startswith("syenc:v1:test-v1:")
     assert all(str(value).startswith("syenc:v1:test-v1:") for value in webhook_row)
 
     restored_job = await jobs.get_job("secret-job")
@@ -168,7 +180,15 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
     await init_db(str(tmp_path / "db"))
     jobs = SQLiteJobStore()
     outbox = SQLiteWebhookOutboxStore()
-    await jobs.save_job(_job())
+    job = _job().model_copy(update={"current_run_id": "run-1"})
+    await jobs.save_job(job)
+    assert await jobs.claim_run(
+        "run-1",
+        job.job_id,
+        "adhoc",
+        hashlib.sha256(job.config_yaml.encode()).hexdigest(),
+        NOW,
+    )
     await outbox.enqueue_delivery(_delivery(), now=NOW)
     await outbox.mark_retryable_failure(
         "secret-delivery",
@@ -186,9 +206,11 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
     async with get_db("jobs.db") as db:
         row = await (
             await db.execute(
-                "SELECT jobs.config_yaml, webhook_deliveries.headers_json, "
+                "SELECT jobs.config_yaml, job_runs.config_yaml, "
+                "webhook_deliveries.headers_json, "
                 "webhook_deliveries.last_error "
-                "FROM jobs JOIN webhook_deliveries ON webhook_deliveries.job_id = jobs.job_id"
+                "FROM jobs JOIN job_runs ON job_runs.job_id = jobs.job_id "
+                "JOIN webhook_deliveries ON webhook_deliveries.job_id = jobs.job_id"
             )
         ).fetchone()
     assert all(str(value).startswith("syenc:v1:new:") for value in row)

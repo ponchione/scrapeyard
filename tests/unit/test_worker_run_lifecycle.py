@@ -45,12 +45,13 @@ async def _insert_job_row(
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """INSERT INTO jobs (job_id, project, name, status,
-               config_yaml, created_at, updated_at, schedule_cron,
+               config_yaml, config_hash, created_at, updated_at, schedule_cron,
                schedule_enabled, current_run_id, current_trigger)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job.job_id, job.project, job.name, job.status.value,
                 job.config_yaml,
+                hashlib.sha256(job.config_yaml.encode()).hexdigest(),
                 job.created_at.isoformat() if job.created_at else None,
                 job.updated_at.isoformat() if job.updated_at else None,
                 job.schedule_cron, int(job.schedule_enabled),
@@ -121,7 +122,7 @@ class TestRunCreation:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = make_job(current_run_id="run-abc")
+        job = make_job(current_run_id="run-abc", config_yaml=SIMPLE_YAML)
         job_store = SQLiteJobStore()
         await _insert_job_row(
             str(tmp_path / "db" / "jobs.db"),
@@ -181,7 +182,7 @@ class TestRunCreation:
         yaml_text = "project: test\nname: hash-check\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
         expected_hash = hashlib.sha256(yaml_text.encode()).hexdigest()
 
-        job = make_job(current_run_id="run-hash")
+        job = make_job(current_run_id="run-hash", config_yaml=yaml_text)
         job_store = SQLiteJobStore()
         await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
@@ -274,7 +275,7 @@ class TestRunFinalization:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = make_job(current_run_id="run-fin")
+        job = make_job(current_run_id="run-fin", config_yaml=SIMPLE_YAML)
         job_store = SQLiteJobStore()
         await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
@@ -340,7 +341,7 @@ class TestRunFinalization:
                 )
             await db.commit()
 
-        job = make_job(current_run_id="run-err")
+        job = make_job(current_run_id="run-err", config_yaml=SIMPLE_YAML)
         job_store = SQLiteJobStore()
         await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
@@ -386,7 +387,7 @@ class TestRunFinalization:
         db_dir = str(tmp_path / "db")
         await init_db(db_dir)
 
-        job = make_job(current_run_id="run-fail")
+        job = make_job(current_run_id="run-fail", config_yaml=SIMPLE_YAML)
         job_store = SQLiteJobStore()
         await _insert_job_row(str(tmp_path / "db" / "jobs.db"), job)
 
@@ -491,7 +492,7 @@ class TestRunCrashHandling:
             "run-crash",
             "job-1",
             "adhoc",
-            "abc",
+            hashlib.sha256(job.config_yaml.encode()).hexdigest(),
             job.created_at,
         )
         assert claimed is True

@@ -15,6 +15,9 @@ JOB_COLUMNS = (
     "current_trigger",
     "deletion_requested_at",
     "delete_results_on_delete",
+    "schedule_failure_at",
+    "schedule_failure_code",
+    "schedule_consecutive_failures",
 )
 
 JOB_RUN_COLUMNS = (
@@ -28,6 +31,7 @@ JOB_RUN_COLUMNS = (
     "completed_at",
     "record_count",
     "error_count",
+    "failure_code",
 )
 
 

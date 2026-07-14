@@ -190,6 +190,7 @@ async def test_adhoc_history_cleanup_resumes_bounded_error_phase_without_deletin
     job_store.finalize_job_deletion.assert_awaited_once_with(
         "old-job",
         delete_results=False,
+        preserve_idempotency_after=now,
     )
     result_store.delete_results.assert_not_awaited()
 

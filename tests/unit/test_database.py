@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from scrapeyard.storage.database import (
     init_db,
 )
 from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.secret_envelope import migrate_persisted_secrets
 
 
 def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
@@ -72,6 +74,7 @@ async def test_init_db_creates_tables(tmp_path):
         assert "heartbeat_at" in run_columns
         assert run_columns["heartbeat_at"][3] == 1
         assert "webhook_reconciled_at" in run_columns
+        assert "webhook_reconciliation_failed_at" in run_columns
         cursor = await db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_deliveries'"
         )
@@ -132,6 +135,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "015",
         "016",
         "017",
+        "018",
     ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [
@@ -478,6 +482,7 @@ async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_pat
 
     await init_db(str(db_dir))
     await init_db(str(db_dir))
+    await migrate_persisted_secrets()
 
     async with get_db("jobs.db") as db:
         cursor = await db.execute("PRAGMA table_info(jobs)")
@@ -507,7 +512,7 @@ async def test_init_db_upgrades_existing_job_runs_heartbeat_idempotently(tmp_pat
         "old-scheduled-run",
         "old-scheduled-job",
         "manual",
-        "hash",
+        hashlib.sha256(b"{}").hexdigest(),
         datetime(2026, 7, 10, 12, 1, tzinfo=timezone.utc),
     )
     claimed = await store.get_job("old-scheduled-job")

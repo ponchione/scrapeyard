@@ -463,7 +463,7 @@ async def test_worker_claim_racing_reconciliation_makes_recovery_a_noop(
             "run-adhoc",
             "job-adhoc",
             "adhoc",
-            "hash",
+            hashlib.sha256(CONFIG_YAML.encode()).hexdigest(),
             NOW,
         )
         assert claimed is True

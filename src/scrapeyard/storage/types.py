@@ -118,6 +118,7 @@ class DeletionFinalizationAction(str, Enum):
     not_reserved = "not_reserved"
     policy_conflict = "policy_conflict"
     pending_webhook_conflict = "pending_webhook_conflict"
+    unexpired_idempotency_conflict = "unexpired_idempotency_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +170,7 @@ class TerminalWebhookCandidate:
     project: str
     name: str
     config_yaml: str
+    has_config_snapshot: bool
     config_hash: str
     started_at: datetime
     heartbeat_at: datetime

@@ -15,7 +15,7 @@ from scrapeyard.queue.terminal_reconciliation import (
 )
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
-from scrapeyard.storage.types import ResultMetadata
+from scrapeyard.storage.types import ResultMetadata, ScheduledJobMutationAction
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
     WebhookFailureReason,
@@ -26,12 +26,17 @@ from scrapeyard.webhook.payload import deterministic_delivery_id
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 
 
-def _yaml(*, webhook_on: str | None = "complete", target: str = "example.com") -> str:
+def _yaml(
+    *,
+    webhook_on: str | None = "complete",
+    target: str = "example.com",
+    webhook_url: str = "https://hooks.example.com/recovery",
+) -> str:
     webhook = ""
     if webhook_on is not None:
         webhook = f"""
 webhook:
-  url: https://hooks.example.com/recovery
+  url: {webhook_url}
   on: [{webhook_on}]
 """
     return f"""project: test
@@ -60,7 +65,7 @@ async def _claim(
         Job(
             job_id=job_id,
             project="test",
-            name="recovery-job",
+            name=f"recovery-job-{job_id}",
             config_yaml=config_yaml,
             status=JobStatus.queued,
             updated_at=NOW,
@@ -83,11 +88,13 @@ async def _terminal_without_intent(
     status: JobStatus = JobStatus.complete,
     record_count: int = 4,
     error_count: int = 2,
+    job_id: str = "job-1",
+    run_id: str = "run-1",
 ) -> None:
-    await _claim(store, config_yaml)
+    await _claim(store, config_yaml, job_id=job_id, run_id=run_id)
     await store.finalize_owned_run(
-        "job-1",
-        "run-1",
+        job_id,
+        run_id,
         status.value,
         record_count,
         error_count,
@@ -97,7 +104,10 @@ async def _terminal_without_intent(
     # Simulate a pre-marker terminal row or a crash-recovered run whose terminal
     # webhook decision was not committed atomically.
     async with get_db("jobs.db") as db:
-        await db.execute("UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = 'run-1'")
+        await db.execute(
+            "UPDATE job_runs SET webhook_reconciled_at = NULL WHERE run_id = ?",
+            (run_id,),
+        )
         await db.commit()
 
 
@@ -312,7 +322,75 @@ async def test_stale_running_recovery_eventually_repairs_failed_intent(
     assert await SQLiteWebhookOutboxStore().get_delivery(delivery_id) is not None
 
 
-async def test_config_hash_mismatch_fails_closed_without_intent(
+async def test_stale_scheduled_run_uses_snapshot_after_future_config_update(
+    store: SQLiteJobStore,
+) -> None:
+    old_config = _yaml(webhook_on="failed")
+    new_config = _yaml(
+        webhook_on="complete",
+        target="future.example.com",
+        webhook_url="https://hooks.example.com/future",
+    )
+    await store.save_job(
+        Job(
+            job_id="job-1",
+            project="test",
+            name="recovery-job",
+            config_yaml=old_config,
+            status=JobStatus.queued,
+            updated_at=NOW,
+            schedule_cron="*/5 * * * *",
+            current_run_id="run-1",
+        )
+    )
+    assert await store.claim_run(
+        "run-1",
+        "job-1",
+        "scheduled",
+        hashlib.sha256(old_config.encode()).hexdigest(),
+        NOW,
+    )
+    assert await store.recover_stale_run(
+        "job-1",
+        "run-1",
+        NOW + timedelta(seconds=1),
+        NOW + timedelta(minutes=1),
+    )
+    updated = await store.update_scheduled_job(
+        "job-1",
+        project="test",
+        name="recovery-job",
+        config_yaml=new_config,
+        schedule_cron="*/10 * * * *",
+        schedule_timezone="UTC",
+        schedule_enabled=True,
+        updated_at=NOW + timedelta(minutes=2),
+    )
+
+    first = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+    )
+    second = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+    )
+
+    delivery_id = deterministic_delivery_id(
+        job_id="job-1",
+        run_id="run-1",
+        event="job.failed",
+    )
+    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
+    assert updated.action is ScheduledJobMutationAction.updated
+    assert first.repaired == 1
+    assert second.inspected == 0
+    assert delivery is not None
+    assert delivery.url == "https://hooks.example.com/recovery"
+    assert (await store.get_job("job-1")).config_yaml == new_config
+
+
+async def test_parent_config_change_does_not_replace_run_snapshot(
     store: SQLiteJobStore,
 ) -> None:
     await _terminal_without_intent(store, _yaml())
@@ -323,10 +401,92 @@ async def test_config_hash_mismatch_fails_closed_without_intent(
         )
         await db.commit()
 
+    summary = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+    )
+
+    assert summary.repaired == 1
+    pending = await SQLiteWebhookOutboxStore().list_pending()
+    assert len(pending) == 1
+    assert pending[0].url == "https://hooks.example.com/recovery"
+
+
+async def test_bad_candidate_does_not_block_later_candidate_in_same_pass(
+    store: SQLiteJobStore,
+) -> None:
+    await _terminal_without_intent(
+        store,
+        _yaml(),
+        job_id="job-a",
+        run_id="run-a",
+    )
+    await _terminal_without_intent(
+        store,
+        _yaml(),
+        job_id="job-b",
+        run_id="run-b",
+    )
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE job_runs SET config_yaml = 'invalid: yaml: value' "
+            "WHERE run_id = 'run-a'"
+        )
+        await db.commit()
+
     with pytest.raises(TerminalIntentReconciliationError):
         await reconcile_terminal_webhook_intents(
             job_store=store,
             result_store=_result_store(),
         )
 
-    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    repaired_id = deterministic_delivery_id(
+        job_id="job-b",
+        run_id="run-b",
+        event="job.complete",
+    )
+    assert await SQLiteWebhookOutboxStore().get_delivery(repaired_id) is not None
+
+
+async def test_bad_candidate_is_rotated_behind_later_bounded_batch(
+    store: SQLiteJobStore,
+) -> None:
+    await _terminal_without_intent(
+        store,
+        _yaml(),
+        job_id="job-a",
+        run_id="run-a",
+    )
+    await _terminal_without_intent(
+        store,
+        _yaml(),
+        job_id="job-b",
+        run_id="run-b",
+    )
+    async with get_db("jobs.db") as db:
+        await db.execute(
+            "UPDATE job_runs SET config_yaml = 'invalid: yaml: value' "
+            "WHERE run_id = 'run-a'"
+        )
+        await db.commit()
+
+    with pytest.raises(TerminalIntentReconciliationError):
+        await reconcile_terminal_webhook_intents(
+            job_store=store,
+            result_store=_result_store(),
+            batch_size=1,
+        )
+
+    summary = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+        batch_size=1,
+    )
+
+    assert summary.repaired == 1
+    repaired_id = deterministic_delivery_id(
+        job_id="job-b",
+        run_id="run-b",
+        event="job.complete",
+    )
+    assert await SQLiteWebhookOutboxStore().get_delivery(repaired_id) is not None

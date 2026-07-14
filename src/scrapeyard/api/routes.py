@@ -96,6 +96,7 @@ def _register_schedule_snapshot(scheduler: SchedulerService, job: Job) -> None:
         job.schedule_cron,
         timezone_name=job.schedule_timezone,
         enabled=job.schedule_enabled,
+        failure_code=job.schedule_failure_code,
     )
 
 

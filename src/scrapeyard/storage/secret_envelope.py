@@ -155,6 +155,12 @@ async def migrate_persisted_secrets() -> None:
                     "SELECT job_id, config_yaml, config_hash FROM jobs ORDER BY job_id"
                 )
             ).fetchall()
+            run_rows = await (
+                await db.execute(
+                    """SELECT run_id, job_id, config_yaml, config_hash
+                       FROM job_runs ORDER BY run_id"""
+                )
+            ).fetchall()
             webhook_rows = await (
                 await db.execute(
                     """SELECT delivery_id, url, headers_json, payload_json,
@@ -164,7 +170,7 @@ async def migrate_persisted_secrets() -> None:
             ).fetchall()
             protected_state_exists = bool(job_rows) or any(
                 row[5] is None for row in webhook_rows
-            )
+            ) or any(row[2] is not None for row in run_rows)
             if keyring is None:
                 if protected_state_exists:
                     raise SecretKeyConfigurationError(
@@ -172,6 +178,7 @@ async def migrate_persisted_secrets() -> None:
                     )
                 return
 
+            job_plaintexts: dict[str, str] = {}
             for row in job_rows:
                 job_id = str(row[0])
                 stored = str(row[1])
@@ -179,6 +186,7 @@ async def migrate_persisted_secrets() -> None:
                 key_id = envelope_key_id(stored)
                 plaintext = keyring.reveal(stored, purpose=purpose)
                 expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+                job_plaintexts[job_id] = plaintext
                 legacy_migrated |= key_id is None
                 protected = (
                     stored
@@ -190,6 +198,37 @@ async def migrate_persisted_secrets() -> None:
                         "UPDATE jobs SET config_yaml = ?, config_hash = ? "
                         "WHERE job_id = ?",
                         (protected, expected_hash, job_id),
+                    )
+
+            for row in run_rows:
+                run_id = str(row[0])
+                job_id = str(row[1])
+                stored_value = row[2]
+                purpose = f"job_runs.config_yaml:{run_id}"
+                if stored_value is None:
+                    run_plaintext = job_plaintexts.get(job_id)
+                    if (
+                        run_plaintext is None
+                        or hashlib.sha256(run_plaintext.encode("utf-8")).hexdigest()
+                        != str(row[3])
+                    ):
+                        continue
+                    key_id = None
+                    stored = ""
+                else:
+                    stored = str(stored_value)
+                    key_id = envelope_key_id(stored)
+                    run_plaintext = keyring.reveal(stored, purpose=purpose)
+                    legacy_migrated |= key_id is None
+                protected = (
+                    stored
+                    if key_id == keyring.active_key_id
+                    else keyring.protect(run_plaintext, purpose=purpose)
+                )
+                if protected != stored:
+                    await db.execute(
+                        "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
+                        (protected, run_id),
                     )
 
             for row in webhook_rows:
