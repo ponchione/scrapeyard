@@ -180,6 +180,12 @@ METRICS_REFRESH_FAILURES = Counter(
     ("subsystem",),
     registry=REGISTRY,
 )
+RECONCILIATION_PASSES = Counter(
+    "scrapeyard_reconciliation_passes_total",
+    "Periodic durability reconciliation passes by fixed service and outcome.",
+    ("service", "status"),
+    registry=REGISTRY,
+)
 
 _active_targets = 0
 
@@ -204,9 +210,19 @@ for _phase in (
     CLEANUP_HISTORY_FAILURES.labels(_phase)
 for _status in ("pending", "delivered", "failed"):
     WEBHOOK_BACKLOG.labels(_status).set(0)
-for _task in ("worker", "scheduler", "cleanup", "webhook"):
+for _task in (
+    "worker",
+    "scheduler",
+    "cleanup",
+    "webhook",
+    "queued_reconciliation",
+    "running_reconciliation",
+):
     BACKGROUND_TASK.labels(_task).set(0)
     LAST_SUCCESS.labels(_task).set(0)
+for _service in ("queued_reconciliation", "running_reconciliation"):
+    for _outcome in ("success", "failure"):
+        RECONCILIATION_PASSES.labels(_service, _outcome)
 
 
 def render_metrics() -> bytes:

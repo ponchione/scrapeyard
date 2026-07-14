@@ -38,10 +38,12 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
   work amplification and output pressure.
 - Durable webhook status counts and oldest-pending age expose retry backlog.
 - Cleanup pass/item/removed-byte totals, artifact finding counts, durable
-  history phase failures, and scheduler/cleanup/webhook last-success timestamps
-  expose stalled maintenance and retained-data integrity.
+  history phase failures, and scheduler/cleanup/webhook/reconciliation
+  last-success timestamps expose stalled maintenance and retained-data integrity.
 - Background-task gauges report the embedded worker, scheduler, cleanup loop,
-  and webhook dispatcher. Result-filesystem free bytes expose disk pressure.
+  webhook dispatcher, queued-delivery reconciler, and stale-running reconciler.
+  Reconciliation pass counters distinguish success from failure. Result-filesystem
+  free bytes expose disk pressure.
 
 Raw URL, project, job ID, run ID, delivery ID, caller, and credential labels are
 never emitted. This keeps time-series cardinality fixed as tenants and jobs
@@ -52,8 +54,12 @@ grow.
 `/health/ready` applies an explicit short timeout to Redis, queue, every SQLite
 database (`jobs.db`, `errors.db`, and `results_meta.db`), disk, and a one-byte
 atomic create/read/remove operation in the result directory. It also fails when
-the worker runner, APScheduler, cleanup task, or webhook coordinator/worker set
-has stopped or failed. Exhausted worker capacity returns a degraded `200`;
+the worker runner, APScheduler, cleanup task, webhook coordinator/worker set, or
+either interval-aware reconciliation service has stopped or gone too long without
+a successful pass. Optional project summaries use the same configured timeout,
+retain the last successful cache on refresh failure, and make readiness return
+`503` with an explicit detail when a requested refresh fails. Exhausted worker
+capacity returns a degraded `200`;
 insufficient free disk or any other failed required dependency/background task
 returns `503`. Liveness never performs these operations.
 
@@ -86,6 +92,9 @@ Tune the bounded probes with:
   bounded `phase` label identifies whether selection, cross-database error
   deletion, or final jobs/run compaction needs investigation. Persisted
   deletion reservations are retried automatically.
+- Alert on increases in
+  `scrapeyard_reconciliation_passes_total{status="failure"}` and on queued or
+  running reconciliation last-success age beyond two configured intervals.
 - Track run/target failure ratios, retry amplification, API tail latency, output
   bytes, and cleanup failures as dashboard trends rather than per-ID series.
 

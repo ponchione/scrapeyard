@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -29,12 +29,16 @@ from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 @pytest.mark.asyncio
 async def test_health_cache_project_summary_classifies_statuses():
-    fake_store = MagicMock(summary_by_project=AsyncMock(return_value=[
-        ("healthy-project", "complete", 2),
-        ("degraded-project", "running", 1),
-        ("degraded-project", "partial", 1),
-        ("failing-project", "failed", 1),
-    ]))
+    fake_store = MagicMock(
+        summary_by_project=AsyncMock(
+            return_value=[
+                ("healthy-project", "complete", 2),
+                ("degraded-project", "running", 1),
+                ("degraded-project", "partial", 1),
+                ("failing-project", "failed", 1),
+            ]
+        )
+    )
     cache = main_module.HealthCache(lambda: fake_store, cache_ttl_seconds=60)
 
     summary = await cache.project_summary()
@@ -58,15 +62,15 @@ async def test_health_cache_uses_cached_summary_until_ttl_expires():
 
 
 @pytest.mark.asyncio
-async def test_health_cache_returns_empty_summary_when_store_unavailable():
+async def test_health_cache_surfaces_store_unavailability():
     cache = main_module.HealthCache(
         lambda: (_ for _ in ()).throw(ValueError("not ready")),
         cache_ttl_seconds=60,
     )
 
-    summary = await cache.project_summary()
-
-    assert summary == {}
+    with pytest.raises(ValueError, match="not ready"):
+        await cache.project_summary()
+    assert cache.cached_project_summary == {}
 
 
 @pytest.mark.asyncio
@@ -86,6 +90,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         workers_queued_reconciliation_interval_seconds=60,
         workers_queued_reconciliation_batch_size=100,
         workers_running_heartbeat_timeout_seconds=600,
+        workers_running_reconciliation_interval_seconds=60,
+        workers_running_reconciliation_batch_size=100,
         storage_cleanup_interval_seconds=21600,
     )
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
@@ -104,6 +110,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     pool = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), redis=object())
     scheduler = SimpleNamespace(start=AsyncMock(), shutdown=MagicMock())
     webhook_dispatcher = SimpleNamespace(startup=AsyncMock())
+
     class _CleanupTask:
         def __init__(self) -> None:
             self.cancel = MagicMock()
@@ -113,10 +120,12 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
             async def _wait():
                 self.awaited = True
                 raise asyncio.CancelledError
+
             return _wait().__await__()
 
     cleanup_task = _CleanupTask()
     queued_reconciliation_task = _CleanupTask()
+    running_reconciliation_task = _CleanupTask()
 
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     monkeypatch.setattr(main_module, "utc_now", lambda: now)
@@ -159,6 +168,11 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         "start_queued_reconciliation_loop",
         lambda **_kwargs: queued_reconciliation_task,
     )
+    monkeypatch.setattr(
+        main_module,
+        "start_running_reconciliation_loop",
+        lambda **_kwargs: running_reconciliation_task,
+    )
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
 
@@ -172,6 +186,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         assert app.state.scheduler is scheduler
         assert app.state.cleanup_task is cleanup_task
         assert app.state.queued_reconciliation_task is queued_reconciliation_task
+        assert app.state.running_reconciliation_task is running_reconciliation_task
         assert (tmp_path / "results").is_dir()
         assert (tmp_path / "adaptive").is_dir()
         assert not (tmp_path / "browser-debug").exists()
@@ -182,6 +197,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     job_store.recover_stale_running_jobs.assert_awaited_once_with(
         now - timedelta(seconds=600),
         now,
+        limit=100,
     )
     webhook_dispatcher.startup.assert_awaited_once()
     terminal_reconciliation.assert_awaited_once_with(
@@ -194,10 +210,12 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         job_store=job_store,
         worker_pool=pool,
         queued_claim_timeout_seconds=300,
+        batch_size=100,
     )
     scheduler.start.assert_awaited_once()
     cleanup_task.cancel.assert_called_once()
     queued_reconciliation_task.cancel.assert_called_once()
+    running_reconciliation_task.cancel.assert_called_once()
     scheduler.shutdown.assert_called_once()
     pool.stop.assert_awaited_once()
     worker_timeout = pool.stop.await_args.kwargs["timeout"]
@@ -258,6 +276,7 @@ async def test_runtime_keyring_failure_returns_sanitized_service_unavailable():
     assert response.status_code == 503
     assert b"Service encryption configuration is unavailable" in response.body
     assert b"sensitive key detail" not in response.body
+
 
 @pytest.mark.asyncio
 async def test_shutdown_attempts_every_phase_after_independent_failures(monkeypatch):
@@ -571,6 +590,7 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
             "job_store": job_store,
             "worker_pool": pool,
             "queued_claim_timeout_seconds": 300,
+            "batch_size": 100,
         }
         events.append("queued_reconciled")
         return QueuedReconciliationSummary()
@@ -596,6 +616,9 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
             workers_queued_claim_timeout_seconds=300,
             workers_queued_reconciliation_interval_seconds=60,
             workers_queued_reconciliation_batch_size=100,
+            workers_running_heartbeat_timeout_seconds=600,
+            workers_running_reconciliation_interval_seconds=60,
+            workers_running_reconciliation_batch_size=100,
             storage_cleanup_interval_seconds=21600,
         ),
     )
@@ -611,6 +634,12 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         main_module,
         "start_queued_reconciliation_loop",
         reconciliation_loop,
+    )
+    running_reconciliation_loop = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        main_module,
+        "start_running_reconciliation_loop",
+        running_reconciliation_loop,
     )
     monkeypatch.setattr(main_module, "start_cleanup_loop", MagicMock())
 
@@ -629,6 +658,16 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         queued_claim_timeout_seconds=300,
         interval_seconds=60,
         batch_size=100,
+        monitor=ANY,
+    )
+    running_reconciliation_loop.assert_called_once_with(
+        job_store=job_store,
+        result_store="result-store",
+        heartbeat_timeout_seconds=600,
+        interval_seconds=60,
+        batch_size=100,
+        webhook_notifier=services.webhook_dispatcher,
+        monitor=ANY,
     )
 
 
@@ -649,7 +688,14 @@ async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "get_settings",
-        lambda: SimpleNamespace(workers_queued_claim_timeout_seconds=300),
+        lambda: SimpleNamespace(
+            workers_queued_claim_timeout_seconds=300,
+            workers_queued_reconciliation_interval_seconds=60,
+            workers_queued_reconciliation_batch_size=100,
+            workers_running_heartbeat_timeout_seconds=600,
+            workers_running_reconciliation_interval_seconds=60,
+            workers_running_reconciliation_batch_size=100,
+        ),
     )
     monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
     monkeypatch.setattr(
@@ -715,12 +761,14 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
         active_tasks=2,
         max_browsers=1,
         active_browsers=1,
-        queue_depths=AsyncMock(
-            return_value={"high": 0, "normal": 0, "low": 0}
-        ),
+        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
     )
     monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
-    monkeypatch.setattr(main_module._health, "project_summary", AsyncMock(return_value={"proj": {"status": "healthy"}}))
+    monkeypatch.setattr(
+        main_module._health,
+        "project_summary",
+        AsyncMock(return_value={"proj": {"status": "healthy"}}),
+    )
     monkeypatch.setattr(main_module._health, "start_time", 1.0)
 
     async def _ok_async(*_a, **_kw):
@@ -736,12 +784,10 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_background_probes",
-        lambda: {
-            name: ProbeResult(True)
-            for name in ("worker", "scheduler", "cleanup", "webhook")
-        },
+        lambda: {name: ProbeResult(True) for name in ("worker", "scheduler", "cleanup", "webhook")},
     )
     import scrapeyard.runtime.health as runtime_health
+
     monkeypatch.setattr(runtime_health.time, "monotonic", lambda: 13.3)
 
     response = await main_module.health()
@@ -794,16 +840,72 @@ async def test_health_filters_project_summary_for_scoped_monitor(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_background_probes",
-        lambda: {
-            name: ProbeResult(True)
-            for name in ("worker", "scheduler", "cleanup", "webhook")
-        },
+        lambda: {name: ProbeResult(True) for name in ("worker", "scheduler", "cleanup", "webhook")},
     )
 
     response = await main_module.health(allowed_projects=frozenset({"alpha"}))
 
     assert response.status_code == 200
     assert json.loads(response.body)["projects"] == {"alpha": summaries["alpha"]}
+
+
+@pytest.mark.asyncio
+async def test_health_project_summary_timeout_is_bounded_and_unhealthy(monkeypatch):
+    import json
+
+    from scrapeyard.runtime.health import ProbeResult
+
+    settings = SimpleNamespace(
+        health_include_projects=True,
+        health_probe_timeout_seconds=0.01,
+        storage_results_dir="/tmp/results",
+        health_disk_free_min_mb=1,
+    )
+    pool = SimpleNamespace(
+        max_concurrent=2,
+        active_tasks=0,
+        max_browsers=1,
+        active_browsers=0,
+        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
+    )
+
+    async def never_completes():
+        await asyncio.Event().wait()
+
+    health_cache = main_module.HealthCache(
+        lambda: SimpleNamespace(summary_by_project=never_completes),
+    )
+    health_cache._projects_cache = {"stale": {}}
+
+    async def _ok_async(*_args, **_kwargs):
+        return ProbeResult(True)
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    monkeypatch.setattr(main_module, "_health", health_cache)
+    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
+    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
+    monkeypatch.setattr(
+        main_module,
+        "probe_result_storage",
+        lambda *_args: ProbeResult(True),
+    )
+    monkeypatch.setattr(main_module, "probe_disk", lambda *_args: ProbeResult(True))
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        lambda: {"worker": ProbeResult(True)},
+    )
+
+    response = await asyncio.wait_for(main_module.health(), timeout=0.5)
+
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload["projects"] == {"stale": {}}
+    assert payload["dependencies"]["project_summary"] == {
+        "ok": False,
+        "detail": "project summary probe timed out after 0.01s",
+    }
 
 
 @pytest.mark.asyncio

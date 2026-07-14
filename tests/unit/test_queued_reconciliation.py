@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -98,18 +99,12 @@ async def test_stale_queued_query_ignores_fresh_and_unowned_rows(tmp_path) -> No
     )
     await _save_stale_job(store, job_id="unowned", run_id="run-temporary")
     async with get_db("jobs.db") as db:
-        await db.execute(
-            "UPDATE jobs SET current_run_id = NULL WHERE job_id = 'unowned'"
-        )
+        await db.execute("UPDATE jobs SET current_run_id = NULL WHERE job_id = 'unowned'")
         await db.commit()
 
-    rows = await store.list_stale_queued_jobs(
-        NOW - timedelta(seconds=TIMEOUT)
-    )
+    rows = await store.list_stale_queued_jobs(NOW - timedelta(seconds=TIMEOUT))
 
-    assert [(row.job_id, row.run_id) for row in rows] == [
-        ("stale", "run-stale")
-    ]
+    assert [(row.job_id, row.run_id) for row in rows] == [("stale", "run-stale")]
 
 
 async def test_stale_queued_query_returns_typed_context_in_deterministic_order(
@@ -137,9 +132,7 @@ async def test_stale_queued_query_returns_typed_context_in_deterministic_order(
         queued_at=NOW - timedelta(minutes=6),
     )
 
-    rows = await store.list_stale_queued_jobs(
-        NOW - timedelta(seconds=TIMEOUT)
-    )
+    rows = await store.list_stale_queued_jobs(NOW - timedelta(seconds=TIMEOUT))
 
     assert [row.job_id for row in rows] == ["job-a", "job-b", "job-c"]
     assert rows[0].trigger == "adhoc"
@@ -195,6 +188,58 @@ async def test_periodic_reconciliation_uses_bounded_batches(monkeypatch) -> None
         "batch_offset": 0,
     }
     assert reconcile.await_args_list[1].kwargs["batch_offset"] == 17
+
+
+async def test_periodic_reconciliation_eventually_drains_backlog_after_bounded_startup(
+    monkeypatch,
+) -> None:
+    remaining = [
+        replace(_stale_job(), job_id=f"job-{index}", run_id=f"run-{index}") for index in range(5)
+    ]
+    drained = asyncio.Event()
+
+    async def list_stale(_cutoff, *, limit, offset):
+        assert limit == 2
+        if not remaining:
+            drained.set()
+            return []
+        return list(remaining[offset : offset + limit])
+
+    async def reconcile_one(job, **_kwargs):
+        remaining.remove(job)
+        return QueuedReconciliationSummary(inspected=1, recovered=1)
+
+    store = MagicMock()
+    store.list_stale_queued_jobs = AsyncMock(side_effect=list_stale)
+    monkeypatch.setattr(
+        "scrapeyard.queue.reconciliation.reconcile_stale_queued_job",
+        reconcile_one,
+    )
+
+    startup = await reconcile_stale_queued_jobs(
+        job_store=store,
+        worker_pool=MagicMock(),
+        queued_claim_timeout_seconds=TIMEOUT,
+        batch_size=2,
+    )
+    assert startup.inspected == 2
+    assert len(remaining) == 3
+
+    task = start_queued_reconciliation_loop(
+        job_store=store,
+        worker_pool=MagicMock(),
+        queued_claim_timeout_seconds=TIMEOUT,
+        interval_seconds=0.001,
+        batch_size=2,
+    )
+    try:
+        await asyncio.wait_for(drained.wait(), timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert remaining == []
+    assert all(call.kwargs["limit"] == 2 for call in store.list_stale_queued_jobs.await_args_list)
 
 
 @pytest.mark.parametrize(

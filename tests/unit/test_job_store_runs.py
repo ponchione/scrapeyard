@@ -49,8 +49,16 @@ async def _insert_run(
             "started_at, heartbeat_at, completed_at, record_count, error_count) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                run_id, job_id, status, trigger, config_hash,
-                started_at, heartbeat_at, completed_at, record_count, error_count,
+                run_id,
+                job_id,
+                status,
+                trigger,
+                config_hash,
+                started_at,
+                heartbeat_at,
+                completed_at,
+                record_count,
+                error_count,
             ),
         )
         await db.commit()
@@ -96,7 +104,11 @@ async def test_get_job_runs_respects_limit(store):
 
     for i in range(5):
         await _insert_run(
-            f"r-{i}", "j-1", "complete", "adhoc", "aaa",
+            f"r-{i}",
+            "j-1",
+            "complete",
+            "adhoc",
+            "aaa",
             f"2026-03-01T{10 + i:02d}:00:00",
         )
 
@@ -110,8 +122,15 @@ async def test_get_job_runs_respects_limit(store):
 async def test_get_job_runs_returns_job_run_objects(store):
     await store.save_job(_make_job())
     await _insert_run(
-        "r-1", "j-1", "complete", "adhoc", "abc123",
-        "2026-03-10T09:00:00", "2026-03-10T09:05:00", 42, 3,
+        "r-1",
+        "j-1",
+        "complete",
+        "adhoc",
+        "abc123",
+        "2026-03-10T09:00:00",
+        "2026-03-10T09:05:00",
+        42,
+        3,
     )
 
     runs = await store.get_job_runs("j-1")
@@ -306,12 +325,8 @@ async def test_recover_stale_running_jobs_fails_stale_run_and_matching_job(store
             current_run_id="r-fresh",
         )
     )
-    await _insert_run(
-        "r-stale", "j-stale", "running", "scheduled", "aaa", "2026-03-10T10:00:00"
-    )
-    await _insert_run(
-        "r-fresh", "j-fresh", "running", "scheduled", "bbb", "2026-03-10T12:30:00"
-    )
+    await _insert_run("r-stale", "j-stale", "running", "scheduled", "aaa", "2026-03-10T10:00:00")
+    await _insert_run("r-fresh", "j-fresh", "running", "scheduled", "bbb", "2026-03-10T12:30:00")
 
     recovered = await store.recover_stale_running_jobs(cutoff, recovered_at)
 
@@ -328,6 +343,39 @@ async def test_recover_stale_running_jobs_fails_stale_run_and_matching_job(store
     assert stale_run.status == JobStatus.failed
     assert stale_run.completed_at == recovered_at
     assert fresh_run.status == JobStatus.running
+
+
+async def test_recover_stale_running_jobs_applies_deterministic_batch_limit(store):
+    cutoff = datetime(2026, 3, 10, 12, 0, 0)
+    recovered_at = datetime(2026, 3, 10, 12, 5, 0)
+    for index in range(3):
+        job_id = f"j-stale-{index}"
+        run_id = f"r-stale-{index}"
+        heartbeat = f"2026-03-10T{index + 8:02d}:00:00"
+        await store.save_job(
+            _make_job(
+                job_id=job_id,
+                name=job_id,
+                status=JobStatus.running,
+                updated_at=datetime(2026, 3, 10, index + 8, 0, 0),
+                current_run_id=run_id,
+            )
+        )
+        await _insert_run(
+            run_id,
+            job_id,
+            "running",
+            "adhoc",
+            f"hash-{index}",
+            heartbeat,
+            heartbeat_at=heartbeat,
+        )
+
+    first = await store.recover_stale_running_jobs(cutoff, recovered_at, limit=2)
+    second = await store.recover_stale_running_jobs(cutoff, recovered_at, limit=2)
+
+    assert [item.job_id for item in first] == ["j-stale-0", "j-stale-1"]
+    assert [item.job_id for item in second] == ["j-stale-2"]
 
 
 async def test_recovery_uses_run_heartbeat_not_parent_job_timestamp(store):

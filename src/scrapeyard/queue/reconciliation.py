@@ -11,6 +11,7 @@ from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.pool import QueueDeliveryState, WorkerPool
+from scrapeyard.runtime.background import BackgroundLoopMonitor
 from scrapeyard.storage.protocols import JobStore
 from scrapeyard.storage.types import StaleQueuedJob
 
@@ -361,8 +362,14 @@ def start_queued_reconciliation_loop(
     queued_claim_timeout_seconds: int,
     interval_seconds: float,
     batch_size: int,
+    monitor: BackgroundLoopMonitor | None = None,
 ) -> asyncio.Task[None]:
     """Periodically repair a bounded batch of stale accepted deliveries."""
+
+    loop_monitor = monitor or BackgroundLoopMonitor(
+        "queued_reconciliation",
+        interval_seconds=interval_seconds,
+    )
 
     async def _loop() -> None:
         batch_offset = 0
@@ -381,12 +388,16 @@ def start_queued_reconciliation_loop(
                     if summary.inspected == batch_size
                     else 0
                 )
-            except Exception:
+                loop_monitor.record_success()
+            except Exception as exc:
+                loop_monitor.record_failure(exc)
                 logger.exception(
                     "Periodic queued reconciliation failed; retrying next interval"
                 )
 
-    return asyncio.create_task(
+    task = asyncio.create_task(
         _loop(),
         name="scrapeyard-queued-reconciliation",
     )
+    loop_monitor.bind(task)
+    return task
