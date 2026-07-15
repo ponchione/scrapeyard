@@ -59,12 +59,21 @@ def write_json_file(path: str | Path, data: Any) -> None:
 async def cleanup_safe_to_thread(func: Callable[..., T], *args: Any) -> T:
     """Finish a blocking filesystem operation before propagating cancellation."""
     task = asyncio.create_task(asyncio.to_thread(func, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        with suppress(Exception):
-            await task
-        raise
+    cancellation_requested = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            continue
+        except Exception:
+            if cancellation_requested:
+                raise asyncio.CancelledError from None
+            raise
+    if cancellation_requested:
+        raise asyncio.CancelledError
+    return result
 
 
 def read_json_file(path: str | Path) -> Any:

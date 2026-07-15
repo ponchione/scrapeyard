@@ -7,6 +7,7 @@ import gzip
 from contextlib import suppress
 
 import pytest
+import httpx
 from scrapling import Fetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
@@ -185,3 +186,83 @@ async def test_slow_continuous_body_closes_socket_before_deadline_error_returns(
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
     assert chunks_sent == sent_at_return
     assert chunks_sent < 100
+
+
+async def test_cookie_jar_preserves_redirect_and_rfc_scope_without_conflicts() -> None:
+    observed: list[tuple[str, str | None]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            lines = request.decode("latin-1").split("\r\n")
+            path = lines[0].split()[1]
+            headers = {
+                name.lower(): value.strip()
+                for line in lines[1:]
+                if ":" in line
+                for name, value in [line.split(":", 1)]
+            }
+            observed.append((path, headers.get("cookie")))
+            response_headers = b""
+            if path == "/start":
+                response_headers = (
+                    b"Set-Cookie: gate=ok; Path=/\r\n"
+                    b"Set-Cookie: session=root; Path=/\r\n"
+                    b"Set-Cookie: session=area; Path=/area\r\n"
+                    b"Set-Cookie: expired=gone; Max-Age=0; Path=/\r\n"
+                    b"Set-Cookie: secure=secret; Secure; Path=/\r\n"
+                    b"Set-Cookie: scoped=yes; Domain=origin.example; Path=/\r\n"
+                )
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                + response_headers
+                + b"Content-Length: 2\r\n\r\nok"
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+
+    server, base_url = await _request_url(handler)
+    connect_base = base_url.rstrip("/")
+    jar = httpx.Cookies()
+    kwargs = {"timeout": 2, "stealthy_headers": False, "cookie_jar": jar}
+    try:
+        first = await fetch_streaming_response(
+            Fetcher,
+            f"{connect_base}/start",
+            {**kwargs, "cookie_url": "http://origin.example/start"},
+            budget=None,
+        )
+        await fetch_streaming_response(
+            Fetcher,
+            f"{connect_base}/area/final",
+            {**kwargs, "cookie_url": "http://origin.example/area/final"},
+            budget=None,
+        )
+        await fetch_streaming_response(
+            Fetcher,
+            f"{connect_base}/other",
+            {**kwargs, "cookie_url": "http://other.example/other"},
+            budget=None,
+        )
+        await fetch_streaming_response(
+            Fetcher,
+            f"{connect_base}/subdomain",
+            {**kwargs, "cookie_url": "http://sub.origin.example/subdomain"},
+            budget=None,
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert first.cookies["session"] in {"root", "area"}
+    same_origin = observed[1][1] or ""
+    assert "gate=ok" in same_origin
+    assert "session=root" in same_origin
+    assert "session=area" in same_origin
+    assert "expired=gone" not in same_origin
+    assert "secure=secret" not in same_origin
+    assert observed[2][1] is None
+    assert observed[3][1] == "scoped=yes"

@@ -16,7 +16,7 @@ from typing import Any, Protocol
 import httpx
 
 from scrapeyard.common.time import utc_now
-from scrapeyard.common.async_tools import MonotonicDeadline
+from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
     URLResolutionError,
@@ -131,7 +131,9 @@ class HttpWebhookDispatcher:
         if client_cache_idle_ttl_seconds <= 0:
             raise ValueError("client_cache_idle_ttl_seconds must be positive")
 
-        self._client_factory = client_factory or httpx.AsyncClient
+        self._client_factory = client_factory or (
+            lambda: httpx.AsyncClient(trust_env=False)
+        )
         self._clients: dict[str, _ClientCacheEntry] = {}
         self._client_lock = asyncio.Lock()
         self._client_condition = asyncio.Condition(self._client_lock)
@@ -153,6 +155,7 @@ class HttpWebhookDispatcher:
         self._coordinator_task: asyncio.Task[None] | None = None
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._tasks: set[asyncio.Task[None]] = set()
+        self._client_close_task: asyncio.Task[None] | None = None
         self._scheduled_ids: set[str] = set()
         self._active_ids: set[str] = set()
 
@@ -176,6 +179,17 @@ class HttpWebhookDispatcher:
     @property
     def client_cache_size(self) -> int:
         return len(self._clients)
+
+    @property
+    def shutdown_pending(self) -> bool:
+        """Whether shutdown still owns tasks that may use runtime resources."""
+
+        if not self._stopping:
+            return False
+        close_task = self._client_close_task
+        return any(not task.done() for task in self._tasks) or (
+            close_task is not None and not close_task.done()
+        )
 
     @property
     def background_ok(self) -> bool:
@@ -214,7 +228,15 @@ class HttpWebhookDispatcher:
         """Start one coordinator and a fixed number of durable workers."""
 
         async with self._startup_lock:
-            if self._started or self._outbox_store is None:
+            if self._started:
+                if self.shutdown_pending:
+                    raise RuntimeError(
+                        "Webhook dispatcher cannot start while tasks from a previous "
+                        "shutdown are still running"
+                    )
+                self._accepting_tasks = True
+                return
+            if self._outbox_store is None:
                 self._accepting_tasks = True
                 return
             lingering = [task for task in self._tasks if not task.done()]
@@ -540,9 +562,31 @@ class HttpWebhookDispatcher:
             ),
         )
 
-        self._started = False
+        live_tasks = {task for task in self._tasks if not task.done()}
+        self._tasks.intersection_update(live_tasks)
+        self._worker_tasks[:] = [task for task in self._worker_tasks if not task.done()]
+        if self._coordinator_task is not None and self._coordinator_task.done():
+            self._coordinator_task = None
+        if live_tasks:
+            if "coordinator" not in unresolved_phases and (
+                self._coordinator_task is not None
+                and not self._coordinator_task.done()
+            ):
+                unresolved_phases.append("coordinator")
+            if "workers" not in unresolved_phases and self._worker_tasks:
+                unresolved_phases.append("workers")
+            raise asyncio.TimeoutError(
+                "Webhook shutdown deadline exceeded in phase(s): "
+                + ", ".join(unresolved_phases)
+            )
 
-        async def _close_client() -> None:
+        self._started = False
+        self._worker_tasks.clear()
+        self._scheduled_ids.clear()
+        self._active_ids.clear()
+        self._queue = None
+
+        async def _close_clients() -> None:
             async with self._client_condition:
                 entries = list(self._clients.values())
                 self._clients.clear()
@@ -551,24 +595,39 @@ class HttpWebhookDispatcher:
                 if entry.expiry_task is not None:
                     entry.expiry_task.cancel()
             clients = list({id(entry.client): entry.client for entry in entries}.values())
+            first_failure: Exception | None = None
             for client in clients:
-                await client.aclose()
+                while True:
+                    try:
+                        await client.aclose()
+                        break
+                    except asyncio.CancelledError:
+                        # Closing is idempotent.  Keep this owned task visible
+                        # until the client acknowledges closure, even after the
+                        # outer hard deadline requests cancellation.
+                        continue
+                    except Exception as exc:
+                        if first_failure is None:
+                            first_failure = exc
+                        break
+            if first_failure is not None:
+                raise first_failure
+
+        if self._client_close_task is None:
+            self._client_close_task = asyncio.create_task(
+                _close_clients(),
+                name="scrapeyard-webhook-client-close",
+            )
 
         try:
-            await deadline.run(_close_client())
+            await deadline.run(self._client_close_task)
+        except AwaitableCancelled:
+            pass
         except asyncio.TimeoutError:
             unresolved_phases.append("http_client")
-
-        live_tasks = {task for task in self._tasks if not task.done()}
-        self._tasks.intersection_update(live_tasks)
-        self._worker_tasks[:] = [task for task in self._worker_tasks if not task.done()]
-        if self._coordinator_task is not None and self._coordinator_task.done():
-            self._coordinator_task = None
-        if not live_tasks:
-            self._worker_tasks.clear()
-            self._scheduled_ids.clear()
-            self._active_ids.clear()
-            self._queue = None
+        finally:
+            if self._client_close_task.done():
+                self._client_close_task = None
 
         if unresolved_phases:
             raise asyncio.TimeoutError(

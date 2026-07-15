@@ -8,7 +8,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from arq.constants import abort_jobs_ss
+from arq.constants import abort_jobs_ss, job_key_prefix
 from arq.connections import RedisSettings
 
 from scrapeyard.api.dependencies import (
@@ -81,6 +81,29 @@ target:
 """
 
 
+def _secret_scrape_yaml() -> str:
+    return """
+project: live-redis
+name: secret-payload
+execution:
+  mode: async
+target:
+  url: https://example.com/?token=target-query-sentinel
+  fetcher: dynamic
+  proxy:
+    url: http://user:proxy-password-sentinel@93.184.216.34:8080
+  browser:
+    extra_headers:
+      Authorization: Bearer browser-authorization-sentinel
+  selectors:
+    title: h1
+webhook:
+  url: https://hooks.example.com/?token=webhook-query-sentinel
+  headers:
+    Authorization: Bearer webhook-header-sentinel
+"""
+
+
 def _scheduled_scrape_yaml(*, enabled: bool = False) -> str:
     return f"""
 project: live-redis
@@ -146,6 +169,46 @@ async def test_concurrent_idempotent_submissions_enqueue_one_real_redis_run(
         assert len({payload["run_id"] for payload in payloads}) == 1
         assert enqueue_calls == 1
         assert await pool.queue_depths() == {"high": 0, "normal": 1, "low": 0}
+    finally:
+        pool._worker.allow_pick_jobs = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_append_only_redis_payload_contains_identifiers_not_config_secrets(
+    client,
+):
+    pool = get_worker_pool()
+    assert pool._worker is not None
+    assert pool.redis is not None
+    pool._worker.allow_pick_jobs = False
+    try:
+        response = await client.post(
+            "/scrape",
+            content=_secret_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert response.status_code == 202
+        body = response.json()
+        payload = await pool.redis.get(f"{job_key_prefix}{body['run_id']}")
+        assert payload is not None
+        assert body["job_id"].encode() in payload
+        assert body["run_id"].encode() in payload
+        for sentinel in (
+            b"target-query-sentinel",
+            b"proxy-password-sentinel",
+            b"browser-authorization-sentinel",
+            b"webhook-query-sentinel",
+            b"webhook-header-sentinel",
+        ):
+            assert sentinel not in payload
+
+        append_only = await pool.redis.config_get("appendonly")
+        append_only_value = append_only.get(
+            "appendonly",
+            append_only.get(b"appendonly"),
+        )
+        assert append_only_value in {"yes", b"yes"}
     finally:
         pool._worker.allow_pick_jobs = True
 

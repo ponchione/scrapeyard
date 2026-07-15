@@ -18,15 +18,19 @@ class BackgroundLoopMonitor:
         *,
         interval_seconds: float,
         grace_cycles: float = 2.0,
+        failure_grace_count: int = 1,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
         if grace_cycles <= 1:
             raise ValueError("grace_cycles must allow at least one failed cycle")
+        if failure_grace_count < 0:
+            raise ValueError("failure_grace_count must not be negative")
         self.name = name
         self.interval_seconds = interval_seconds
         self._grace_seconds = interval_seconds * grace_cycles
+        self._failure_grace_count = failure_grace_count
         self._clock = clock
         self._started_at = self._now()
         self._last_success_at: float | None = None
@@ -70,6 +74,8 @@ class BackgroundLoopMonitor:
         task = self._task
         if task is None or task.done():
             return False
+        if self._consecutive_failures > self._failure_grace_count:
+            return False
         last_healthy = self._last_success_at or self._started_at
         return self._now() - last_healthy <= self._grace_seconds
 
@@ -91,7 +97,7 @@ class BackgroundLoopMonitor:
             )
         failure = self._last_failure_type or "no successful pass"
         return (
-            f"{self.name} has not succeeded within {self._grace_seconds:g}s; "
+            f"{self.name} is outside its success/failure grace; "
             f"consecutive_failures={self._consecutive_failures} "
-            f"last_failure={failure}"
+            f"last_failure={failure} success_grace_seconds={self._grace_seconds:g}"
         )

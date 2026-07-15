@@ -11,12 +11,14 @@ from scrapeyard.config.schema import FailStrategy, FetcherType, WebhookConfig
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitProbe, CircuitState
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import ErrorType, JobStatus
+from scrapeyard.models.job import ErrorType, Job, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.target_execution import TargetRuntimeContext
 from scrapeyard.queue.worker import _fetch_and_validate_target, scrape_task
 from scrapeyard.storage.types import RunOwnershipError
+from scrapeyard.storage.database import init_db
+from scrapeyard.storage.job_store import SQLiteJobStore
 from tests.unit.worker_helpers import (
     SIMPLE_YAML,
     finalized_status,
@@ -45,6 +47,44 @@ async def test_scrape_task_marks_job_failed_on_bad_yaml():
     )
 
     job_store.fail_owned_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bad_persisted_yaml_creates_durable_preclaim_failure_run(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    invalid_yaml = "not: valid: yaml: config: missing: project"
+    await job_store.save_job(
+        Job(
+            job_id="bad-config-job",
+            project="test",
+            name="bad-config-job",
+            config_yaml=invalid_yaml,
+            current_run_id="bad-config-run",
+        )
+    )
+
+    error_store = AsyncMock()
+    error_store.count_errors_for_run.return_value = 0
+    result_store = AsyncMock()
+    result_store.delete_result.return_value = False
+    await scrape_task(
+        "bad-config-job",
+        invalid_yaml,
+        run_id="bad-config-run",
+        job_store=job_store,
+        result_store=result_store,
+        error_store=error_store,
+        circuit_breaker=MagicMock(),
+        rate_limiter=LocalDomainRateLimiter(),
+    )
+
+    job = await job_store.get_job("bad-config-job")
+    run = await job_store.get_job_run("bad-config-job", "bad-config-run")
+    assert job.status is JobStatus.failed
+    assert run is not None
+    assert run.status is JobStatus.failed
+    assert run.failure_code == "preclaim_execution_failure"
 
 
 @pytest.mark.asyncio

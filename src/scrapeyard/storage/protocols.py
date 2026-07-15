@@ -185,6 +185,10 @@ class JobStore(Protocol):
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]: ...
 
+    async def get_queued_run_config(self, job_id: str, run_id: str) -> str:
+        """Load the immutable encrypted config snapshot for an accepted delivery."""
+        ...
+
     async def claim_run(
         self,
         run_id: str,

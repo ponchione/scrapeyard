@@ -161,6 +161,12 @@ async def migrate_persisted_secrets() -> None:
                        FROM job_runs ORDER BY run_id"""
                 )
             ).fetchall()
+            queued_rows = await (
+                await db.execute(
+                    """SELECT run_id, job_id, config_yaml, config_hash
+                       FROM queued_run_snapshots ORDER BY run_id"""
+                )
+            ).fetchall()
             webhook_rows = await (
                 await db.execute(
                     """SELECT delivery_id, url, headers_json, payload_json,
@@ -170,7 +176,7 @@ async def migrate_persisted_secrets() -> None:
             ).fetchall()
             protected_state_exists = bool(job_rows) or any(
                 row[5] is None for row in webhook_rows
-            ) or any(row[2] is not None for row in run_rows)
+            ) or any(row[2] is not None for row in run_rows) or bool(queued_rows)
             if keyring is None:
                 if protected_state_exists:
                     raise SecretKeyConfigurationError(
@@ -229,6 +235,26 @@ async def migrate_persisted_secrets() -> None:
                     await db.execute(
                         "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
                         (protected, run_id),
+                    )
+
+            for row in queued_rows:
+                run_id = str(row[0])
+                stored = str(row[2])
+                purpose = f"queued_run_snapshots.config_yaml:{run_id}"
+                key_id = envelope_key_id(stored)
+                plaintext = keyring.reveal(stored, purpose=purpose)
+                expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+                legacy_migrated |= key_id is None
+                protected = (
+                    stored
+                    if key_id == keyring.active_key_id
+                    else keyring.protect(plaintext, purpose=purpose)
+                )
+                if protected != stored or str(row[3]) != expected_hash:
+                    await db.execute(
+                        """UPDATE queued_run_snapshots
+                           SET config_yaml = ?, config_hash = ? WHERE run_id = ?""",
+                        (protected, expected_hash, run_id),
                     )
 
             for row in webhook_rows:

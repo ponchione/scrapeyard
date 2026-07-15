@@ -59,7 +59,6 @@ from scrapeyard.runtime.health import (
     HealthCache,
     ProbeResult,
     probe_disk,
-    probe_asyncio_task,
     probe_background_service,
     probe_redis,
     probe_result_storage,
@@ -196,12 +195,18 @@ async def _startup_runtime_services(app: FastAPI) -> None:
         monitor=queued_monitor,
     )
     await services.scheduler.start()
+    cleanup_monitor = BackgroundLoopMonitor(
+        "cleanup",
+        interval_seconds=settings.storage_cleanup_interval_seconds,
+    )
+    app.state.cleanup_monitor = cleanup_monitor
     app.state.cleanup_task = start_cleanup_loop(
         services.result_store,
         services.webhook_outbox_store,
         interval_hours=get_settings().storage_cleanup_interval_seconds / 3600,
         job_store=get_job_store(),
         error_store=get_error_store(),
+        monitor=cleanup_monitor,
     )
 
 
@@ -210,6 +215,7 @@ async def _shutdown_runtime_services(
     *,
     shutdown_grace_seconds: float,
 ) -> None:
+    app.state.shutdown_pending = False
     deadline = MonotonicDeadline(shutdown_grace_seconds)
     failures: list[tuple[str, Exception]] = []
 
@@ -220,6 +226,15 @@ async def _shutdown_runtime_services(
     def record_failure(phase: str, exc: Exception) -> None:
         failures.append((phase, exc))
         logger.exception("Runtime shutdown phase failed phase=%s", phase)
+
+    def retain_shared_services(phases: list[str]) -> None:
+        app.state.shutdown_pending = True
+        joined = ", ".join(dict.fromkeys(phases))
+        error = RuntimeError(
+            f"Runtime shutdown failed for phase(s): {joined}; "
+            "shared services retained for live owned tasks"
+        )
+        raise error from (failures[0][1] if failures else None)
 
     background_tasks = (
         ("cleanup", getattr(app.state, "cleanup_task", None)),
@@ -256,23 +271,72 @@ async def _shutdown_runtime_services(
             await worker_pool.stop(timeout=remaining())
         except Exception as exc:
             record_failure("worker", exc)
-            if bool(getattr(worker_pool, "shutdown_pending", False)):
-                phases = ", ".join(phase for phase, _exc in failures)
-                raise RuntimeError(
-                    f"Runtime shutdown failed for phase(s): {phases}; "
-                    "shared services retained for live worker tasks"
-                ) from exc
+
+    live_owned_phases = [
+        phase
+        for phase, task in background_tasks
+        if task is not None
+        and callable(getattr(task, "done", None))
+        and not task.done()
+    ]
+    if worker_pool is not None and bool(
+        getattr(worker_pool, "shutdown_pending", False)
+    ):
+        live_owned_phases.append("worker")
+    if live_owned_phases:
+        retain_shared_services(live_owned_phases)
+
     try:
         await close_webhook_dispatcher(timeout=remaining())
     except Exception as exc:
         record_failure("webhook", exc)
+
+    webhook_dispatcher = getattr(app.state, "webhook_dispatcher", None)
+    if bool(getattr(webhook_dispatcher, "shutdown_pending", False)):
+        retain_shared_services(["webhook"])
+
+    database_close_task = asyncio.create_task(
+        close_db(),
+        name="scrapeyard-database-close",
+    )
+    app.state.database_close_task = database_close_task
     try:
-        await deadline.run(close_db())
+        await deadline.run(database_close_task)
     except Exception as exc:
         record_failure("database", exc)
+    if not database_close_task.done():
+        retain_shared_services(["database"])
+    app.state.database_close_task = None
     if failures:
         phases = ", ".join(phase for phase, _exc in failures)
         raise RuntimeError(f"Runtime shutdown failed for phase(s): {phases}") from failures[0][1]
+
+
+def _runtime_shutdown_pending(app: FastAPI) -> bool:
+    """Return whether any application-owned work still holds runtime resources."""
+
+    if bool(getattr(app.state, "shutdown_pending", False)):
+        return True
+    worker_pool = getattr(app.state, "worker_pool", None)
+    if bool(getattr(worker_pool, "shutdown_pending", False)):
+        return True
+    webhook_dispatcher = getattr(app.state, "webhook_dispatcher", None)
+    if bool(getattr(webhook_dispatcher, "shutdown_pending", False)):
+        return True
+    for name in (
+        "cleanup_task",
+        "queued_reconciliation_task",
+        "running_reconciliation_task",
+        "database_close_task",
+    ):
+        task = getattr(app.state, name, None)
+        if (
+            task is not None
+            and callable(getattr(task, "done", None))
+            and not task.done()
+        ):
+            return True
+    return False
 
 
 @asynccontextmanager
@@ -321,10 +385,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 shutdown_grace_seconds=settings.workers_shutdown_grace_seconds,
             )
         except BaseException:
-            worker_pool = getattr(app.state, "worker_pool", None)
-            release_instance_lock = not bool(
-                getattr(worker_pool, "shutdown_pending", False)
-            )
+            release_instance_lock = not _runtime_shutdown_pending(app)
             raise
         finally:
             if release_instance_lock:
@@ -333,7 +394,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.info("Released single-instance guard path=%s", instance_lock.path)
             else:
                 logger.critical(
-                    "Retaining single-instance guard for unresolved worker shutdown path=%s",
+                    "Retaining single-instance guard for unresolved runtime shutdown path=%s",
                     instance_lock.path,
                 )
 
@@ -377,6 +438,7 @@ app.add_middleware(
     RateLimitMiddleware,
     requests=_settings_for_middleware.rate_limit_requests,
     window_seconds=_settings_for_middleware.rate_limit_window_seconds,
+    max_keys=_settings_for_middleware.rate_limit_max_keys,
     api_keys={credential.secret for credential in _credentials_for_middleware},
     exempt_paths={"/health", "/health/live"},
 )
@@ -472,8 +534,8 @@ def _background_probes() -> dict[str, ProbeResult]:
         "scheduler": probe_background_service(
             "scheduler", getattr(app.state, "scheduler", None)
         ),
-        "cleanup": probe_asyncio_task(
-            "cleanup", getattr(app.state, "cleanup_task", None)
+        "cleanup": probe_background_service(
+            "cleanup", getattr(app.state, "cleanup_monitor", None)
         ),
         "webhook": probe_background_service(
             "webhook", getattr(app.state, "webhook_dispatcher", None)

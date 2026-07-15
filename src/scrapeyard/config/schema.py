@@ -631,7 +631,10 @@ class BrowserConfig(StrictConfigModel):
     )
     extra_headers: dict[str, str] = Field(
         default_factory=dict,
-        description="Additional HTTP headers injected into every browser request",
+        description=(
+            "Additional HTTP headers scoped to requests with the exact target origin; "
+            "cross-origin requests and redirects have these headers removed"
+        ),
     )
     click_selector: str | None = Field(
         default=None,

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
@@ -168,6 +169,50 @@ async def test_delete_expired_offloads_directory_removal(store):
         result_store_module.remove_directories,
         [Path(meta.file_path)],
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_keeps_destructive_thread_owned_through_repeated_cancellation(
+    store,
+    monkeypatch,
+):
+    meta = await store.save_result("job-thread-owned", {"ok": True})
+    old_date = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+            (old_date, meta.run_id),
+        )
+        await db.commit()
+
+    started = threading.Event()
+    release = threading.Event()
+    original_remove = result_store_module.remove_directories
+
+    def blocking_remove(paths) -> None:
+        started.set()
+        assert release.wait(timeout=2)
+        original_remove(paths)
+
+    monkeypatch.setattr(result_store_module, "remove_directories", blocking_remove)
+    cleanup = asyncio.create_task(store.delete_expired(30))
+    for _index in range(100):
+        if started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert started.is_set()
+
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    cleanup.cancel()
+    await asyncio.sleep(0.01)
+    assert not cleanup.done()
+    assert Path(meta.file_path).exists()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert not Path(meta.file_path).exists()
 
 
 @pytest.mark.asyncio

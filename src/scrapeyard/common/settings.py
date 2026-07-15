@@ -9,7 +9,7 @@ from functools import lru_cache
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
-from scrapeyard.engine.proxy import normalize_proxy_url
+from scrapeyard.engine.proxy import normalize_service_proxy_url
 
 
 _SECRET_REFERENCE_NAME_RE = re.compile(r"^SCRAPEYARD_SECRET_[A-Z0-9_]+$")
@@ -61,6 +61,7 @@ class ServiceSettings(BaseSettings):
 
     rate_limit_requests: int = Field(default=600, ge=0)
     rate_limit_window_seconds: int = Field(default=60, ge=0)
+    rate_limit_max_keys: int = Field(default=10000, ge=1)
 
     scheduler_jitter_max_seconds: int = Field(default=120, ge=0)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=1)
@@ -102,6 +103,7 @@ class ServiceSettings(BaseSettings):
     proxy_url: str = ""
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
+    domain_rate_limit_max_domains: int = Field(default=10000, ge=1)
 
     api_keys: str = ""
     api_credentials: str = ""
@@ -127,7 +129,7 @@ class ServiceSettings(BaseSettings):
     def _normalize_proxy_url(cls, value: str) -> str:
         if not value.strip():
             return ""
-        return normalize_proxy_url(value)
+        return normalize_service_proxy_url(value)
 
     @model_validator(mode="after")
     def _validate_read_limits(self) -> ServiceSettings:

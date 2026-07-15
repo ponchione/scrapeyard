@@ -136,6 +136,15 @@ async def submit_scrape_job(
             run_id=updated_job.current_run_id,
         )
     except (KeyError, FileNotFoundError) as exc:
+        if updated_job.status is JobStatus.failed:
+            return ScrapeSubmission(
+                job_id=updated_job.job_id,
+                run_id=_require_run_id(updated_job),
+                status=updated_job.status.value,
+                completed=True,
+                results=None,
+                replayed=replayed,
+            )
         raise ResultArtifactUnavailableError from exc
     return ScrapeSubmission(
         job_id=job.job_id,

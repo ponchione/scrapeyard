@@ -200,9 +200,8 @@ class QueueTaskHandler(Protocol):
     async def __call__(
         self,
         job_id: str,
-        config_yaml: str,
         *,
-        run_id: str | None = None,
+        run_id: str,
         trigger: str = "adhoc",
         browser_limiter: BrowserExecutionLimiter,
     ) -> None: ...
@@ -412,10 +411,15 @@ class WorkerPool:
         if run_id is None:
             raise RuntimeError("WorkerPool.enqueue() requires a run_id")
 
+        # The durable encrypted snapshot is already in SQLite.  Keep the
+        # accepted method argument for source compatibility, but never place
+        # secret-bearing YAML in Redis or its append-only persistence.
+        del config_yaml
+
         enqueue_time_ms = timestamp_ms()
         payload = serialize_job(
             _ARQ_FUNCTION_NAME,
-            (job_id, config_yaml, run_id),
+            (job_id, run_id),
             {
                 "needs_browser": needs_browser,
                 "trigger": trigger,
@@ -811,7 +815,7 @@ class WorkerPool:
         self,
         _ctx: dict[str, Any],
         job_id: str,
-        config_yaml: str,
+        delivery_identity: str,
         run_id: str | None = None,
         *,
         needs_browser: bool = False,
@@ -821,10 +825,11 @@ class WorkerPool:
         # Retain this keyword for jobs already serialized in Redis. Browser
         # concurrency is enforced per target by the injected limiter.
         del needs_browser
+        effective_run_id = run_id or delivery_identity
         self._active_tasks += 1
         try:
             await self._execute(
-                job_id, config_yaml, run_id=run_id, trigger=trigger,
+                job_id, run_id=effective_run_id, trigger=trigger,
             )
         finally:
             self._active_tasks -= 1
@@ -833,15 +838,13 @@ class WorkerPool:
     async def _execute(
         self,
         job_id: str,
-        config_yaml: str,
         *,
-        run_id: str | None = None,
+        run_id: str,
         trigger: str = "adhoc",
     ) -> None:
         if self._task_handler is not None:
             await self._task_handler(
                 job_id,
-                config_yaml,
                 run_id=run_id,
                 trigger=trigger,
                 browser_limiter=self._browser_limiter,

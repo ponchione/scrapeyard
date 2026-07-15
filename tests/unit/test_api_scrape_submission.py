@@ -135,6 +135,41 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
 
 
 @pytest.mark.asyncio
+async def test_submit_scrape_job_returns_durable_failed_state_without_artifact_404():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job.model_copy(update={"status": JobStatus.failed})
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
+    result_store.get_result.side_effect = KeyError("no preclaim artifact")
+    worker_pool.enqueue.return_value = _QueuedJob()
+
+    submission = await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.sync),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=5,
+        sync_poll_delay_seconds=0.1,
+    )
+
+    assert submission.completed is True
+    assert submission.status == "failed"
+    assert submission.results is None
+    result_store.get_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_submit_scrape_job_rejects_terminal_run_with_missing_artifact():
     job_store = AsyncMock()
     result_store = AsyncMock()

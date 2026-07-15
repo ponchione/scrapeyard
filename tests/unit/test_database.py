@@ -134,9 +134,10 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "014",
         "015",
         "016",
-        "017",
-        "018",
-    ]
+            "017",
+            "018",
+            "019",
+        ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [
         "003",

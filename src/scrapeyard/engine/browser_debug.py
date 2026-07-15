@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 from scrapling.engines import camo as scrapling_camo_engine
@@ -66,6 +67,14 @@ _BROWSER_BLOCKED_REQUESTS: ContextVar[list[dict[str, str]] | None] = ContextVar(
     "scrapeyard_browser_blocked_requests",
     default=None,
 )
+_BROWSER_TARGET_ORIGIN: ContextVar[tuple[str, str, int] | None] = ContextVar(
+    "scrapeyard_browser_target_origin",
+    default=None,
+)
+_BROWSER_ORIGIN_SCOPED_HEADERS: ContextVar[frozenset[str]] = ContextVar(
+    "scrapeyard_browser_origin_scoped_headers",
+    default=frozenset(),
+)
 
 
 class BrowserPageActionError(RuntimeError):
@@ -74,6 +83,33 @@ class BrowserPageActionError(RuntimeError):
     def __init__(self, message: str, *, debug: dict[str, Any]) -> None:
         self.debug = debug
         super().__init__(message)
+
+
+def _url_origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not scheme or not host:
+        return None
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    port = parsed_port or (443 if scheme == "https" else 80 if scheme == "http" else -1)
+    return scheme, host, port
+
+
+async def _request_header_mapping(request: Any) -> dict[str, str] | None:
+    all_headers = getattr(request, "all_headers", None)
+    if callable(all_headers):
+        headers = all_headers()
+        if inspect.isawaitable(headers):
+            headers = await headers
+    else:
+        headers = getattr(request, "headers", None)
+    if not hasattr(headers, "items"):
+        return None
+    return {str(name): str(value) for name, value in headers.items()}
 
 
 def _exception_text(exc: Exception) -> str:
@@ -132,6 +168,25 @@ async def _guarded_async_intercept_route(route: Any) -> None:
             )
             await route.abort()
             raise
+
+    scoped_headers = _BROWSER_ORIGIN_SCOPED_HEADERS.get()
+    target_origin = _BROWSER_TARGET_ORIGIN.get()
+    request_origin = _url_origin(request_url) if isinstance(request_url, str) else None
+    if scoped_headers and target_origin is not None and request_origin != target_origin:
+        headers = await _request_header_mapping(request)
+        if headers is None:
+            await route.abort()
+            raise UnsafeURLError(
+                "Browser could not safely remove target-origin headers from a "
+                "cross-origin request"
+            )
+        filtered = {
+            name: value
+            for name, value in headers.items()
+            if name.lower() not in scoped_headers
+        }
+        await route.continue_(headers=filtered)
+        return
 
     if block_resources is None:
         await scrapling_async_intercept_route(route)
@@ -691,10 +746,14 @@ async def fetch_browser_response(
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
     blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
+    origin_token = _BROWSER_TARGET_ORIGIN.set(_url_origin(url))
+    headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
+        frozenset(name.lower() for name in browser.extra_headers)
+    )
     try:
         fetch = fetcher_cls.async_fetch(url, **call_kwargs)
         try:
-            response = await fetch if budget is None else await budget.wait_for(fetch)
+            response = await fetch if budget is None else await budget.wait_for_owned(fetch)
         except Exception as exc:
             if blocked_requests:
                 capture["blocked_requests"] = blocked_requests
@@ -704,6 +763,8 @@ async def fetch_browser_response(
                     pass
             raise
     finally:
+        _BROWSER_ORIGIN_SCOPED_HEADERS.reset(headers_token)
+        _BROWSER_TARGET_ORIGIN.reset(origin_token)
         _BROWSER_BLOCKED_REQUESTS.reset(blocked_token)
         _BROWSER_REQUIRE_RESOLVED_DNS.reset(dns_token)
         _BROWSER_BLOCK_RESOURCES.reset(guard_token)

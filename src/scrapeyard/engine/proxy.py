@@ -11,7 +11,10 @@ if TYPE_CHECKING:
     from scrapeyard.config.schema import ProxyConfig, TargetConfig
 
 _DIRECT_PROXY = "direct"
-_ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
+# This common subset is accepted by the httpx basic transport and by both
+# browser transports.  In particular, httpx rejects SOCKS4/4a while browser
+# engines do not consistently accept the remote-DNS ``socks5h`` spelling.
+_ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks5"})
 
 
 def normalize_proxy_url(value: str) -> str:
@@ -50,6 +53,19 @@ def normalize_public_proxy_url(value: str) -> str:
             proxy_url,
             allowed_schemes=tuple(_ALLOWED_PROXY_SCHEMES),
             resolve_dns=False,
+        )
+    return proxy_url
+
+
+def normalize_service_proxy_url(value: str) -> str:
+    """Validate an operator default against the same resolved runtime guard."""
+
+    proxy_url = normalize_proxy_url(value)
+    if proxy_url != _DIRECT_PROXY:
+        assert_public_url(
+            proxy_url,
+            allowed_schemes=tuple(_ALLOWED_PROXY_SCHEMES),
+            allow_unresolved=False,
         )
     return proxy_url
 

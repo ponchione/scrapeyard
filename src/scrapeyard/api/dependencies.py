@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 
 from arq.connections import ArqRedis, RedisSettings
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.time import utc_now
 from scrapeyard.engine.rate_limiter import (
     DomainRateLimiter,
     LocalDomainRateLimiter,
@@ -17,13 +19,18 @@ from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.worker import scrape_task
+from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore, WebhookOutboxStore
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
+from scrapeyard.storage.types import RunOwnershipError
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,9 @@ class _RateLimiterHolder:
         if settings.domain_rate_limit_shared and redis is not None:
             self._instance = RedisDomainRateLimiter(redis)
         else:
-            self._instance = LocalDomainRateLimiter()
+            self._instance = LocalDomainRateLimiter(
+                max_domains=settings.domain_rate_limit_max_domains,
+            )
         return self._instance
 
     def get(self) -> DomainRateLimiter:
@@ -178,12 +187,52 @@ def get_worker_pool() -> WorkerPool:
 
     async def _task_handler(
         job_id: str,
-        config_yaml: str,
         *,
-        run_id: str | None = None,
+        run_id: str,
         trigger: str = "adhoc",
         browser_limiter: BrowserExecutionLimiter,
     ) -> None:
+        try:
+            config_yaml = await job_store.get_queued_run_config(job_id, run_id)
+        except RunOwnershipError:
+            logger.info(
+                "Skipping superseded or terminal queue delivery "
+                "job_id=%s run_id=%s",
+                job_id,
+                run_id,
+            )
+            return
+        except Exception as exc:
+            logger.error(
+                "Accepted queue configuration could not be loaded "
+                "job_id=%s run_id=%s error_type=%s",
+                job_id,
+                run_id,
+                type(exc).__name__,
+            )
+            try:
+                await job_store.fail_owned_run(
+                    job_id,
+                    run_id,
+                    utc_now(),
+                    error_count=1,
+                )
+            except RunOwnershipError:
+                return
+            try:
+                await reconcile_terminal_webhook_intents(
+                    job_store=job_store,
+                    result_store=result_store,
+                )
+            except Exception:
+                logger.exception(
+                    "Pre-claim failure webhook reconciliation failed "
+                    "job_id=%s run_id=%s",
+                    job_id,
+                    run_id,
+                )
+            await webhook_dispatcher.notify()
+            return
         await scrape_task(
             job_id,
             config_yaml,

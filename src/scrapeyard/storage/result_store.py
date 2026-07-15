@@ -277,7 +277,10 @@ class LocalResultStore:
         # (recoverable) rather than orphaned metadata rows pointing to
         # missing files. The database context has exited here so filesystem
         # latency cannot block unrelated metadata access.
-        await asyncio.to_thread(remove_directories, self._checked_result_dirs(inactive_rows))
+        await cleanup_safe_to_thread(
+            remove_directories,
+            self._checked_result_dirs(inactive_rows),
+        )
         return len(inactive_rows)
 
     async def _delete_files_then_ids(

@@ -472,6 +472,45 @@ async def test_enqueue_starts_pool_and_enqueues_job():
 
 
 @pytest.mark.asyncio
+async def test_enqueue_payload_contains_identifiers_only_not_secret_bearing_yaml():
+    pool = _make_pool()
+    fake_redis = MagicMock(
+        eval=AsyncMock(return_value=1),
+        job_serializer=None,
+        expires_extra_ms=86_400_000,
+    )
+    pool._started = True
+    pool._redis = fake_redis
+    sentinels = (
+        "target-query-sentinel",
+        "proxy-password-sentinel",
+        "browser-authorization-sentinel",
+        "webhook-header-sentinel",
+        "webhook-query-sentinel",
+    )
+    config_yaml = f"""
+target:
+  url: https://example.com/?token={sentinels[0]}
+  proxy:
+    url: http://user:{sentinels[1]}@proxy.example.com:8080
+  browser:
+    extra_headers:
+      Authorization: Bearer {sentinels[2]}
+webhook:
+  url: https://hooks.example.com/?token={sentinels[4]}
+  headers:
+    Authorization: Bearer {sentinels[3]}
+"""
+
+    await pool.enqueue("job-secret", config_yaml, run_id="run-secret")
+
+    redis_command = repr(fake_redis.eval.await_args.args)
+    assert "job-secret" in redis_command
+    assert "run-secret" in redis_command
+    assert all(sentinel not in redis_command for sentinel in sentinels)
+
+
+@pytest.mark.asyncio
 async def test_duplicate_enqueue_returns_routing_handle_without_second_delivery():
     pool = _make_pool()
     fake_redis = MagicMock(
@@ -703,7 +742,6 @@ async def test_run_job_accepts_legacy_browser_flag_without_holding_a_permit():
 
     pool._execute.assert_awaited_once_with(
         "job-1",
-        "config: yaml",
         run_id="run-1",
         trigger="adhoc",
     )
@@ -758,12 +796,11 @@ async def test_run_job_without_browser_skips_browser_counter():
     pool = _make_pool()
     pool._execute = AsyncMock()
 
-    await pool._run_job({}, "job-1", "config: yaml", trigger="scheduled")
+    await pool._run_job({}, "job-1", "run-1", trigger="scheduled")
 
     pool._execute.assert_awaited_once_with(
         "job-1",
-        "config: yaml",
-        run_id=None,
+        run_id="run-1",
         trigger="scheduled",
     )
     assert pool.active_tasks == 0
@@ -775,11 +812,10 @@ async def test_execute_delegates_to_task_handler():
     handler = AsyncMock()
     pool = _make_pool(task_handler=handler)
 
-    await pool._execute("job-1", "config: yaml", run_id="run-1", trigger="scheduled")
+    await pool._execute("job-1", run_id="run-1", trigger="scheduled")
 
     handler.assert_awaited_once_with(
         "job-1",
-        "config: yaml",
         run_id="run-1",
         trigger="scheduled",
         browser_limiter=pool.browser_limiter,
@@ -791,4 +827,4 @@ async def test_execute_without_task_handler_raises_instead_of_succeeding_silentl
     pool = _make_pool()
 
     with pytest.raises(RuntimeError, match="requires a task_handler"):
-        await pool._execute("job-1", "config: yaml")
+        await pool._execute("job-1", run_id="run-1")

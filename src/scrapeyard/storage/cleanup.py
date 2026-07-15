@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
+from scrapeyard.runtime.background import BackgroundLoopMonitor
 from scrapeyard.runtime.metrics import (
     CLEANUP_ARTIFACT_FINDINGS,
     CLEANUP_BYTES,
@@ -445,6 +446,7 @@ def start_cleanup_loop(
     *,
     job_store: JobStore | None = None,
     error_store: ErrorStore | None = None,
+    monitor: BackgroundLoopMonitor | None = None,
 ) -> asyncio.Task[None]:
     """Spawn a background task that periodically runs cleanup.
 
@@ -516,12 +518,19 @@ def start_cleanup_loop(
                     )
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 CLEANUP_RUNS.labels("failed").inc()
+                if monitor is not None:
+                    monitor.record_failure(exc)
                 logger.exception("Error during result cleanup")
             else:
                 CLEANUP_RUNS.labels("success").inc()
+                if monitor is not None:
+                    monitor.record_success()
                 mark_last_success("cleanup")
             await asyncio.sleep(interval_hours * 3600)
 
-    return asyncio.create_task(_loop(), name="result-cleanup")
+    task = asyncio.create_task(_loop(), name="result-cleanup")
+    if monitor is not None:
+        monitor.bind(task)
+    return task

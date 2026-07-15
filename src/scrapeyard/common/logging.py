@@ -63,6 +63,14 @@ def setup_logging(log_dir: str, log_level: str = "INFO") -> None:
     fmt = _JsonFormatter()
     root.setLevel(_resolve_log_level(log_level))
 
+    # Scrapling installs a plaintext StreamHandler during import while also
+    # propagating records to the root logger.  Remove that dependency-owned
+    # output path so URLs and referrers pass through our redacting formatter
+    # exactly once.
+    scrapling_logger = logging.getLogger("scrapling")
+    scrapling_logger.handlers.clear()
+    scrapling_logger.propagate = True
+
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt)
     root.addHandler(stream_handler)
