@@ -97,6 +97,9 @@ Enforce outbound network policy for the Scrapeyard container or pod:
 - Block private/internal ranges unless explicitly required:
   `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, IPv6
   loopback, link-local, and ULA ranges.
+- Block special-purpose documentation, transition, multicast, benchmark, and
+  reserved destinations, including `192.0.2.0/24`, `198.51.100.0/24`,
+  `203.0.113.0/24`, IPv4-mapped IPv6, and NAT64 forms of denied IPv4 ranges.
 
 Route all untrusted scrape traffic through the configured proxy gateway. Where
 the host policy can use a public allowlist, allow Scrapeyard egress only to that
@@ -104,9 +107,11 @@ gateway plus Redis. This keeps browser runtime and target DNS behavior outside
 the application trust boundary.
 
 The checked-in `security/deploy-secure-compose.sh` makes installation and
-attestation one deployment transaction. It starts only Redis and the controlled
-private probe, discovers the deployment bridge, installs the checked-in
-bridge-and-source-scoped `DOCKER-USER` policy, and only then starts the app.
+attestation one deployment transaction. On redeploy it builds the replacement
+image, stops any existing application container, starts only Redis and the
+controlled private probe, discovers the deployment bridge, installs the
+checked-in bridge-and-source-scoped `DOCKER-USER` policy, and only then starts
+the app.
 The app independently verifies the helper and its challenge listener over the
 liveness port, attempts the challenge from its own network namespace, then
 verifies liveness again. A reachable challenge, a merely closed/unroutable
@@ -124,7 +129,25 @@ sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
 The installed policy permits the fixed Redis peer, the controlled helper's
 liveness port, and operator-declared destinations before rejecting loopback,
 metadata/link-local, private, carrier-grade NAT, benchmark, multicast, and
-reserved connected addresses. The helper reports liveness only while its
+reserved connected addresses. The operator allow example above intentionally
+uses an address inside a denied documentation range, so it also demonstrates
+that explicit allows precede the reviewed deny policy.
+
+The reviewed address table in `src/scrapeyard/engine/ip_policy.py` is shared by
+the application predicate and the host-policy renderer. It is fixed to the IANA
+special-purpose registries reviewed on 2025-10-09 instead of changing with the
+host Python version's `ipaddress.is_global` tables. It is intentionally stricter
+for a few special-purpose blocks whose isolated public exceptions are not
+useful scrape targets, including all of `192.0.0.0/24`.
+
+Policy replacement uses alternating staging chains. The installer fully builds
+the inactive chain, inserts and confirms its `DOCKER-USER` jump while the old
+jump is still present, and removes the old jump only afterward. An error trap
+reinserts the prior jump before withdrawing the replacement if any later IPv4
+or IPv6 mutation fails. Address families, tools, Docker chain prerequisites,
+and rendered rules are validated before the active policy is changed.
+
+The helper reports liveness only while its
 challenge listener is serving, so connection refusal or timeout is accepted as
 policy proof only between two valid liveness exchanges. A hostname that returns
 public during validation and private during connection is therefore rejected.

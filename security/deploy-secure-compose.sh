@@ -17,6 +17,10 @@ docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
 # start independent of Compose's implicit missing-image behavior.
 docker compose build scrapeyard
 
+# A redeploy must not leave an already-running untrusted-submission service
+# online if host-policy replacement encounters an unexpected tool failure.
+docker compose stop scrapeyard
+
 # Start only dependencies first. The application is not allowed to start until
 # the connected-IP policy exists on the deployment bridge.
 docker compose up -d --wait egress-probe redis
