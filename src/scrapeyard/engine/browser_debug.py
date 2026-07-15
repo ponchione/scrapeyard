@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from rebrowser_playwright.async_api import TimeoutError as RebrowserPlaywrightTimeoutError
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 from scrapling.engines import camo as scrapling_camo_engine
 from scrapling.engines import pw as scrapling_pw_engine
@@ -83,6 +85,17 @@ class BrowserPageActionError(RuntimeError):
     def __init__(self, message: str, *, debug: dict[str, Any]) -> None:
         self.debug = debug
         super().__init__(message)
+
+
+class BrowserTransportTimeout(TimeoutError):
+    """Local retryable boundary for browser navigation and wait timeouts."""
+
+    def __init__(self, message: str, *, debug: dict[str, Any]) -> None:
+        self.debug = debug
+        super().__init__(message)
+
+
+_BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, RebrowserPlaywrightTimeoutError)
 
 
 def _url_origin(url: str) -> tuple[str, str, int] | None:
@@ -754,6 +767,13 @@ async def fetch_browser_response(
         fetch = fetcher_cls.async_fetch(url, **call_kwargs)
         try:
             response = await fetch if budget is None else await budget.wait_for_owned(fetch)
+        except _BROWSER_TIMEOUT_ERRORS as exc:
+            original_debug = getattr(exc, "debug", None)
+            timeout_debug = dict(original_debug) if isinstance(original_debug, dict) else {}
+            timeout_debug.update(capture)
+            if blocked_requests:
+                timeout_debug["blocked_requests"] = blocked_requests
+            raise BrowserTransportTimeout(str(exc), debug=timeout_debug) from exc
         except Exception as exc:
             if blocked_requests:
                 capture["blocked_requests"] = blocked_requests

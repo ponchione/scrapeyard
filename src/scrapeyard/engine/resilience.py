@@ -18,10 +18,18 @@ from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
 )
-from scrapeyard.runtime.metrics import RETRIES
 from scrapeyard.engine.url_guard import URLResolutionError
+from scrapeyard.runtime.metrics import RETRIES
 
 T = TypeVar("T")
+
+_TRANSIENT_TRANSPORT_ERRORS = (
+    asyncio.TimeoutError,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    httpx.ProxyError,
+    httpx.TimeoutException,
+)
 
 
 class RetryableError(Exception):
@@ -81,8 +89,7 @@ class RetryHandler:
             except (
                 RetryableError,
                 URLResolutionError,
-                httpx.ConnectError,
-                httpx.TimeoutException,
+                *_TRANSIENT_TRANSPORT_ERRORS,
             ) as exc:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:

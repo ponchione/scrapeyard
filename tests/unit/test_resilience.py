@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +23,7 @@ from scrapeyard.engine.resilience import (
     RetryableError,
 )
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.engine.url_guard import URLResolutionError
+from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
 from scrapeyard.models.job import ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
 
@@ -69,6 +70,11 @@ class TestRetryHandler:
             httpx.ConnectError("connection refused"),
             httpx.ConnectTimeout("connect timed out"),
             httpx.ReadTimeout("read timed out"),
+            httpx.ReadError("response reset"),
+            httpx.WriteError("request write failed"),
+            httpx.RemoteProtocolError("incomplete upstream response"),
+            httpx.ProxyError("proxy tunnel failed"),
+            asyncio.TimeoutError("operation timed out"),
         ],
     )
     async def test_retries_on_httpx_connection_and_timeout_failures(self, failure):
@@ -79,6 +85,24 @@ class TestRetryHandler:
 
         assert result == "ok"
         assert fn.await_count == 2
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx.ReadError("response reset"),
+            httpx.RemoteProtocolError("incomplete upstream response"),
+            httpx.ProxyError("proxy tunnel failed"),
+            asyncio.TimeoutError("operation timed out"),
+        ],
+    )
+    async def test_persistent_transient_failures_use_every_configured_attempt(self, failure):
+        handler = RetryHandler(self._config(max_attempts=3, backoff_max=0))
+        fn = AsyncMock(side_effect=failure)
+
+        with pytest.raises(type(failure)):
+            await handler.execute(fn)
+
+        assert fn.await_count == 3
 
     async def test_exhausts_retries(self):
         handler = RetryHandler(self._config(max_attempts=2, backoff=BackoffStrategy.fixed))
@@ -131,6 +155,23 @@ class TestRetryHandler:
         with pytest.raises(ValueError, match="bad"):
             await handler.execute(fn)
         assert fn.call_count == 1
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx.UnsupportedProtocol("unsupported URL scheme"),
+            httpx.LocalProtocolError("malformed request"),
+            UnsafeURLError("URL points at a non-public address"),
+        ],
+    )
+    async def test_permanent_and_safety_failures_are_not_retried(self, failure):
+        handler = RetryHandler(self._config(max_attempts=3))
+        fn = AsyncMock(side_effect=failure)
+
+        with pytest.raises(type(failure)):
+            await handler.execute(fn)
+
+        assert fn.await_count == 1
 
 
 # --- ResultValidator ---
