@@ -29,13 +29,16 @@ from scrapeyard.storage.filesystem import (
     DirectoryEntryLimitExceeded,
     FileSizeLimitExceeded,
     FilesystemDeadlineReached,
+    FilesystemWriteCancelled,
+    JsonFileSizeLimitExceeded,
     cleanup_safe_to_thread,
     ensure_directory,
     read_bytes_file_no_follow,
     read_json_file_no_follow,
     remove_directories,
-    serialize_json_bytes,
+    serialize_json_bytes as serialize_json_bytes,
     write_bytes_file,
+    write_json_file_bounded,
 )
 from scrapeyard.storage.result_queries import (
     EXCESS_RESULTS_PER_JOB_QUERY,
@@ -48,6 +51,7 @@ from scrapeyard.storage.types import (
     ReconciliationOperationFailure,
     ResultArtifactFailure,
     ResultArtifactFailureKind,
+    ResultArtifactReadError,
     ResultMetadata,
     ResultPayload,
     ResultReconciliationReport,
@@ -399,20 +403,21 @@ class LocalResultStore:
     ) -> SaveResultMeta:
         project, job_name = await self._job_lookup(job_id)
         run_id = run_id or generate_run_id()
-        payload = await cleanup_safe_to_thread(serialize_json_bytes, data)
-        if budget is not None:
-            budget.enforce_serialized_result_bytes(len(payload))
-        elif max_serialized_bytes is not None and len(payload) > max_serialized_bytes:
-            raise BudgetExceeded(
-                BudgetLimitName.serialized_result_bytes,
-                max_serialized_bytes,
-                len(payload),
+        effective_limit = (
+            budget.max_serialized_result_bytes
+            if budget is not None
+            else (
+                max_serialized_bytes
+                if max_serialized_bytes is not None
+                else self._max_serialized_result_bytes
             )
+        )
 
         run_dir = self._checked_result_dir(
             str(safe_join(self._results_dir, project, job_name, run_id))
         )
         async with self._save_guard(run_dir):
+            run_dir_existed = run_dir.exists()
             await cleanup_safe_to_thread(ensure_directory, run_dir)
             path = run_dir / "results.json"
             try:
@@ -424,8 +429,24 @@ class LocalResultStore:
                 previous_payload = None
 
             metadata_committed = False
+            serialized_bytes = 0
+            write_cancelled = threading.Event()
+
+            def write_checkpoint() -> None:
+                if write_cancelled.is_set():
+                    raise FilesystemWriteCancelled
+                if budget is not None:
+                    budget.check_deadline()
+
             try:
-                await cleanup_safe_to_thread(write_bytes_file, path, payload)
+                serialized_bytes = await cleanup_safe_to_thread(
+                    write_json_file_bounded,
+                    path,
+                    data,
+                    effective_limit,
+                    write_checkpoint,
+                    cancel_on_cancellation=write_cancelled.set,
+                )
                 qualification_checkpoint("after_result_artifact_write")
                 if budget is not None:
                     budget.check_deadline()
@@ -451,6 +472,26 @@ class LocalResultStore:
                 metadata_committed = True
                 if budget is not None:
                     budget.check_deadline()
+            except JsonFileSizeLimitExceeded as exc:
+                if previous_payload is None:
+                    with suppress(FileNotFoundError):
+                        path.unlink()
+                else:
+                    await cleanup_safe_to_thread(
+                        write_bytes_file,
+                        path,
+                        previous_payload,
+                    )
+                if not run_dir_existed:
+                    with suppress(OSError):
+                        run_dir.rmdir()
+                if budget is not None:
+                    budget.enforce_serialized_result_bytes(exc.observed_bytes)
+                raise BudgetExceeded(
+                    BudgetLimitName.serialized_result_bytes,
+                    effective_limit,
+                    exc.observed_bytes,
+                ) from None
             except BaseException:
                 if not metadata_committed:
                     if previous_payload is None:
@@ -462,13 +503,16 @@ class LocalResultStore:
                             path,
                             previous_payload,
                         )
+                    if not run_dir_existed:
+                        with suppress(OSError):
+                            run_dir.rmdir()
                 raise
 
         return SaveResultMeta(
             run_id=run_id,
             file_path=str(run_dir),
             record_count=record_count,
-            serialized_bytes=len(payload),
+            serialized_bytes=serialized_bytes,
         )
 
     async def get_result(
@@ -492,7 +536,21 @@ class LocalResultStore:
         file_path = row["file_path"]
 
         path = self._checked_result_dir(str(file_path)) / "results.json"
-        data = await asyncio.to_thread(read_json_file_no_follow, path)
+        try:
+            data = await asyncio.to_thread(
+                read_json_file_no_follow,
+                path,
+                max_bytes=self._max_serialized_result_bytes,
+            )
+        except (FileSizeLimitExceeded, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Result artifact unavailable job_id=%s run_id=%s classification=corrupt "
+                "error_type=%s",
+                job_id,
+                result_run_id,
+                type(exc).__name__,
+            )
+            raise ResultArtifactReadError("Result artifact is unavailable") from exc
         return ResultPayload(run_id=result_run_id, data=data, status=status)
 
     async def get_result_metadata(

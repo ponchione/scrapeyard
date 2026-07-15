@@ -12,6 +12,7 @@ import httpx
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
@@ -101,28 +102,29 @@ def _extract_page_data(
     budget: RunBudget | None = None,
 ) -> list[dict[str, Any]]:
     """Extract records and enrich with pricing visibility and stock status detection."""
-    reserve_output_bytes = budget.reserve_estimated_result_bytes if budget is not None else None
     if target.item_selector is not None:
         items = select_items_strict(page, target.item_selector)
-        data = [
-            extract_selectors_strict(
-                item,
-                target.selectors,
-                reserve_output_bytes=reserve_output_bytes,
-            )
-            for item in items
-        ]
     else:
         items = [page]
-        data = [
-            extract_selectors_strict(
-                page,
-                target.selectors,
-                reserve_output_bytes=reserve_output_bytes,
-            )
-        ]
 
-    for item_data, element in zip(data, items, strict=False):
+    if budget is not None:
+        budget.reserve_extracted_records(len(items))
+
+    data: list[dict[str, Any]] = []
+    for element in items:
+        reserved_bytes = 0
+
+        def reserve_output_bytes(amount: int) -> None:
+            nonlocal reserved_bytes
+            if budget is not None:
+                budget.reserve_estimated_result_bytes(amount)
+                reserved_bytes += amount
+
+        item_data = extract_selectors_strict(
+            element,
+            target.selectors,
+            reserve_output_bytes=reserve_output_bytes if budget is not None else None,
+        )
         enrich_item_detection(
             item_data,
             element,
@@ -130,6 +132,15 @@ def _extract_page_data(
             target.stock_detection,
             budget=budget,
         )
+        if budget is not None:
+            finalized_size = compact_json_size(item_data)
+            # One conservative byte covers the record's array separator.
+            # Selector extraction already reserved the base dictionary, so
+            # only reserve enrichment growth beyond that representation.
+            budget.reserve_estimated_result_bytes(
+                max(0, finalized_size - reserved_bytes) + 1
+            )
+        data.append(item_data)
     return data
 
 
@@ -597,8 +608,6 @@ async def _scrape_first_page(
             target,
             page_data,
         )
-    if context.budget is not None:
-        await context.budget.consume_extracted_records(len(page_data))
     result.data.extend(page_data)
     result.pages_scraped = 1
     return ScrapePageResult(page=outcome.page, debug=outcome.debug, page_data=page_data)

@@ -1,9 +1,12 @@
 """Tests for scrapeyard.storage.filesystem — directory and JSON file helpers."""
 
+import json
+import os
 from datetime import datetime
 
 import pytest
 
+from scrapeyard.common.json_encoding import iter_json_bytes
 from scrapeyard.storage.filesystem import (
     FileSizeLimitExceeded,
     FilesystemDeadlineReached,
@@ -35,6 +38,19 @@ def test_ensure_directory_preserves_existing_contents(tmp_path):
     assert target.is_dir()
     assert (target / "old_file.txt").read_text() == "stale"
     assert (target / "subdir" / "nested.txt").read_text() == "nested"
+
+
+def test_incremental_json_encoder_bounds_escaped_and_multibyte_byte_chunks():
+    data = {"escaped": '"\\\n' * 100_000, "multibyte": "é" * 100_000}
+
+    chunks = list(iter_json_bytes(data))
+
+    assert max(map(len, chunks)) <= 16 * 1024
+    assert b"".join(chunks) == json.dumps(
+        data,
+        default=str,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def test_write_and_read_json_round_trip(tmp_path):
@@ -143,6 +159,33 @@ def test_read_bytes_no_follow_round_trips_and_rejects_symlink(tmp_path):
 def test_bounded_read_rejects_file_above_limit_without_returning_payload(tmp_path):
     target = tmp_path / "oversized.bin"
     target.write_bytes(b"12345")
+
+    with pytest.raises(FileSizeLimitExceeded):
+        read_bytes_file_no_follow(target, max_bytes=4)
+
+
+def test_bounded_read_stops_file_that_grows_after_fstat(tmp_path, monkeypatch):
+    target = tmp_path / "growing.bin"
+    target.write_bytes(b"1234")
+    from scrapeyard.storage import filesystem
+
+    real_fstat = filesystem.os.fstat
+    grown = False
+
+    def grow_after_fstat(descriptor):
+        nonlocal grown
+        result = real_fstat(descriptor)
+        if not grown:
+            grown = True
+            append_fd = os.open(target, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(append_fd, b"5")
+            finally:
+                os.close(append_fd)
+        return result
+
+    monkeypatch.setattr(filesystem.os, "fstat", grow_after_fstat)
+    monkeypatch.setattr(filesystem, "_READ_CHUNK_SIZE", 2)
 
     with pytest.raises(FileSizeLimitExceeded):
         read_bytes_file_no_follow(target, max_bytes=4)

@@ -7,13 +7,14 @@ import threading
 from pathlib import Path
 
 import pytest
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import ANY, AsyncMock, call, patch
 
 import scrapeyard.storage.result_store as result_store_module
 from scrapeyard.common.budgets import BudgetExceeded
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
+from scrapeyard.storage.types import ResultArtifactReadError
 
 
 async def _lookup(job_id: str) -> tuple[str, str]:
@@ -269,16 +270,17 @@ async def test_save_result_offloads_filesystem_work(store):
         await store.save_result("j-1", data, run_id="run-1")
 
     assert mock_to_thread.await_args_list == [
-        call(result_store_module.serialize_json_bytes, data),
         call(result_store_module.ensure_directory, run_dir),
         call(
             result_store_module.read_bytes_file_no_follow,
             run_dir / "results.json",
         ),
         call(
-            result_store_module.write_bytes_file,
+            result_store_module.write_json_file_bounded,
             run_dir / "results.json",
-            result_store_module.serialize_json_bytes(data),
+            data,
+            store._max_serialized_result_bytes,
+            ANY,
         ),
     ]
 
@@ -299,14 +301,14 @@ async def test_save_result_writes_distinct_run_artifacts_concurrently(
     store,
     monkeypatch,
 ):
-    real_write = result_store_module.write_bytes_file
+    real_write = result_store_module.write_json_file_bounded
     state_lock = threading.Lock()
     both_writing = threading.Event()
     release = threading.Event()
     active = 0
     max_active = 0
 
-    def blocking_write(path, payload):
+    def blocking_write(path, data, max_bytes, checkpoint):
         nonlocal active, max_active
         with state_lock:
             active += 1
@@ -315,12 +317,16 @@ async def test_save_result_writes_distinct_run_artifacts_concurrently(
                 both_writing.set()
         release.wait(timeout=10)
         try:
-            real_write(path, payload)
+            return real_write(path, data, max_bytes, checkpoint)
         finally:
             with state_lock:
                 active -= 1
 
-    monkeypatch.setattr(result_store_module, "write_bytes_file", blocking_write)
+    monkeypatch.setattr(
+        result_store_module,
+        "write_json_file_bounded",
+        blocking_write,
+    )
     tasks = [
         asyncio.create_task(
             store.save_result("j-1", {"run": run_id}, run_id=run_id)
@@ -341,7 +347,7 @@ async def test_save_result_serializes_same_run_and_releases_keyed_lock(
     store,
     monkeypatch,
 ):
-    real_write = result_store_module.write_bytes_file
+    real_write = result_store_module.write_json_file_bounded
     release_first = threading.Event()
     first_writing = threading.Event()
     state_lock = threading.Lock()
@@ -349,7 +355,7 @@ async def test_save_result_serializes_same_run_and_releases_keyed_lock(
     active = 0
     max_active = 0
 
-    def blocking_first_write(path, payload):
+    def blocking_first_write(path, data, max_bytes, checkpoint):
         nonlocal calls, active, max_active
         with state_lock:
             calls += 1
@@ -360,14 +366,14 @@ async def test_save_result_serializes_same_run_and_releases_keyed_lock(
             first_writing.set()
             release_first.wait(timeout=10)
         try:
-            real_write(path, payload)
+            return real_write(path, data, max_bytes, checkpoint)
         finally:
             with state_lock:
                 active -= 1
 
     monkeypatch.setattr(
         result_store_module,
-        "write_bytes_file",
+        "write_json_file_bounded",
         blocking_first_write,
     )
     first = asyncio.create_task(
@@ -435,6 +441,33 @@ async def test_save_result_rejects_one_byte_over_before_file_or_metadata(store):
     assert row is None
 
 
+async def test_oversized_save_never_builds_a_complete_json_byte_buffer(
+    store,
+    monkeypatch,
+):
+    data = {"escaped": '"\\\n' * 1000, "multibyte": "é" * 1000}
+
+    def forbidden_whole_document_encoder(_data):
+        raise AssertionError("whole-document byte encoding must not be used")
+
+    monkeypatch.setattr(
+        result_store_module,
+        "serialize_json_bytes",
+        forbidden_whole_document_encoder,
+    )
+
+    with pytest.raises(BudgetExceeded):
+        await store.save_result(
+            "j-1",
+            data,
+            run_id="run-stream-over",
+            max_serialized_bytes=128,
+        )
+
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-stream-over"
+    assert not run_dir.exists()
+
+
 async def test_save_result_serialization_failure_creates_no_run_directory(store):
     class BrokenValue:
         def __str__(self):
@@ -479,14 +512,18 @@ async def test_save_result_disk_failure_leaves_no_temp_file_or_metadata(store, m
 async def test_save_result_cancellation_cleans_completed_uncommitted_file(store, monkeypatch):
     started = threading.Event()
     release = threading.Event()
-    real_write = result_store_module.write_bytes_file
+    real_write = result_store_module.write_json_file_bounded
 
-    def delayed_write(path, payload):
+    def delayed_write(path, data, max_bytes, checkpoint):
         started.set()
         release.wait(timeout=2)
-        real_write(path, payload)
+        return real_write(path, data, max_bytes, checkpoint)
 
-    monkeypatch.setattr(result_store_module, "write_bytes_file", delayed_write)
+    monkeypatch.setattr(
+        result_store_module,
+        "write_json_file_bounded",
+        delayed_write,
+    )
     task = asyncio.create_task(
         store.save_result("j-1", {"value": 1}, run_id="run-cancelled")
     )
@@ -524,7 +561,28 @@ async def test_get_result_offloads_json_read(store):
     assert mock_to_thread.await_args == call(
         result_store_module.read_json_file_no_follow,
         json_path,
+        max_bytes=store._max_serialized_result_bytes,
     )
+
+
+async def test_get_result_rejects_oversized_artifact_before_decoding(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    limited = LocalResultStore(
+        str(results_dir),
+        _lookup,
+        max_serialized_result_bytes=16,
+    )
+    meta = await limited.save_result("j-1", {}, run_id="run-oversized")
+    result_path = Path(meta.file_path) / "results.json"
+    result_path.write_bytes(b'{' + b'"value":"' + b'x' * 32 + b'"}')
+
+    with patch("scrapeyard.storage.filesystem.os.fdopen") as fdopen:
+        with pytest.raises(ResultArtifactReadError):
+            await limited.get_result("j-1", "run-oversized")
+
+    fdopen.assert_not_called()
 
 
 async def test_get_result_rejects_symlinked_result_file(store, tmp_path):
