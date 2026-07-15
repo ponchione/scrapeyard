@@ -4,6 +4,7 @@ import logging
 import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
+from urllib.parse import urlparse
 
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -15,6 +16,7 @@ from scrapeyard.engine.adaptive_diagnostics import (
     missing_adaptive_selectors,
 )
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
+from scrapeyard.engine.basic_fetch import _request_headers
 from scrapeyard.engine.resilience import RetryHandler
 from scrapeyard.engine.scraper import (
     _fetch_basic_with_safe_redirects,
@@ -241,7 +243,90 @@ async def test_production_basic_fetch_pins_connection_to_validated_ip(monkeypatc
     assert fetch.await_args.args[1] == "https://93.184.216.34/products"
     assert fetch.await_args.args[2]["headers"]["Host"] == "example.com"
     assert fetch.await_args.args[2]["extensions"]["sni_hostname"] == "example.com"
+    assert fetch.await_args.args[2]["header_url"] == target.url
     assert outcome.debug["final_url"] == target.url
+
+
+@pytest.mark.asyncio
+async def test_production_basic_redirects_generate_headers_from_each_logical_url(monkeypatch):
+    logical_urls = [
+        "https://shop.acme.com/start",
+        "https://catalog.widgets.org/products",
+    ]
+    resolved_urls = [
+        "https://93.184.216.34/start",
+        "https://93.184.216.35/products",
+    ]
+    responses = iter(
+        [
+            SimpleNamespace(
+                status=302,
+                url=resolved_urls[0],
+                headers={"Location": logical_urls[1]},
+            ),
+            SimpleNamespace(status=200, url=resolved_urls[1], headers={}),
+        ]
+    )
+    requests: list[tuple[str, str, str, str, str]] = []
+
+    def resolve(url: str) -> SimpleNamespace:
+        index = logical_urls.index(url)
+        host = urlparse(url).hostname
+        return SimpleNamespace(
+            connect_url=resolved_urls[index],
+            host_header=host,
+            sni_hostname=host,
+        )
+
+    async def fetch(_fetcher_cls, url, kwargs, **_options):
+        headers = _request_headers(
+            kwargs["header_url"],
+            kwargs["headers"],
+            stealthy=True,
+        )
+        requests.append(
+            (
+                url,
+                kwargs["header_url"],
+                headers["referer"],
+                headers["Host"],
+                kwargs["extensions"]["sni_hostname"],
+            )
+        )
+        return next(responses)
+
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", resolve)
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
+
+    await _fetch_basic_with_safe_redirects(Fetcher, logical_urls[0], {}, {})
+
+    assert requests == [
+        (
+            resolved_urls[0],
+            logical_urls[0],
+            "https://www.google.com/search?q=acme",
+            "shop.acme.com",
+            "shop.acme.com",
+        ),
+        (
+            resolved_urls[1],
+            logical_urls[1],
+            "https://www.google.com/search?q=widgets",
+            "catalog.widgets.org",
+            "catalog.widgets.org",
+        ),
+    ]
+
+
+def test_generated_basic_headers_preserve_explicit_referer() -> None:
+    headers = _request_headers(
+        "https://shop.example/products",
+        {"Referer": "https://caller.example/source"},
+        stealthy=True,
+    )
+
+    assert headers["Referer"] == "https://caller.example/source"
+    assert "referer" not in headers
 
 
 @pytest.mark.asyncio
