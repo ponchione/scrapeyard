@@ -413,6 +413,12 @@ history is compacted.
 All service settings use the `SCRAPEYARD_` prefix. The most commonly changed
 settings are:
 
+The base Compose deployment passes every runtime setting through from the shell
+or `.env` while retaining its checked-in default. The three
+`SCRAPEYARD_QUALIFICATION_*` settings are intentionally unavailable there; they
+are reserved for the destructive, local-only release-qualification Compose
+profile.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
