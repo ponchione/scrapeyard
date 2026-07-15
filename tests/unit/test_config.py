@@ -494,6 +494,33 @@ class TestResolvedTargets:
                 )
             )
 
+    @pytest.mark.parametrize("field", ["selector", "wait_for_selector"])
+    @pytest.mark.parametrize(
+        ("value", "valid"),
+        [
+            (None, True),
+            (".product-card", True),
+            (" ", False),
+            ("x" * 4096, True),
+            ("x" * 4097, False),
+        ],
+    )
+    def test_browser_action_selector_boundaries(self, field, value, valid):
+        kwargs = {"type": "scroll"}
+        if value is not None:
+            kwargs[field] = value
+        if field == "selector" and value is not None:
+            kwargs["type"] = "click"
+        elif field == "wait_for_selector" and value is not None:
+            kwargs.update(type="click", selector="#accept")
+
+        if valid:
+            action = BrowserActionConfig(**kwargs)
+            assert getattr(action, field) == value
+        else:
+            with pytest.raises(ValidationError, match="Selector queries"):
+                BrowserActionConfig(**kwargs)
+
     def test_basic_fetcher_rejects_browser_configuration(self):
         with pytest.raises(ValidationError, match="dynamic or stealthy"):
             TargetConfig(
@@ -565,6 +592,25 @@ class TestResolvedTargets:
     def test_browser_useragent_rejects_crlf_value(self):
         with pytest.raises(ValidationError, match="CR, LF, or NUL"):
             BrowserConfig(useragent="Mozilla\r\nX-Evil: 1")
+
+    @pytest.mark.parametrize("field", ["click_selector", "wait_for_selector"])
+    @pytest.mark.parametrize(
+        ("value", "valid"),
+        [
+            (None, True),
+            (".product-card", True),
+            ("\t", False),
+            ("x" * 4096, True),
+            ("x" * 4097, False),
+        ],
+    )
+    def test_legacy_browser_selector_boundaries(self, field, value, valid):
+        if valid:
+            browser = BrowserConfig(**{field: value})
+            assert getattr(browser, field) == value
+        else:
+            with pytest.raises(ValidationError, match="Selector queries"):
+                BrowserConfig(**{field: value})
 
     @pytest.mark.parametrize(
         "option",
