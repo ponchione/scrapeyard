@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -1029,6 +1030,69 @@ async def test_health_project_summary_timeout_is_bounded_and_unhealthy(monkeypat
         "ok": False,
         "detail": "project summary probe timed out after 0.01s",
     }
+
+
+@pytest.mark.asyncio
+async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monkeypatch):
+    import json
+
+    from scrapeyard.runtime.health import ProbeResult
+
+    timeout = 0.03
+    cancelled_async_probes = 0
+
+    async def stalled_async_probe(*_args, **_kwargs):
+        nonlocal cancelled_async_probes
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled_async_probes += 1
+
+    def slow_sync_probe(*_args, **_kwargs):
+        time.sleep(0.2)
+        return ProbeResult(True)
+
+    settings = SimpleNamespace(
+        health_include_projects=False,
+        health_probe_timeout_seconds=timeout,
+        storage_results_dir="/tmp/results",
+        health_disk_free_min_mb=1,
+    )
+    pool = SimpleNamespace(
+        max_concurrent=2,
+        active_tasks=0,
+        max_browsers=1,
+        active_browsers=0,
+        queue_depths=stalled_async_probe,
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    monkeypatch.setattr(main_module, "probe_redis", stalled_async_probe)
+    monkeypatch.setattr(main_module, "probe_sqlite", stalled_async_probe)
+    monkeypatch.setattr(main_module, "probe_result_storage", slow_sync_probe)
+    monkeypatch.setattr(main_module, "probe_disk", slow_sync_probe)
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        lambda: {"worker": ProbeResult(True)},
+    )
+
+    started = asyncio.get_running_loop().time()
+    response = await main_module.health()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert response.status_code == 503
+    assert elapsed < 0.1
+    assert cancelled_async_probes == 5
+    dependencies = json.loads(response.body)["dependencies"]
+    assert dependencies["redis"]["detail"] == (
+        "redis queue depth probe timed out after 0.03s"
+    )
+    assert dependencies["sqlite"]["detail"] == "jobs.db probe timed out after 0.03s"
+    assert dependencies["result_storage"]["detail"] == (
+        "result storage probe timed out after 0.03s"
+    )
+    assert dependencies["disk"]["detail"] == "disk probe timed out after 0.03s"
 
 
 @pytest.mark.asyncio
