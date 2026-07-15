@@ -11,7 +11,6 @@ from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from rebrowser_playwright.async_api import TimeoutError as RebrowserPlaywrightTimeoutError
@@ -37,6 +36,7 @@ from scrapeyard.engine.url_guard import (
     URLResolutionError,
     UnsafeURLError,
     assert_public_url,
+    canonical_url_origin,
     redact_sensitive_mapping,
 )
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
@@ -100,20 +100,6 @@ class BrowserTransportTimeout(TimeoutError):
 
 
 _BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, RebrowserPlaywrightTimeoutError)
-
-
-def _url_origin(url: str) -> tuple[str, str, int] | None:
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if not scheme or not host:
-        return None
-    try:
-        parsed_port = parsed.port
-    except ValueError:
-        return None
-    port = parsed_port or (443 if scheme == "https" else 80 if scheme == "http" else -1)
-    return scheme, host, port
 
 
 async def _request_header_mapping(request: Any) -> dict[str, str] | None:
@@ -189,7 +175,7 @@ async def _guarded_async_intercept_route(route: Any) -> None:
 
     scoped_headers = _BROWSER_ORIGIN_SCOPED_HEADERS.get()
     target_origin = _BROWSER_TARGET_ORIGIN.get()
-    request_origin = _url_origin(request_url) if isinstance(request_url, str) else None
+    request_origin = canonical_url_origin(request_url) if isinstance(request_url, str) else None
     if scoped_headers and target_origin is not None and request_origin != target_origin:
         headers = await _request_header_mapping(request)
         if headers is None:
@@ -767,7 +753,7 @@ async def fetch_browser_response(
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
     budget_token = _BROWSER_RUN_BUDGET.set(budget)
     blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
-    origin_token = _BROWSER_TARGET_ORIGIN.set(_url_origin(url))
+    origin_token = _BROWSER_TARGET_ORIGIN.set(canonical_url_origin(url))
     headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
         frozenset(name.lower() for name in browser.extra_headers)
     )

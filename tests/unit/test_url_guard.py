@@ -9,6 +9,7 @@ from scrapeyard.engine.url_guard import (
     UnsafeURLError,
     activate_deployment_secret_redaction,
     assert_public_url,
+    canonical_url_origin,
     redact_deployment_secrets,
     redact_deployment_secrets_in_value,
     redact_deployment_secrets_in_value_with_count,
@@ -318,6 +319,20 @@ def test_url_host_label_strips_userinfo_and_preserves_port() -> None:
 )
 def test_url_host_label_canonicalizes_logical_origin(url: str, expected: str) -> None:
     assert url_host_label(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://BÜCHER.example/path", ("https", "xn--bcher-kva.example", 443)),
+        ("https://xn--bcher-kva.example:443/path", ("https", "xn--bcher-kva.example", 443)),
+        ("https://[2001:0db8::1]/path", ("https", "2001:db8::1", 443)),
+        ("http://example.com:0/path", ("http", "example.com", 0)),
+        ("https://example.com:invalid/path", None),
+    ],
+)
+def test_canonical_url_origin_normalizes_browser_origin_identity(url: str, expected) -> None:
+    assert canonical_url_origin(url) == expected
 
 
 def test_redact_sensitive_mapping_masks_secret_keys_and_url_userinfo() -> None:

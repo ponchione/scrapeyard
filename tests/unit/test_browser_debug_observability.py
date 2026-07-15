@@ -535,6 +535,61 @@ async def test_browser_extra_headers_are_scoped_to_exact_target_origin(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_url", "expect_credentials"),
+    [
+        ("https://xn--bcher-kva.example/redirected", True),
+        ("https://xn--bcher-kva.example:443/redirected", True),
+        ("https://xn--caf-dma.example/resource", False),
+        ("https://xn--bcher-kva.example:8443/resource", False),
+        ("http://xn--bcher-kva.example/resource", False),
+    ],
+)
+async def test_browser_extra_headers_use_canonical_idna_target_origin(
+    request_url: str,
+    expect_credentials: bool,
+) -> None:
+    target = TargetConfig(
+        url="https://bücher.example/start",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={
+            "disable_resources": False,
+            "extra_headers": {"Authorization": "Bearer target-secret"},
+        },
+    )
+    route = FakeRoute(
+        request_url,
+        "document",
+        headers={
+            "Accept": "text/html",
+            "Authorization": "Bearer target-secret",
+        },
+    )
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **_kwargs):
+            await scrapling_pw_engine.async_intercept_route(route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    assert route.continued is True
+    if expect_credentials:
+        assert route.continued_headers is None
+    else:
+        assert route.continued_headers == {"Accept": "text/html"}
+
+
+@pytest.mark.asyncio
 async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() -> None:
     target = TargetConfig(
         url="https://example.com",
