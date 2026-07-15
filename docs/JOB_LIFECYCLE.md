@@ -96,9 +96,13 @@ Cleanup order is:
 
 1. Confirm the current arq run is `complete` or `missing`.
 2. Remove all errors for the job.
-3. If `delete_results=true`, remove contained result directories and then their
-   metadata. Files are removed first on this explicit path so a filesystem
-   fault leaves metadata paths available for retry.
+3. If `delete_results=true`, snapshot the exact current/history run IDs owned
+   by the reserved job, remove their contained result directories (including
+   browser-debug-only directories without metadata), and then remove the job's
+   result metadata. Files are removed first on this explicit path so a
+   filesystem fault leaves metadata paths available for retry. Cleanup never
+   removes the shared project/name directory, because retained results from a
+   deleted job may share that name with a newer job.
 4. In one jobs.db transaction, recheck the reservation and absence of pending
    webhooks, remove delivered/failed/scrubbed webhook rows, remove `JobRun`
    rows, and finally remove the job.

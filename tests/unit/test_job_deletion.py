@@ -119,6 +119,8 @@ async def test_reservation_persists_policy_and_resumes_idempotently(store):
     assert job.schedule_enabled is False
     assert job.delete_results_on_delete is True
     assert job.deletion_requested_at == NOW + timedelta(seconds=2)
+    assert first.owned_run_ids == ("run-1",)
+    assert repeated.owned_run_ids == ("run-1",)
 
 
 async def test_pending_webhook_blocks_reservation_without_mutating_parent(store):

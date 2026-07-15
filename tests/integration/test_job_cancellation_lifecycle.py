@@ -275,6 +275,31 @@ async def test_delete_results_true_removes_metadata_and_artifact(client, monkeyp
     assert await get_result_store().get_result_metadata(job_id, run_id) is None
 
 
+async def test_delete_results_true_removes_artifact_without_metadata(client, monkeypatch):
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _success)
+    response = await _submit(client, _yaml(name="remove-unindexed-artifacts"))
+    job_id = response.json()["job_id"]
+    result = await poll_until_ready(
+        lambda: client.get(f"/results/{job_id}"),
+        lambda response: response.status_code == 200,
+    )
+    run_id = result.json()["run_id"]
+    metadata = await get_result_store().get_result_metadata(job_id, run_id)
+    assert metadata is not None
+    run_dir = Path(metadata.file_path)
+    (run_dir / "artifacts").mkdir(exist_ok=True)
+    (run_dir / "artifacts" / "page.png").write_bytes(b"debug")
+    async with get_db("results_meta.db") as db:
+        await db.execute(
+            "DELETE FROM results_meta WHERE job_id = ? AND run_id = ?",
+            (job_id, run_id),
+        )
+        await db.commit()
+
+    assert (await client.delete(f"/jobs/{job_id}?delete_results=true")).status_code == 204
+    assert not run_dir.exists()
+
+
 async def test_pending_webhook_blocks_delete_until_terminal(client, monkeypatch):
     monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _success)
     response = await _submit(client, _yaml(name="pending-block"))

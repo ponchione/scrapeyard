@@ -405,7 +405,14 @@ class ResultStore(Protocol):
         """Return metadata without requiring the result artifact to be readable."""
         ...
 
-    async def delete_results(self, job_id: str) -> None: ...
+    async def delete_results(
+        self,
+        job_id: str,
+        *,
+        owned_run_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Delete metadata-backed results and exact owned run directories."""
+        ...
 
     async def delete_result(self, job_id: str, run_id: str) -> bool:
         """Delete one run-specific artifact and metadata row if present."""

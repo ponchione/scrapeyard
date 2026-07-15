@@ -1017,12 +1017,20 @@ class SQLiteJobStore:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Deletion reservation lost ownership inside transaction")
+            cursor = await db.execute(
+                "SELECT run_id FROM job_runs WHERE job_id = ? ORDER BY run_id",
+                (job_id,),
+            )
+            owned_run_ids = {str(item["run_id"]) for item in await cursor.fetchall()}
+            if run_id is not None:
+                owned_run_ids.add(run_id)
             return DeletionReservationOutcome(
                 action,
                 job_id,
                 run_id,
                 prior_status,
                 delete_results,
+                tuple(sorted(owned_run_ids)),
             )
 
     async def finalize_job_deletion(
