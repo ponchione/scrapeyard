@@ -26,6 +26,7 @@ from scrapeyard.config import (
 from scrapeyard.config.schema import (
     MAX_BROWSER_ACTIONS,
     MAX_BROWSER_ACTION_REPEAT,
+    MAX_BROWSER_HUMANIZE_SECONDS,
     MAX_BROWSER_TIMEOUT_MS,
     MAX_BROWSER_WAIT_MS,
     MAX_DETECTION_CSS_SELECTORS,
@@ -804,6 +805,41 @@ target:
     @pytest.mark.parametrize("boolean", [False, True])
     def test_explicit_boolean_or_float_control_keeps_boolean_semantics(self, boolean):
         assert BrowserConfig(humanize=boolean).humanize is boolean
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf"), float("1e1000"), 0, -1],
+    )
+    def test_browser_humanize_rejects_invalid_numeric_durations(self, value):
+        with pytest.raises(ValidationError):
+            BrowserConfig(humanize=value)
+
+    def test_browser_humanize_accepts_positive_finite_boundary(self):
+        config = BrowserConfig(humanize=MAX_BROWSER_HUMANIZE_SECONDS)
+
+        assert config.humanize == MAX_BROWSER_HUMANIZE_SECONDS
+
+        with pytest.raises(ValidationError):
+            BrowserConfig(humanize=MAX_BROWSER_HUMANIZE_SECONDS + 1)
+
+    @pytest.mark.parametrize("value", [".nan", ".inf", "-.inf", "1e1000", "0", "-1"])
+    def test_loaded_yaml_rejects_invalid_browser_humanize_durations(self, value):
+        raw = f"""
+project: test
+name: invalid-humanize
+target:
+  url: https://example.com
+  fetcher: stealthy
+  browser:
+    humanize: {value}
+  selectors:
+    title: h1
+"""
+
+        with pytest.raises(ValidationError) as exc_info:
+            load_config(raw)
+
+        assert exc_info.value.errors()[0]["loc"] == ("target", "browser", "humanize")
 
     @pytest.mark.parametrize(
         ("model", "kwargs"),

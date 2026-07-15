@@ -355,6 +355,8 @@ bounded list of names), `custom_fonts_only` (which requires `fonts`), and
 `window` (a two-integer `[width, height]` list). Python-object controls such as
 custom fingerprints and screen constraint objects are not accepted by the
 service schema.
+`browser.humanize` accepts literal `true`/`false` or a positive, finite maximum
+cursor-movement duration no greater than 60 seconds.
 
 Example browser actions:
 
