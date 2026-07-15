@@ -97,6 +97,7 @@ class ServiceSettings(BaseSettings):
     storage_cleanup_cycle_max_items_per_phase: int = Field(default=10000, ge=1)
     storage_cleanup_cycle_max_seconds: float = Field(default=60.0, gt=0)
     storage_cleanup_catchup_delay_seconds: float = Field(default=5.0, gt=0)
+    storage_reconciliation_max_entries_per_run: int = Field(default=10000, ge=1)
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False
