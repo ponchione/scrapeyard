@@ -8,7 +8,11 @@ requires-python = ">=3.10,<4.0"
 dependencies = [
     "fastapi>=0.136.1,<0.137.0",
     "uvicorn[standard]>=0.34.0,<0.35.0",
-    "scrapling>=0.2,<0.3",
+    # Scrapling 0.3+ removed browser internals instrumented by browser_debug.py.
+    "scrapling>=0.2.99,<0.3",
+    # Scrapling 0.2 passes a deprecated no-op parser option. Keep the temporary,
+    # exact test warning filter bounded to this security-fixed lxml API line.
+    "lxml>=6.1.1,<6.2.0",
     "arq>=0.26,<0.27",
     "apscheduler>=3.10,<4.0",
     "pyyaml>=6.0,<7.0",

@@ -39,7 +39,6 @@ def _scrapling_response(*, body: bytes, url: str = "https://example.com/") -> Re
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore:The 'strip_cdata' option:DeprecationWarning")
 async def test_real_scrapling_response_body_is_counted(monkeypatch):
     response = _scrapling_response(body=b"<html><body>hello</body></html>")
 

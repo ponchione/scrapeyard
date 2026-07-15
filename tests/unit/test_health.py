@@ -15,28 +15,34 @@ from scrapeyard.main import app
 from scrapeyard.runtime.health import ProbeResult
 
 
-def test_setup_logging_is_idempotent(tmp_path) -> None:
-    log_dir = tmp_path / "logs"
+@pytest.fixture
+def isolated_logger():
     logger = logging.Logger("scrapeyard-test")
-    with patch("logging.getLogger", return_value=logger):
-        setup_logging(str(log_dir))
-        first_count = len(logger.handlers)
-        setup_logging(str(log_dir))
-        assert len(logger.handlers) == first_count
+    yield logger
+    for handler in logger.handlers:
+        handler.close()
+    logger.handlers.clear()
 
 
-def test_setup_logging_uses_configured_level(tmp_path) -> None:
+def test_setup_logging_is_idempotent(tmp_path, isolated_logger) -> None:
     log_dir = tmp_path / "logs"
-    logger = logging.Logger("scrapeyard-test")
-    with patch("logging.getLogger", return_value=logger):
+    with patch("logging.getLogger", return_value=isolated_logger):
+        setup_logging(str(log_dir))
+        first_count = len(isolated_logger.handlers)
+        setup_logging(str(log_dir))
+        assert len(isolated_logger.handlers) == first_count
+
+
+def test_setup_logging_uses_configured_level(tmp_path, isolated_logger) -> None:
+    log_dir = tmp_path / "logs"
+    with patch("logging.getLogger", return_value=isolated_logger):
         setup_logging(str(log_dir), "debug")
-    assert logger.level == logging.DEBUG
+    assert isolated_logger.level == logging.DEBUG
 
 
-def test_setup_logging_rejects_unknown_level(tmp_path) -> None:
+def test_setup_logging_rejects_unknown_level(tmp_path, isolated_logger) -> None:
     log_dir = tmp_path / "logs"
-    logger = logging.Logger("scrapeyard-test")
-    with patch("logging.getLogger", return_value=logger):
+    with patch("logging.getLogger", return_value=isolated_logger):
         with pytest.raises(ValueError, match="SCRAPEYARD_LOG_LEVEL"):
             setup_logging(str(log_dir), "chatty")
 
