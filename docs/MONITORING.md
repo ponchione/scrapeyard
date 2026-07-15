@@ -40,8 +40,9 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
   work amplification and output pressure.
 - Durable webhook status counts and oldest-pending age expose retry backlog.
 - Cleanup pass/item/removed-byte totals, artifact finding counts, durable
-  history phase failures, and scheduler/cleanup/webhook/reconciliation
-  last-success timestamps expose stalled maintenance and retained-data integrity.
+  history phase failures, exact eligible backlog count/oldest age, and
+  scheduler/cleanup/webhook/reconciliation last-success timestamps expose
+  stalled maintenance and retained-data integrity.
 - Background-task gauges report the embedded worker, scheduler, cleanup loop,
   webhook dispatcher, queued-delivery reconciler, and stale-running reconciler.
   Scheduler readiness also includes durable per-schedule callback failures;
@@ -90,6 +91,10 @@ Tune the bounded probes with:
   readiness floor; keep a separate host-volume inode alert.
 - Alert when cleanup or scheduler last-success age exceeds twice its expected
   interval. A zero timestamp means that subsystem has not yet succeeded.
+- Alert when `scrapeyard_cleanup_eligible_items` or
+  `scrapeyard_cleanup_oldest_eligible_age_seconds` rises across maintenance
+  cycles for any category; successful bounded transactions do not by
+  themselves prove that retention is keeping up.
 - Page on scheduler readiness details beginning `scheduled callback failures`.
   Inspect the affected job's `schedule_failure_code`, failure timestamp,
   consecutive count, and synthetic failed run. Codes are bounded

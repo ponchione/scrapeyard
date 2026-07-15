@@ -16,6 +16,7 @@ from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.secret_envelope import protect_text, reveal_text
+from scrapeyard.storage.types import CleanupBacklogSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -617,20 +618,29 @@ class SQLiteWebhookOutboxStore:
             get_db("jobs.db") as db,
             db_transaction(db, immediate=True),
         ):
-            delivered_ids = await self._terminal_ids_for_scrub(
-                db,
-                status=WebhookDeliveryStatus.delivered,
-                terminal_column="delivered_at",
-                cutoff=delivered_before,
-                limit=limit,
+            cursor = await db.execute(
+                """SELECT delivery_id, status
+                   FROM webhook_deliveries
+                   WHERE scrubbed_at IS NULL
+                     AND (
+                         (status = 'delivered' AND delivered_at <= ?)
+                         OR (status = 'failed' AND failed_at <= ?)
+                     )
+                   ORDER BY COALESCE(delivered_at, failed_at), delivery_id
+                   LIMIT ?""",
+                (fmt_dt(delivered_before), fmt_dt(failed_before), limit),
             )
-            failed_ids = await self._terminal_ids_for_scrub(
-                db,
-                status=WebhookDeliveryStatus.failed,
-                terminal_column="failed_at",
-                cutoff=failed_before,
-                limit=limit,
-            )
+            rows = await cursor.fetchall()
+            delivered_ids = [
+                str(row["delivery_id"])
+                for row in rows
+                if row["status"] == WebhookDeliveryStatus.delivered.value
+            ]
+            failed_ids = [
+                str(row["delivery_id"])
+                for row in rows
+                if row["status"] == WebhookDeliveryStatus.failed.value
+            ]
             for delivery_ids in (delivered_ids, failed_ids):
                 if not delivery_ids:
                     continue
@@ -653,6 +663,35 @@ class SQLiteWebhookOutboxStore:
             delivered_scrubbed=len(delivered_ids),
             failed_scrubbed=len(failed_ids),
         )
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        delivered_before: datetime,
+        failed_before: datetime,
+    ) -> dict[str, CleanupBacklogSnapshot]:
+        """Return exact terminal-secret backlog using the scrub predicate."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(COALESCE(delivered_at, failed_at)) AS oldest_eligible_at
+                   FROM webhook_deliveries
+                   WHERE scrubbed_at IS NULL
+                     AND (
+                         (status = 'delivered' AND delivered_at <= ?)
+                         OR (status = 'failed' AND failed_at <= ?)
+                     )""",
+                (fmt_dt(delivered_before), fmt_dt(failed_before)),
+            )
+            row = await cursor.fetchone()
+        assert row is not None
+        return {
+            "terminal_webhooks": CleanupBacklogSnapshot(
+                int(row["eligible_count"]),
+                parse_dt(row["oldest_eligible_at"]),
+            )
+        }
 
     async def _fetch_deliveries(
         self,
@@ -775,27 +814,3 @@ class SQLiteWebhookOutboxStore:
         async with get_db("jobs.db") as db, db_transaction(db):
             cursor = await db.execute(sql, params)
         return cursor.rowcount == 1
-
-    @staticmethod
-    async def _terminal_ids_for_scrub(
-        db: aiosqlite.Connection,
-        *,
-        status: WebhookDeliveryStatus,
-        terminal_column: str,
-        cutoff: datetime,
-        limit: int,
-    ) -> list[str]:
-        if terminal_column not in {"delivered_at", "failed_at"}:
-            raise ValueError("Invalid webhook terminal timestamp column")
-        cursor = await db.execute(
-            f"""SELECT delivery_id
-                FROM webhook_deliveries
-                WHERE status = ?
-                  AND scrubbed_at IS NULL
-                  AND {terminal_column} IS NOT NULL
-                  AND {terminal_column} <= ?
-                ORDER BY {terminal_column} ASC, delivery_id ASC
-                LIMIT ?""",
-            (status.value, fmt_dt(cutoff), limit),
-        )
-        return [str(row[0]) for row in await cursor.fetchall()]

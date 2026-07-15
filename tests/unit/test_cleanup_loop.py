@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.storage.cleanup import start_cleanup_loop
+from scrapeyard.storage.cleanup import CleanupCycleOutcome, start_cleanup_loop
 from scrapeyard.runtime.background import BackgroundLoopMonitor
 from scrapeyard.runtime.health import probe_background_service
 
@@ -40,6 +40,38 @@ async def test_cleanup_loop_handles_cancellation():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_cleanup_loop_promptly_reschedules_saturated_cycle(monkeypatch):
+    delays: list[float] = []
+    settings = SimpleNamespace(
+        storage_retention_days=7,
+        storage_max_results_per_job=20,
+        storage_cleanup_batch_size=50,
+        storage_orphan_grace_seconds=3600,
+        storage_reconciliation_dry_run=True,
+        storage_cleanup_cycle_max_items_per_phase=100,
+        storage_cleanup_cycle_max_seconds=30,
+        storage_cleanup_catchup_delay_seconds=2.5,
+    )
+
+    async def fake_run_cleanup(**_kwargs):
+        return CleanupCycleOutcome(saturated=True, processed_items=100)
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("scrapeyard.storage.cleanup.get_settings", lambda: settings)
+    monkeypatch.setattr("scrapeyard.storage.cleanup.run_cleanup", fake_run_cleanup)
+    monkeypatch.setattr("scrapeyard.storage.cleanup.asyncio.sleep", fake_sleep)
+
+    task = start_cleanup_loop(MagicMock(), interval_hours=6)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert delays == [2.5]
 
 
 @pytest.mark.asyncio

@@ -392,7 +392,7 @@ already delivered or permanently failed deliveries. See
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the transaction and cross-database
 consistency boundaries.
 
-The six-hour cleanup pass applies normal result retention first, then validates
+The six-hour cleanup cycle applies normal result retention first, then validates
 metadata-backed artifacts and reconciles stale filesystem orphans and known
 atomic-write temporary files. Reconciliation is dry-run by default. A
 metadata row remains authoritative even after its parent job is deleted with
@@ -401,7 +401,9 @@ files are reported as storage failures and are not repaired or deleted. See
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#result-artifact-reconciliation) before
 enabling destructive reconciliation.
 
-The same pass bounds operational history. Old terminal ad-hoc jobs are removed
+Repeated full retention batches drain within per-category item and shared-time
+budgets. A saturated cycle resumes after a short catch-up delay rather than the
+normal interval. The same cycle bounds operational history. Old terminal ad-hoc jobs are removed
 through resumable deletion while their result metadata/artifacts follow the
 separate result policy. Scheduled run rows, their reconciled webhook
 tombstones, and error rows are pruned in bounded batches. API `run_count` and
@@ -432,7 +434,10 @@ profile.
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Result artifact directory |
-| `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows and reconciliation run directories processed per cleanup phase and pass |
+| `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows processed per bounded transaction and reconciliation cursor batch |
+| `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` | `10000` | Maximum eligible items drained per retention category in one maintenance cycle |
+| `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` | `60` | Shared elapsed-time ceiling for one cleanup cycle |
+| `SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` | `5` | Delay before another cycle when a cleanup budget is saturated |
 | `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` | `86400` | Minimum artifact age before orphan/temp removal eligibility |
 | `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` | `true` | Report eligible orphan/temp removals without changing files |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive state directory |
@@ -441,7 +446,7 @@ profile.
 | `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS` | `0.5` | Sync response polling interval |
 | `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` | `128` | Maximum visible-ASCII idempotency key length |
 | `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` | `24` | Caller/key replay and conflict window |
-| `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` | `1000` | Maximum expired key records removed per cleanup pass |
+| `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` | `1000` | Maximum expired key records removed per bounded cleanup transaction |
 | `SCRAPEYARD_RATE_LIMIT_REQUESTS` | `600` | Maximum API requests per caller in one sliding window; `0` disables the limiter |
 | `SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS` | `60` | API sliding-window length in seconds |
 | `SCRAPEYARD_RATE_LIMIT_MAX_KEYS` | `10000` | Maximum live API-key/client-IP rate-limit buckets; new identities are refused at saturation |
@@ -452,8 +457,8 @@ profile.
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT` | `100` | Maximum newest scheduled runs retained per job; age expiry may retain fewer |
 | `SCRAPEYARD_HISTORY_ERROR_RETENTION_DAYS` | `30` | Structured error history window |
 | `SCRAPEYARD_HISTORY_WEBHOOK_TOMBSTONE_RETENTION_DAYS` | `30` | Scrubbed tombstone window before atomic run/tombstone compaction |
-| `SCRAPEYARD_HISTORY_ADHOC_JOB_CLEANUP_BATCH_SIZE` | `100` | Maximum ad-hoc jobs selected per cleanup pass |
-| `SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE` | `500` | Maximum scheduled runs selected per cleanup pass |
+| `SCRAPEYARD_HISTORY_ADHOC_JOB_CLEANUP_BATCH_SIZE` | `100` | Maximum ad-hoc jobs selected per bounded cleanup transaction |
+| `SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE` | `500` | Maximum scheduled runs selected per bounded cleanup transaction |
 | `SCRAPEYARD_HISTORY_ERROR_CLEANUP_BATCH_SIZE` | `1000` | Maximum error rows removed per cleanup operation |
 | `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` | `60` | Maximum lateness for one coalesced in-process cron fire |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |

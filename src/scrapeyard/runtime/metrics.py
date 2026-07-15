@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Iterator
 
 from prometheus_client import (
@@ -15,9 +16,20 @@ from prometheus_client import (
     generate_latest,
 )
 
+from scrapeyard.storage.types import CleanupBacklogSnapshot
+
 
 REGISTRY = CollectorRegistry(auto_describe=True)
 ProcessCollector(registry=REGISTRY)
+_CLEANUP_BACKLOG_CATEGORIES = (
+    "expired_results",
+    "excess_results",
+    "adhoc_jobs",
+    "scheduled_runs",
+    "expired_errors",
+    "idempotency_records",
+    "terminal_webhooks",
+)
 
 API_REQUESTS = Counter(
     "scrapeyard_api_requests_total",
@@ -169,6 +181,18 @@ CLEANUP_HISTORY_FAILURES = Counter(
     ("phase",),
     registry=REGISTRY,
 )
+CLEANUP_ELIGIBLE_ITEMS = Gauge(
+    "scrapeyard_cleanup_eligible_items",
+    "Rows currently eligible for retention cleanup by bounded category.",
+    ("category",),
+    registry=REGISTRY,
+)
+CLEANUP_OLDEST_ELIGIBLE_AGE = Gauge(
+    "scrapeyard_cleanup_oldest_eligible_age_seconds",
+    "Age of the oldest currently eligible retention row by bounded category.",
+    ("category",),
+    registry=REGISTRY,
+)
 DISK_FREE_BYTES = Gauge(
     "scrapeyard_result_storage_free_bytes",
     "Free bytes on the result artifact filesystem.",
@@ -214,6 +238,9 @@ for _phase in (
     "scheduled_pruning",
 ):
     CLEANUP_HISTORY_FAILURES.labels(_phase)
+for _category in _CLEANUP_BACKLOG_CATEGORIES:
+    CLEANUP_ELIGIBLE_ITEMS.labels(_category).set(0)
+    CLEANUP_OLDEST_ELIGIBLE_AGE.labels(_category).set(0)
 for _status in ("pending", "delivered", "failed"):
     WEBHOOK_BACKLOG.labels(_status).set(0)
 for _task in (
@@ -292,6 +319,22 @@ def observe_rate_limit_state(scope: str, event: str) -> None:
     safe_scope = scope if scope in {"domain", "api"} else "other"
     safe_event = event if event in {"saturated", "evicted", "expired"} else "other"
     RATE_LIMIT_STATE_EVENTS.labels(safe_scope, safe_event).inc()
+
+
+def set_cleanup_backlog(
+    snapshots: dict[str, CleanupBacklogSnapshot],
+    *,
+    observed_at: datetime,
+) -> None:
+    """Publish exact fixed-category cleanup backlog snapshots."""
+
+    for category, snapshot in snapshots.items():
+        if category not in _CLEANUP_BACKLOG_CATEGORIES:
+            continue
+        CLEANUP_ELIGIBLE_ITEMS.labels(category).set(snapshot.eligible_count)
+        oldest = snapshot.oldest_eligible_at
+        age_seconds = 0.0 if oldest is None else (observed_at - oldest).total_seconds()
+        CLEANUP_OLDEST_ELIGIBLE_AGE.labels(category).set(max(0.0, age_seconds))
 
 
 def mark_last_success(task: str, *, observed_at: float | None = None) -> None:

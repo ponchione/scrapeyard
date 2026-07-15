@@ -18,6 +18,7 @@ from scrapeyard.models.job import (
 )
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.error_queries import build_query_errors_query
+from scrapeyard.storage.types import CleanupBacklogSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -232,3 +233,27 @@ class SQLiteErrorStore:
                 (fmt_dt(expired_before), limit),
             )
             return cursor.rowcount
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        expired_before: datetime,
+    ) -> dict[str, CleanupBacklogSnapshot]:
+        """Return exact error-retention backlog using the delete predicate."""
+
+        async with get_db("errors.db") as db:
+            cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(timestamp) AS oldest_eligible_at
+                   FROM errors
+                   WHERE timestamp <= ?""",
+                (fmt_dt(expired_before),),
+            )
+            row = await cursor.fetchone()
+        assert row is not None
+        return {
+            "expired_errors": CleanupBacklogSnapshot(
+                int(row["eligible_count"]),
+                parse_dt(row["oldest_eligible_at"]),
+            )
+        }

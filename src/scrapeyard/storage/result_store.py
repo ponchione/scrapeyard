@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
-from scrapeyard.common.dt import parse_dt
+from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import safe_join
 from scrapeyard.common.qualification import qualification_checkpoint
@@ -39,6 +39,7 @@ from scrapeyard.storage.result_queries import (
     build_result_lookup_query,
 )
 from scrapeyard.storage.types import (
+    CleanupBacklogSnapshot,
     ReconciliationOperationFailure,
     ResultArtifactFailure,
     ResultArtifactFailureKind,
@@ -974,3 +975,47 @@ class LocalResultStore:
             EXCESS_RESULTS_PER_JOB_QUERY,
             (max_results_per_job, limit),
         )
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        expired_before: datetime,
+        max_results_per_job: int,
+    ) -> dict[str, CleanupBacklogSnapshot]:
+        """Return exact result-retention backlog using cleanup predicates."""
+
+        async with get_db("results_meta.db") as db:
+            expired_cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(created_at) AS oldest_eligible_at
+                   FROM results_meta
+                   WHERE created_at < ?""",
+                (fmt_dt(expired_before),),
+            )
+            expired_row = await expired_cursor.fetchone()
+            excess_cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(created_at) AS oldest_eligible_at
+                   FROM (
+                       SELECT created_at,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY job_id
+                                  ORDER BY created_at DESC, id DESC
+                              ) AS rn
+                       FROM results_meta
+                   )
+                   WHERE rn > ?""",
+                (max_results_per_job,),
+            )
+            excess_row = await excess_cursor.fetchone()
+        assert expired_row is not None and excess_row is not None
+        return {
+            "expired_results": CleanupBacklogSnapshot(
+                int(expired_row["eligible_count"]),
+                parse_dt(expired_row["oldest_eligible_at"]),
+            ),
+            "excess_results": CleanupBacklogSnapshot(
+                int(excess_row["eligible_count"]),
+                parse_dt(excess_row["oldest_eligible_at"]),
+            ),
+        }

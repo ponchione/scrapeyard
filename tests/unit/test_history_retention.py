@@ -200,6 +200,36 @@ async def test_adhoc_candidate_selection_is_bounded(stores):
     assert candidates == ["job-0", "job-1", "job-2"]
 
 
+async def test_history_cleanup_backlog_matches_selection_predicates(stores):
+    jobs, _errors = stores
+    await _save_job(jobs, "eligible-adhoc")
+    await _insert_idempotency(
+        "eligible-adhoc",
+        expires_at=NOW - timedelta(seconds=1),
+    )
+    await _save_job(
+        jobs,
+        "scheduled",
+        schedule=True,
+        current_run_id="run-current",
+    )
+    await _insert_run("scheduled", "run-current", started_at=NOW)
+    await _insert_run("scheduled", "run-old", started_at=OLD)
+
+    backlog = await jobs.summarize_cleanup_backlog(
+        observed_at=NOW,
+        adhoc_expired_before=NOW - timedelta(days=30),
+        scheduled_expired_before=NOW - timedelta(days=30),
+        tombstone_expired_before=NOW - timedelta(days=30),
+        max_scheduled_runs_per_job=100,
+    )
+
+    assert backlog["idempotency_records"].eligible_count == 1
+    assert backlog["adhoc_jobs"].eligible_count == 1
+    assert backlog["scheduled_runs"].eligible_count == 1
+    assert backlog["scheduled_runs"].oldest_eligible_at == OLD
+
+
 async def test_adhoc_retention_preserves_unexpired_idempotency_boundary(stores):
     jobs, _errors = stores
     await _save_job(jobs, "future-key")
@@ -369,6 +399,30 @@ async def test_error_cleanup_batches_are_deterministic_and_resumable(stores):
     assert second == (2, True)
     assert final == 1
     assert await errors.count_errors_for_run("run") == 0
+
+
+async def test_error_cleanup_backlog_matches_expiry_predicate(stores):
+    _jobs, errors = stores
+    await errors.log_error(
+        ErrorRecord(
+            job_id="old-job",
+            run_id="old-run",
+            project="history",
+            target_url="https://example.com",
+            attempt=1,
+            timestamp=OLD,
+            error_type=ErrorType.network_error,
+            fetcher_used="basic",
+            action_taken=ActionTaken.fail,
+        )
+    )
+
+    backlog = await errors.summarize_cleanup_backlog(
+        expired_before=NOW - timedelta(days=30),
+    )
+
+    assert backlog["expired_errors"].eligible_count == 1
+    assert backlog["expired_errors"].oldest_eligible_at == OLD
 
 
 async def test_real_adhoc_cleanup_resumes_after_cross_database_failure(stores):

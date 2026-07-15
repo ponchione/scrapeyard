@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from scrapeyard.storage.cleanup import (
+    CleanupCycleOutcome,
     CleanupIncompleteError,
     HistoryRetentionPolicy,
     run_cleanup,
@@ -86,6 +87,41 @@ async def test_run_cleanup_delegates_per_job_pruning():
 
 
 @pytest.mark.asyncio
+async def test_run_cleanup_drains_repeated_full_result_batches():
+    result_store = AsyncMock()
+    result_store.delete_expired.side_effect = [500, 500, 7]
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.return_value = ResultReconciliationReport(dry_run=True)
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=False, processed_items=1007)
+    assert result_store.delete_expired.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_reports_saturation_at_per_phase_cycle_budget():
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 500
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.return_value = ResultReconciliationReport(dry_run=True)
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+        cycle_max_items_per_phase=1000,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=True, processed_items=1000)
+    assert result_store.delete_expired.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_run_cleanup_removes_bounded_expired_idempotency_records():
     result_store = AsyncMock()
     result_store.delete_expired.return_value = 0
@@ -140,7 +176,7 @@ async def test_run_cleanup_scrubs_bounded_terminal_webhook_rows():
 
 
 @pytest.mark.asyncio
-async def test_adhoc_history_cleanup_resumes_bounded_error_phase_without_deleting_results():
+async def test_adhoc_history_cleanup_drains_error_batches_without_deleting_results():
     result_store, job_store, error_store = _history_cleanup_mocks()
     job_store.list_adhoc_jobs_for_retention.return_value = ["old-job"]
     job_store.reserve_job_deletion.side_effect = [
@@ -175,23 +211,13 @@ async def test_adhoc_history_cleanup_resumes_bounded_error_phase_without_deletin
         history_policy=_history_policy(),
         now=now,
     )
-    job_store.finalize_job_deletion.assert_not_awaited()
-
-    await run_cleanup(
-        result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        job_store=job_store,
-        error_store=error_store,
-        history_policy=_history_policy(),
-        now=now,
-    )
-
     job_store.finalize_job_deletion.assert_awaited_once_with(
         "old-job",
         delete_results=False,
         preserve_idempotency_after=now,
     )
+    assert job_store.reserve_job_deletion.await_count == 2
+    assert error_store.delete_errors_for_job_batch.await_count == 2
     result_store.delete_results.assert_not_awaited()
 
 

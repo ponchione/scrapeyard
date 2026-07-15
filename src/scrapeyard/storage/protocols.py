@@ -9,6 +9,7 @@ from scrapeyard.common.budgets import RunBudget
 from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun
 from scrapeyard.storage.types import (
     CancellationOutcome,
+    CleanupBacklogSnapshot,
     DeletionFinalizationOutcome,
     DeletionReservationOutcome,
     HistoryPruneResult,
@@ -58,6 +59,16 @@ class JobStore(Protocol):
     ) -> int:
         """Delete a bounded batch of expired submission records."""
         ...
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        observed_at: datetime,
+        adhoc_expired_before: datetime,
+        scheduled_expired_before: datetime,
+        tombstone_expired_before: datetime,
+        max_scheduled_runs_per_job: int,
+    ) -> dict[str, CleanupBacklogSnapshot]: ...
 
     async def list_adhoc_jobs_for_retention(
         self,
@@ -409,6 +420,13 @@ class ResultStore(Protocol):
         limit: int = 500,
     ) -> int: ...
 
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        expired_before: datetime,
+        max_results_per_job: int,
+    ) -> dict[str, CleanupBacklogSnapshot]: ...
+
     async def reconcile_artifacts(
         self,
         *,
@@ -467,6 +485,12 @@ class ErrorStore(Protocol):
     ) -> int:
         """Delete a deterministic bounded batch of aged error rows."""
         ...
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        expired_before: datetime,
+    ) -> dict[str, CleanupBacklogSnapshot]: ...
 
 
 class WebhookOutboxStore(Protocol):
@@ -563,3 +587,10 @@ class WebhookOutboxStore(Protocol):
         scrubbed_at: datetime,
         limit: int,
     ) -> WebhookRetentionSummary: ...
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        delivered_before: datetime,
+        failed_before: datetime,
+    ) -> dict[str, CleanupBacklogSnapshot]: ...

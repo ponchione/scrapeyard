@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -27,6 +29,83 @@ from scrapeyard.storage.types import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INTERVAL_HOURS = 6
+_DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE = 10_000
+_DEFAULT_CYCLE_MAX_SECONDS = 60.0
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupCycleOutcome:
+    """Result used by the loop to choose normal cadence or prompt catch-up."""
+
+    saturated: bool
+    processed_items: int
+
+
+class _CleanupCycleBudget:
+    """Bound each phase independently while sharing one elapsed-time ceiling."""
+
+    def __init__(
+        self,
+        *,
+        max_items_per_phase: int,
+        max_seconds: float,
+        clock: Callable[[], float],
+    ) -> None:
+        if max_items_per_phase < 1:
+            raise ValueError("Cleanup cycle item budget must be positive")
+        if max_seconds <= 0:
+            raise ValueError("Cleanup cycle time budget must be positive")
+        self.max_items_per_phase = max_items_per_phase
+        self.max_seconds = max_seconds
+        self._clock = clock
+        self._started = clock()
+        self._phase_items: dict[str, int] = {}
+        self.saturated = False
+
+    @property
+    def processed_items(self) -> int:
+        return sum(self._phase_items.values())
+
+    def next_limit(self, phase: str, batch_size: int) -> int:
+        if batch_size < 1:
+            raise ValueError("Cleanup batch size must be positive")
+        if self._clock() - self._started >= self.max_seconds:
+            self.saturated = True
+            return 0
+        remaining = self.max_items_per_phase - self._phase_items.get(phase, 0)
+        if remaining <= 0:
+            self.saturated = True
+            return 0
+        return min(batch_size, remaining)
+
+    def record(self, phase: str, count: int, *, limit: int) -> bool:
+        if count < 0 or count > limit:
+            raise RuntimeError(
+                f"Cleanup phase {phase!r} returned invalid count {count} for limit {limit}"
+            )
+        self._phase_items[phase] = self._phase_items.get(phase, 0) + count
+        if count < limit:
+            return False
+        if self.next_limit(phase, limit) == 0:
+            self.saturated = True
+            return False
+        return True
+
+
+async def _drain_count_phase(
+    *,
+    phase: str,
+    batch_size: int,
+    cycle: _CleanupCycleBudget,
+    operation: Callable[[int], Awaitable[int]],
+) -> int:
+    total = 0
+    while limit := cycle.next_limit(phase, batch_size):
+        count = await operation(limit)
+        total += count
+        if not cycle.record(phase, count, limit=limit):
+            break
+    return total
 
 
 class CleanupIncompleteError(RuntimeError):
@@ -68,17 +147,23 @@ async def _cleanup_durable_history(
     error_store: ErrorStore,
     policy: HistoryRetentionPolicy,
     observed_at: datetime,
+    cycle: _CleanupCycleBudget,
 ) -> list[str]:
-    """Run bounded, retry-safe cleanup across jobs.db and errors.db."""
+    """Drain retry-safe history batches within per-phase cycle budgets."""
 
     failed_phases: list[str] = []
     tombstone_before = observed_at - timedelta(
         days=policy.webhook_tombstone_retention_days
     )
     try:
-        errors_deleted = await error_store.delete_expired_errors(
-            observed_at - timedelta(days=policy.error_retention_days),
-            limit=policy.error_batch_size,
+        errors_deleted = await _drain_count_phase(
+            phase="expired_errors",
+            batch_size=policy.error_batch_size,
+            cycle=cycle,
+            operation=lambda limit: error_store.delete_expired_errors(
+                observed_at - timedelta(days=policy.error_retention_days),
+                limit=limit,
+            ),
         )
     except asyncio.CancelledError:
         raise
@@ -88,124 +173,183 @@ async def _cleanup_durable_history(
         if errors_deleted:
             CLEANUP_ITEMS.labels("expired_errors").inc(errors_deleted)
 
-    try:
-        adhoc_jobs = await job_store.list_adhoc_jobs_for_retention(
-            observed_at - timedelta(days=policy.adhoc_job_retention_days),
-            idempotency_observed_at=observed_at,
-            tombstone_expired_before=tombstone_before,
-            limit=policy.adhoc_job_batch_size,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        _history_failure(failed_phases, "adhoc_selection", exc)
-        adhoc_jobs = []
-
-    for job_id in adhoc_jobs:
+    while adhoc_limit := cycle.next_limit(
+        "adhoc_candidates",
+        policy.adhoc_job_batch_size,
+    ):
         try:
-            reservation = await job_store.reserve_job_deletion(
-                job_id,
-                delete_results=False,
-                requested_at=observed_at,
+            adhoc_jobs = await job_store.list_adhoc_jobs_for_retention(
+                observed_at - timedelta(days=policy.adhoc_job_retention_days),
+                idempotency_observed_at=observed_at,
+                tombstone_expired_before=tombstone_before,
+                limit=adhoc_limit,
             )
-            if reservation.action not in {
-                DeletionReservationAction.created,
-                DeletionReservationAction.resumed,
-            }:
-                continue
-            errors_deleted, errors_remain = await error_store.delete_errors_for_job_batch(
-                job_id,
-                limit=policy.error_batch_size,
-            )
-            if errors_deleted:
-                CLEANUP_ITEMS.labels("job_errors").inc(errors_deleted)
-            if errors_remain:
-                continue
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _history_failure(failed_phases, "adhoc_errors", exc)
-            continue
-        try:
-            finalized = await job_store.finalize_job_deletion(
-                job_id,
-                delete_results=False,
-                preserve_idempotency_after=observed_at,
-            )
-            if (
-                finalized.action
-                is DeletionFinalizationAction.unexpired_idempotency_conflict
-            ):
-                logger.info(
-                    "Ad-hoc history deletion deferred for live idempotency reservation "
-                    "job_id=%s recovery_action=retry_after_idempotency_expiry",
+            _history_failure(failed_phases, "adhoc_selection", exc)
+            break
+        selection_full = cycle.record(
+            "adhoc_candidates",
+            len(adhoc_jobs),
+            limit=adhoc_limit,
+        )
+        retry_pending = False
+        made_progress = False
+        for job_id in adhoc_jobs:
+            try:
+                reservation = await job_store.reserve_job_deletion(
                     job_id,
+                    delete_results=False,
+                    requested_at=observed_at,
                 )
-                continue
-            if finalized.action not in {
-                DeletionFinalizationAction.deleted,
-                DeletionFinalizationAction.missing,
-            }:
-                raise RuntimeError(
-                    f"Ad-hoc history finalization returned {finalized.action.value}"
+                if reservation.action not in {
+                    DeletionReservationAction.created,
+                    DeletionReservationAction.resumed,
+                }:
+                    continue
+                error_limit = cycle.next_limit(
+                    "adhoc_job_errors",
+                    policy.error_batch_size,
                 )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _history_failure(failed_phases, "adhoc_finalization", exc)
-        else:
-            if finalized.action is DeletionFinalizationAction.deleted:
-                CLEANUP_ITEMS.labels("adhoc_jobs").inc()
-
-    try:
-        scheduled_runs = await job_store.list_scheduled_runs_for_retention(
-            observed_at - timedelta(days=policy.scheduled_run_retention_days),
-            tombstone_expired_before=tombstone_before,
-            max_runs_per_job=policy.scheduled_run_retention_count,
-            limit=policy.scheduled_run_batch_size,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        _history_failure(failed_phases, "scheduled_selection", exc)
-        scheduled_runs = []
-
-    for job_id, run_id in scheduled_runs:
-        try:
-            errors_deleted, errors_remain = await error_store.delete_errors_for_run_batch(
-                run_id,
-                limit=policy.error_batch_size,
-            )
-            if errors_deleted:
-                CLEANUP_ITEMS.labels("run_errors").inc(errors_deleted)
-            if errors_remain:
+                if not error_limit:
+                    retry_pending = True
+                    continue
+                errors_deleted, errors_remain = (
+                    await error_store.delete_errors_for_job_batch(
+                        job_id,
+                        limit=error_limit,
+                    )
+                )
+                cycle.record(
+                    "adhoc_job_errors",
+                    errors_deleted,
+                    limit=error_limit,
+                )
+                if errors_deleted:
+                    made_progress = True
+                    CLEANUP_ITEMS.labels("job_errors").inc(errors_deleted)
+                if errors_remain:
+                    retry_pending = True
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _history_failure(failed_phases, "adhoc_errors", exc)
                 continue
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _history_failure(failed_phases, "scheduled_errors", exc)
-            continue
+            try:
+                finalized = await job_store.finalize_job_deletion(
+                    job_id,
+                    delete_results=False,
+                    preserve_idempotency_after=observed_at,
+                )
+                if (
+                    finalized.action
+                    is DeletionFinalizationAction.unexpired_idempotency_conflict
+                ):
+                    logger.info(
+                        "Ad-hoc history deletion deferred for live idempotency reservation "
+                        "job_id=%s recovery_action=retry_after_idempotency_expiry",
+                        job_id,
+                    )
+                    continue
+                if finalized.action not in {
+                    DeletionFinalizationAction.deleted,
+                    DeletionFinalizationAction.missing,
+                }:
+                    raise RuntimeError(
+                        f"Ad-hoc history finalization returned {finalized.action.value}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _history_failure(failed_phases, "adhoc_finalization", exc)
+            else:
+                made_progress = True
+                if finalized.action is DeletionFinalizationAction.deleted:
+                    CLEANUP_ITEMS.labels("adhoc_jobs").inc()
+        if not selection_full and not (retry_pending and made_progress):
+            break
+
+    while scheduled_limit := cycle.next_limit(
+        "scheduled_candidates",
+        policy.scheduled_run_batch_size,
+    ):
         try:
-            pruned = await job_store.prune_scheduled_run_for_retention(
-                job_id,
-                run_id,
-                expired_before=(
-                    observed_at - timedelta(days=policy.scheduled_run_retention_days)
-                ),
+            scheduled_runs = await job_store.list_scheduled_runs_for_retention(
+                observed_at - timedelta(days=policy.scheduled_run_retention_days),
                 tombstone_expired_before=tombstone_before,
                 max_runs_per_job=policy.scheduled_run_retention_count,
+                limit=scheduled_limit,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _history_failure(failed_phases, "scheduled_pruning", exc)
-        else:
-            if pruned.pruned:
-                CLEANUP_ITEMS.labels("scheduled_runs").inc()
-                if pruned.webhook_tombstones_deleted:
-                    CLEANUP_ITEMS.labels("webhook_tombstones").inc(
-                        pruned.webhook_tombstones_deleted
+            _history_failure(failed_phases, "scheduled_selection", exc)
+            break
+        selection_full = cycle.record(
+            "scheduled_candidates",
+            len(scheduled_runs),
+            limit=scheduled_limit,
+        )
+        retry_pending = False
+        made_progress = False
+        for job_id, run_id in scheduled_runs:
+            try:
+                error_limit = cycle.next_limit(
+                    "scheduled_run_errors",
+                    policy.error_batch_size,
+                )
+                if not error_limit:
+                    retry_pending = True
+                    continue
+                errors_deleted, errors_remain = (
+                    await error_store.delete_errors_for_run_batch(
+                        run_id,
+                        limit=error_limit,
                     )
+                )
+                cycle.record(
+                    "scheduled_run_errors",
+                    errors_deleted,
+                    limit=error_limit,
+                )
+                if errors_deleted:
+                    made_progress = True
+                    CLEANUP_ITEMS.labels("run_errors").inc(errors_deleted)
+                if errors_remain:
+                    retry_pending = True
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _history_failure(failed_phases, "scheduled_errors", exc)
+                continue
+            try:
+                pruned = await job_store.prune_scheduled_run_for_retention(
+                    job_id,
+                    run_id,
+                    expired_before=(
+                        observed_at
+                        - timedelta(days=policy.scheduled_run_retention_days)
+                    ),
+                    tombstone_expired_before=tombstone_before,
+                    max_runs_per_job=policy.scheduled_run_retention_count,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _history_failure(failed_phases, "scheduled_pruning", exc)
+            else:
+                made_progress = made_progress or pruned.pruned
+                if pruned.pruned:
+                    CLEANUP_ITEMS.labels("scheduled_runs").inc()
+                    if pruned.webhook_tombstones_deleted:
+                        CLEANUP_ITEMS.labels("webhook_tombstones").inc(
+                            pruned.webhook_tombstones_deleted
+                        )
+        if not selection_full and not (retry_pending and made_progress):
+            break
     return failed_phases
 
 
@@ -224,15 +368,27 @@ async def run_cleanup(
     idempotency_cleanup_batch_size: int = 1000,
     error_store: ErrorStore | None = None,
     history_policy: HistoryRetentionPolicy | None = None,
+    cycle_max_items_per_phase: int = _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
+    cycle_max_seconds: float = _DEFAULT_CYCLE_MAX_SECONDS,
     *,
     now: datetime | None = None,
-) -> None:
-    """Clean result artifacts and scrub bounded terminal webhook secrets."""
+) -> CleanupCycleOutcome:
+    """Drain bounded retention batches and report whether catch-up remains."""
+    cycle = _CleanupCycleBudget(
+        max_items_per_phase=cycle_max_items_per_phase,
+        max_seconds=cycle_max_seconds,
+        clock=time.monotonic,
+    )
     failed_phases: list[str] = []
     try:
-        deleted = await result_store.delete_expired(
-            retention_days,
-            limit=result_cleanup_batch_size,
+        deleted = await _drain_count_phase(
+            phase="expired_results",
+            batch_size=result_cleanup_batch_size,
+            cycle=cycle,
+            operation=lambda limit: result_store.delete_expired(
+                retention_days,
+                limit=limit,
+            ),
         )
     except asyncio.CancelledError:
         raise
@@ -248,9 +404,14 @@ async def run_cleanup(
             logger.info("Cleanup removed %d expired result(s)", deleted)
 
     try:
-        pruned = await result_store.prune_excess_per_job(
-            max_results_per_job,
-            limit=result_cleanup_batch_size,
+        pruned = await _drain_count_phase(
+            phase="excess_results",
+            batch_size=result_cleanup_batch_size,
+            cycle=cycle,
+            operation=lambda limit: result_store.prune_excess_per_job(
+                max_results_per_job,
+                limit=limit,
+            ),
         )
     except asyncio.CancelledError:
         raise
@@ -368,9 +529,14 @@ async def run_cleanup(
     observed_at = now or utc_now()
     if job_store is not None:
         try:
-            idempotency_deleted = await job_store.delete_expired_idempotency_records(
-                observed_at,
-                limit=idempotency_cleanup_batch_size,
+            idempotency_deleted = await _drain_count_phase(
+                phase="idempotency_records",
+                batch_size=idempotency_cleanup_batch_size,
+                cycle=cycle,
+                operation=lambda limit: job_store.delete_expired_idempotency_records(
+                    observed_at,
+                    limit=limit,
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -394,13 +560,32 @@ async def run_cleanup(
         if webhook_delivered_retention_days is None or webhook_failed_retention_days is None:
             raise ValueError("Webhook retention windows are required for outbox cleanup")
 
+        delivered_scrubbed = 0
+        failed_scrubbed = 0
         try:
-            summary = await webhook_outbox_store.scrub_terminal_deliveries(
-                delivered_before=observed_at - timedelta(days=webhook_delivered_retention_days),
-                failed_before=observed_at - timedelta(days=webhook_failed_retention_days),
-                scrubbed_at=observed_at,
-                limit=webhook_cleanup_batch_size,
-            )
+            while webhook_limit := cycle.next_limit(
+                "webhook_secrets",
+                webhook_cleanup_batch_size,
+            ):
+                summary = await webhook_outbox_store.scrub_terminal_deliveries(
+                    delivered_before=(
+                        observed_at - timedelta(days=webhook_delivered_retention_days)
+                    ),
+                    failed_before=(
+                        observed_at - timedelta(days=webhook_failed_retention_days)
+                    ),
+                    scrubbed_at=observed_at,
+                    limit=webhook_limit,
+                )
+                scrubbed = summary.delivered_scrubbed + summary.failed_scrubbed
+                delivered_scrubbed += summary.delivered_scrubbed
+                failed_scrubbed += summary.failed_scrubbed
+                if not cycle.record(
+                    "webhook_secrets",
+                    scrubbed,
+                    limit=webhook_limit,
+                ):
+                    break
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -415,11 +600,11 @@ async def run_cleanup(
                 "Webhook retention cleanup complete delivered_scrubbed_count=%s "
                 "failed_scrubbed_count=%s batch_limit=%s "
                 "recovery_action=retain_terminal_tombstones",
-                summary.delivered_scrubbed,
-                summary.failed_scrubbed,
+                delivered_scrubbed,
+                failed_scrubbed,
                 webhook_cleanup_batch_size,
             )
-            scrubbed = summary.delivered_scrubbed + summary.failed_scrubbed
+            scrubbed = delivered_scrubbed + failed_scrubbed
             if scrubbed:
                 CLEANUP_ITEMS.labels("webhook_secrets").inc(scrubbed)
 
@@ -432,11 +617,16 @@ async def run_cleanup(
                 error_store=error_store,
                 policy=history_policy,
                 observed_at=observed_at,
+                cycle=cycle,
             )
         )
 
     if failed_phases:
         raise CleanupIncompleteError(failed_phases)
+    return CleanupCycleOutcome(
+        saturated=cycle.saturated,
+        processed_items=cycle.processed_items,
+    )
 
 
 def start_cleanup_loop(
@@ -458,6 +648,7 @@ def start_cleanup_loop(
 
     async def _loop() -> None:
         while True:
+            sleep_seconds = interval_hours * 3600
             try:
                 settings = get_settings()
                 history_policy = HistoryRetentionPolicy(
@@ -481,7 +672,7 @@ def start_cleanup_loop(
                     error_batch_size=settings.history_error_cleanup_batch_size,
                 ) if job_store is not None and error_store is not None else None
                 if webhook_outbox_store is None:
-                    await run_cleanup(
+                    outcome = await run_cleanup(
                         result_store=result_store,
                         retention_days=settings.storage_retention_days,
                         max_results_per_job=settings.storage_max_results_per_job,
@@ -494,9 +685,21 @@ def start_cleanup_loop(
                         else 1000,
                         error_store=error_store,
                         history_policy=history_policy,
+                        cycle_max_items_per_phase=(
+                            getattr(
+                                settings,
+                                "storage_cleanup_cycle_max_items_per_phase",
+                                _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
+                            )
+                        ),
+                        cycle_max_seconds=getattr(
+                            settings,
+                            "storage_cleanup_cycle_max_seconds",
+                            _DEFAULT_CYCLE_MAX_SECONDS,
+                        ),
                     )
                 else:
-                    await run_cleanup(
+                    outcome = await run_cleanup(
                         result_store=result_store,
                         retention_days=settings.storage_retention_days,
                         max_results_per_job=settings.storage_max_results_per_job,
@@ -515,6 +718,18 @@ def start_cleanup_loop(
                         else 1000,
                         error_store=error_store,
                         history_policy=history_policy,
+                        cycle_max_items_per_phase=(
+                            getattr(
+                                settings,
+                                "storage_cleanup_cycle_max_items_per_phase",
+                                _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
+                            )
+                        ),
+                        cycle_max_seconds=getattr(
+                            settings,
+                            "storage_cleanup_cycle_max_seconds",
+                            _DEFAULT_CYCLE_MAX_SECONDS,
+                        ),
                     )
             except asyncio.CancelledError:
                 raise
@@ -528,7 +743,19 @@ def start_cleanup_loop(
                 if monitor is not None:
                     monitor.record_success()
                 mark_last_success("cleanup")
-            await asyncio.sleep(interval_hours * 3600)
+                if isinstance(outcome, CleanupCycleOutcome) and outcome.saturated:
+                    sleep_seconds = getattr(
+                        settings,
+                        "storage_cleanup_catchup_delay_seconds",
+                        5.0,
+                    )
+                    logger.info(
+                        "Cleanup cycle reached its bounded catch-up budget "
+                        "processed_items=%s retry_delay_seconds=%s",
+                        outcome.processed_items,
+                        sleep_seconds,
+                    )
+            await asyncio.sleep(sleep_seconds)
 
     task = asyncio.create_task(_loop(), name="result-cleanup")
     if monitor is not None:

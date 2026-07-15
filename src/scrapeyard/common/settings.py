@@ -93,6 +93,9 @@ class ServiceSettings(BaseSettings):
     storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
     storage_reconciliation_dry_run: bool = True
     storage_cleanup_interval_seconds: float = Field(default=21600.0, gt=0)
+    storage_cleanup_cycle_max_items_per_phase: int = Field(default=10000, ge=1)
+    storage_cleanup_cycle_max_seconds: float = Field(default=60.0, gt=0)
+    storage_cleanup_catchup_delay_seconds: float = Field(default=5.0, gt=0)
     adaptive_dir: str = "/data/adaptive"
     log_dir: str = "/data/logs"
     browser_debug_enabled: bool = False

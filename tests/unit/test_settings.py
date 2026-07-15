@@ -323,6 +323,19 @@ class TestServiceSettingsFromEnv:
 
         assert settings.storage_cleanup_batch_size == 37
 
+    def test_reads_cleanup_cycle_budgets(self):
+        values = {
+            "SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE": "1234",
+            "SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS": "45",
+            "SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS": "2.5",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+
+        assert settings.storage_cleanup_cycle_max_items_per_phase == 1234
+        assert settings.storage_cleanup_cycle_max_seconds == 45.0
+        assert settings.storage_cleanup_catchup_delay_seconds == 2.5
+
     def test_reads_run_thread_worker_capacity(self):
         with patch.dict(
             os.environ,
