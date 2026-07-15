@@ -154,7 +154,7 @@ jobs:
         run: poetry sync --no-interaction
       - name: Exercise the authenticated real Redis/arq path
         run: >-
-          poetry run pytest --no-cov -m live_redis tests/live_redis -q
+          poetry run pytest -W error --no-cov -m live_redis tests/live_redis -q
           --junitxml=test-results/live-redis.xml
       - name: Capture Redis diagnostics on failure
         if: failure()
