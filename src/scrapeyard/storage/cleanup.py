@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from scrapeyard.common.settings import get_settings
@@ -24,6 +24,7 @@ from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore, Webh
 from scrapeyard.storage.types import (
     DeletionFinalizationAction,
     DeletionReservationAction,
+    ResultReconciliationReport,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,13 +79,26 @@ class _CleanupCycleBudget:
             return 0
         return min(batch_size, remaining)
 
-    def record(self, phase: str, count: int, *, limit: int) -> bool:
+    def record(
+        self,
+        phase: str,
+        count: int,
+        *,
+        limit: int,
+        has_more: bool | None = None,
+    ) -> bool:
         if count < 0 or count > limit:
             raise RuntimeError(
                 f"Cleanup phase {phase!r} returned invalid count {count} for limit {limit}"
             )
         self._phase_items[phase] = self._phase_items.get(phase, 0) + count
         if count < limit:
+            if has_more:
+                raise RuntimeError(
+                    f"Cleanup phase {phase!r} reported more work after a short page"
+                )
+            return False
+        if has_more is False:
             return False
         if self.next_limit(phase, limit) == 0:
             self.saturated = True
@@ -106,6 +120,69 @@ async def _drain_count_phase(
         if not cycle.record(phase, count, limit=limit):
             break
     return total
+
+
+async def _drain_artifact_reconciliation(
+    *,
+    result_store: ResultStore,
+    grace_seconds: int,
+    dry_run: bool,
+    now: datetime | None,
+    batch_size: int,
+    cycle: _CleanupCycleBudget,
+) -> ResultReconciliationReport:
+    """Drain independent durable artifact cursors within their phase budgets."""
+
+    aggregate = ResultReconciliationReport(dry_run=dry_run)
+    metadata_pending = True
+    filesystem_pending = True
+    while metadata_pending or filesystem_pending:
+        metadata_limit = (
+            cycle.next_limit("artifact_metadata", batch_size)
+            if metadata_pending
+            else 0
+        )
+        filesystem_limit = (
+            cycle.next_limit("artifact_filesystem", batch_size)
+            if filesystem_pending
+            else 0
+        )
+        if not metadata_limit and not filesystem_limit:
+            break
+        page = await result_store.reconcile_artifacts(
+            grace_seconds=grace_seconds,
+            dry_run=dry_run,
+            now=now,
+            batch_size=batch_size,
+            metadata_scan_limit=metadata_limit,
+            filesystem_scan_limit=filesystem_limit,
+        )
+        aggregate = aggregate.merged_with(
+            page,
+            metadata_scanned=bool(metadata_limit),
+            filesystem_scanned=bool(filesystem_limit),
+        )
+        if metadata_limit:
+            metadata_pending = not page.metadata_scan_exhausted
+            cycle.record(
+                "artifact_metadata",
+                page.metadata_rows_inspected,
+                limit=metadata_limit,
+                has_more=metadata_pending,
+            )
+        if filesystem_limit:
+            filesystem_pending = not page.filesystem_scan_exhausted
+            cycle.record(
+                "artifact_filesystem",
+                page.filesystem_entries_inspected,
+                limit=filesystem_limit,
+                has_more=filesystem_pending,
+            )
+    return replace(
+        aggregate,
+        metadata_scan_exhausted=not metadata_pending,
+        filesystem_scan_exhausted=not filesystem_pending,
+    )
 
 
 class CleanupIncompleteError(RuntimeError):
@@ -427,11 +504,13 @@ async def run_cleanup(
             logger.info("Cleanup pruned %d excess result(s) across jobs", pruned)
 
     try:
-        reconciliation = await result_store.reconcile_artifacts(
+        reconciliation = await _drain_artifact_reconciliation(
+            result_store=result_store,
             grace_seconds=orphan_grace_seconds,
             dry_run=reconciliation_dry_run,
             now=now,
             batch_size=result_cleanup_batch_size,
+            cycle=cycle,
         )
     except asyncio.CancelledError:
         raise
@@ -474,6 +553,14 @@ async def run_cleanup(
             CLEANUP_ITEMS.labels("artifact_directories").inc(reconciliation.directories_removed)
         if reconciliation.files_removed:
             CLEANUP_ITEMS.labels("artifact_files").inc(reconciliation.files_removed)
+        if reconciliation.metadata_rows_inspected:
+            CLEANUP_ITEMS.labels("artifact_metadata_inspected").inc(
+                reconciliation.metadata_rows_inspected
+            )
+        if reconciliation.filesystem_entries_inspected:
+            CLEANUP_ITEMS.labels("artifact_filesystem_inspected").inc(
+                reconciliation.filesystem_entries_inspected
+            )
         if reconciliation.removed_bytes:
             CLEANUP_BYTES.inc(reconciliation.removed_bytes)
         logger.info(
@@ -481,6 +568,7 @@ async def run_cleanup(
             "metadata_rows_inspected=%s valid_artifacts=%s "
             "missing_result_files=%s corrupt_result_files=%s "
             "unreadable_result_files=%s unsafe_metadata_paths=%s "
+            "filesystem_entries_inspected=%s "
             "filesystem_run_directories_inspected=%s malformed_entries_ignored=%s "
             "orphan_candidates=%s "
             "recent_candidates_skipped=%s active_run_candidates_skipped=%s "
@@ -489,7 +577,8 @@ async def run_cleanup(
             "stale_temporary_candidates=%s directories_would_remove=%s "
             "files_would_remove=%s directories_removed=%s files_removed=%s "
             "removed_bytes=%s failure_count=%s artifact_error_types=%s "
-            "operation_error_types=%s "
+            "operation_error_types=%s metadata_scan_exhausted=%s "
+            "filesystem_scan_exhausted=%s has_more=%s "
             "recovery_action=retry_failures_next_cleanup_pass",
             reconciliation.dry_run,
             reconciliation.metadata_rows_inspected,
@@ -498,6 +587,7 @@ async def run_cleanup(
             reconciliation.corrupt_result_files,
             reconciliation.unreadable_result_files,
             reconciliation.unsafe_metadata_paths,
+            reconciliation.filesystem_entries_inspected,
             reconciliation.filesystem_run_directories_inspected,
             reconciliation.malformed_entries_ignored,
             reconciliation.orphan_candidates,
@@ -524,6 +614,9 @@ async def run_cleanup(
             or "none",
             ",".join(sorted({failure.error_type for failure in reconciliation.operation_failures}))
             or "none",
+            reconciliation.metadata_scan_exhausted,
+            reconciliation.filesystem_scan_exhausted,
+            reconciliation.has_more,
         )
 
     observed_at = now or utc_now()

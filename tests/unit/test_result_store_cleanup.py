@@ -577,9 +577,106 @@ async def test_reconciliation_paginates_metadata_and_filesystem_work(store):
     )
 
     assert first.metadata_rows_inspected == 2
+    assert first.filesystem_entries_inspected == 2
     assert first.filesystem_run_directories_inspected == 2
+    assert first.metadata_scan_exhausted is False
+    assert first.filesystem_scan_exhausted is False
+    assert first.has_more is True
     assert second.metadata_rows_inspected == 1
+    assert second.filesystem_entries_inspected == 1
     assert second.filesystem_run_directories_inspected == 1
+    assert second.metadata_scan_exhausted is True
+    assert second.filesystem_scan_exhausted is True
+    assert second.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_reports_independent_metadata_exhaustion(store):
+    for index in range(3):
+        run_dir = store._results_dir / "test-project" / "test-job" / f"missing-{index}"
+        await _insert_metadata(
+            job_id=f"job-metadata-{index}",
+            run_id=f"run-metadata-{index}",
+            file_path=run_dir,
+        )
+
+    report = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=2,
+    )
+
+    assert report.metadata_rows_inspected == 2
+    assert report.metadata_scan_exhausted is False
+    assert report.filesystem_entries_inspected == 0
+    assert report.filesystem_scan_exhausted is True
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_reports_independent_filesystem_exhaustion(store):
+    for index in range(3):
+        run_dir = store._results_dir / "test-project" / "test-job" / f"orphan-{index}"
+        run_dir.mkdir(parents=True)
+        _backdate_tree(run_dir)
+
+    report = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=2,
+    )
+
+    assert report.metadata_rows_inspected == 0
+    assert report.metadata_scan_exhausted is True
+    assert report.filesystem_entries_inspected == 2
+    assert report.filesystem_scan_exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_cursors_survive_store_restart(store):
+    for index in range(3):
+        await store.save_result(
+            f"job-restart-{index}",
+            {"index": index},
+            run_id=f"run-restart-{index}",
+        )
+
+    first = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=1,
+    )
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            """SELECT metadata_cursor, filesystem_project,
+                      filesystem_job_name, filesystem_run_id
+               FROM result_reconciliation_state WHERE singleton = 1"""
+        )
+        persisted_first = tuple(await cursor.fetchone())
+
+    restarted = LocalResultStore(str(store._results_dir), _lookup)
+    second = await restarted.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        batch_size=1,
+    )
+    async with get_db("results_meta.db") as db:
+        cursor = await db.execute(
+            """SELECT metadata_cursor, filesystem_project,
+                      filesystem_job_name, filesystem_run_id
+               FROM result_reconciliation_state WHERE singleton = 1"""
+        )
+        persisted_second = tuple(await cursor.fetchone())
+
+    assert first.has_more is True
+    assert second.has_more is True
+    assert persisted_first[0] > 0
+    assert persisted_second[0] > persisted_first[0]
+    assert persisted_first[1:] == ("test-project", "test-job", "run-restart-0")
+    assert persisted_second[1:] == ("test-project", "test-job", "run-restart-1")
 
 
 @pytest.mark.asyncio

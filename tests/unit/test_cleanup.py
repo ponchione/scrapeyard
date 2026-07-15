@@ -122,6 +122,130 @@ async def test_run_cleanup_reports_saturation_at_per_phase_cycle_budget():
 
 
 @pytest.mark.asyncio
+async def test_run_cleanup_drains_artifact_backlog_larger_than_one_batch():
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.side_effect = [
+        ResultReconciliationReport(
+            dry_run=True,
+            metadata_rows_inspected=2,
+            filesystem_entries_inspected=2,
+            metadata_scan_exhausted=False,
+            filesystem_scan_exhausted=False,
+        ),
+        ResultReconciliationReport(
+            dry_run=True,
+            metadata_rows_inspected=1,
+            filesystem_entries_inspected=1,
+        ),
+    ]
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=2,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=False, processed_items=6)
+    assert result_store.reconcile_artifacts.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_drains_artifact_scans_independently():
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.side_effect = [
+        ResultReconciliationReport(
+            dry_run=True,
+            metadata_rows_inspected=1,
+            filesystem_entries_inspected=2,
+            metadata_scan_exhausted=True,
+            filesystem_scan_exhausted=False,
+        ),
+        ResultReconciliationReport(
+            dry_run=True,
+            filesystem_entries_inspected=1,
+        ),
+    ]
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=2,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=False, processed_items=4)
+    assert result_store.reconcile_artifacts.await_args_list[1].kwargs[
+        "metadata_scan_limit"
+    ] == 0
+    assert result_store.reconcile_artifacts.await_args_list[1].kwargs[
+        "filesystem_scan_limit"
+    ] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_artifact_item_ceiling_marks_cycle_saturated():
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+    result_store.reconcile_artifacts.return_value = ResultReconciliationReport(
+        dry_run=True,
+        metadata_rows_inspected=2,
+        filesystem_entries_inspected=2,
+        metadata_scan_exhausted=False,
+        filesystem_scan_exhausted=False,
+    )
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=2,
+        cycle_max_items_per_phase=4,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=True, processed_items=8)
+    assert result_store.reconcile_artifacts.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypatch):
+    elapsed = 0.0
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
+
+    async def reconcile_page(**_kwargs):
+        nonlocal elapsed
+        elapsed = 1.0
+        return ResultReconciliationReport(
+            dry_run=True,
+            metadata_rows_inspected=2,
+            filesystem_entries_inspected=2,
+            metadata_scan_exhausted=False,
+            filesystem_scan_exhausted=False,
+        )
+
+    result_store.reconcile_artifacts.side_effect = reconcile_page
+    monkeypatch.setattr("scrapeyard.storage.cleanup.time.monotonic", lambda: elapsed)
+
+    outcome = await run_cleanup(
+        result_store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=2,
+        cycle_max_seconds=0.5,
+    )
+
+    assert outcome == CleanupCycleOutcome(saturated=True, processed_items=4)
+    result_store.reconcile_artifacts.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_run_cleanup_removes_bounded_expired_idempotency_records():
     result_store = AsyncMock()
     result_store.delete_expired.return_value = 0
@@ -343,6 +467,7 @@ async def test_reconciliation_failure_is_contained_before_webhook_cleanup(caplog
             webhook_outbox_store=outbox,
             webhook_delivered_retention_days=7,
             webhook_failed_retention_days=30,
+            reconciliation_dry_run=False,
         )
 
     assert "error_type=RuntimeError" in caplog.text
@@ -376,6 +501,7 @@ async def test_reconciliation_operation_failures_mark_cleanup_incomplete(caplog)
             webhook_outbox_store=outbox,
             webhook_delivered_retention_days=7,
             webhook_failed_retention_days=30,
+            reconciliation_dry_run=False,
         )
 
     outbox.scrub_terminal_deliveries.assert_awaited_once()
