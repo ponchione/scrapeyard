@@ -242,20 +242,31 @@ def test_egress_policy_blocks_reserved_destinations_after_explicit_allows() -> N
     text = path.read_text(encoding="utf-8")
     assert "DOCKER-USER" in text
     assert '-i "$NETWORK_INTERFACE"' in text
-    assert 'CHAIN="SY-EGRESS-${POLICY_ID}"' in text
+    assert 'LEGACY_CHAIN="SY-EGRESS-${POLICY_ID}"' in text
+    assert 'CHAIN_A="${LEGACY_CHAIN}-A"' in text
+    assert 'CHAIN_B="${LEGACY_CHAIN}-B"' in text
     assert "--dport 6379 -j ACCEPT" in text
     assert 'PROBE_LIVENESS_PORT="${SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT:-8081}"' in text
     assert '-p tcp --dport "$PROBE_LIVENESS_PORT" -j ACCEPT' in text
+    rendered = subprocess.run(
+        ["python3", "security/render-egress-policy.py"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     for cidr in (
         "10.0.0.0/8",
         "127.0.0.0/8",
         "169.254.0.0/16",
         "172.16.0.0/12",
+        "192.0.2.0/24",
         "192.168.0.0/16",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
         "fc00::/7",
         "fe80::/10",
     ):
-        assert cidr in text
+        assert cidr in rendered
 
 
 def test_secure_compose_deployment_installs_policy_before_starting_app() -> None:
@@ -265,9 +276,10 @@ def test_secure_compose_deployment_installs_policy_before_starting_app() -> None
     dependency_start = text.index("docker compose up -d --wait egress-probe redis")
     image_build = text.index("docker compose build scrapeyard")
     policy_install = text.index("install-docker-egress-policy.sh install")
+    application_stop = text.index("docker compose stop scrapeyard")
     application_start = text.index("docker compose up -d --wait", policy_install)
 
-    assert image_build < dependency_start < policy_install < application_start
+    assert image_build < application_stop < dependency_start < policy_install < application_start
     assert "SCRAPEYARD_PROXY_URL" in text
     assert "SCRAPEYARD_EGRESS_INTERFACE" in text
     assert "install-chromium-apparmor-profile.sh install" in text
