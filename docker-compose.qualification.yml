@@ -21,6 +21,11 @@ services:
     tmpfs:
       - /run/scrapeyard-qualification:uid=10001,gid=10001,mode=0700
     environment:
+      # Qualification submits only repository-owned fixture configurations.
+      # Production keeps the base file's fail-closed untrusted mode enabled.
+      SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "false"
+      SCRAPEYARD_EGRESS_POLICY_PROBE_HOST: ""
+      SCRAPEYARD_EGRESS_POLICY_PROBE_PORT: "0"
       SCRAPEYARD_QUALIFICATION_MODE: "true"
       SCRAPEYARD_QUALIFICATION_CRASH_POINT: "${SCRAPEYARD_QUALIFICATION_CRASH_POINT:-}"
       SCRAPEYARD_QUALIFICATION_MARKER_DIR: /run/scrapeyard-qualification

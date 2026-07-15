@@ -268,8 +268,19 @@ if ! apparmor_profile_loaded; then
 fi
 run_apparmor_profile install
 
-echo "Starting Redis, the controlled fixture, and Scrapeyard..."
-timeout 120 docker compose "${COMPOSE_ARGS[@]}" up -d --no-build
+echo "Starting controlled dependencies before the application..."
+timeout 120 docker compose "${COMPOSE_ARGS[@]}" up -d --no-build \
+  egress-probe redis fixture
+NETWORK_ID="$(docker network inspect --format '{{.Id}}' "${PROJECT}_backend")"
+[[ "$NETWORK_ID" =~ ^[a-f0-9]{12,}$ ]] || fail "could not resolve the Compose backend bridge"
+SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}"
+export SCRAPEYARD_EGRESS_INTERFACE
+
+run_egress_policy install
+EGRESS_POLICY_ACTIVE=1
+
+echo "Starting Scrapeyard after the connected-IP policy is installed..."
+timeout 120 docker compose "${COMPOSE_ARGS[@]}" up -d --no-build scrapeyard peer
 HEALTH_DEADLINE=$((SECONDS + START_TIMEOUT))
 until curl --silent --fail --max-time 5 "http://127.0.0.1:$API_PORT/health" \
   > "$DIAGNOSTICS_DIR/health.json" 2>/dev/null; do
@@ -283,13 +294,6 @@ PORT_BINDING="$(docker port "$(compose ps -q scrapeyard)" 8420/tcp)"
 compose exec -T peer python -c \
   "import urllib.request; assert urllib.request.urlopen('http://scrapeyard:8420/health/live', timeout=3).status == 200"
 
-NETWORK_ID="$(docker network inspect --format '{{.Id}}' "${PROJECT}_backend")"
-[[ "$NETWORK_ID" =~ ^[a-f0-9]{12,}$ ]] || fail "could not resolve the Compose backend bridge"
-SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}"
-export SCRAPEYARD_EGRESS_INTERFACE
-
-run_egress_policy install
-EGRESS_POLICY_ACTIVE=1
 if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
   'http://fixture.private.test:8080/protected?case=network-layer'; then
   fail "network policy allowed a private target"

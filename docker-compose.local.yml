@@ -5,3 +5,10 @@ services:
   scrapeyard:
     ports:
       - "${SCRAPEYARD_BIND_ADDRESS:-127.0.0.1}:${SCRAPEYARD_PORT:-8420}:8420"
+    environment:
+      # Local development is an explicit trusted-input mode. Production uses
+      # security/deploy-secure-compose.sh and leaves these base defaults on.
+      SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "false"
+      SCRAPEYARD_EGRESS_POLICY_PROBE_HOST: ""
+      SCRAPEYARD_EGRESS_POLICY_PROBE_PORT: "0"
+      SCRAPEYARD_PROXY_URL: "${SCRAPEYARD_PROXY_URL:-}"

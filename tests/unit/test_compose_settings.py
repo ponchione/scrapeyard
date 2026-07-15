@@ -26,6 +26,7 @@ _REQUIRED_ENV = {
         '{"v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}'
     ),
     "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID": "v1",
+    "SCRAPEYARD_PROXY_URL": "http://8.8.8.8:8080",
 }
 
 
@@ -77,7 +78,9 @@ def test_production_compose_preserves_defaults_and_honors_overrides(tmp_path: Pa
     assert defaults["SCRAPEYARD_WORKERS_MAX_CONCURRENT"] == "4"
     assert defaults["SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB"] == "3072"
     assert defaults["SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS"] == "2"
-    assert defaults["SCRAPEYARD_PROXY_URL"] == ""
+    assert defaults["SCRAPEYARD_PROXY_URL"] == "http://8.8.8.8:8080"
+    assert defaults["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "true"
+    assert defaults["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == "172.30.0.248"
 
     overridden = _render_production_compose(
         tmp_path,
@@ -88,3 +91,12 @@ def test_production_compose_preserves_defaults_and_honors_overrides(tmp_path: Pa
     assert overridden["SCRAPEYARD_WORKERS_MAX_CONCURRENT"] == "9"
     assert overridden["SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS"] == "7"
     assert overridden["SCRAPEYARD_PROXY_URL"] == "https://proxy.example:8443"
+
+
+def test_trusted_compose_overlays_explicitly_disable_production_attestation() -> None:
+    for path in ("docker-compose.local.yml", "docker-compose.qualification.yml"):
+        compose = yaml.load(Path(path).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        environment = compose["services"]["scrapeyard"]["environment"]
+        assert environment["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "false"
+        assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == ""
+        assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT"] == "0"

@@ -1,4 +1,32 @@
 services:
+  egress-probe:
+    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
+    command: ["python", "-m", "http.server", "8080", "--bind", "0.0.0.0"]
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 32
+    cpus: "0.25"
+    mem_limit: 64m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/', timeout=1).read(1)
+      interval: 2s
+      timeout: 1s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      backend:
+        ipv4_address: 172.30.0.248
+
   redis:
     image: redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
     user: redis
@@ -31,6 +59,8 @@ services:
     init: true
     expose: ["8420"]
     depends_on:
+      egress-probe:
+        condition: service_healthy
       redis:
         condition: service_healthy
     read_only: true
@@ -71,6 +101,10 @@ services:
       SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID: "${SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID:?set SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID before running docker compose}"
       SCRAPEYARD_API_KEYS: "${SCRAPEYARD_API_KEYS:-}"
       SCRAPEYARD_MAX_REQUEST_BYTES: "${SCRAPEYARD_MAX_REQUEST_BYTES:-262144}"
+      SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "${SCRAPEYARD_UNTRUSTED_SUBMISSIONS:-true}"
+      SCRAPEYARD_EGRESS_POLICY_PROBE_HOST: "${SCRAPEYARD_EGRESS_POLICY_PROBE_HOST:-172.30.0.248}"
+      SCRAPEYARD_EGRESS_POLICY_PROBE_PORT: "${SCRAPEYARD_EGRESS_POLICY_PROBE_PORT:-8080}"
+      SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS: "${SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS:-1}"
       # Queue
       SCRAPEYARD_REDIS_DSN: "${SCRAPEYARD_REDIS_DSN:-redis://redis:6379/0}"
       SCRAPEYARD_QUEUE_NAME: "${SCRAPEYARD_QUEUE_NAME:-scrapeyard}"
@@ -155,6 +189,9 @@ services:
       SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS: "${SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS:-300}"
       SCRAPEYARD_CIRCUIT_BREAKER_MAX_DOMAINS: "${SCRAPEYARD_CIRCUIT_BREAKER_MAX_DOMAINS:-10000}"
       SCRAPEYARD_CIRCUIT_BREAKER_INACTIVE_TTL_SECONDS: "${SCRAPEYARD_CIRCUIT_BREAKER_INACTIVE_TTL_SECONDS:-3600}"
+      # Runtime validation rejects an empty/direct proxy whenever untrusted
+      # submissions are enabled. Keeping interpolation optional permits the
+      # explicitly trusted local and qualification overlays below.
       SCRAPEYARD_PROXY_URL: "${SCRAPEYARD_PROXY_URL:-}"
       SCRAPEYARD_LOG_LEVEL: "${SCRAPEYARD_LOG_LEVEL:-INFO}"
       SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED: "${SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED:-true}"

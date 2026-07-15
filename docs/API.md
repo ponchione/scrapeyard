@@ -118,3 +118,9 @@ scope. Readiness probes every durable subsystem and required background task;
 metrics use Prometheus text exposition with bounded labels. See
 [MONITORING.md](MONITORING.md) for probe semantics, scrape configuration, and
 alert guidance.
+
+When `SCRAPEYARD_UNTRUSTED_SUBMISSIONS=true`, submitted job-level/target-level
+proxies and `browser.cdp_url` require the separate `transport-admin` scope in
+addition to the route's normal `submit` or `schedule-admin` scope. Ordinary
+callers use the operator-configured service proxy. This authorization check
+does not replace the mandatory connected-IP deployment policy.

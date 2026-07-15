@@ -29,6 +29,7 @@ SECRETS = {
     "multi-scheduler": "multi-schedule-secret-00000",
     "beta-reader": "beta-reader-secret-000000",
     "global-reader": "global-reader-secret-0000",
+    "transport-admin": "transport-secret-00000000",
 }
 
 
@@ -73,6 +74,11 @@ def _credentials():
                 "global-reader": {
                     "secret": SECRETS["global-reader"],
                     "scopes": ["read"],
+                },
+                "transport-admin": {
+                    "secret": SECRETS["transport-admin"],
+                    "scopes": ["schedule-admin", "transport-admin"],
+                    "projects": ["alpha"],
                 },
             }
         )
@@ -126,6 +132,16 @@ target:
   url: https://example.com
   selectors:
     title: h1
+"""
+
+
+def _transport_schedule_yaml(override: str) -> str:
+    return f"""
+project: alpha
+name: transport-override
+schedule:
+  cron: "0 9 * * *"
+{override}
 """
 
 
@@ -383,6 +399,50 @@ async def test_schedule_admin_and_delete_scopes_are_least_privilege(
         headers=_headers("deleter"),
     )
     assert deleted.status_code == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    [
+        """proxy:\n  url: http://8.8.8.8:8080\ntarget:\n  url: https://example.com\n  selectors:\n    title: h1""",
+        """target:\n  url: https://example.com\n  proxy:\n    url: http://8.8.8.8:8080\n  selectors:\n    title: h1""",
+        """target:\n  url: https://example.com\n  fetcher: dynamic\n  browser:\n    cdp_url: ws://8.8.8.8:9222\n  selectors:\n    title: h1""",
+    ],
+)
+async def test_untrusted_mode_requires_transport_admin_for_overrides(
+    authorized_client,
+    override,
+):
+    settings = get_settings()
+    original_untrusted = settings.untrusted_submissions
+    original_proxy = settings.proxy_url
+    settings.untrusted_submissions = True
+    settings.proxy_url = "http://8.8.8.8:8080"
+    try:
+        denied = await authorized_client.post(
+            "/jobs",
+            content=_transport_schedule_yaml(override),
+            headers={
+                **_headers("scheduler"),
+                "content-type": "application/x-yaml",
+            },
+        )
+        allowed = await authorized_client.post(
+            "/jobs",
+            content=_transport_schedule_yaml(override),
+            headers={
+                **_headers("transport-admin"),
+                "content-type": "application/x-yaml",
+            },
+        )
+    finally:
+        settings.untrusted_submissions = original_untrusted
+        settings.proxy_url = original_proxy
+
+    assert denied.status_code == 403
+    assert "transport-admin" in denied.json()["error"]
+    assert allowed.status_code == 201
 
 
 @pytest.mark.asyncio

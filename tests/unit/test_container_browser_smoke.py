@@ -89,6 +89,7 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
     local = _yaml("docker-compose.local.yml")
     smoke = _yaml("docker-compose.smoke.yml")
     production_app = production["services"]["scrapeyard"]
+    egress_probe = production["services"]["egress-probe"]
     smoke_app = smoke["services"]["scrapeyard"]
 
     assert production_app["build"] == "."
@@ -111,8 +112,14 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
     assert production_app["environment"]["SCRAPEYARD_API_CREDENTIALS"].startswith(
         "${SCRAPEYARD_API_CREDENTIALS:?"
     )
+    assert production_app["depends_on"]["egress-probe"]["condition"] == "service_healthy"
+    assert egress_probe["networks"]["backend"]["ipv4_address"] == "172.30.0.248"
+    assert "@sha256:" in egress_probe["image"]
+    assert egress_probe["read_only"] == "true"
+    assert egress_probe["cap_drop"] == ["ALL"]
     assert smoke_app["environment"]["SCRAPEYARD_BROWSER_DEBUG_ENABLED"] == "true"
-    assert set(smoke_app["depends_on"]) == {"redis", "fixture"}
+    assert smoke_app["environment"]["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "false"
+    assert set(smoke_app["depends_on"]) == {"egress-probe", "redis", "fixture"}
 
     extra_hosts = dict(entry.split("=", 1) for entry in smoke_app["extra_hosts"])
     assert ipaddress.ip_address(extra_hosts["fixture.public.test"]).is_global
@@ -244,6 +251,30 @@ def test_egress_policy_blocks_reserved_destinations_after_explicit_allows() -> N
         "fe80::/10",
     ):
         assert cidr in text
+
+
+def test_secure_compose_deployment_installs_policy_before_starting_app() -> None:
+    path = Path("security/deploy-secure-compose.sh")
+    subprocess.run(["bash", "-n", str(path)], check=True)
+    text = path.read_text(encoding="utf-8")
+    dependency_start = text.index("docker compose up -d --wait egress-probe redis")
+    image_build = text.index("docker compose build scrapeyard")
+    policy_install = text.index("install-docker-egress-policy.sh install")
+    application_start = text.index("docker compose up -d --wait", policy_install)
+
+    assert image_build < dependency_start < policy_install < application_start
+    assert "SCRAPEYARD_PROXY_URL" in text
+    assert "SCRAPEYARD_EGRESS_INTERFACE" in text
+    assert "install-chromium-apparmor-profile.sh install" in text
+
+
+def test_smoke_installs_connected_ip_policy_before_starting_app() -> None:
+    text = Path("scripts/run_container_browser_smoke.sh").read_text(encoding="utf-8")
+    dependency_start = text.index("egress-probe redis fixture")
+    policy_install = text.index("run_egress_policy install", dependency_start)
+    application_start = text.index("up -d --no-build scrapeyard peer", policy_install)
+
+    assert dependency_start < policy_install < application_start
 
 
 def test_security_scan_uses_digest_pinned_tools_and_enforces_findings() -> None:

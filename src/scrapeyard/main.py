@@ -68,6 +68,7 @@ from scrapeyard.runtime.health import (
     probe_sqlite,
 )
 from scrapeyard.runtime.background import BackgroundLoopMonitor
+from scrapeyard.runtime.egress import attest_connected_ip_policy
 from scrapeyard.runtime.instance_guard import (
     SingleInstanceLock,
     instance_identity,
@@ -384,6 +385,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Validate write capability even when every durable table is empty.
         EncryptionKeyring.from_settings(required=True)
         await init_db(settings.db_dir)
+        await attest_connected_ip_policy(settings)
         await migrate_persisted_secrets()
         _ensure_runtime_directories()
         await _recover_stale_running_jobs()

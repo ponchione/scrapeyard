@@ -39,11 +39,16 @@ services:
     ports:
       - "127.0.0.1:${SCRAPEYARD_SMOKE_API_PORT:-18420}:8420"
     depends_on:
+      egress-probe:
+        condition: service_healthy
       redis:
         condition: service_healthy
       fixture:
         condition: service_healthy
     environment:
+      # The isolated fixture is trusted and intentionally reached directly;
+      # the smoke still installs and attests the connected-IP host policy.
+      SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "false"
       SCRAPEYARD_SYNC_TIMEOUT_SECONDS: "5"
       SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS: "20"
       SCRAPEYARD_WORKERS_MAX_CONCURRENT: "2"
