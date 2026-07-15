@@ -60,7 +60,11 @@ unchanged during client migration.
 An accepted async request, an accepted manual trigger, or a sync request that
 reaches its HTTP wait limit returns `202` with the persisted `job_id`, `run_id`,
 current persisted status, and poll URL. A timeout never rewrites `running` to
-`queued`.
+`queued`, and the queue handler returning is only a wake-up signal: the exact
+durable run must have a result-bearing terminal status before the API reads its
+artifact or returns `200`. The configured wait is a hard monotonic deadline;
+polling sleep and queue-state reads do not extend it or select a state first
+observed after it expired.
 
 ## Error envelope
 

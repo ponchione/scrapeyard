@@ -116,30 +116,45 @@ class _PriorityJobHandle:
         *,
         poll_delay: float = 0.5,
     ) -> object:
-        started = monotonic()
+        deadline = None if timeout is None else monotonic() + timeout
         while True:
-            snapshot = await self._pool._delivery_snapshot(self._run_id)
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
+            snapshot_awaitable = self._pool._delivery_snapshot(self._run_id)
+            snapshot = (
+                await snapshot_awaitable
+                if remaining is None
+                else await asyncio.wait_for(snapshot_awaitable, timeout=remaining)
+            )
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
             if snapshot.state is QueueDeliveryState.complete:
                 if self._pool.redis is None:
                     raise RuntimeError("Redis disconnected while waiting for queue result")
                 # Result keys are global to the arq job identity; queue name is
                 # irrelevant once the result exists.
-                return cast(
-                    object,
-                    await Job(
-                        self._run_id,
-                        redis=self._pool.redis,
-                        _queue_name=self._pool._queue_name,
-                    ).result(timeout=0, poll_delay=poll_delay),
+                result_awaitable = Job(
+                    self._run_id,
+                    redis=self._pool.redis,
+                    _queue_name=self._pool._queue_name,
+                ).result(timeout=0, poll_delay=poll_delay)
+                result = (
+                    await result_awaitable
+                    if remaining is None
+                    else await asyncio.wait_for(result_awaitable, timeout=remaining)
                 )
+                return cast(object, result)
             if snapshot.state is QueueDeliveryState.missing:
                 raise ResultNotFound(
                     "Not waiting for job result because the delivery is not in "
                     "any configured priority queue"
                 )
-            if timeout is not None and monotonic() - started > timeout:
-                raise asyncio.TimeoutError
-            await asyncio.sleep(poll_delay)
+            if remaining is None:
+                await asyncio.sleep(poll_delay)
+            else:
+                await asyncio.sleep(min(poll_delay, remaining))
 
 
 class _PriorityWorker(Worker):

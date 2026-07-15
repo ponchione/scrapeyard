@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +16,7 @@ from scrapeyard.queue.pool import (
     QueueDeliveryState,
     WorkerPool,
     _DeliverySnapshot,
+    _PriorityJobHandle,
     _PriorityWorker,
 )
 from scrapeyard.queue.priority import WeightedPriorityPolicy
@@ -644,6 +646,39 @@ async def test_inspect_delivery_requires_connected_redis():
 
     with pytest.raises(RuntimeError, match="active Redis connection"):
         await pool.inspect_delivery("run-missing")
+
+
+@pytest.mark.asyncio
+async def test_priority_handle_caps_poll_sleep_at_hard_timeout():
+    pool = _make_pool()
+    pool._delivery_snapshot = AsyncMock(
+        return_value=_DeliverySnapshot(QueueDeliveryState.queued, "high")
+    )
+    handle = _PriorityJobHandle(pool, "run-timeout")
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        await handle.result(timeout=0.03, poll_delay=0.2)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+
+
+@pytest.mark.asyncio
+async def test_priority_handle_does_not_prefer_state_observed_after_deadline():
+    pool = _make_pool()
+    pool._delivery_snapshot = AsyncMock(
+        side_effect=[
+            _DeliverySnapshot(QueueDeliveryState.queued, "high"),
+            _DeliverySnapshot(QueueDeliveryState.missing),
+        ]
+    )
+    handle = _PriorityJobHandle(pool, "run-late-missing")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await handle.result(timeout=0.03, poll_delay=0.2)
+
+    pool._delivery_snapshot.assert_awaited_once()
 
 
 @pytest.mark.asyncio

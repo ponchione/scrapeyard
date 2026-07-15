@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from arq.jobs import ResultNotFound
+
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import MAX_PATH_PART_BYTES, safe_path_part
 from scrapeyard.common.qualification import qualification_checkpoint
@@ -23,6 +25,9 @@ from scrapeyard.storage.protocols import JobStore, ResultStore
 from scrapeyard.storage.types import IdempotentJobAction
 
 _ADHOC_JOB_SAVE_ATTEMPTS = 5
+_RESULT_BEARING_STATUSES = frozenset(
+    {JobStatus.complete, JobStatus.partial, JobStatus.failed}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,7 @@ async def submit_scrape_job(
         response_mode="sync" if wait_for_completion else "async",
         idempotency_retention_hours=idempotency_retention_hours,
     )
+    submitted_run_id = _require_run_id(job)
 
     queued_job: QueueJobHandle | None = None
     if should_enqueue:
@@ -82,23 +88,19 @@ async def submit_scrape_job(
                 config_yaml,
                 delivery.priority,
                 needs_browser=delivery.needs_browser,
-                run_id=job.current_run_id,
+                run_id=submitted_run_id,
                 trigger="adhoc",
             )
             qualification_checkpoint("after_enqueue_before_claim")
         except Exception:
             with suppress(Exception):
-                if job.current_run_id is not None:
-                    await job_store.rollback_queued_submission(
-                        job.job_id,
-                        job.current_run_id,
-                    )
+                await job_store.rollback_queued_submission(job.job_id, submitted_run_id)
             raise
 
     if not wait_for_completion:
         return ScrapeSubmission(
             job_id=job.job_id,
-            run_id=_require_run_id(job),
+            run_id=submitted_run_id,
             status=job.status.value,
             completed=False,
             results=None,
@@ -106,41 +108,62 @@ async def submit_scrape_job(
         )
 
     if queued_job is not None:
-        completed = await wait_for_queued_job(
+        wait_signalled = await wait_for_queued_job(
             queued_job,
             timeout_seconds=sync_timeout_seconds,
             poll_delay_seconds=sync_poll_delay_seconds,
         )
     else:
-        completed = await wait_for_persisted_job(
+        wait_signalled = await wait_for_persisted_job(
             job.job_id,
             job_store=job_store,
             timeout_seconds=sync_timeout_seconds,
             poll_delay_seconds=sync_poll_delay_seconds,
         )
-    if not completed:
-        updated_job = await job_store.get_job(job.job_id)
+    updated_job = await job_store.get_job(job.job_id)
+    durable_status = updated_job.status
+    submitted_run = None
+    if updated_job.current_run_id != submitted_run_id:
+        submitted_run = await job_store.get_job_run(job.job_id, submitted_run_id)
+        if submitted_run is not None:
+            durable_status = submitted_run.status
+
+    # A queue result is only a wake-up signal. The handler can return normally
+    # after losing ownership or observing an obsolete delivery, so only the
+    # exact durable run can authorize an artifact read. A timeout remains a
+    # hard HTTP wait boundary even if a later database read sees completion.
+    same_current_run = updated_job.current_run_id == submitted_run_id
+    exact_historical_run = (
+        not same_current_run
+        and submitted_run is not None
+        and submitted_run.run_id == submitted_run_id
+    )
+    result_is_authoritative = (
+        wait_signalled
+        and durable_status in _RESULT_BEARING_STATUSES
+        and (same_current_run or exact_historical_run)
+    )
+    if not result_is_authoritative:
         return ScrapeSubmission(
             job_id=job.job_id,
-            run_id=_require_run_id(updated_job),
-            status=updated_job.status.value,
+            run_id=submitted_run_id,
+            status=durable_status.value,
             completed=False,
             results=None,
             replayed=replayed,
         )
 
-    updated_job = await job_store.get_job(job.job_id)
     try:
         payload = await result_store.get_result(
             job.job_id,
-            run_id=updated_job.current_run_id,
+            run_id=submitted_run_id,
         )
     except (KeyError, FileNotFoundError) as exc:
         raise ResultArtifactUnavailableError from exc
     return ScrapeSubmission(
         job_id=job.job_id,
-        run_id=_require_run_id(updated_job),
-        status=updated_job.status.value,
+        run_id=submitted_run_id,
+        status=durable_status.value,
         completed=True,
         results=payload.data,
         replayed=replayed,
@@ -234,6 +257,10 @@ async def wait_for_queued_job(
     try:
         await asyncio.shield(result_task)
     except asyncio.TimeoutError:
+        return False
+    except ResultNotFound:
+        # Delivery reconciliation or an obsolete handler can remove the arq
+        # record while the durable run remains queued/running elsewhere.
         return False
     except asyncio.CancelledError:
         if result_task.done():
