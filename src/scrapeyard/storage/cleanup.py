@@ -64,13 +64,19 @@ class _CleanupCycleBudget:
         self.saturated = False
 
     @property
+    def deadline(self) -> float:
+        """Return the absolute monotonic deadline shared with storage work."""
+
+        return self._started + self.max_seconds
+
+    @property
     def processed_items(self) -> int:
         return sum(self._phase_items.values())
 
     def next_limit(self, phase: str, batch_size: int) -> int:
         if batch_size < 1:
             raise ValueError("Cleanup batch size must be positive")
-        if self._clock() - self._started >= self.max_seconds:
+        if self._clock() >= self.deadline:
             self.saturated = True
             return 0
         remaining = self.max_items_per_phase - self._phase_items.get(phase, 0)
@@ -156,6 +162,7 @@ async def _drain_artifact_reconciliation(
             batch_size=batch_size,
             metadata_scan_limit=metadata_limit,
             filesystem_scan_limit=filesystem_limit,
+            deadline=cycle.deadline,
         )
         aggregate = aggregate.merged_with(
             page,

@@ -591,6 +591,240 @@ async def test_reconciliation_paginates_metadata_and_filesystem_work(store):
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_deadline_preserves_unvalidated_metadata_rows(
+    store, monkeypatch
+):
+    clock = [0.0]
+    for index in range(3):
+        await store.save_result(
+            f"job-deadline-metadata-{index}",
+            {"index": index},
+            run_id=f"run-deadline-metadata-{index}",
+        )
+    real_read = result_store_module.read_json_file_no_follow
+
+    def slow_first_read(path, **kwargs):
+        payload = real_read(path, **kwargs)
+        clock[0] = 2.0
+        return payload
+
+    monkeypatch.setattr(result_store_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        result_store_module,
+        "read_json_file_no_follow",
+        slow_first_read,
+    )
+
+    first = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        metadata_scan_limit=3,
+        filesystem_scan_limit=0,
+        deadline=1.0,
+    )
+    async with get_db("results_meta.db") as db:
+        first_cursor = int(
+            (
+                await (
+                    await db.execute(
+                        "SELECT metadata_cursor FROM result_reconciliation_state"
+                    )
+                ).fetchone()
+            )[0]
+        )
+
+    clock[0] = 0.0
+    second = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        metadata_scan_limit=3,
+        filesystem_scan_limit=0,
+        deadline=1.0,
+    )
+
+    assert first.metadata_rows_inspected == 1
+    assert first.metadata_scan_exhausted is False
+    assert first_cursor > 0
+    assert second.metadata_rows_inspected == 1
+    assert second.metadata_scan_exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_deadline_preserves_later_run_candidates(store, monkeypatch):
+    clock = [0.0]
+    for run_id in ("run-deadline-a", "run-deadline-b", "run-deadline-c"):
+        run_dir = store._results_dir / "test-project" / "test-job" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "artifact").write_bytes(b"x")
+        _backdate_tree(run_dir)
+    real_snapshot = store._tree_snapshot
+
+    def slow_first_snapshot(path, deadline_reached=None):
+        snapshot = real_snapshot(path, deadline_reached)
+        clock[0] = 2.0
+        return snapshot
+
+    monkeypatch.setattr(result_store_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(store, "_tree_snapshot", slow_first_snapshot)
+
+    first = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        metadata_scan_limit=0,
+        filesystem_scan_limit=3,
+        deadline=1.0,
+        now=NOW,
+    )
+    async with get_db("results_meta.db") as db:
+        row = await (
+            await db.execute(
+                """SELECT filesystem_project, filesystem_job_name, filesystem_run_id
+                   FROM result_reconciliation_state"""
+            )
+        ).fetchone()
+
+    clock[0] = 0.0
+    second = await store.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        metadata_scan_limit=0,
+        filesystem_scan_limit=3,
+        deadline=1.0,
+        now=NOW,
+    )
+
+    assert first.filesystem_entries_inspected == 1
+    assert first.filesystem_scan_exhausted is False
+    assert tuple(row) == ("test-project", "test-job", "run-deadline-a")
+    assert second.filesystem_entries_inspected == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_cancellation_stops_blocking_validation_and_keeps_cursor(
+    store, monkeypatch
+):
+    await store.save_result(
+        "job-cancel-validation",
+        {"ok": True},
+        run_id="run-cancel-validation",
+    )
+    started = threading.Event()
+    real_read = result_store_module.read_json_file_no_follow
+
+    def cooperative_slow_read(path, **kwargs):
+        started.set()
+        deadline_reached = kwargs["deadline_reached"]
+        while not deadline_reached():
+            threading.Event().wait(0.001)
+        return real_read(path, **kwargs)
+
+    monkeypatch.setattr(
+        result_store_module,
+        "read_json_file_no_follow",
+        cooperative_slow_read,
+    )
+    task = asyncio.create_task(
+        store.reconcile_artifacts(
+            grace_seconds=86400,
+            dry_run=True,
+            metadata_scan_limit=1,
+            filesystem_scan_limit=0,
+            deadline=result_store_module.time.monotonic() + 60,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    async with get_db("results_meta.db") as db:
+        row = await (
+            await db.execute(
+                "SELECT metadata_cursor FROM result_reconciliation_state"
+            )
+        ).fetchone()
+    assert row[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_classifies_oversized_result_without_loading(store):
+    limited = LocalResultStore(
+        str(store._results_dir),
+        _lookup,
+        max_serialized_result_bytes=8,
+    )
+    run_dir = store._results_dir / "test-project" / "test-job" / "run-oversized"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.json").write_text('{"value":1}', encoding="utf-8")
+    await _insert_metadata(
+        job_id="job-oversized",
+        run_id="run-oversized",
+        file_path=run_dir,
+    )
+
+    report = await limited.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=True,
+        metadata_scan_limit=1,
+        filesystem_scan_limit=0,
+    )
+
+    assert report.corrupt_result_files == 1
+    assert report.artifact_failures[0].error_type == "FileSizeLimitExceeded"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_bounds_recursive_tree_entries(store):
+    limited = LocalResultStore(
+        str(store._results_dir),
+        _lookup,
+        max_artifact_tree_entries=2,
+    )
+    run_dir = store._results_dir / "test-project" / "test-job" / "run-many-entries"
+    run_dir.mkdir(parents=True)
+    for index in range(3):
+        (run_dir / str(index)).write_bytes(b"x")
+    _backdate_tree(run_dir)
+
+    report = await limited.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=False,
+        metadata_scan_limit=0,
+        filesystem_scan_limit=1,
+        now=NOW,
+    )
+
+    assert report.operation_failures[0].action == "scan_run"
+    assert report.operation_failures[0].error_type == "DirectoryEntryLimitExceeded"
+    assert run_dir.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_bounds_recursive_tree_bytes(store):
+    limited = LocalResultStore(
+        str(store._results_dir),
+        _lookup,
+        max_artifact_tree_bytes=2,
+    )
+    run_dir = store._results_dir / "test-project" / "test-job" / "run-many-bytes"
+    run_dir.mkdir(parents=True)
+    (run_dir / "artifact").write_bytes(b"123")
+    _backdate_tree(run_dir)
+
+    report = await limited.reconcile_artifacts(
+        grace_seconds=86400,
+        dry_run=False,
+        metadata_scan_limit=0,
+        filesystem_scan_limit=1,
+        now=NOW,
+    )
+
+    assert report.operation_failures[0].action == "scan_run"
+    assert report.operation_failures[0].error_type == "FileSizeLimitExceeded"
+    assert run_dir.is_dir()
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_reports_independent_metadata_exhaustion(store):
     for index in range(3):
         run_dir = store._results_dir / "test-project" / "test-job" / f"missing-{index}"
@@ -862,10 +1096,10 @@ async def test_reconciliation_reports_unreadable_artifact_without_deleting(store
     meta = await store.save_result("job-io", {"ok": True}, run_id="run-io")
     real_read = result_store_module.read_json_file_no_follow
 
-    def fail_read(path):
+    def fail_read(path, **kwargs):
         if Path(path) == Path(meta.file_path) / "results.json":
             raise OSError("sensitive path")
-        return real_read(path)
+        return real_read(path, **kwargs)
 
     monkeypatch.setattr(result_store_module, "read_json_file_no_follow", fail_read)
     report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
@@ -997,10 +1231,10 @@ async def test_reconciliation_partial_removal_failure_is_reported_and_retryable(
     _backdate_tree(second)
     real_remove = store._remove_run_candidate
 
-    def partial_failure(candidate, cutoff):
+    def partial_failure(candidate, cutoff, deadline_reached=None):
         if candidate.identity.run_id == "run-a":
             raise OSError("sensitive path")
-        return real_remove(candidate, cutoff)
+        return real_remove(candidate, cutoff, deadline_reached)
 
     monkeypatch.setattr(store, "_remove_run_candidate", partial_failure)
     report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)

@@ -243,6 +243,7 @@ async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypat
 
     assert outcome == CleanupCycleOutcome(saturated=True, processed_items=4)
     result_store.reconcile_artifacts.assert_awaited_once()
+    assert result_store.reconcile_artifacts.await_args.kwargs["deadline"] == 0.5
 
 
 @pytest.mark.asyncio
