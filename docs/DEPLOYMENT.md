@@ -14,7 +14,7 @@ assumption at the network layer.
   Uvicorn/Gunicorn workers and orchestrator replicas at `1`; use
   `SCRAPEYARD_WORKERS_MAX_CONCURRENT` for in-process scrape concurrency.
 - Browser scraping egress is controlled by the host, orchestrator, proxy
-  gateway, or firewall policy.
+  gateway, or firewall policy and attested before the application starts.
 
 ## Single-instance guard
 
@@ -47,7 +47,9 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
   ```
 
   A wider `SCRAPEYARD_BIND_ADDRESS=0.0.0.0` is an explicit local-development
-  choice and requires host firewall restrictions.
+  choice and requires host firewall restrictions. This overlay explicitly
+  selects trusted-input mode and disables the production egress probe; do not
+  use it as a production override.
 
 - For a shared deployment with Eyebox, prefer a private service network over a
   host port. If Eyebox shares Scrapeyard's Compose network, use
@@ -60,15 +62,28 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
 
 ## Egress
 
-App-level URL guards are a backstop, not the only control. Enforce outbound
-network policy for the Scrapeyard container or pod:
+App-level URL guards are a backstop, not the only control. Production Compose
+defaults `SCRAPEYARD_UNTRUSTED_SUBMISSIONS=true`, requires an egress-filtering
+operator `SCRAPEYARD_PROXY_URL`, and points a startup attestation at the
+controlled private `egress-probe` service. The application refuses to start if
+the proxy is empty/`direct`, if the probe pair is incomplete, or if the probe
+accepts a connection.
+
+In this mode, caller-submitted job/target proxies and `browser.cdp_url` require
+the separate `transport-admin` scope. Ordinary submitters cannot select a
+transport endpoint and all targets inherit the operator proxy. The proxy must
+itself resolve target names and reject private, loopback, link-local, and cloud
+metadata destinations; otherwise it becomes an SSRF relay.
 
 Config parsing performs only bounded lexical, scheme, hostname, and literal-IP
 checks; it never performs DNS resolution in Pydantic validators. Hostnames are
 resolved and checked freshly immediately before transport use. Direct basic
 HTTP requests connect to the validated address with the original Host header
-and TLS SNI, while browser, CDP, and proxy traffic still depends on the egress
-boundary below to close resolver/connection races.
+and TLS SNI. Browser navigation, redirects, subresources, service workers,
+CDP, and proxy connections may resolve independently, so only a connected-IP
+host/orchestrator boundary closes their validation-to-connection races.
+
+Enforce outbound network policy for the Scrapeyard container or pod:
 
 - Allow Redis.
 - Allow the configured proxy gateway if scraping through a proxy.
@@ -79,35 +94,49 @@ boundary below to close resolver/connection races.
   `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, IPv6
   loopback, link-local, and ULA ranges.
 
-If practical, route all scrape traffic through a single proxy gateway and allow
-Scrapeyard egress only to that gateway plus Redis. That is the strongest
-deployment boundary because browser runtimes and DNS behavior stay outside the
-application trust boundary.
+Route all untrusted scrape traffic through the configured proxy gateway. Where
+the host policy can use a public allowlist, allow Scrapeyard egress only to that
+gateway plus Redis. This keeps browser runtime and target DNS behavior outside
+the application trust boundary.
 
-The checked-in `security/install-docker-egress-policy.sh` is an enforceable
-Docker-host example. It installs a deployment-specific, bridge-and-source-scoped
-`DOCKER-USER` chain for the fixed production app address, permits Redis and operator-declared proxy CIDRs,
-then rejects loopback, metadata/link-local, private, carrier-grade NAT,
-benchmark, multicast, and reserved destinations. Because filtering occurs on
-the connected destination IP, a public hostname rebound to a private address is
-still rejected. Review it with the host network owner, then run as root:
+The checked-in `security/deploy-secure-compose.sh` makes installation and
+attestation one deployment transaction. It starts only Redis and the controlled
+private probe, discovers the deployment bridge, installs the checked-in
+bridge-and-source-scoped `DOCKER-USER` policy, and only then starts the app.
+The app independently attempts the probe from its own network namespace; a
+reachable probe aborts lifespan startup. Export the operator proxy (and public
+proxy CIDR when needed), then run the wrapper as root:
+
+```bash
+export SCRAPEYARD_PROXY_URL=https://scrape-proxy.example:8443
+export SCRAPEYARD_EGRESS_ALLOW_CIDRS=203.0.113.10/32
+sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
+  security/deploy-secure-compose.sh
+```
+
+The installed policy permits the fixed Redis peer and operator-declared
+destinations before rejecting loopback, metadata/link-local, private,
+carrier-grade NAT, benchmark, multicast, and reserved connected addresses. A
+hostname that returns public during validation and private during connection is
+therefore rejected. A direct `docker compose up` with production defaults is
+not a supported deployment transaction: without the rule the reachable probe
+keeps the app unhealthy, and without the proxy settings validation fails.
+
+During decommissioning, stop the stack before removing the rule. Resolve the
+bridge exactly as the wrapper does (or retain its exported values), then run:
 
 ```bash
 NETWORK_ID=$(docker network inspect --format '{{.Id}}' scrapeyard_backend)
 sudo SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}" \
   SCRAPEYARD_EGRESS_POLICY_ID=prod \
-  SCRAPEYARD_EGRESS_ALLOW_CIDRS=203.0.113.10/32 \
-  security/install-docker-egress-policy.sh install
-# Remove during decommissioning:
-sudo SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}" \
-  SCRAPEYARD_EGRESS_POLICY_ID=prod \
   security/install-docker-egress-policy.sh remove
 ```
 
-Treat this connected-IP policy (or an equivalent orchestrator/proxy policy) as
-mandatory for untrusted scrape submissions. Application URL checks and pinned
-direct HTTP/webhook connections provide defense in depth, but browser and proxy
-runtimes still require the network boundary to close DNS-rebinding races.
+Treat this policy or an equivalent orchestrator policy as mandatory for
+untrusted submissions. The authorization boundary applies when YAML is
+accepted; it does not retroactively rewrite persisted schedules. Audit existing
+scheduled configurations before enabling the mode, and recreate intentional
+proxy/CDP overrides with a `transport-admin` credential.
 
 Kubernetes deployments should express the same allow-before-deny policy with a
 CNI that supports egress CIDR rules; default Kubernetes `NetworkPolicy` cannot
@@ -186,8 +215,10 @@ sudo security/install-chromium-apparmor-profile.sh remove
   old and new named credentials with the same identity, move clients to the
   new secret, then remove and restart without the old entry. Authentication
   compares every configured secret in constant time before selecting a match.
-- Available scopes are `submit`, `read`, `schedule-admin`, `delete`, and
-  `health-detail`. An optional non-empty `projects` list limits route and data
+- Available scopes are `submit`, `read`, `schedule-admin`, `delete`,
+  `health-detail`, and `transport-admin`. Reserve `transport-admin` for
+  operators who may select a per-job/per-target proxy or CDP endpoint while
+  untrusted-submission mode is enabled. An optional non-empty `projects` list limits route and data
   access to those namespaces. Project-scoped list/error queries must include a
   permitted `project` filter.
 - `SCRAPEYARD_API_KEYS` remains a deprecated, full-admin restart-time migration

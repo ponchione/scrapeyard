@@ -63,6 +63,7 @@ from scrapeyard.api.serializers import (
     serialize_scrape_queued,
     serialize_scrape_result,
 )
+from scrapeyard.api.transport_policy import enforce_submission_transport_policy
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.common.yaml import MAX_YAML_NESTING
@@ -197,8 +198,13 @@ async def _read_valid_yaml_config(
         body = await request.body()
         config_yaml = body.decode("utf-8")
         project = await asyncio.to_thread(load_config_project, config_yaml)
-        authorize_request(request, scope, project=project)
+        caller = authorize_request(request, scope, project=project)
         config = await asyncio.to_thread(load_config, config_yaml)
+        enforce_submission_transport_policy(
+            config,
+            caller=caller,
+            settings=get_settings(),
+        )
     except RecursionError:
         raise_json_error(
             422,

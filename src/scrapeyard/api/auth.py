@@ -25,6 +25,7 @@ class AuthScope(str, Enum):
     schedule_admin = "schedule-admin"
     delete = "delete"
     health_detail = "health-detail"
+    transport_admin = "transport-admin"
 
 
 ALL_AUTH_SCOPES = frozenset(AuthScope)
