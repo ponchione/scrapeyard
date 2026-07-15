@@ -523,8 +523,9 @@ non-idempotent behavior.
 
 Records expire after `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` (24 hours by
 default). The first reuse after expiry removes that caller/key record lazily
-and creates a new submission. The cleanup loop additionally deletes at most
-`SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` expired rows each pass. Automated
+and creates a new submission. The cleanup loop additionally deletes expired
+rows in transactions of at most `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE`.
+Automated
 ad-hoc history retention excludes jobs with a future expiry and rechecks that
 condition in its final write transaction, so independently configured history
 retention cannot shorten the replay window. Explicit job deletion and
@@ -552,9 +553,15 @@ artifact is opened; missing and cross-project retained IDs return the same
 
 The periodic cleanup order is expired-result retention, per-job result
 pruning, artifact reconciliation, expired submission-idempotency deletion,
-then webhook tombstone scrubbing. Retention
-processes at most `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` deterministic rows
-per phase. It commits each metadata batch and releases SQLite before removing
+then webhook tombstone scrubbing. Retention drains repeated deterministic
+batches in one maintenance cycle. Each transaction remains bounded by its
+category batch setting, while
+`SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` and
+`SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` bound aggregate cycle work. If
+either budget is reached, the loop waits only
+`SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` before continuing instead
+of sleeping for the normal six-hour interval. It commits each metadata batch
+and releases SQLite before removing
 the corresponding directories, so filesystem latency does not block result
 metadata access. Retention remains metadata-first, so a crash leaves a
 recoverable filesystem orphan.
@@ -592,7 +599,7 @@ directory removal.
 validates and scans cursor-paginated batches no larger than
 `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE`, performs the same eligibility checks,
 and reports what would be removed without mutating files or metadata. Cursors
-advance across later passes so large stores are covered without one unbounded
+advance across later cycles so large stores are covered without one unbounded
 metadata load or full-tree candidate list. Review at least one grace-period
 window of summaries before setting dry-run to `false`. Destructive passes
 remove only eligible directories and known temp files, converge idempotently,
@@ -620,6 +627,14 @@ changes can make a candidate unverifiable; a path can still change after its
 last check; and SQLite/filesystem operations are not one transaction. Active
 and age rechecks reduce but cannot eliminate that gap. The service retains its
 documented single-process/local-filesystem assumption.
+
+Size cleanup so each category's daily item budget exceeds the measured rate at
+which rows become eligible, with recovery headroom after the longest planned
+downtime. With the defaults, one cycle may process 10,000 eligible items per
+category and saturated cycles repeat after five seconds. Track both
+`scrapeyard_cleanup_eligible_items` and
+`scrapeyard_cleanup_oldest_eligible_age_seconds`; a rising count or age proves
+retention is falling behind even while individual cycles succeed.
 
 ## Terminal finalization and webhook intent
 
@@ -738,7 +753,7 @@ exactly-once.
 Failed rows remain fully inspectable for
 `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS`; delivered rows retain their full
 request data for `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS`. The existing
-periodic cleanup loop processes a deterministic bounded batch and scrubs the
+periodic cleanup loop drains deterministic bounded transactions and scrubs the
 URL, headers, payload, timeout, and free-form last error in place. Pending rows
 are never selected by terminal retention settings. A cleanup failure is logged
 and retried on a later pass without stopping workers or changing scrape state.

@@ -22,6 +22,7 @@ from scrapeyard.api.dependencies import (
     close_webhook_dispatcher,
     get_error_store,
     get_job_store,
+    get_result_store,
     get_run_thread_pool,
     get_worker_pool,
     init_rate_limiter,
@@ -85,6 +86,7 @@ from scrapeyard.runtime.metrics import (
     WEBHOOK_OLDEST_AGE,
     WORK_CAPACITY,
     render_metrics,
+    set_cleanup_backlog,
 )
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
@@ -798,6 +800,75 @@ async def _refresh_metrics() -> None:
                 WEBHOOK_BACKLOG.labels("delivered").set(summary.delivered)
                 WEBHOOK_BACKLOG.labels("failed").set(summary.failed)
                 WEBHOOK_OLDEST_AGE.set(summary.oldest_pending_age_seconds or 0.0)
+
+            if callable(getattr(outbox, "summarize_cleanup_backlog", None)):
+                observed_at = utc_now()
+                tombstone_before = observed_at - timedelta(
+                    days=settings.history_webhook_tombstone_retention_days
+                )
+                try:
+                    backlog_groups = await asyncio.wait_for(
+                        asyncio.gather(
+                            get_result_store().summarize_cleanup_backlog(
+                                expired_before=(
+                                    observed_at
+                                    - timedelta(days=settings.storage_retention_days)
+                                ),
+                                max_results_per_job=(
+                                    settings.storage_max_results_per_job
+                                ),
+                            ),
+                            get_job_store().summarize_cleanup_backlog(
+                                observed_at=observed_at,
+                                adhoc_expired_before=(
+                                    observed_at
+                                    - timedelta(
+                                        days=settings.history_adhoc_job_retention_days
+                                    )
+                                ),
+                                scheduled_expired_before=(
+                                    observed_at
+                                    - timedelta(
+                                        days=settings.history_scheduled_run_retention_days
+                                    )
+                                ),
+                                tombstone_expired_before=tombstone_before,
+                                max_scheduled_runs_per_job=(
+                                    settings.history_scheduled_run_retention_count
+                                ),
+                            ),
+                            get_error_store().summarize_cleanup_backlog(
+                                expired_before=(
+                                    observed_at
+                                    - timedelta(days=settings.history_error_retention_days)
+                                ),
+                            ),
+                            outbox.summarize_cleanup_backlog(
+                                delivered_before=(
+                                    observed_at
+                                    - timedelta(
+                                        days=settings.webhook_delivered_retention_days
+                                    )
+                                ),
+                                failed_before=(
+                                    observed_at
+                                    - timedelta(
+                                        days=settings.webhook_failed_retention_days
+                                    )
+                                ),
+                            ),
+                        ),
+                        timeout=timeout,
+                    )
+                except Exception:
+                    METRICS_REFRESH_FAILURES.labels("cleanup_backlog").inc()
+                else:
+                    snapshots = {
+                        category: snapshot
+                        for group in backlog_groups
+                        for category, snapshot in group.items()
+                    }
+                    set_cleanup_backlog(snapshots, observed_at=observed_at)
 
         try:
             DISK_FREE_BYTES.set(shutil.disk_usage(settings.storage_results_dir).free)

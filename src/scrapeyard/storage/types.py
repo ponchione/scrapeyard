@@ -10,6 +10,14 @@ from typing import Any
 from scrapeyard.models.job import Job, JobStatus
 
 
+@dataclass(frozen=True, slots=True)
+class CleanupBacklogSnapshot:
+    """Exact eligible-row count and oldest eligibility timestamp."""
+
+    eligible_count: int
+    oldest_eligible_at: datetime | None
+
+
 class IdempotentJobAction(str, Enum):
     """Atomic outcome for caller-scoped ad-hoc submission creation."""
 

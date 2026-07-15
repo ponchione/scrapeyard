@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,7 +11,8 @@ from httpx import ASGITransport, AsyncClient
 import scrapeyard.main as main_module
 from scrapeyard.api.middleware import MetricsMiddleware
 from scrapeyard.runtime.health import ProbeResult
-from scrapeyard.runtime.metrics import API_REQUESTS, render_metrics
+from scrapeyard.runtime.metrics import API_REQUESTS, render_metrics, set_cleanup_backlog
+from scrapeyard.storage.types import CleanupBacklogSnapshot
 from scrapeyard.storage.webhook_outbox import WebhookOutboxSummary
 
 
@@ -102,3 +104,25 @@ async def test_api_metric_labels_remain_bounded_under_many_resource_ids():
     assert samples[0].value >= 250
     assert "private-resource-249" not in render_metrics().decode()
     assert elapsed < 5.0
+
+
+def test_cleanup_backlog_metrics_publish_only_fixed_categories():
+    observed_at = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    set_cleanup_backlog(
+        {
+            "expired_results": CleanupBacklogSnapshot(
+                12,
+                observed_at - timedelta(hours=3),
+            ),
+            "unbounded-user-value": CleanupBacklogSnapshot(99, observed_at),
+        },
+        observed_at=observed_at,
+    )
+
+    rendered = render_metrics().decode()
+    assert 'scrapeyard_cleanup_eligible_items{category="expired_results"} 12.0' in rendered
+    assert (
+        'scrapeyard_cleanup_oldest_eligible_age_seconds{category="expired_results"} '
+        "10800.0"
+    ) in rendered
+    assert "unbounded-user-value" not in rendered

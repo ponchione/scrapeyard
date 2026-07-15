@@ -111,6 +111,34 @@ async def test_delete_expired_keeps_fresh_results(store):
 
 
 @pytest.mark.asyncio
+async def test_result_cleanup_backlog_matches_retention_predicates(store):
+    for run_id in ("run-old", "run-middle", "run-new"):
+        await store.save_result("job-backlog", [{"run": run_id}], run_id=run_id)
+    created = {
+        "run-old": NOW - timedelta(days=40),
+        "run-middle": NOW - timedelta(days=2),
+        "run-new": NOW - timedelta(days=1),
+    }
+    async with get_db("results_meta.db") as db:
+        for run_id, created_at in created.items():
+            await db.execute(
+                "UPDATE results_meta SET created_at = ? WHERE run_id = ?",
+                (created_at.isoformat(), run_id),
+            )
+        await db.commit()
+
+    backlog = await store.summarize_cleanup_backlog(
+        expired_before=NOW - timedelta(days=30),
+        max_results_per_job=2,
+    )
+
+    assert backlog["expired_results"].eligible_count == 1
+    assert backlog["expired_results"].oldest_eligible_at == created["run-old"]
+    assert backlog["excess_results"].eligible_count == 1
+    assert backlog["excess_results"].oldest_eligible_at == created["run-old"]
+
+
+@pytest.mark.asyncio
 async def test_delete_expired_skips_active_matching_run(store):
     lookups: list[tuple[str, str, str]] = []
 

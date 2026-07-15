@@ -31,6 +31,7 @@ from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS, select_colu
 from scrapeyard.storage.types import (
     CancellationAction,
     CancellationOutcome,
+    CleanupBacklogSnapshot,
     DeletionFinalizationAction,
     DeletionFinalizationOutcome,
     DeletionReservationAction,
@@ -329,6 +330,99 @@ class SQLiteJobStore:
             (fmt_dt(expired_before), limit),
         )
         return cursor.rowcount
+
+    async def summarize_cleanup_backlog(
+        self,
+        *,
+        observed_at: datetime,
+        adhoc_expired_before: datetime,
+        scheduled_expired_before: datetime,
+        tombstone_expired_before: datetime,
+        max_scheduled_runs_per_job: int,
+    ) -> dict[str, CleanupBacklogSnapshot]:
+        """Return exact job/idempotency backlog using retention predicates."""
+
+        async with get_db("jobs.db") as db:
+            idempotency_cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(expires_at) AS oldest_eligible_at
+                   FROM scrape_idempotency
+                   WHERE expires_at <= ?""",
+                (fmt_dt(observed_at),),
+            )
+            idempotency_row = await idempotency_cursor.fetchone()
+            adhoc_cursor = await db.execute(
+                """SELECT COUNT(*) AS eligible_count,
+                          MIN(COALESCE(
+                              jobs.deletion_requested_at,
+                              jobs.updated_at,
+                              jobs.created_at
+                          )) AS oldest_eligible_at
+                   FROM jobs
+                   WHERE jobs.schedule_cron IS NULL
+                     AND (
+                         (
+                             jobs.status IN ('complete', 'partial', 'failed', 'cancelled')
+                             AND COALESCE(jobs.updated_at, jobs.created_at) <= ?
+                         )
+                         OR (
+                             jobs.status = 'deleting'
+                             AND jobs.delete_results_on_delete = 0
+                         )
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM webhook_deliveries
+                         WHERE webhook_deliveries.job_id = jobs.job_id
+                           AND (
+                               webhook_deliveries.status NOT IN ('delivered', 'failed')
+                               OR webhook_deliveries.scrubbed_at IS NULL
+                               OR webhook_deliveries.scrubbed_at > ?
+                           )
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM scrape_idempotency
+                         WHERE scrape_idempotency.job_id = jobs.job_id
+                           AND scrape_idempotency.expires_at > ?
+                     )""",
+                (
+                    fmt_dt(adhoc_expired_before),
+                    fmt_dt(tombstone_expired_before),
+                    fmt_dt(observed_at),
+                ),
+            )
+            adhoc_row = await adhoc_cursor.fetchone()
+            scheduled_cursor = await db.execute(
+                "SELECT COUNT(*) AS eligible_count, "
+                "MIN(COALESCE(job_runs.completed_at, job_runs.started_at)) "
+                "AS oldest_eligible_at "
+                "FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id WHERE "
+                + self._scheduled_history_eligibility_sql(),
+                (
+                    fmt_dt(tombstone_expired_before),
+                    fmt_dt(scheduled_expired_before),
+                    max_scheduled_runs_per_job,
+                ),
+            )
+            scheduled_row = await scheduled_cursor.fetchone()
+        assert (
+            idempotency_row is not None
+            and adhoc_row is not None
+            and scheduled_row is not None
+        )
+        return {
+            "idempotency_records": CleanupBacklogSnapshot(
+                int(idempotency_row["eligible_count"]),
+                parse_dt(idempotency_row["oldest_eligible_at"]),
+            ),
+            "adhoc_jobs": CleanupBacklogSnapshot(
+                int(adhoc_row["eligible_count"]),
+                parse_dt(adhoc_row["oldest_eligible_at"]),
+            ),
+            "scheduled_runs": CleanupBacklogSnapshot(
+                int(scheduled_row["eligible_count"]),
+                parse_dt(scheduled_row["oldest_eligible_at"]),
+            ),
+        }
 
     async def list_adhoc_jobs_for_retention(
         self,

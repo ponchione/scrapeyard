@@ -560,6 +560,13 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
     assert inspectable_failed.last_error == "HTTP 400 with sensitive context"
     assert inspectable_failed.headers == {"X-Test": "yes"}
 
+    backlog = await store.summarize_cleanup_backlog(
+        delivered_before=now + timedelta(seconds=2),
+        failed_before=now + timedelta(seconds=2),
+    )
+    assert backlog["terminal_webhooks"].eligible_count == 2
+    assert backlog["terminal_webhooks"].oldest_eligible_at == now + timedelta(seconds=1)
+
     summary = await store.scrub_terminal_deliveries(
         delivered_before=now + timedelta(seconds=2),
         failed_before=now + timedelta(seconds=2),
