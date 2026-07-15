@@ -83,10 +83,11 @@ def _response_cookie_metadata(cookies: httpx.Cookies) -> dict[str, str]:
 
     Cookie routing retains the full domain/path-aware jar.  Scrapling's
     name-only metadata mapping uses the last value in jar order when response
-    cookies repeat a name at different paths or domains.
+    cookies repeat a name at different paths or domains.  Valueless cookies
+    remain in the routing jar and are represented as empty strings in metadata.
     """
 
-    return {cookie.name: cookie.value for cookie in cookies.jar}
+    return {cookie.name: cookie.value or "" for cookie in cookies.jar}
 
 
 async def fetch_streaming_response(
@@ -100,7 +101,7 @@ async def fetch_streaming_response(
 
     kwargs = dict(call_kwargs)
     proxy = kwargs.pop("proxy", None)
-    retries = int(kwargs.pop("retries", 3) or 0)
+    kwargs.pop("retries", None)
     timeout = kwargs.pop("timeout", 10)
     follow_redirects = bool(kwargs.pop("follow_redirects", False))
     stealthy = bool(kwargs.pop("stealthy_headers", True))
@@ -125,7 +126,9 @@ async def fetch_streaming_response(
 
     transport = httpx.AsyncHTTPTransport(
         proxy=proxy,
-        retries=retries,
+        # RetryHandler is the sole retry owner so every physical attempt
+        # re-enters rate limiting, cancellation, metrics, and the run budget.
+        retries=0,
         trust_env=False,
     )
 

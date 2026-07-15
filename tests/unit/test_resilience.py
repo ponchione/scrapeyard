@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from scrapeyard.config.schema import BackoffStrategy, OnEmptyAction, RetryConfig, ValidationConfig
@@ -56,6 +57,23 @@ class TestRetryHandler:
     async def test_retries_on_temporary_dns_resolution_failure(self):
         handler = RetryHandler(self._config(max_attempts=2, backoff_max=0))
         fn = AsyncMock(side_effect=[URLResolutionError("EAI_AGAIN"), "ok"])
+
+        result = await handler.execute(fn)
+
+        assert result == "ok"
+        assert fn.await_count == 2
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ConnectTimeout("connect timed out"),
+            httpx.ReadTimeout("read timed out"),
+        ],
+    )
+    async def test_retries_on_httpx_connection_and_timeout_failures(self, failure):
+        handler = RetryHandler(self._config(max_attempts=2, backoff_max=0))
+        fn = AsyncMock(side_effect=[failure, "ok"])
 
         result = await handler.execute(fn)
 

@@ -379,6 +379,10 @@ fetch/navigation attempts to the same canonical host. It applies to initial
 fetches, retries, redirect hops, pagination, and validation retries. Browser
 subresources are not throttled by this setting.
 
+`retry.max_attempts` is the total number of attempts per request, including the
+initial attempt. Connection and timeout failures follow the same backoff,
+cancellation, rate-limit, metric, and run-budget policy as retryable HTTP statuses.
+
 Terminal webhook intent is durable before a run is reported complete. Each
 logical event uses a stable `whv1_<sha256>` delivery ID derived only from its
 job ID, run ID, and event, and the same ID is sent to the receiver for

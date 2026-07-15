@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.engine.fetch_classifier import (
     classify_fetch_exception,
@@ -33,6 +35,17 @@ def test_classify_fetch_exception_maps_browser_timeout_for_dynamic_fetcher():
     error_type, http_status, debug = classify_fetch_exception(asyncio.TimeoutError(), FetcherType.dynamic)
 
     assert error_type == ErrorType.navigation_timeout
+    assert http_status is None
+    assert debug is None
+
+
+def test_classify_fetch_exception_maps_httpx_timeout_for_basic_fetcher():
+    error_type, http_status, debug = classify_fetch_exception(
+        httpx.ReadTimeout("read timed out"),
+        FetcherType.basic,
+    )
+
+    assert error_type == ErrorType.timeout
     assert http_status is None
     assert debug is None
 

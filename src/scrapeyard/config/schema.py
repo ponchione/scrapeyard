@@ -892,7 +892,7 @@ class RetryConfig(StrictConfigModel):
         default=3,
         ge=1,
         le=MAX_RETRY_ATTEMPTS,
-        description="Maximum retry attempts per request",
+        description="Total request attempts, including the initial attempt",
     )
     backoff: BackoffStrategy = Field(
         default=BackoffStrategy.exponential, description="Backoff strategy"
