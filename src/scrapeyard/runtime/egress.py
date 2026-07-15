@@ -66,8 +66,8 @@ async def _attest_probe_liveness(settings: ServiceSettings) -> None:
 async def attest_connected_ip_policy(settings: ServiceSettings) -> None:
     """Require a live controlled helper around one denied challenge attempt."""
 
-    host = settings.egress_policy_probe_host
-    port = settings.egress_policy_probe_port
+    host = getattr(settings, "egress_policy_probe_host", "")
+    port = getattr(settings, "egress_policy_probe_port", 0)
     if not host or not port:
         return
     await _attest_probe_liveness(settings)
