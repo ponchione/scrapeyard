@@ -7,12 +7,17 @@ tokens, browser `extra_headers`, browser/CDP URLs, webhook URL query tokens,
 and webhook headers. The raw YAML historically carried all of those into
 `jobs.config_yaml`. A terminal webhook intent then copied the resolved webhook
 URL, headers, and payload into `webhook_deliveries`; retry error text can also
-contain a URL. Those job/outbox fields are the durable secret-bearing boundary.
+contain a URL. Those SQLite job/snapshot/outbox fields are the durable
+secret-bearing boundary. Redis receives only the immutable `job_id`, `run_id`,
+trigger, and non-secret delivery metadata; submitted YAML is never serialized
+into an arq payload. Redis AOF files, backups, and the configured seven-day
+payload lifetime therefore do not create another plaintext configuration copy.
 The config `project` and `name` must remain literal and cannot be derived from
 a secret reference.
 
-New writes encrypt the complete parent YAML, the immutable YAML snapshot owned
-by every accepted `job_runs` row, and the complete outbox URL, headers, payload,
+New writes encrypt the complete parent YAML, an immutable
+`queued_run_snapshots` YAML copy before every delivery enters Redis, the YAML
+snapshot owned by every claimed or failed `job_runs` row, and the complete outbox URL, headers, payload,
 and non-null retry error. The run snapshot is bound to its run ID with distinct
 associated data, allowing terminal webhook repair after a scheduled parent is
 updated without exposing the old configuration. Encrypting complete values
@@ -26,6 +31,11 @@ fingerprint, never the raw query or exception message. Result records still
 contain extracted site data by design and therefore require the same access,
 retention, and backup controls as any scrape output. Logs record identifiers
 and exception types rather than config/header values.
+
+Browser `extra_headers` are target-origin credentials: they are retained only
+when scheme, hostname, and effective port exactly match the configured target.
+Browser interception removes them from cross-origin requests, redirects,
+subdomains, and scheme changes before the request is continued.
 
 Prefer deployment references in submitted YAML:
 
@@ -88,11 +98,11 @@ After schema migrations and before workers/scheduler start, one atomic
 `jobs.db` transaction:
 
 1. authenticates every existing envelope;
-2. encrypts every legacy job config and unsanitized outbox request;
+2. encrypts every legacy job config, accepted queued snapshot, and unsanitized outbox request;
 3. backfills a legacy run snapshot only when its hash proves the current parent
    is the exact configuration that run accepted;
 4. writes a SHA-256 config fingerprint used only for compare-and-set behavior;
-5. rotates parent, run-snapshot, and outbox envelopes to the configured active key.
+5. rotates parent, queued-snapshot, run-snapshot, and outbox envelopes to the configured active key.
 
 Already-current envelopes are still authenticated and their config hashes are
 verified, but their rows are not rewritten. A no-change restart therefore

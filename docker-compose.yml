@@ -129,6 +129,9 @@ services:
       SCRAPEYARD_DB_DIR: "/data/db"
       SCRAPEYARD_ADAPTIVE_DIR: "/data/adaptive"
       SCRAPEYARD_LOG_DIR: "/data/logs"
+      # In-memory rate-limit cardinality bounds
+      SCRAPEYARD_RATE_LIMIT_MAX_KEYS: "10000"
+      SCRAPEYARD_DOMAIN_RATE_LIMIT_MAX_DOMAINS: "10000"
       # Circuit breaker
       SCRAPEYARD_CIRCUIT_BREAKER_MAX_FAILURES: "3"
       SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS: "300"

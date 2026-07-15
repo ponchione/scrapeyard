@@ -432,6 +432,11 @@ settings are:
 | `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` | `128` | Maximum visible-ASCII idempotency key length |
 | `SCRAPEYARD_IDEMPOTENCY_RETENTION_HOURS` | `24` | Caller/key replay and conflict window |
 | `SCRAPEYARD_IDEMPOTENCY_CLEANUP_BATCH_SIZE` | `1000` | Maximum expired key records removed per cleanup pass |
+| `SCRAPEYARD_RATE_LIMIT_REQUESTS` | `600` | Maximum API requests per caller in one sliding window; `0` disables the limiter |
+| `SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS` | `60` | API sliding-window length in seconds |
+| `SCRAPEYARD_RATE_LIMIT_MAX_KEYS` | `10000` | Maximum live API-key/client-IP rate-limit buckets; new identities are refused at saturation |
+| `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED` | `true` | Use Redis for cross-job domain pacing when the queue connection is available |
+| `SCRAPEYARD_DOMAIN_RATE_LIMIT_MAX_DOMAINS` | `10000` | Maximum process-local domain pacing entries when shared pacing is disabled |
 | `SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS` | `30` | Terminal ad-hoc job history window before resumable metadata deletion |
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_DAYS` | `30` | Scheduled run history age window |
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT` | `100` | Maximum newest scheduled runs retained per job; age expiry may retain fewer |
