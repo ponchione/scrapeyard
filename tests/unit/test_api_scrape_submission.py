@@ -135,7 +135,7 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
 
 
 @pytest.mark.asyncio
-async def test_submit_scrape_job_returns_durable_failed_state_without_artifact_404():
+async def test_submit_scrape_job_rejects_durable_failed_state_without_artifact():
     job_store = AsyncMock()
     result_store = AsyncMock()
     worker_pool = AsyncMock()
@@ -153,19 +153,17 @@ async def test_submit_scrape_job_returns_durable_failed_state_without_artifact_4
     result_store.get_result.side_effect = KeyError("no preclaim artifact")
     worker_pool.enqueue.return_value = _QueuedJob()
 
-    submission = await submit_scrape_job(
-        config_yaml="project: integ",
-        config=_config(ExecutionMode.sync),
-        job_store=job_store,
-        result_store=result_store,
-        worker_pool=worker_pool,
-        sync_timeout_seconds=5,
-        sync_poll_delay_seconds=0.1,
-    )
+    with pytest.raises(ResultArtifactUnavailableError):
+        await submit_scrape_job(
+            config_yaml="project: integ",
+            config=_config(ExecutionMode.sync),
+            job_store=job_store,
+            result_store=result_store,
+            worker_pool=worker_pool,
+            sync_timeout_seconds=5,
+            sync_poll_delay_seconds=0.1,
+        )
 
-    assert submission.completed is True
-    assert submission.status == "failed"
-    assert submission.results is None
     result_store.get_result.assert_awaited_once()
 
 

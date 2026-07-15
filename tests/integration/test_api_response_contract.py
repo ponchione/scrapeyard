@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from scrapeyard.api.dependencies import get_job_store, get_worker_pool
+from scrapeyard.common.time import utc_now
 from scrapeyard.engine.scraper import TargetResult
 from tests.integration.conftest import poll_until_ready
 
@@ -168,6 +170,44 @@ async def test_sync_and_polling_use_the_same_v1_result_contract(client, monkeypa
     polled = await client.get(f"/results/{submitted.json()['job_id']}")
     assert polled.status_code == 200
     assert polled.json() == submitted.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group_by", ["target", "merge"])
+async def test_sync_and_polling_share_missing_terminal_artifact_semantics(
+    client,
+    monkeypatch,
+    group_by,
+):
+    job_store = get_job_store()
+    captured: dict[str, str] = {}
+
+    class _FailedWithoutArtifact:
+        async def result(self, timeout=None, *, poll_delay=0.5):
+            del timeout, poll_delay
+            await job_store.fail_owned_run(
+                captured["job_id"],
+                captured["run_id"],
+                utc_now(),
+                error_count=1,
+            )
+
+    async def _enqueue(job_id, _config_yaml, _priority, **kwargs):
+        captured.update(job_id=job_id, run_id=kwargs["run_id"])
+        return _FailedWithoutArtifact()
+
+    monkeypatch.setattr(get_worker_pool(), "enqueue", _enqueue)
+    submitted = await client.post(
+        "/scrape",
+        content=_yaml(mode="sync", group_by=group_by),
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert submitted.status_code == 404
+    assert submitted.json()["error"] == "Completed result artifact is no longer available"
+    polled = await client.get(f"/results/{captured['job_id']}")
+    assert polled.status_code == 404
+    assert polled.json()["code"] == submitted.json()["code"] == "not_found"
 
 
 @pytest.mark.asyncio
