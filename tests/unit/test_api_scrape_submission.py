@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from arq.jobs import ResultNotFound
 
 from scrapeyard.api.scrape_submission import (
     ResultArtifactUnavailableError,
@@ -37,6 +38,11 @@ class _BlockingQueuedJob:
         await asyncio.Event().wait()
 
 
+class _MissingQueuedJob:
+    async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
+        raise ResultNotFound("obsolete delivery")
+
+
 def _config(
     mode: ExecutionMode,
     fetcher: FetcherType = FetcherType.basic,
@@ -60,6 +66,17 @@ def _config(
 async def test_wait_for_queued_job_treats_arq_cancellation_as_terminal():
     completed = await wait_for_queued_job(
         _CancelledQueuedJob(),
+        timeout_seconds=5,
+        poll_delay_seconds=0.1,
+    )
+
+    assert completed is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_queued_job_treats_missing_delivery_as_non_authoritative():
+    completed = await wait_for_queued_job(
+        _MissingQueuedJob(),
         timeout_seconds=5,
         poll_delay_seconds=0.1,
     )
@@ -132,6 +149,83 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
     assert submission.completed is True
     assert submission.status == "complete"
     assert submission.results == {"status": "complete"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable_status", [JobStatus.queued, JobStatus.running])
+async def test_queue_handler_completion_does_not_complete_an_active_durable_run(
+    durable_status,
+):
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job.model_copy(update={"status": durable_status})
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
+    worker_pool.enqueue.return_value = _QueuedJob()
+
+    submission = await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.sync),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=5,
+        sync_poll_delay_seconds=0.1,
+    )
+
+    assert submission.completed is False
+    assert submission.status == durable_status.value
+    assert submission.run_id == saved_job.current_run_id
+    result_store.get_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_handler_completion_never_reads_artifact_for_replacement_run():
+    job_store = AsyncMock()
+    result_store = AsyncMock()
+    worker_pool = AsyncMock()
+    saved_job = None
+
+    async def _save_job(job):
+        nonlocal saved_job
+        saved_job = job
+
+    async def _get_job(_job_id: str):
+        return saved_job.model_copy(
+            update={
+                "status": JobStatus.running,
+                "current_run_id": "replacement-run",
+            }
+        )
+
+    job_store.save_job.side_effect = _save_job
+    job_store.get_job.side_effect = _get_job
+    job_store.get_job_run.return_value = None
+    worker_pool.enqueue.return_value = _QueuedJob()
+
+    submission = await submit_scrape_job(
+        config_yaml="project: integ",
+        config=_config(ExecutionMode.sync),
+        job_store=job_store,
+        result_store=result_store,
+        worker_pool=worker_pool,
+        sync_timeout_seconds=5,
+        sync_poll_delay_seconds=0.1,
+    )
+
+    assert submission.completed is False
+    assert submission.status == "running"
+    assert submission.run_id == saved_job.current_run_id
+    result_store.get_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
