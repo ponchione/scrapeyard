@@ -15,6 +15,19 @@ from typing import Any, TypeVar
 
 
 T = TypeVar("T")
+_READ_CHUNK_SIZE = 64 * 1024
+
+
+class FilesystemDeadlineReached(TimeoutError):
+    """Raised when cooperative blocking filesystem work reaches its deadline."""
+
+
+class FileSizeLimitExceeded(ValueError):
+    """Raised before a bounded artifact read would exceed its byte ceiling."""
+
+
+class DirectoryEntryLimitExceeded(ValueError):
+    """Raised before a directory scan would exceed its entry ceiling."""
 
 
 def ensure_directory(path: str | Path) -> None:
@@ -56,7 +69,11 @@ def write_json_file(path: str | Path, data: Any) -> None:
     write_bytes_file(path, serialize_json_bytes(data))
 
 
-async def cleanup_safe_to_thread(func: Callable[..., T], *args: Any) -> T:
+async def cleanup_safe_to_thread(
+    func: Callable[..., T],
+    *args: Any,
+    cancel_on_cancellation: Callable[[], None] | None = None,
+) -> T:
     """Finish a blocking filesystem operation before propagating cancellation."""
     task = asyncio.create_task(asyncio.to_thread(func, *args))
     cancellation_requested = False
@@ -66,6 +83,8 @@ async def cleanup_safe_to_thread(func: Callable[..., T], *args: Any) -> T:
             break
         except asyncio.CancelledError:
             cancellation_requested = True
+            if cancel_on_cancellation is not None:
+                cancel_on_cancellation()
             continue
         except Exception:
             if cancellation_requested:
@@ -82,8 +101,18 @@ def read_json_file(path: str | Path) -> Any:
     return json.loads(target.read_text(encoding="utf-8"))
 
 
-def read_bytes_file_no_follow(path: str | Path) -> bytes:
-    """Read a regular file as bytes without following its final symlink."""
+def read_bytes_file_no_follow(
+    path: str | Path,
+    *,
+    max_bytes: int | None = None,
+    deadline_reached: Callable[[], bool] | None = None,
+) -> bytes:
+    """Read a regular file without following symlinks or exceeding bounds."""
+
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError("max_bytes must not be negative")
+    if deadline_reached is not None and deadline_reached():
+        raise FilesystemDeadlineReached
 
     target = Path(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -92,18 +121,44 @@ def read_bytes_file_no_follow(path: str | Path) -> bytes:
         file_stat = os.fstat(descriptor)
         if not stat.S_ISREG(file_stat.st_mode):
             raise ValueError("Artifact is not a regular file")
+        if max_bytes is not None and file_stat.st_size > max_bytes:
+            raise FileSizeLimitExceeded(
+                f"Artifact exceeds the {max_bytes}-byte validation ceiling"
+            )
         with os.fdopen(descriptor, "rb") as fh:
             descriptor = -1
-            return fh.read()
+            payload = bytearray()
+            while True:
+                if deadline_reached is not None and deadline_reached():
+                    raise FilesystemDeadlineReached
+                chunk = fh.read(_READ_CHUNK_SIZE)
+                if not chunk:
+                    return bytes(payload)
+                payload.extend(chunk)
+                if max_bytes is not None and len(payload) > max_bytes:
+                    raise FileSizeLimitExceeded(
+                        f"Artifact exceeds the {max_bytes}-byte validation ceiling"
+                    )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
 
 
-def read_json_file_no_follow(path: str | Path) -> Any:
-    """Load a regular JSON file without following its final symlink component."""
+def read_json_file_no_follow(
+    path: str | Path,
+    *,
+    max_bytes: int | None = None,
+    deadline_reached: Callable[[], bool] | None = None,
+) -> Any:
+    """Load bounded regular JSON without following its final symlink component."""
 
-    payload = read_bytes_file_no_follow(path)
+    payload = read_bytes_file_no_follow(
+        path,
+        max_bytes=max_bytes,
+        deadline_reached=deadline_reached,
+    )
+    if deadline_reached is not None and deadline_reached():
+        raise FilesystemDeadlineReached
     return json.loads(payload.decode("utf-8"))
 
 

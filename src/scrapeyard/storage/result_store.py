@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import stat
+import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -24,6 +26,9 @@ from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.common.time import utc_now
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.filesystem import (
+    DirectoryEntryLimitExceeded,
+    FileSizeLimitExceeded,
+    FilesystemDeadlineReached,
     cleanup_safe_to_thread,
     ensure_directory,
     read_bytes_file_no_follow,
@@ -53,6 +58,9 @@ logger = logging.getLogger(__name__)
 _RESULT_RUN_DIR_DEPTH = 3
 _DELETE_ID_BATCH_SIZE = 500
 _DEFAULT_CLEANUP_BATCH_SIZE = 500
+_DEFAULT_MAX_SERIALIZED_RESULT_BYTES = 50 * 1024 * 1024
+_DEFAULT_MAX_ARTIFACT_TREE_BYTES = 150 * 1024 * 1024
+_DEFAULT_MAX_ARTIFACT_TREE_ENTRIES = 10_000
 _ATOMIC_TEMP_PATTERN = re.compile(
     r"^\.(?:results\.json|dynamic-main\.png|stealthy-main\.png)\."
     r"[1-9][0-9]*\.[0-9a-f]{32}\.tmp$"
@@ -76,6 +84,13 @@ class _RemovalCandidate:
     path: Path
     size: int
     recent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ScannedArtifactEntry:
+    cursor: tuple[str, str, str]
+    run_candidate: _RemovalCandidate | None = None
+    temp_candidates: tuple[_RemovalCandidate, ...] = ()
 
 
 @dataclass(slots=True)
@@ -161,10 +176,23 @@ class LocalResultStore:
         results_dir: str,
         job_lookup: Callable[[str], Awaitable[tuple[str, str]]],
         active_run_lookup: Callable[[str, str, str], Awaitable[bool]] | None = None,
+        *,
+        max_serialized_result_bytes: int = _DEFAULT_MAX_SERIALIZED_RESULT_BYTES,
+        max_artifact_tree_bytes: int = _DEFAULT_MAX_ARTIFACT_TREE_BYTES,
+        max_artifact_tree_entries: int = _DEFAULT_MAX_ARTIFACT_TREE_ENTRIES,
     ) -> None:
+        if max_serialized_result_bytes < 1:
+            raise ValueError("max_serialized_result_bytes must be positive")
+        if max_artifact_tree_bytes < 1:
+            raise ValueError("max_artifact_tree_bytes must be positive")
+        if max_artifact_tree_entries < 1:
+            raise ValueError("max_artifact_tree_entries must be positive")
         self._results_dir = Path(results_dir)
         self._job_lookup = job_lookup
         self._active_run_lookup = active_run_lookup
+        self._max_serialized_result_bytes = max_serialized_result_bytes
+        self._max_artifact_tree_bytes = max_artifact_tree_bytes
+        self._max_artifact_tree_entries = max_artifact_tree_entries
         self._save_locks: dict[Path, _SaveLockEntry] = {}
         self._reconciliation_lock = asyncio.Lock()
 
@@ -559,114 +587,161 @@ class LocalResultStore:
             )
         )
 
+    def _validate_metadata_row(
+        self,
+        row: Mapping[str, Any],
+        state: _ReconciliationState,
+        deadline_reached: Callable[[], bool],
+    ) -> None:
+        try:
+            run_dir = self._checked_result_dir(str(row["file_path"]))
+        except (OSError, ValueError) as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.unsafe,
+                type(exc).__name__,
+            )
+            return
+        result_path = run_dir / "results.json"
+        try:
+            run_mode = run_dir.lstat().st_mode
+            result_mode = result_path.lstat().st_mode
+        except FileNotFoundError as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.missing,
+                type(exc).__name__,
+            )
+            return
+        except OSError as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.unreadable,
+                type(exc).__name__,
+            )
+            return
+        if not stat.S_ISDIR(run_mode) or not stat.S_ISREG(result_mode):
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.unsafe,
+            )
+            return
+        try:
+            read_json_file_no_follow(
+                result_path,
+                max_bytes=self._max_serialized_result_bytes,
+                deadline_reached=deadline_reached,
+            )
+        except FileNotFoundError as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.missing,
+                type(exc).__name__,
+            )
+        except (FileSizeLimitExceeded, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.corrupt,
+                type(exc).__name__,
+            )
+        except FilesystemDeadlineReached:
+            raise
+        except OSError as exc:
+            self._record_artifact_failure(
+                state,
+                row,
+                ResultArtifactFailureKind.unreadable,
+                type(exc).__name__,
+            )
+        else:
+            state.valid_artifacts += 1
+
     def _validate_metadata_rows(
         self,
         rows: Sequence[Mapping[str, Any]],
         state: _ReconciliationState,
-    ) -> set[Path]:
-        referenced: set[Path] = set()
+        deadline_reached: Callable[[], bool],
+    ) -> int:
+        """Validate rows until the deadline and return the completed prefix size."""
+
+        completed = 0
         for row in rows:
+            if deadline_reached():
+                break
+            try:
+                self._validate_metadata_row(row, state, deadline_reached)
+            except FilesystemDeadlineReached:
+                break
             state.metadata_rows_inspected += 1
-            try:
-                run_dir = self._checked_result_dir(str(row["file_path"]))
-            except (OSError, ValueError) as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.unsafe,
-                    type(exc).__name__,
-                )
-                continue
-            referenced.add(run_dir)
-            result_path = run_dir / "results.json"
-            try:
-                run_mode = run_dir.lstat().st_mode
-                result_mode = result_path.lstat().st_mode
-            except FileNotFoundError as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.missing,
-                    type(exc).__name__,
-                )
-                continue
-            except OSError as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.unreadable,
-                    type(exc).__name__,
-                )
-                continue
-            if not stat.S_ISDIR(run_mode) or not stat.S_ISREG(result_mode):
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.unsafe,
-                )
-                continue
-            try:
-                read_json_file_no_follow(result_path)
-            except FileNotFoundError as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.missing,
-                    type(exc).__name__,
-                )
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.corrupt,
-                    type(exc).__name__,
-                )
-            except OSError as exc:
-                self._record_artifact_failure(
-                    state,
-                    row,
-                    ResultArtifactFailureKind.unreadable,
-                    type(exc).__name__,
-                )
-            else:
-                state.valid_artifacts += 1
-        return referenced
+            completed += 1
+        return completed
 
-    @staticmethod
     def _directory_entries(
+        self,
         directory: Path,
+        *,
+        limit: int | None = None,
     ) -> list[tuple[str, Path, os.stat_result]]:
-        """List one directory through a non-following descriptor."""
+        """List one directory through a non-following, entry-bounded descriptor."""
 
+        entry_limit = self._max_artifact_tree_entries if limit is None else limit
+        if entry_limit < 0:
+            raise ValueError("directory entry limit must not be negative")
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(directory, flags)
         try:
             with os.scandir(descriptor) as entries:
-                result = [
-                    (entry.name, directory / entry.name, entry.stat(follow_symlinks=False))
-                    for entry in entries
-                ]
+                result: list[tuple[str, Path, os.stat_result]] = []
+                for entry in entries:
+                    if len(result) >= entry_limit:
+                        raise DirectoryEntryLimitExceeded(
+                            f"Directory exceeds the {entry_limit}-entry scan ceiling"
+                        )
+                    result.append(
+                        (
+                            entry.name,
+                            directory / entry.name,
+                            entry.stat(follow_symlinks=False),
+                        )
+                    )
         finally:
             os.close(descriptor)
         result.sort(key=lambda item: item[0])
         return result
 
-    @staticmethod
-    def _tree_snapshot(run_dir: Path) -> tuple[int, float, list[tuple[Path, int, float]]]:
-        """Return regular bytes, newest mtime, and known atomic temps, non-following."""
+    def _tree_snapshot(
+        self,
+        run_dir: Path,
+        deadline_reached: Callable[[], bool] | None = None,
+    ) -> tuple[int, float, list[tuple[Path, int, float]]]:
+        """Return a deadline-, byte-, and entry-bounded non-following snapshot."""
 
+        if deadline_reached is not None and deadline_reached():
+            raise FilesystemDeadlineReached
         root_stat = run_dir.lstat()
         if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
             raise ValueError("run candidate is not a regular directory")
         total_bytes = 0
+        total_entries = 0
         newest_mtime = root_stat.st_mtime
         temporary_files: list[tuple[Path, int, float]] = []
         pending = [run_dir]
         while pending:
+            if deadline_reached is not None and deadline_reached():
+                raise FilesystemDeadlineReached
             directory = pending.pop()
-            for entry_name, entry_path, entry_stat in LocalResultStore._directory_entries(
-                directory
-            ):
+            remaining_entries = self._max_artifact_tree_entries - total_entries
+            entries = self._directory_entries(directory, limit=remaining_entries)
+            for entry_name, entry_path, entry_stat in entries:
+                if deadline_reached is not None and deadline_reached():
+                    raise FilesystemDeadlineReached
+                total_entries += 1
                 newest_mtime = max(newest_mtime, entry_stat.st_mtime)
                 mode = entry_stat.st_mode
                 if stat.S_ISLNK(mode):
@@ -675,6 +750,10 @@ class LocalResultStore:
                     pending.append(entry_path)
                 elif stat.S_ISREG(mode):
                     total_bytes += entry_stat.st_size
+                    if total_bytes > self._max_artifact_tree_bytes:
+                        raise FileSizeLimitExceeded(
+                            "Artifact tree exceeds the configured byte scan ceiling"
+                        )
                     if _ATOMIC_TEMP_PATTERN.fullmatch(entry_name):
                         temporary_files.append(
                             (entry_path, entry_stat.st_size, entry_stat.st_mtime)
@@ -688,28 +767,22 @@ class LocalResultStore:
         cutoff_timestamp: float,
         limit: int,
         after: tuple[str, str, str] | None,
-    ) -> tuple[
-        list[_RemovalCandidate],
-        list[_RemovalCandidate],
-        tuple[str, str, str] | None,
-        bool,
-    ]:
+        deadline_reached: Callable[[], bool],
+    ) -> tuple[list[_ScannedArtifactEntry], bool]:
         """Scan at most *limit* run entries after a deterministic cursor."""
 
-        run_candidates: list[_RemovalCandidate] = []
-        temp_candidates: list[_RemovalCandidate] = []
+        scanned_entries: list[_ScannedArtifactEntry] = []
         processed = 0
-        last_cursor = after
         root = self._results_dir.resolve(strict=False)
         try:
             project_entries = self._directory_entries(root)
         except FileNotFoundError:
-            return run_candidates, temp_candidates, None, True
-        except OSError as exc:
+            return scanned_entries, True
+        except (OSError, ValueError) as exc:
             state.operation_failures.append(
                 ReconciliationOperationFailure("scan_root", ".", type(exc).__name__)
             )
-            return run_candidates, temp_candidates, None, True
+            return scanned_entries, True
 
         for project_name, project_path, project_stat in project_entries:
             if after is not None and project_name < after[0]:
@@ -719,7 +792,7 @@ class LocalResultStore:
                     state.malformed_entries_ignored += 1
                     continue
                 job_entries = self._directory_entries(project_path)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 state.operation_failures.append(
                     ReconciliationOperationFailure(
                         "scan_project", project_name[:80], type(exc).__name__
@@ -735,7 +808,7 @@ class LocalResultStore:
                         state.malformed_entries_ignored += 1
                         continue
                     run_entries = self._directory_entries(job_path)
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     state.operation_failures.append(
                         ReconciliationOperationFailure("scan_job", project_job, type(exc).__name__)
                     )
@@ -744,47 +817,58 @@ class LocalResultStore:
                     cursor = (project_name, job_name, run_name)
                     if after is not None and cursor <= after:
                         continue
+                    if deadline_reached():
+                        return scanned_entries, False
                     if processed >= limit:
-                        return (
-                            run_candidates,
-                            temp_candidates,
-                            last_cursor,
-                            False,
-                        )
+                        return scanned_entries, False
                     processed += 1
-                    state.filesystem_entries_inspected += 1
-                    last_cursor = cursor
                     identity = _RunIdentity(project_name, job_name, run_name)
                     try:
                         if not stat.S_ISDIR(run_stat.st_mode) or stat.S_ISLNK(run_stat.st_mode):
                             state.malformed_entries_ignored += 1
+                            scanned_entries.append(_ScannedArtifactEntry(cursor))
+                            state.filesystem_entries_inspected += 1
                             continue
                         run_dir = self._checked_result_dir(str(run_path))
-                        total_bytes, newest_mtime, temporary_files = self._tree_snapshot(run_dir)
+                        total_bytes, newest_mtime, temporary_files = self._tree_snapshot(
+                            run_dir,
+                            deadline_reached,
+                        )
+                    except FilesystemDeadlineReached:
+                        return scanned_entries, False
                     except (OSError, ValueError) as exc:
                         state.operation_failures.append(
                             ReconciliationOperationFailure(
                                 "scan_run", identity.identifier, type(exc).__name__
                             )
                         )
+                        scanned_entries.append(_ScannedArtifactEntry(cursor))
+                        state.filesystem_entries_inspected += 1
                         continue
+                    state.filesystem_entries_inspected += 1
                     state.filesystem_run_directories_inspected += 1
                     run_is_recent = newest_mtime >= cutoff_timestamp
-                    run_candidates.append(
-                        _RemovalCandidate(
-                            identity,
-                            run_dir,
-                            total_bytes,
-                            recent=run_is_recent,
-                        )
+                    run_candidate = _RemovalCandidate(
+                        identity,
+                        run_dir,
+                        total_bytes,
+                        recent=run_is_recent,
                     )
+                    temp_candidates: list[_RemovalCandidate] = []
                     for temp_path, temp_size, temp_mtime in temporary_files:
                         if temp_mtime >= cutoff_timestamp or run_is_recent:
                             state.recent_candidates_skipped += 1
                             continue
                         state.stale_temporary_candidates += 1
                         temp_candidates.append(_RemovalCandidate(identity, temp_path, temp_size))
-        return run_candidates, temp_candidates, None, True
+                    scanned_entries.append(
+                        _ScannedArtifactEntry(
+                            cursor,
+                            run_candidate,
+                            tuple(temp_candidates),
+                        )
+                    )
+        return scanned_entries, True
 
     async def _active(self, identity: _RunIdentity) -> bool:
         if self._active_run_lookup is None:
@@ -815,14 +899,20 @@ class LocalResultStore:
         self,
         candidate: _RemovalCandidate,
         cutoff_timestamp: float,
+        deadline_reached: Callable[[], bool] | None = None,
     ) -> tuple[str, int]:
         path = self._checked_result_dir(str(candidate.path))
         try:
-            size, newest_mtime, _temporary_files = self._tree_snapshot(path)
+            size, newest_mtime, _temporary_files = self._tree_snapshot(
+                path,
+                deadline_reached,
+            )
         except FileNotFoundError:
             return "missing", 0
         if newest_mtime >= cutoff_timestamp:
             return "recent", 0
+        if deadline_reached is not None and deadline_reached():
+            raise FilesystemDeadlineReached
         if not shutil.rmtree.avoids_symlink_attacks:
             raise RuntimeError("recursive removal is not symlink-safe")
         shutil.rmtree(path)
@@ -832,6 +922,7 @@ class LocalResultStore:
         self,
         candidate: _RemovalCandidate,
         cutoff_timestamp: float,
+        deadline_reached: Callable[[], bool] | None = None,
     ) -> tuple[str, int]:
         run_dir = self._checked_result_dir(
             str(
@@ -842,7 +933,10 @@ class LocalResultStore:
             )
         )
         try:
-            _size, newest_mtime, _temporary_files = self._tree_snapshot(run_dir)
+            _size, newest_mtime, _temporary_files = self._tree_snapshot(
+                run_dir,
+                deadline_reached,
+            )
             relative = candidate.path.relative_to(run_dir)
             if not relative.parts or ".." in relative.parts:
                 raise ValueError("unsafe temporary path")
@@ -863,8 +957,116 @@ class LocalResultStore:
             raise ValueError("unsafe temporary candidate")
         if newest_mtime >= cutoff_timestamp or temp_stat.st_mtime >= cutoff_timestamp:
             return "recent", 0
+        if deadline_reached is not None and deadline_reached():
+            raise FilesystemDeadlineReached
         candidate.path.unlink()
         return "removed", temp_stat.st_size
+
+    async def _reconcile_scanned_entry(
+        self,
+        entry: _ScannedArtifactEntry,
+        *,
+        state: _ReconciliationState,
+        cutoff_timestamp: float,
+        dry_run: bool,
+        blocking_stop_reached: Callable[[], bool],
+        stop_blocking_work: Callable[[], None],
+    ) -> bool:
+        """Finish one scanned run entry, returning false on a cooperative stop."""
+
+        candidate = entry.run_candidate
+        if candidate is None:
+            return True
+
+        async def active_or_failed(item: _RemovalCandidate, action: str) -> bool:
+            try:
+                return await self._active(item.identity)
+            except Exception as exc:
+                state.operation_failures.append(
+                    ReconciliationOperationFailure(
+                        action, item.identity.identifier, type(exc).__name__
+                    )
+                )
+                return True
+
+        if await self._metadata_references(candidate):
+            for temp_candidate in entry.temp_candidates:
+                if blocking_stop_reached():
+                    return False
+                if await active_or_failed(temp_candidate, "check_active_temp"):
+                    state.active_run_candidates_skipped += 1
+                    continue
+                state.files_would_remove += 1
+                if dry_run:
+                    continue
+                if await active_or_failed(temp_candidate, "recheck_active_temp"):
+                    state.active_run_race_candidates_skipped += 1
+                    continue
+                try:
+                    outcome, removed_bytes = await cleanup_safe_to_thread(
+                        self._remove_temp_candidate,
+                        temp_candidate,
+                        cutoff_timestamp,
+                        blocking_stop_reached,
+                        cancel_on_cancellation=stop_blocking_work,
+                    )
+                except FilesystemDeadlineReached:
+                    return False
+                except Exception as exc:
+                    state.operation_failures.append(
+                        ReconciliationOperationFailure(
+                            "remove_temp",
+                            temp_candidate.identity.identifier,
+                            type(exc).__name__,
+                        )
+                    )
+                    continue
+                if outcome == "removed":
+                    state.files_removed += 1
+                    state.removed_bytes += removed_bytes
+                elif outcome == "recent":
+                    state.recent_candidates_skipped += 1
+            return True
+
+        if candidate.recent:
+            state.recent_candidates_skipped += 1
+            return True
+        state.orphan_candidates += 1
+        if await active_or_failed(candidate, "check_active_run"):
+            state.active_run_candidates_skipped += 1
+            return True
+        state.directories_would_remove += 1
+        if dry_run:
+            return True
+        if await self._metadata_references(candidate):
+            state.metadata_race_candidates_skipped += 1
+            return True
+        if await active_or_failed(candidate, "recheck_active_run"):
+            state.active_run_race_candidates_skipped += 1
+            return True
+        try:
+            outcome, removed_bytes = await cleanup_safe_to_thread(
+                self._remove_run_candidate,
+                candidate,
+                cutoff_timestamp,
+                blocking_stop_reached,
+                cancel_on_cancellation=stop_blocking_work,
+            )
+        except FilesystemDeadlineReached:
+            return False
+        except Exception as exc:
+            state.operation_failures.append(
+                ReconciliationOperationFailure(
+                    "remove_run", candidate.identity.identifier, type(exc).__name__
+                )
+            )
+            return True
+        if outcome == "removed":
+            state.directories_removed += 1
+            state.removed_bytes += removed_bytes
+        elif outcome == "recent":
+            state.recent_candidates_skipped += 1
+        return True
 
     async def reconcile_artifacts(
         self,
@@ -875,8 +1077,9 @@ class LocalResultStore:
         batch_size: int = _DEFAULT_CLEANUP_BATCH_SIZE,
         metadata_scan_limit: int | None = None,
         filesystem_scan_limit: int | None = None,
+        deadline: float | None = None,
     ) -> ResultReconciliationReport:
-        """Validate and reconcile one bounded, cursor-paginated artifact batch."""
+        """Validate and reconcile one deadline-aware, cursor-paginated batch."""
 
         if grace_seconds < 1:
             raise ValueError("grace_seconds must be at least 1")
@@ -896,6 +1099,7 @@ class LocalResultStore:
                 dry_run=dry_run,
                 metadata_limit=metadata_limit,
                 filesystem_limit=filesystem_limit,
+                deadline=deadline,
             )
 
     async def _reconcile_artifact_page(
@@ -905,146 +1109,91 @@ class LocalResultStore:
         dry_run: bool,
         metadata_limit: int,
         filesystem_limit: int,
+        deadline: float | None,
     ) -> ResultReconciliationReport:
-        """Process and durably advance one independently limited cursor page."""
+        """Process and durably advance completed prefixes of both cursor pages."""
 
         state = _ReconciliationState()
+        stop_requested = threading.Event()
+
+        def deadline_reached() -> bool:
+            return stop_requested.is_set() or (
+                deadline is not None and time.monotonic() >= deadline
+            )
+
         metadata_cursor, filesystem_cursor = await self._load_reconciliation_cursors()
         next_metadata_cursor = metadata_cursor
-        metadata_exhausted = True
+        metadata_exhausted = not metadata_limit
         if metadata_limit:
-            async with get_db("results_meta.db") as db:
-                cursor = await db.execute(
-                    """SELECT id, job_id, run_id, file_path
-                       FROM results_meta
-                       WHERE id > ?
-                       ORDER BY id
-                       LIMIT ?""",
-                    (metadata_cursor, metadata_limit + 1),
+            metadata_exhausted = False
+            if not deadline_reached():
+                async with get_db("results_meta.db") as db:
+                    cursor = await db.execute(
+                        """SELECT id, job_id, run_id, file_path
+                           FROM results_meta
+                           WHERE id > ?
+                           ORDER BY id
+                           LIMIT ?""",
+                        (metadata_cursor, metadata_limit + 1),
+                    )
+                    fetched_rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
+                rows = fetched_rows[:metadata_limit]
+                completed_rows = await cleanup_safe_to_thread(
+                    self._validate_metadata_rows,
+                    rows,
+                    state,
+                    deadline_reached,
+                    cancel_on_cancellation=stop_requested.set,
                 )
-                fetched_rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            metadata_exhausted = len(fetched_rows) <= metadata_limit
-            rows = fetched_rows[:metadata_limit]
-            await cleanup_safe_to_thread(
-                self._validate_metadata_rows,
-                rows,
-                state,
-            )
-            next_metadata_cursor = (
-                0
-                if metadata_exhausted
-                else int(rows[-1]["id"])
-            )
+                metadata_exhausted = (
+                    len(fetched_rows) <= metadata_limit and completed_rows == len(rows)
+                )
+                if metadata_exhausted:
+                    next_metadata_cursor = 0
+                elif completed_rows:
+                    next_metadata_cursor = int(rows[completed_rows - 1]["id"])
 
-        run_candidates: list[_RemovalCandidate] = []
-        temp_candidates: list[_RemovalCandidate] = []
         next_filesystem_cursor = filesystem_cursor
-        filesystem_exhausted = True
+        filesystem_exhausted = not filesystem_limit
         if filesystem_limit:
-            (
-                run_candidates,
-                temp_candidates,
-                scanned_filesystem_cursor,
-                filesystem_exhausted,
-            ) = await cleanup_safe_to_thread(
-                self._scan_artifacts,
-                state,
-                cutoff_timestamp,
-                filesystem_limit,
-                filesystem_cursor,
-            )
-            next_filesystem_cursor = (
-                None if filesystem_exhausted else scanned_filesystem_cursor
-            )
-
-        referenced_identities: set[_RunIdentity] = set()
-        orphan_candidates: list[_RemovalCandidate] = []
-        for candidate in run_candidates:
-            if await self._metadata_references(candidate):
-                referenced_identities.add(candidate.identity)
-            elif candidate.recent:
-                state.recent_candidates_skipped += 1
-            else:
-                state.orphan_candidates += 1
-                orphan_candidates.append(candidate)
-        run_candidates = orphan_candidates
-        temp_candidates = [
-            candidate
-            for candidate in temp_candidates
-            if candidate.identity in referenced_identities
-        ]
-
-        async def active_or_failed(candidate: _RemovalCandidate, action: str) -> bool:
-            try:
-                return await self._active(candidate.identity)
-            except Exception as exc:
-                state.operation_failures.append(
-                    ReconciliationOperationFailure(
-                        action, candidate.identity.identifier, type(exc).__name__
-                    )
-                )
-                return True
-
-        for candidate in run_candidates:
-            if await active_or_failed(candidate, "check_active_run"):
-                state.active_run_candidates_skipped += 1
-                continue
-            state.directories_would_remove += 1
-            if dry_run:
-                continue
-            if await self._metadata_references(candidate):
-                state.metadata_race_candidates_skipped += 1
-                continue
-            if await active_or_failed(candidate, "recheck_active_run"):
-                state.active_run_race_candidates_skipped += 1
-                continue
-            try:
-                outcome, removed_bytes = await cleanup_safe_to_thread(
-                    self._remove_run_candidate,
-                    candidate,
+            filesystem_exhausted = False
+            scanned_entries: list[_ScannedArtifactEntry] = []
+            scan_exhausted = False
+            if not deadline_reached():
+                scanned_entries, scan_exhausted = await cleanup_safe_to_thread(
+                    self._scan_artifacts,
+                    state,
                     cutoff_timestamp,
+                    filesystem_limit,
+                    filesystem_cursor,
+                    deadline_reached,
+                    cancel_on_cancellation=stop_requested.set,
                 )
-            except Exception as exc:
-                state.operation_failures.append(
-                    ReconciliationOperationFailure(
-                        "remove_run", candidate.identity.identifier, type(exc).__name__
-                    )
+            completed_entries = 0
+            for index, entry in enumerate(scanned_entries):
+                if index and deadline_reached():
+                    break
+                blocking_stop_reached = (
+                    stop_requested.is_set if index == 0 else deadline_reached
                 )
-                continue
-            if outcome == "removed":
-                state.directories_removed += 1
-                state.removed_bytes += removed_bytes
-            elif outcome == "recent":
-                state.recent_candidates_skipped += 1
+                completed = await self._reconcile_scanned_entry(
+                    entry,
+                    state=state,
+                    cutoff_timestamp=cutoff_timestamp,
+                    dry_run=dry_run,
+                    blocking_stop_reached=blocking_stop_reached,
+                    stop_blocking_work=stop_requested.set,
+                )
+                if not completed:
+                    break
+                completed_entries += 1
+                next_filesystem_cursor = entry.cursor
+            filesystem_exhausted = (
+                scan_exhausted and completed_entries == len(scanned_entries)
+            )
+            if filesystem_exhausted:
+                next_filesystem_cursor = None
 
-        for candidate in temp_candidates:
-            if await active_or_failed(candidate, "check_active_temp"):
-                state.active_run_candidates_skipped += 1
-                continue
-            state.files_would_remove += 1
-            if dry_run:
-                continue
-            if await active_or_failed(candidate, "recheck_active_temp"):
-                state.active_run_race_candidates_skipped += 1
-                continue
-            try:
-                outcome, removed_bytes = await cleanup_safe_to_thread(
-                    self._remove_temp_candidate,
-                    candidate,
-                    cutoff_timestamp,
-                )
-            except Exception as exc:
-                state.operation_failures.append(
-                    ReconciliationOperationFailure(
-                        "remove_temp", candidate.identity.identifier, type(exc).__name__
-                    )
-                )
-                continue
-            if outcome == "removed":
-                state.files_removed += 1
-                state.removed_bytes += removed_bytes
-            elif outcome == "recent":
-                state.recent_candidates_skipped += 1
         if metadata_limit or filesystem_limit:
             await self._save_reconciliation_cursors(
                 next_metadata_cursor,

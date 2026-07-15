@@ -5,6 +5,8 @@ from datetime import datetime
 import pytest
 
 from scrapeyard.storage.filesystem import (
+    FileSizeLimitExceeded,
+    FilesystemDeadlineReached,
     ensure_directory,
     read_bytes_file_no_follow,
     read_json_file,
@@ -136,6 +138,31 @@ def test_read_bytes_no_follow_round_trips_and_rejects_symlink(tmp_path):
     assert read_bytes_file_no_follow(target) == b"preserve-me"
     with pytest.raises(OSError):
         read_bytes_file_no_follow(link)
+
+
+def test_bounded_read_rejects_file_above_limit_without_returning_payload(tmp_path):
+    target = tmp_path / "oversized.bin"
+    target.write_bytes(b"12345")
+
+    with pytest.raises(FileSizeLimitExceeded):
+        read_bytes_file_no_follow(target, max_bytes=4)
+
+
+def test_chunked_read_honors_cooperative_deadline(tmp_path, monkeypatch):
+    target = tmp_path / "deadline.bin"
+    target.write_bytes(b"12345")
+    from scrapeyard.storage import filesystem
+
+    monkeypatch.setattr(filesystem, "_READ_CHUNK_SIZE", 2)
+    checks = 0
+
+    def deadline_reached() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    with pytest.raises(FilesystemDeadlineReached):
+        read_bytes_file_no_follow(target, deadline_reached=deadline_reached)
 
 
 def test_remove_directories_removes_existing(tmp_path):
