@@ -67,6 +67,7 @@ class TestServiceSettingsDefaults:
         assert settings.run_max_extracted_records == 100000
         assert settings.run_max_serialized_result_bytes == 52428800
         assert settings.run_max_browser_debug_bytes == 26214400
+        assert settings.api_result_thread_max_workers == 2
         assert settings.storage_reconciliation_max_entries_per_run == 10000
 
     def test_regex_safety_defaults(self):
@@ -373,6 +374,15 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
 
         assert settings.run_thread_max_workers == 7
+
+    def test_reads_result_response_thread_worker_capacity(self):
+        with patch.dict(
+            os.environ,
+            {"SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS": "3"},
+        ):
+            settings = ServiceSettings()
+
+        assert settings.api_result_thread_max_workers == 3
 
     def test_reads_history_retention_settings(self):
         values = {

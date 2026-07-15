@@ -178,14 +178,18 @@ def serialize_result_response(
         and "results" in artifact
         and isinstance(artifact.get("targets"), list)
     ):
-        targets: list[Any] = []
-        for target in artifact.get("targets") or []:
-            if isinstance(target, dict):
-                normalized = dict(target)
-                normalized.setdefault("observed_count", normalized.get("count", 0))
-                targets.append(normalized)
-            else:
-                targets.append(target)
+        stored_targets = artifact.get("targets") or []
+        targets = stored_targets
+        if any(
+            isinstance(target, dict) and "observed_count" not in target
+            for target in stored_targets
+        ):
+            targets = list(stored_targets)
+            for index, target in enumerate(targets):
+                if isinstance(target, dict) and "observed_count" not in target:
+                    normalized = dict(target)
+                    normalized["observed_count"] = normalized.get("count", 0)
+                    targets[index] = normalized
         return {
             "job_id": job_id,
             "run_id": run_id,

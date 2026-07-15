@@ -23,6 +23,7 @@ from scrapeyard.api.dependencies import (
     close_webhook_dispatcher,
     get_error_store,
     get_job_store,
+    get_result_response_thread_pool,
     get_result_store,
     get_run_thread_pool,
     get_worker_pool,
@@ -301,12 +302,20 @@ async def _shutdown_runtime_services(
         and get_run_thread_pool().active
     ):
         live_owned_phases.append("run_threads")
+    if (
+        get_result_response_thread_pool.cache_info().currsize
+        and get_result_response_thread_pool().active
+    ):
+        live_owned_phases.append("result_response_threads")
     if live_owned_phases:
         retain_shared_services(live_owned_phases)
 
     if get_run_thread_pool.cache_info().currsize:
         get_run_thread_pool().shutdown()
         get_run_thread_pool.cache_clear()
+    if get_result_response_thread_pool.cache_info().currsize:
+        get_result_response_thread_pool().shutdown()
+        get_result_response_thread_pool.cache_clear()
 
     try:
         await close_webhook_dispatcher(timeout=remaining())
