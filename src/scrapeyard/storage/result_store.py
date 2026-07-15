@@ -92,6 +92,7 @@ class _ReconciliationState:
     corrupt_result_files: int = 0
     unreadable_result_files: int = 0
     unsafe_metadata_paths: int = 0
+    filesystem_entries_inspected: int = 0
     filesystem_run_directories_inspected: int = 0
     malformed_entries_ignored: int = 0
     orphan_candidates: int = 0
@@ -108,7 +109,13 @@ class _ReconciliationState:
     artifact_failures: list[ResultArtifactFailure] = field(default_factory=list)
     operation_failures: list[ReconciliationOperationFailure] = field(default_factory=list)
 
-    def report(self, *, dry_run: bool) -> ResultReconciliationReport:
+    def report(
+        self,
+        *,
+        dry_run: bool,
+        metadata_scan_exhausted: bool,
+        filesystem_scan_exhausted: bool,
+    ) -> ResultReconciliationReport:
         return ResultReconciliationReport(
             dry_run=dry_run,
             metadata_rows_inspected=self.metadata_rows_inspected,
@@ -117,6 +124,7 @@ class _ReconciliationState:
             corrupt_result_files=self.corrupt_result_files,
             unreadable_result_files=self.unreadable_result_files,
             unsafe_metadata_paths=self.unsafe_metadata_paths,
+            filesystem_entries_inspected=self.filesystem_entries_inspected,
             filesystem_run_directories_inspected=(self.filesystem_run_directories_inspected),
             malformed_entries_ignored=self.malformed_entries_ignored,
             orphan_candidates=self.orphan_candidates,
@@ -132,6 +140,8 @@ class _ReconciliationState:
             removed_bytes=self.removed_bytes,
             artifact_failures=tuple(self.artifact_failures),
             operation_failures=tuple(self.operation_failures),
+            metadata_scan_exhausted=metadata_scan_exhausted,
+            filesystem_scan_exhausted=filesystem_scan_exhausted,
         )
 
 
@@ -156,8 +166,7 @@ class LocalResultStore:
         self._job_lookup = job_lookup
         self._active_run_lookup = active_run_lookup
         self._save_locks: dict[Path, _SaveLockEntry] = {}
-        self._reconciliation_metadata_cursor = 0
-        self._reconciliation_filesystem_cursor: tuple[str, str, str] | None = None
+        self._reconciliation_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def _save_guard(self, run_dir: Path) -> AsyncIterator[None]:
@@ -216,6 +225,47 @@ class LocalResultStore:
             except ValueError:
                 logger.warning("Skipping unsafe result directory during cleanup: %r", file_path)
         return paths
+
+    @staticmethod
+    async def _load_reconciliation_cursors(
+    ) -> tuple[int, tuple[str, str, str] | None]:
+        async with get_db("results_meta.db") as db:
+            cursor = await db.execute(
+                """SELECT metadata_cursor, filesystem_project,
+                          filesystem_job_name, filesystem_run_id
+                   FROM result_reconciliation_state
+                   WHERE singleton = 1"""
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Result reconciliation cursor state is missing")
+        filesystem_cursor = None
+        if row["filesystem_project"] is not None:
+            filesystem_cursor = (
+                str(row["filesystem_project"]),
+                str(row["filesystem_job_name"]),
+                str(row["filesystem_run_id"]),
+            )
+        return int(row["metadata_cursor"]), filesystem_cursor
+
+    @staticmethod
+    async def _save_reconciliation_cursors(
+        metadata_cursor: int,
+        filesystem_cursor: tuple[str, str, str] | None,
+    ) -> None:
+        filesystem_parts: tuple[str | None, str | None, str | None] = (
+            (None, None, None) if filesystem_cursor is None else filesystem_cursor
+        )
+        async with get_db("results_meta.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """UPDATE result_reconciliation_state
+                   SET metadata_cursor = ?, filesystem_project = ?,
+                       filesystem_job_name = ?, filesystem_run_id = ?
+                   WHERE singleton = 1""",
+                (metadata_cursor, *filesystem_parts),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Result reconciliation cursor state is missing")
 
     @staticmethod
     async def _delete_metadata_ids(
@@ -702,6 +752,7 @@ class LocalResultStore:
                             False,
                         )
                     processed += 1
+                    state.filesystem_entries_inspected += 1
                     last_cursor = cursor
                     identity = _RunIdentity(project_name, job_name, run_name)
                     try:
@@ -822,6 +873,8 @@ class LocalResultStore:
         dry_run: bool,
         now: datetime | None = None,
         batch_size: int = _DEFAULT_CLEANUP_BATCH_SIZE,
+        metadata_scan_limit: int | None = None,
+        filesystem_scan_limit: int | None = None,
     ) -> ResultReconciliationReport:
         """Validate and reconcile one bounded, cursor-paginated artifact batch."""
 
@@ -829,42 +882,80 @@ class LocalResultStore:
             raise ValueError("grace_seconds must be at least 1")
         if batch_size < 1:
             raise ValueError("result reconciliation batch_size must be positive")
+        metadata_limit = batch_size if metadata_scan_limit is None else metadata_scan_limit
+        filesystem_limit = (
+            batch_size if filesystem_scan_limit is None else filesystem_scan_limit
+        )
+        if metadata_limit < 0 or filesystem_limit < 0:
+            raise ValueError("result reconciliation scan limits must not be negative")
         observed_at = now or utc_now()
         cutoff_timestamp = (observed_at - timedelta(seconds=grace_seconds)).timestamp()
-        state = _ReconciliationState()
-        async with get_db("results_meta.db") as db:
-            cursor = await db.execute(
-                """SELECT id, job_id, run_id, file_path
-                   FROM results_meta
-                   WHERE id > ?
-                   ORDER BY id
-                   LIMIT ?""",
-                (self._reconciliation_metadata_cursor, batch_size),
+        async with self._reconciliation_lock:
+            return await self._reconcile_artifact_page(
+                cutoff_timestamp=cutoff_timestamp,
+                dry_run=dry_run,
+                metadata_limit=metadata_limit,
+                filesystem_limit=filesystem_limit,
             )
-            rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-        await cleanup_safe_to_thread(
-            self._validate_metadata_rows,
-            rows,
-            state,
-        )
-        if len(rows) < batch_size:
-            self._reconciliation_metadata_cursor = 0
-        elif rows:
-            self._reconciliation_metadata_cursor = int(rows[-1]["id"])
 
-        (
-            run_candidates,
-            temp_candidates,
-            filesystem_cursor,
-            exhausted,
-        ) = await cleanup_safe_to_thread(
-            self._scan_artifacts,
-            state,
-            cutoff_timestamp,
-            batch_size,
-            self._reconciliation_filesystem_cursor,
-        )
-        self._reconciliation_filesystem_cursor = None if exhausted else filesystem_cursor
+    async def _reconcile_artifact_page(
+        self,
+        *,
+        cutoff_timestamp: float,
+        dry_run: bool,
+        metadata_limit: int,
+        filesystem_limit: int,
+    ) -> ResultReconciliationReport:
+        """Process and durably advance one independently limited cursor page."""
+
+        state = _ReconciliationState()
+        metadata_cursor, filesystem_cursor = await self._load_reconciliation_cursors()
+        next_metadata_cursor = metadata_cursor
+        metadata_exhausted = True
+        if metadata_limit:
+            async with get_db("results_meta.db") as db:
+                cursor = await db.execute(
+                    """SELECT id, job_id, run_id, file_path
+                       FROM results_meta
+                       WHERE id > ?
+                       ORDER BY id
+                       LIMIT ?""",
+                    (metadata_cursor, metadata_limit + 1),
+                )
+                fetched_rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
+            metadata_exhausted = len(fetched_rows) <= metadata_limit
+            rows = fetched_rows[:metadata_limit]
+            await cleanup_safe_to_thread(
+                self._validate_metadata_rows,
+                rows,
+                state,
+            )
+            next_metadata_cursor = (
+                0
+                if metadata_exhausted
+                else int(rows[-1]["id"])
+            )
+
+        run_candidates: list[_RemovalCandidate] = []
+        temp_candidates: list[_RemovalCandidate] = []
+        next_filesystem_cursor = filesystem_cursor
+        filesystem_exhausted = True
+        if filesystem_limit:
+            (
+                run_candidates,
+                temp_candidates,
+                scanned_filesystem_cursor,
+                filesystem_exhausted,
+            ) = await cleanup_safe_to_thread(
+                self._scan_artifacts,
+                state,
+                cutoff_timestamp,
+                filesystem_limit,
+                filesystem_cursor,
+            )
+            next_filesystem_cursor = (
+                None if filesystem_exhausted else scanned_filesystem_cursor
+            )
 
         referenced_identities: set[_RunIdentity] = set()
         orphan_candidates: list[_RemovalCandidate] = []
@@ -954,7 +1045,16 @@ class LocalResultStore:
                 state.removed_bytes += removed_bytes
             elif outcome == "recent":
                 state.recent_candidates_skipped += 1
-        return state.report(dry_run=dry_run)
+        if metadata_limit or filesystem_limit:
+            await self._save_reconciliation_cursors(
+                next_metadata_cursor,
+                next_filesystem_cursor,
+            )
+        return state.report(
+            dry_run=dry_run,
+            metadata_scan_exhausted=metadata_exhausted,
+            filesystem_scan_exhausted=filesystem_exhausted,
+        )
 
     async def delete_expired(
         self,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -282,6 +282,7 @@ class ResultReconciliationReport:
     corrupt_result_files: int = 0
     unreadable_result_files: int = 0
     unsafe_metadata_paths: int = 0
+    filesystem_entries_inspected: int = 0
     filesystem_run_directories_inspected: int = 0
     malformed_entries_ignored: int = 0
     orphan_candidates: int = 0
@@ -297,9 +298,76 @@ class ResultReconciliationReport:
     removed_bytes: int = 0
     artifact_failures: tuple[ResultArtifactFailure, ...] = ()
     operation_failures: tuple[ReconciliationOperationFailure, ...] = ()
+    metadata_scan_exhausted: bool = True
+    filesystem_scan_exhausted: bool = True
 
     @property
     def failure_count(self) -> int:
         """Return metadata validation plus scan/removal failure count."""
 
         return len(self.artifact_failures) + len(self.operation_failures)
+
+    @property
+    def inspected_items(self) -> int:
+        """Return work charged to artifact reconciliation cycle budgets."""
+
+        return self.metadata_rows_inspected + self.filesystem_entries_inspected
+
+    @property
+    def has_more(self) -> bool:
+        """Return whether either independent keyset scan has more work."""
+
+        return not (self.metadata_scan_exhausted and self.filesystem_scan_exhausted)
+
+    def merged_with(
+        self,
+        page: ResultReconciliationReport,
+        *,
+        metadata_scanned: bool,
+        filesystem_scanned: bool,
+    ) -> ResultReconciliationReport:
+        """Accumulate one independently bounded reconciliation cursor page."""
+
+        if self.dry_run != page.dry_run:
+            raise ValueError("Cannot merge reconciliation reports with different modes")
+        count_fields = (
+            "metadata_rows_inspected",
+            "valid_artifacts",
+            "missing_result_files",
+            "corrupt_result_files",
+            "unreadable_result_files",
+            "unsafe_metadata_paths",
+            "filesystem_entries_inspected",
+            "filesystem_run_directories_inspected",
+            "malformed_entries_ignored",
+            "orphan_candidates",
+            "recent_candidates_skipped",
+            "active_run_candidates_skipped",
+            "metadata_race_candidates_skipped",
+            "active_run_race_candidates_skipped",
+            "stale_temporary_candidates",
+            "directories_would_remove",
+            "files_would_remove",
+            "directories_removed",
+            "files_removed",
+            "removed_bytes",
+        )
+        updates = {
+            field_name: getattr(self, field_name) + getattr(page, field_name)
+            for field_name in count_fields
+        }
+        updates.update(
+            artifact_failures=self.artifact_failures + page.artifact_failures,
+            operation_failures=self.operation_failures + page.operation_failures,
+            metadata_scan_exhausted=(
+                page.metadata_scan_exhausted
+                if metadata_scanned
+                else self.metadata_scan_exhausted
+            ),
+            filesystem_scan_exhausted=(
+                page.filesystem_scan_exhausted
+                if filesystem_scanned
+                else self.filesystem_scan_exhausted
+            ),
+        )
+        return replace(self, **updates)

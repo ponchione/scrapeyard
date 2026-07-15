@@ -99,6 +99,11 @@ async def test_init_db_creates_tables(tmp_path):
             "WHERE type='index' AND name='idx_results_meta_project_run'"
         )
         assert await cursor.fetchone() is not None
+        cursor = await db.execute(
+            "SELECT metadata_cursor, filesystem_project "
+            "FROM result_reconciliation_state WHERE singleton = 1"
+        )
+        assert tuple(await cursor.fetchone()) == (0, None)
 
 
 async def test_init_db_idempotent(tmp_path):
@@ -144,6 +149,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
         "006",
         "008",
         "011",
+        "020",
     ]
     async with get_db("jobs.db") as db:
         cursor = await db.execute(

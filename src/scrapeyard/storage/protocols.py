@@ -441,6 +441,8 @@ class ResultStore(Protocol):
         dry_run: bool,
         now: datetime | None = None,
         batch_size: int = 500,
+        metadata_scan_limit: int | None = None,
+        filesystem_scan_limit: int | None = None,
     ) -> ResultReconciliationReport:
         """Validate metadata and reconcile stale contained filesystem artifacts."""
         ...

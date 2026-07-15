@@ -37,6 +37,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "006_add_results_meta_indexes.sql",
         "008_results_meta_unique_job_run.sql",
         "011_add_results_artifact_lookup_index.sql",
+        "020_create_result_reconciliation_state.sql",
     ),
 }
 _MIGRATION_FILE_RE = re.compile(r"^(?P<id>[0-9]{3})_[a-z0-9_]+\.sql$")
@@ -248,6 +249,8 @@ async def _migration_is_reflected(
         return False
     if migration_id == "018":
         return False
+    if migration_id == "020":
+        return await _table_exists(db, "result_reconciliation_state")
     return False
 
 

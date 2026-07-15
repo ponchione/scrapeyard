@@ -585,7 +585,9 @@ artifact is opened; missing and cross-project retained IDs return the same
 The periodic cleanup order is expired-result retention, per-job result
 pruning, artifact reconciliation, expired submission-idempotency deletion,
 then webhook tombstone scrubbing. Retention drains repeated deterministic
-batches in one maintenance cycle. Each transaction remains bounded by its
+batches in one maintenance cycle. Artifact reconciliation likewise drains
+independent metadata and filesystem cursor pages until each scan is exhausted
+or its cycle ceiling is reached. Each transaction/page remains bounded by its
 category batch setting, while
 `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` and
 `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` bound aggregate cycle work. If
@@ -626,18 +628,22 @@ files and lookalikes remain untouched. A stale temp inside an active or recent
 run is protected; an eligible orphan run subsumes its temp into the contained
 directory removal.
 
-`SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN=true` is the safe default. Each pass
-validates and scans cursor-paginated batches no larger than
+`SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN=true` is the safe default. Each page
+validates and scans cursor-paginated work no larger than
 `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE`, performs the same eligibility checks,
-and reports what would be removed without mutating files or metadata. Cursors
-advance across later cycles so large stores are covered without one unbounded
-metadata load or full-tree candidate list. Review at least one grace-period
-window of summaries before setting dry-run to `false`. Destructive passes
+and reports what would be removed without mutating files or metadata. The two
+scans expose exhaustion independently, and their keyset cursors are committed
+to `results_meta.db` after each page. Process restarts therefore resume later
+entries instead of repeatedly starting at the lexicographically earliest
+directories. Large stores are covered without one unbounded metadata load or
+full-tree candidate list. Review at least one grace-period window of summaries
+before setting dry-run to `false`. Destructive passes
 remove only eligible directories and known temp files, converge idempotently,
 and never modify `results_meta`.
 
-Every pass logs a typed summary: metadata inspected/valid, missing/corrupt/
-unreadable/unsafe artifacts, filesystem runs inspected, orphan/temp candidates,
+Every cycle logs a typed summary: metadata inspected/valid, missing/corrupt/
+unreadable/unsafe artifacts, filesystem entries/runs inspected, independent
+scan exhaustion and remaining-work state, orphan/temp candidates,
 recent/active/race skips, proposed and completed removals, removed regular-file
 bytes, dry-run state, and failure count. Per-entry reports contain only bounded
 job/run or relative identifiers and exception types, never JSON contents,

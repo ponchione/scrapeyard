@@ -420,9 +420,11 @@ files are reported as storage failures and are not repaired or deleted. See
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#result-artifact-reconciliation) before
 enabling destructive reconciliation.
 
-Repeated full retention batches drain within per-category item and shared-time
-budgets. A saturated cycle resumes after a short catch-up delay rather than the
-normal interval. The same cycle bounds operational history. Old terminal ad-hoc jobs are removed
+Repeated full retention and artifact-reconciliation cursor pages drain within
+per-category item and shared-time budgets. Metadata and filesystem scans report
+exhaustion independently, persist their keyset cursors across restarts, and a
+saturated cycle resumes after a short catch-up delay rather than the normal
+interval. The same cycle bounds operational history. Old terminal ad-hoc jobs are removed
 through resumable deletion while their result metadata/artifacts follow the
 separate result policy. Scheduled run rows, their reconciled webhook
 tombstones, and error rows are pruned in bounded batches. API `run_count` and
@@ -458,7 +460,7 @@ profile.
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Result artifact directory |
-| `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows processed per bounded transaction and reconciliation cursor batch |
+| `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows or filesystem entries processed per bounded transaction/reconciliation cursor page |
 | `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` | `10000` | Maximum eligible items drained per retention category in one maintenance cycle |
 | `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` | `60` | Shared elapsed-time ceiling for one cleanup cycle |
 | `SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` | `5` | Delay before another cycle when a cleanup budget is saturated |
