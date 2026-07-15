@@ -266,6 +266,7 @@ async def _fetch_basic_with_safe_redirects(
         if production_stream:
             request_kwargs["cookie_jar"] = cookie_jar
             request_kwargs["cookie_url"] = current_url
+            request_kwargs["header_url"] = current_url
             response = await fetch_basic_response(
                 fetcher_cls,
                 request_url,

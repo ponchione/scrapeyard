@@ -109,7 +109,12 @@ async def fetch_streaming_response(
     if not isinstance(custom_config, dict):
         raise ValueError("Custom parser config must be a mapping")
     extensions = kwargs.pop("extensions", None)
-    headers = _request_headers(url, kwargs.pop("headers", None), stealthy=stealthy)
+    header_url = str(kwargs.pop("header_url", url))
+    headers = _request_headers(
+        header_url,
+        kwargs.pop("headers", None),
+        stealthy=stealthy,
+    )
     cookie_jar = kwargs.pop("cookie_jar", None)
     cookie_url = str(kwargs.pop("cookie_url", url))
     if cookie_jar is not None and not isinstance(cookie_jar, httpx.Cookies):
