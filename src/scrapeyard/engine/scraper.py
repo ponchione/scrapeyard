@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +12,7 @@ import httpx
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
@@ -86,10 +86,12 @@ async def _run_page_cpu_work(
 ) -> Any:
     """Keep selector/detection CPU work off the event loop and under deadline."""
 
-    work = asyncio.to_thread(function, *args, **kwargs)
-    if context.budget is None:
-        return await work
-    return await context.budget.wait_for(work)
+    return await run_thread_work(
+        function,
+        *args,
+        run_budget=context.budget,
+        **kwargs,
+    )
 
 
 def _extract_page_data(
@@ -225,8 +227,11 @@ async def _fetch_basic_with_safe_redirects(
         request_kwargs = dict(call_kwargs)
         production_stream = fetcher_cls is Fetcher
         if production_stream and request_kwargs.get("proxy") is None:
-            resolve = asyncio.to_thread(resolve_public_url, current_url)
-            resolved = await resolve if budget is None else await budget.wait_for(resolve)
+            resolved = await run_thread_work(
+                resolve_public_url,
+                current_url,
+                run_budget=budget,
+            )
             request_url = resolved.connect_url
             headers = dict(request_kwargs.get("headers") or {})
             headers["Host"] = resolved.host_header
@@ -238,6 +243,7 @@ async def _fetch_basic_with_safe_redirects(
             await _assert_fetch_url(
                 current_url,
                 require_resolved_dns=require_resolved_dns,
+                budget=budget,
             )
         await _acquire_request_rate_limit(
             current_url,
@@ -288,10 +294,16 @@ async def _fetch_basic_with_safe_redirects(
     raise FetchError(310, debug={**debug, "redirects": redirects})
 
 
-async def _assert_fetch_url(url: str, *, require_resolved_dns: bool) -> None:
-    await asyncio.to_thread(
+async def _assert_fetch_url(
+    url: str,
+    *,
+    require_resolved_dns: bool,
+    budget: RunBudget | None,
+) -> None:
+    await run_thread_work(
         assert_public_url,
         url,
+        run_budget=budget,
         allow_unresolved=not require_resolved_dns,
     )
 
@@ -304,16 +316,13 @@ async def _assert_connection_endpoint(
 ) -> None:
     """Resolve a remote transport endpoint immediately before it is used."""
 
-    lookup = asyncio.to_thread(
+    await run_thread_work(
         assert_public_url,
         url,
+        run_budget=budget,
         allowed_schemes=allowed_schemes,
         allow_unresolved=False,
     )
-    if budget is None:
-        await lookup
-    else:
-        await budget.wait_for(lookup)
 
 
 async def _acquire_request_rate_limit(
@@ -429,7 +438,11 @@ async def _fetch_page(
             domain_rate_limit=domain_rate_limit,
         )
     else:
-        await _assert_fetch_url(url, require_resolved_dns=require_resolved_dns)
+        await _assert_fetch_url(
+            url,
+            require_resolved_dns=require_resolved_dns,
+            budget=budget,
+        )
         call_kwargs.update(browser_fetch_kwargs(target, fetcher_type, proxy_url=proxy_url))
         await _acquire_request_rate_limit(
             url,
@@ -457,7 +470,11 @@ async def _fetch_page(
         debug.update(capture)
 
     populate_fetch_debug(debug, response, url)
-    await _assert_fetch_url(debug["final_url"], require_resolved_dns=require_resolved_dns)
+    await _assert_fetch_url(
+        debug["final_url"],
+        require_resolved_dns=require_resolved_dns,
+        budget=budget,
+    )
     if response.status and response.status >= 400:
         if response.status in retryable_status:
             raise RetryableError(response.status)

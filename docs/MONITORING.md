@@ -32,7 +32,9 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
 
 - API request count and latency use method, route template, and status class.
 - Queue depth and oldest waiting age use only `high`, `normal`, and `low`.
-- Active jobs, targets, and browser targets are compared with process capacity.
+- Active jobs, targets, browser targets, and bounded run threads are compared
+  with process capacity. Lingering run threads separately show work still
+  consuming a slot after its owning run reached a terminal deadline.
 - Run and target count/latency use bounded status, trigger, and fetcher labels.
 - Retry, rate-limit wait, extracted-record, and serialized-byte totals show
   work amplification and output pressure.
@@ -77,6 +79,9 @@ Tune the bounded probes with:
   returns `503` for two consecutive probe intervals.
 - Alert on sustained `active_work{kind="jobs"} / work_capacity{kind="jobs"}`
   above 0.9, or browsers above 0.9 with growing queue age.
+- Alert when `scrapeyard_active_work{kind="lingering_run_threads"}` remains
+  nonzero; sustained saturation of run-thread capacity indicates blocking
+  selector, validation, or resolver work that outlived its run deadline.
 - Alert when any priority's oldest queue age exceeds the run service objective,
   even if depth is low.
 - Alert when webhook pending count or oldest-pending age grows across multiple

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import logging
@@ -25,6 +24,7 @@ from scrapling.engines.toolbelt.navigation import (
 )
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
     BrowserActionConfig,
@@ -64,6 +64,10 @@ _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
 _BROWSER_REQUIRE_RESOLVED_DNS: ContextVar[bool] = ContextVar(
     "scrapeyard_browser_require_resolved_dns",
     default=False,
+)
+_BROWSER_RUN_BUDGET: ContextVar[RunBudget | None] = ContextVar(
+    "scrapeyard_browser_run_budget",
+    default=None,
 )
 _BROWSER_BLOCKED_REQUESTS: ContextVar[list[dict[str, str]] | None] = ContextVar(
     "scrapeyard_browser_blocked_requests",
@@ -153,9 +157,10 @@ async def _guarded_async_intercept_route(route: Any) -> None:
 
     if isinstance(request_url, str) and request_url:
         try:
-            await asyncio.to_thread(
+            await run_thread_work(
                 assert_public_url,
                 request_url,
+                run_budget=_BROWSER_RUN_BUDGET.get(),
                 allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
             )
         except URLResolutionError:
@@ -631,15 +636,12 @@ async def capture_browser_state(
         await run_browser_actions(page, browser.actions, budget=budget)
     capture["final_url"] = getattr(page, "url", None)
     if isinstance(capture["final_url"], str) and capture["final_url"]:
-        validate_url = asyncio.to_thread(
+        await run_thread_work(
             assert_public_url,
             capture["final_url"],
+            run_budget=budget,
             allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
         )
-        if budget is None:
-            await validate_url
-        else:
-            await budget.wait_for(validate_url)
     try:
         title = page.title()
         capture["page_title"] = await title if budget is None else await budget.wait_for(title)
@@ -700,7 +702,12 @@ async def fetch_basic_response(
             call_kwargs,
             budget=budget,
         )
-    return await asyncio.to_thread(fetcher_cls.get, url, **call_kwargs)
+    return await run_thread_work(
+        fetcher_cls.get,
+        url,
+        run_budget=budget,
+        **call_kwargs,
+    )
 
 
 async def fetch_browser_response(
@@ -758,6 +765,7 @@ async def fetch_browser_response(
     blocked_requests: list[dict[str, str]] = []
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
+    budget_token = _BROWSER_RUN_BUDGET.set(budget)
     blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
     origin_token = _BROWSER_TARGET_ORIGIN.set(_url_origin(url))
     headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
@@ -783,6 +791,7 @@ async def fetch_browser_response(
                     pass
             raise
     finally:
+        _BROWSER_RUN_BUDGET.reset(budget_token)
         _BROWSER_ORIGIN_SCOPED_HEADERS.reset(headers_token)
         _BROWSER_TARGET_ORIGIN.reset(origin_token)
         _BROWSER_BLOCKED_REQUESTS.reset(blocked_token)

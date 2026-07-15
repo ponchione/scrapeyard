@@ -476,6 +476,15 @@ representative production results, then leave headroom for normal catalog
 growth; do not set the serialized-result ceiling below 4096 bytes because a
 compact terminal diagnostic must remain persistable.
 
+Selector, validation, and application DNS work use a dedicated executor with
+`SCRAPEYARD_RUN_THREAD_MAX_WORKERS` slots. A run may become terminal at its
+deadline because Python cannot forcibly stop a running thread, but its slot is
+retained until the underlying work actually finishes. This contains lingering
+work outside the process-wide executor and prevents timed-out runs from
+releasing internal capacity early. Monitor active and post-deadline work with
+`scrapeyard_active_work{kind="run_threads"}` and
+`scrapeyard_active_work{kind="lingering_run_threads"}`.
+
 Production `basic` requests use an asynchronous streaming transport. The
 fetched-byte ceiling counts decoded body chunks as they are read, including
 redirect and application-level retry responses against one shared run budget.

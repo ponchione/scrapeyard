@@ -9,6 +9,7 @@ from functools import lru_cache
 from arq.connections import ArqRedis, RedisSettings
 
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.run_threads import RunThreadPool
 from scrapeyard.common.time import utc_now
 from scrapeyard.engine.rate_limiter import (
     DomainRateLimiter,
@@ -40,6 +41,13 @@ class RuntimeServices:
     webhook_dispatcher: HttpWebhookDispatcher
     worker_pool: WorkerPool
     scheduler: SchedulerService
+
+
+@lru_cache(maxsize=1)
+def get_run_thread_pool() -> RunThreadPool:
+    """Return the process-wide bounded executor for run-owned blocking work."""
+
+    return RunThreadPool(get_settings().run_thread_max_workers)
 
 
 @lru_cache(maxsize=1)
@@ -161,7 +169,10 @@ def reset_rate_limiter() -> None:
 
 def reset_cached_dependencies() -> None:
     """Clear cached dependency singletons and reset non-cached runtime holders."""
+    if get_run_thread_pool.cache_info().currsize:
+        get_run_thread_pool().shutdown()
     for cached_fn in (
+        get_run_thread_pool,
         get_job_store,
         get_error_store,
         get_result_store,

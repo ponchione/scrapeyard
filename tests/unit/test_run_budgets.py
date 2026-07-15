@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
+from scrapeyard.common.run_threads import RunThreadPool, run_thread_work
 from scrapeyard.config.schema import BrowserActionConfig, RetryConfig
 from scrapeyard.engine.browser_debug import run_browser_actions
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
@@ -96,6 +98,50 @@ async def test_deadline_does_not_wait_for_cancellation_resistant_child():
     assert not finished.is_set()
     release.set()
     await asyncio.wait_for(finished.wait(), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_deadline_retains_run_thread_capacity_until_work_finishes():
+    pool = RunThreadPool(max_workers=1)
+    started = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+
+    def blocking_work() -> None:
+        started.set()
+        release.wait()
+
+    def second_work() -> None:
+        second_started.set()
+
+    try:
+        budget = _budget(max_duration_seconds=0.02)
+        with pytest.raises(BudgetExceeded):
+            await run_thread_work(blocking_work, run_budget=budget, pool=pool)
+        await asyncio.sleep(0)
+
+        assert started.is_set()
+        assert pool.active == 1
+        assert pool.lingering == 1
+
+        second_budget = _budget(max_duration_seconds=0.02)
+        with pytest.raises(BudgetExceeded):
+            await run_thread_work(second_work, run_budget=second_budget, pool=pool)
+        assert not second_started.is_set()
+
+        release.set()
+        for _ in range(20):
+            if pool.active == 0:
+                break
+            await asyncio.sleep(0.01)
+
+        assert pool.active == 0
+        assert pool.lingering == 0
+        await run_thread_work(second_work, run_budget=_budget(), pool=pool)
+        assert second_started.is_set()
+    finally:
+        release.set()
+        pool.shutdown()
 
 
 @pytest.mark.asyncio
