@@ -17,7 +17,7 @@ def test_compose_wires_explicit_lease_settings() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     for name, default in LEASE_ENV.items():
-        assert f'{name}: "{default}"' in compose
+        assert f'{name}: "${{{name}:-{default}}}"' in compose
     assert "WORKERS_RUNNING_LEASE_SECONDS" not in compose
 
 
