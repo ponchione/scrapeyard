@@ -362,15 +362,17 @@ async def test_paginate_target_enforces_aggregate_record_budget_across_pages():
         )
     )
 
+    def reserve_page_before_extraction(_page, _target):
+        budget.reserve_extracted_records(2)
+        raise AssertionError("over-limit page must not be materialized")
+
     with pytest.raises(BudgetExceeded) as exc_info:
         await paginate_target(
             page=_Page([_Element("/page-2")]),
             target=target,
             result=result,
             fetch_target_page=fetch_page,
-            extract_page_data=MagicMock(
-                return_value=[{"title": "third"}, {"title": "fourth"}]
-            ),
+            extract_page_data=reserve_page_before_extraction,
             retry_handler=MagicMock(spec=RetryConfig),
             fetcher_cls=object(),
             adaptive=False,

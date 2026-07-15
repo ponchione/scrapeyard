@@ -10,6 +10,10 @@ from typing import Any
 from scrapeyard.models.job import Job, JobStatus
 
 
+class ResultArtifactReadError(RuntimeError):
+    """A metadata-backed result artifact is corrupt or exceeds read policy."""
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupBacklogSnapshot:
     """Exact eligible-row count and oldest eligibility timestamp."""

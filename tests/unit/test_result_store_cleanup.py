@@ -12,6 +12,7 @@ import pytest
 import scrapeyard.storage.result_store as result_store_module
 from scrapeyard.storage.database import get_db, init_db, reset_db
 from scrapeyard.storage.result_store import LocalResultStore
+from scrapeyard.storage.types import ResultArtifactReadError
 
 
 @pytest.fixture
@@ -771,6 +772,8 @@ async def test_reconciliation_classifies_oversized_result_without_loading(store)
 
     assert report.corrupt_result_files == 1
     assert report.artifact_failures[0].error_type == "FileSizeLimitExceeded"
+    with pytest.raises(ResultArtifactReadError):
+        await limited.get_result("job-oversized", "run-oversized")
 
 
 @pytest.mark.asyncio

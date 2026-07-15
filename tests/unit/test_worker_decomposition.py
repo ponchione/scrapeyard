@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.common.budgets import RunBudget
-from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, OnEmptyAction
+from scrapeyard.common.json_encoding import compact_json_size
+from scrapeyard.config.schema import (
+    FailStrategy,
+    FetcherType,
+    GroupBy,
+    OnEmptyAction,
+    ScrapeConfig,
+)
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
@@ -17,6 +24,7 @@ from scrapeyard.queue.worker import (
     JobExecutionContext,
     _collect_result_payload,
     _format_output,
+    _materialize_output_artifact,
     _persist_job_results,
     _process_all_targets,
 )
@@ -514,6 +522,57 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
     ]
     assert payload["results"] == [{"sku": "a1", "_source": "a.example"}, "raw-item"]
     assert results[0].data == [{"sku": "a1"}]
+
+
+@pytest.mark.parametrize("group_by", [GroupBy.target, GroupBy.merge])
+def test_materialized_output_accounts_every_persisted_component(group_by):
+    config = ScrapeConfig.model_validate(
+        {
+            "project": "test",
+            "name": "job",
+            "output": {"group_by": group_by.value},
+            "target": {
+                "url": "https://example.com/products",
+                "selectors": {"sku": ".sku"},
+            },
+        }
+    )
+    record = {
+        "sku": "a1",
+        "pricing_visibility": "unknown",
+        "display_price_text": None,
+        "stock_status": "unknown",
+    }
+    result = TargetResult(
+        url="https://example.com/products",
+        status="success",
+        data=[record],
+        pages_scraped=1,
+    )
+    budget = RunBudget(
+        max_duration_seconds=60,
+        max_fetched_bytes=1_000_000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=1_000_000,
+        max_browser_debug_bytes=1_000,
+    )
+    budget.reserve_estimated_result_bytes(compact_json_size(record) + 1)
+
+    payload = _materialize_output_artifact(
+        config,
+        [result],
+        "job-1",
+        JobStatus.complete,
+        [],
+        publish_results=True,
+        budget=budget,
+    )
+
+    assert budget.estimated_result_bytes >= compact_json_size(payload)
+    if group_by is GroupBy.target:
+        assert payload["results"]["example.com"]["data"] is result.data
+    else:
+        assert payload["results"][0]["_source"] == "example.com"
 
 
 def test_format_output_rejects_reserved_source_field_in_merge_record():

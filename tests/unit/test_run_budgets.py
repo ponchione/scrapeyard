@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,6 +43,18 @@ async def test_record_budget_is_aggregate_and_concurrency_safe_at_exact_boundary
     assert exc_info.value.limit_name is BudgetLimitName.extracted_records
     assert exc_info.value.configured_limit == 6
     assert exc_info.value.observed_amount == 7
+    assert budget.extracted_records == 6
+
+
+def test_record_reservation_is_thread_safe_before_synchronous_extraction():
+    budget = _budget(max_extracted_records=6)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        outcomes = list(
+            executor.map(budget.reserve_extracted_records, (2, 1, 3))
+        )
+
+    assert outcomes == [None, None, None]
     assert budget.extracted_records == 6
 
 

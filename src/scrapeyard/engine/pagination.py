@@ -201,8 +201,6 @@ async def paginate_target(
             target,
             budget=budget,
         )
-        if budget is not None:
-            await budget.consume_extracted_records(len(page_data))
         result.data.extend(page_data)
         result.pages_scraped += 1
         await cancellation_checkpoint(

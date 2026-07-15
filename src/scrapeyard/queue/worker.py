@@ -12,7 +12,9 @@ from typing import Any
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.ids import generate_run_id
+from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.common.qualification import qualification_checkpoint
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
@@ -547,16 +549,16 @@ async def _persist_job_results(
     if not publish_results:
         flat_data.clear()
 
-    output_data = _redact_output_artifact(
+    output_data = await run_thread_work(
+        _materialize_output_artifact,
         context.config,
-        _format_output(
-            context.config,
-            all_results,
-            job_id,
-            final_status,
-            all_errors,
-            publish_results=publish_results,
-        ),
+        all_results,
+        job_id,
+        final_status,
+        all_errors,
+        publish_results=publish_results,
+        budget=context.budget,
+        run_budget=context.budget,
     )
     context.budget.check_deadline()
     save_meta = await save_run_result(
@@ -1149,9 +1151,35 @@ def _format_output(
     all_errors: list[str],
     *,
     publish_results: bool = True,
+    budget: RunBudget | None = None,
 ) -> dict[str, Any]:
     """Build the output data dict for result storage."""
-    redacted_errors = [redact_userinfo_in_text(error) for error in all_errors]
+    redacted_errors: list[str] = []
+    for error in all_errors:
+        redacted_error = redact_userinfo_in_text(error)
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size(redacted_error) + 1
+            )
+        redacted_errors.append(redacted_error)
+
+    target_summaries: list[dict[str, Any]] = []
+    for result in all_results:
+        target_summary = {
+            "url": redact_userinfo_in_url(result.url),
+            **_target_result_details(
+                result,
+                records_accepted=publish_results,
+            ),
+            "pages_scraped": result.pages_scraped,
+            "errors": [redact_userinfo_in_text(error) for error in result.errors],
+        }
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size(target_summary) + 1
+            )
+        target_summaries.append(target_summary)
+
     job_meta: dict[str, Any] = {
         "project": config.project,
         "name": config.name,
@@ -1159,26 +1187,27 @@ def _format_output(
         "status": final_status.value,
         "completed_at": utc_now().isoformat(),
         "errors": redacted_errors,
-        "targets": [
-            {
-                "url": redact_userinfo_in_url(result.url),
-                **_target_result_details(
-                    result,
-                    records_accepted=publish_results,
-                ),
-                "pages_scraped": result.pages_scraped,
-                "errors": [redact_userinfo_in_text(error) for error in result.errors],
-            }
-            for result in all_results
-        ],
+        "targets": target_summaries,
     }
+    if budget is not None:
+        budget.reserve_estimated_result_bytes(
+            compact_json_size({**job_meta, "errors": [], "targets": []})
+        )
 
     if not publish_results:
         empty_results: list[Any] | dict[str, Any]
         empty_results = [] if config.output.group_by == GroupBy.merge else {}
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size({"results": empty_results})
+            )
         return {**job_meta, "results": empty_results}
 
     if config.output.group_by == GroupBy.merge:
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size({"results": []})
+            )
         merged: list[Any] = []
         for result in all_results:
             source = url_host_label(result.url)
@@ -1188,24 +1217,44 @@ def _format_output(
                         raise ValueError(
                             "Extracted record contains reserved merge field '_source'"
                         )
+                    if budget is not None:
+                        source_field_size = compact_json_size({"_source": source}) - 2
+                        budget.reserve_estimated_result_bytes(
+                            source_field_size + int(bool(item))
+                        )
                     merged.append({**item, "_source": source})
                 else:
                     merged.append(item)
         return {**job_meta, "results": merged}
 
     grouped: dict[str, Any] = {}
+    if budget is not None:
+        budget.reserve_estimated_result_bytes(
+            compact_json_size({"results": {}})
+        )
     for result in all_results:
         group_key = _unique_result_group_key(grouped, result.url)
-        grouped[group_key] = {
+        target_output = {
             **_target_result_details(result),
             "data": result.data,
         }
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size(
+                    {group_key: {**target_output, "data": []}}
+                )
+            )
+        grouped[group_key] = target_output
     return {**job_meta, "results": grouped}
 
 
 def _redact_output_artifact(
     config: ScrapeConfig,
     output_data: dict[str, Any],
+    *,
+    records_already_redacted: bool = False,
+    record_redaction_count: int = 0,
+    budget: RunBudget | None = None,
 ) -> dict[str, Any]:
     """Redact diagnostics aggressively without corrupting extracted records."""
     secret_values = config.resolved_secret_values
@@ -1216,19 +1265,32 @@ def _redact_output_artifact(
     )
 
     if config.output.group_by == GroupBy.merge:
-        redacted_merged_results, redaction_count = redact_deployment_secrets_in_value_with_count(
-            results,
-            secret_values=secret_values,
-        )
+        if records_already_redacted:
+            redacted_merged_results = results
+            redaction_count = record_redaction_count
+        else:
+            redacted_merged_results, redaction_count = (
+                redact_deployment_secrets_in_value_with_count(
+                    results,
+                    secret_values=secret_values,
+                )
+            )
         redacted_output["results"] = redacted_merged_results
         if redaction_count:
-            redacted_output["result_redaction"] = {
+            redaction_metadata = {
                 "deployment_secret_matches": redaction_count,
             }
+            if budget is not None:
+                budget.reserve_estimated_result_bytes(
+                    compact_json_size({"result_redaction": redaction_metadata})
+                )
+            redacted_output["result_redaction"] = redaction_metadata
+        if budget is not None:
+            budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
         return redacted_output
 
     redacted_results: dict[str, Any] = {}
-    redaction_count = 0
+    redaction_count = record_redaction_count
     for group_key, target_result in results.items():
         data = target_result["data"]
         redacted_target = redact_sensitive_mapping(
@@ -1239,10 +1301,14 @@ def _redact_output_artifact(
             },
             secret_values=secret_values,
         )
-        redacted_data, data_count = redact_deployment_secrets_in_value_with_count(
-            data,
-            secret_values=secret_values,
-        )
+        if records_already_redacted:
+            redacted_data = data
+            data_count = 0
+        else:
+            redacted_data, data_count = redact_deployment_secrets_in_value_with_count(
+                data,
+                secret_values=secret_values,
+            )
         redacted_target["data"] = redacted_data
         redaction_count += data_count
         redacted_group_key, group_key_count = redact_deployment_secrets_with_count(
@@ -1258,10 +1324,89 @@ def _redact_output_artifact(
         redacted_results[unique_group_key] = redacted_target
     redacted_output["results"] = redacted_results
     if redaction_count:
-        redacted_output["result_redaction"] = {
+        redaction_metadata = {
             "deployment_secret_matches": redaction_count,
         }
+        if budget is not None:
+            budget.reserve_estimated_result_bytes(
+                compact_json_size({"result_redaction": redaction_metadata})
+            )
+        redacted_output["result_redaction"] = redaction_metadata
+    if budget is not None:
+        budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
     return redacted_output
+
+
+def _redact_result_records(
+    config: ScrapeConfig,
+    all_results: list[TargetResult],
+    *,
+    budget: RunBudget,
+) -> int:
+    """Redact records one at a time without retaining a second full result graph."""
+
+    redaction_count = 0
+    for result in all_results:
+        for index, item in enumerate(result.data):
+            original_size = compact_json_size(item)
+            redacted_item, item_count = redact_deployment_secrets_in_value_with_count(
+                item,
+                secret_values=config.resolved_secret_values,
+            )
+            redacted_size = compact_json_size(redacted_item)
+            if redacted_size > original_size:
+                budget.reserve_estimated_result_bytes(redacted_size - original_size)
+            result.data[index] = redacted_item
+            redaction_count += item_count
+    return redaction_count
+
+
+def _materialize_output_artifact(
+    config: ScrapeConfig,
+    all_results: list[TargetResult],
+    job_id: str,
+    final_status: JobStatus,
+    all_errors: list[str],
+    *,
+    publish_results: bool,
+    budget: RunBudget,
+) -> dict[str, Any]:
+    redaction_count = (
+        _redact_result_records(config, all_results, budget=budget)
+        if publish_results
+        else 0
+    )
+    output_data = _format_output(
+        config,
+        all_results,
+        job_id,
+        final_status,
+        all_errors,
+        publish_results=publish_results,
+        budget=budget,
+    )
+    if publish_results and config.output.group_by == GroupBy.merge:
+        for item in output_data["results"]:
+            if not isinstance(item, dict) or not isinstance(item.get("_source"), str):
+                continue
+            source = item["_source"]
+            redacted_source, source_count = redact_deployment_secrets_with_count(
+                source,
+                config.resolved_secret_values,
+            )
+            if len(redacted_source.encode("utf-8")) > len(source.encode("utf-8")):
+                budget.reserve_estimated_result_bytes(
+                    len(redacted_source.encode("utf-8")) - len(source.encode("utf-8"))
+                )
+            item["_source"] = redacted_source
+            redaction_count += source_count
+    return _redact_output_artifact(
+        config,
+        output_data,
+        records_already_redacted=publish_results,
+        record_redaction_count=redaction_count,
+        budget=budget,
+    )
 
 
 def _run_superseded(job: Job, run_id: str | None) -> bool:

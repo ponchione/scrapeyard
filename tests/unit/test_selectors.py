@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import random
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -340,6 +342,101 @@ def test_many_selectors_cannot_repeat_one_large_page_value_past_budget() -> None
         _extract_page_data(page, target, budget=budget)
 
     assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
+
+
+def test_first_page_reserves_all_matches_before_extracting_any_row() -> None:
+    items = [_Node(), _Node()]
+    page = _Node(css_map={".item": items})
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com",
+            "item_selector": ".item",
+            "selectors": {"title": "h1"},
+        }
+    )
+    budget = _value_budget(4096)
+    budget.max_extracted_records = 1
+
+    with patch(
+        "scrapeyard.engine.scraper.extract_selectors_strict"
+    ) as extract_selectors:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            _extract_page_data(page, target, budget=budget)
+
+    assert exc_info.value.limit_name is BudgetLimitName.extracted_records
+    assert exc_info.value.observed_amount == 2
+    assert budget.extracted_records == 0
+    extract_selectors.assert_not_called()
+
+
+def test_first_page_accepts_exact_record_boundary() -> None:
+    items = [_Node(), _Node()]
+    page = _Node(css_map={".item": items})
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com",
+            "item_selector": ".item",
+            "selectors": {"title": "h1"},
+        }
+    )
+    budget = _value_budget(4096)
+    budget.max_extracted_records = 2
+
+    rows = _extract_page_data(page, target, budget=budget)
+
+    assert len(rows) == 2
+    assert budget.extracted_records == 2
+
+
+def test_concurrent_page_reservations_never_extract_past_aggregate_limit() -> None:
+    page = _Node(css_map={".item": [_Node(), _Node()]})
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com",
+            "item_selector": ".item",
+            "selectors": {"title": "h1"},
+        }
+    )
+    budget = _value_budget(4096)
+    budget.max_extracted_records = 2
+
+    with patch(
+        "scrapeyard.engine.scraper.extract_selectors_strict",
+        return_value={"title": None},
+    ) as extract_selectors:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_extract_page_data, page, target, budget=budget)
+                for _index in range(2)
+            ]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except BudgetExceeded as exc:
+                outcomes.append(exc)
+
+    assert budget.extracted_records == 2
+    assert extract_selectors.call_count == 2
+    assert sum(isinstance(outcome, BudgetExceeded) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, list) for outcome in outcomes) == 1
+
+
+def test_detection_overhead_crosses_result_ceiling_before_row_is_retained() -> None:
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://example.com",
+            "selectors": {"missing": ".missing"},
+        }
+    )
+    budget = _value_budget(97)
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        _extract_page_data(_Node(), target, budget=budget)
+
+    assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
+    assert exc_info.value.observed_amount == 99
+    assert budget.estimated_result_bytes < budget.max_serialized_result_bytes
 
 
 def test_aggregate_result_budget_accepts_exact_estimated_boundary() -> None:

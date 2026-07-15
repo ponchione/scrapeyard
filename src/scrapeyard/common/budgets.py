@@ -89,6 +89,7 @@ class RunBudget:
         self._browser_debug_bytes = 0
         self._estimated_result_bytes = 0
         self._counter_lock = asyncio.Lock()
+        self._record_counter_lock = threading.Lock()
         self._result_counter_lock = threading.Lock()
         self._exhausted: BudgetExceeded | None = None
 
@@ -298,11 +299,22 @@ class RunBudget:
             self._fetched_bytes = observed
 
     async def consume_extracted_records(self, amount: int) -> None:
-        """Atomically reserve records across all targets, pages, and retries."""
+        """Compatibility wrapper for synchronous record reservation."""
+
+        self.reserve_extracted_records(amount)
+
+    def reserve_extracted_records(self, amount: int) -> None:
+        """Synchronously reserve records before worker-thread extraction.
+
+        A page is accepted or rejected as one unit. Callers reserve its match
+        count before constructing selector dictionaries so concurrent targets
+        cannot materialize records beyond the aggregate run ceiling.
+        """
+
         if amount < 0:
             raise ValueError("Extracted record amount cannot be negative")
         self.check_deadline()
-        async with self._counter_lock:
+        with self._record_counter_lock:
             self.check_deadline()
             observed = self._extracted_records + amount
             if observed > self.max_extracted_records:
