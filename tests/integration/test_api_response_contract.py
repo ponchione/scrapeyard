@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from scrapeyard.api.dependencies import get_job_store, get_worker_pool
+from scrapeyard.api.dependencies import get_job_store, get_result_store, get_worker_pool
 from scrapeyard.common.time import utc_now
 from scrapeyard.engine.scraper import TargetResult
 from tests.integration.conftest import poll_until_ready
@@ -236,6 +238,40 @@ async def test_legacy_v0_compatibility_supports_representative_eyebox_reader(
         f"/results/{payload['job_id']}?compatibility=legacy-v0"
     )
     assert polled.json() == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt_payload", [b"\xff", b'{"broken":'])
+async def test_corrupt_result_artifacts_use_sanitized_unavailable_response(
+    client,
+    monkeypatch,
+    corrupt_payload,
+):
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _success)
+    submitted = await client.post(
+        "/scrape",
+        content=_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    job_id = submitted.json()["job_id"]
+    result = await poll_until_ready(
+        lambda: client.get(f"/results/{job_id}"),
+        lambda response: response.status_code == 200,
+        failure_message="Timed out waiting for result to corrupt",
+    )
+    metadata = await get_result_store().get_result_metadata(
+        job_id,
+        result.json()["run_id"],
+    )
+    assert metadata is not None
+    (Path(metadata.file_path) / "results.json").write_bytes(corrupt_payload)
+
+    response = await client.get(f"/results/{job_id}")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert "broken" not in response.text
+    assert metadata.file_path not in response.text
 
 
 @pytest.mark.asyncio

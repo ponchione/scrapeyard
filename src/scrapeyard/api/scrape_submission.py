@@ -22,7 +22,7 @@ from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.pool import QueueJobHandle, WorkerPool
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import JobStore, ResultStore
-from scrapeyard.storage.types import IdempotentJobAction
+from scrapeyard.storage.types import IdempotentJobAction, ResultArtifactReadError
 
 _ADHOC_JOB_SAVE_ATTEMPTS = 5
 _RESULT_BEARING_STATUSES = frozenset(
@@ -67,6 +67,7 @@ async def submit_scrape_job(
     sync_poll_delay_seconds: float,
     idempotency: IdempotencyContext | None = None,
     idempotency_retention_hours: int = 24,
+    load_result: bool = True,
 ) -> ScrapeSubmission:
     wait_for_completion = should_wait_for_completion(config)
     job, should_enqueue, replayed = await _save_adhoc_job(
@@ -153,12 +154,22 @@ async def submit_scrape_job(
             replayed=replayed,
         )
 
+    if not load_result:
+        return ScrapeSubmission(
+            job_id=job.job_id,
+            run_id=submitted_run_id,
+            status=durable_status.value,
+            completed=True,
+            results=None,
+            replayed=replayed,
+        )
+
     try:
         payload = await result_store.get_result(
             job.job_id,
             run_id=submitted_run_id,
         )
-    except (KeyError, FileNotFoundError) as exc:
+    except (KeyError, FileNotFoundError, ResultArtifactReadError) as exc:
         raise ResultArtifactUnavailableError from exc
     return ScrapeSubmission(
         job_id=job.job_id,

@@ -32,8 +32,8 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
 
 - API request count and latency use method, route template, and status class.
 - Queue depth and oldest waiting age use only `high`, `normal`, and `low`.
-- Active jobs, targets, browser targets, and bounded run threads are compared
-  with process capacity. Lingering run threads separately show work still
+- Active jobs, targets, browser targets, bounded run threads, and result-response
+  threads are compared with process capacity. Lingering threads separately show work still
   consuming a slot after its owning run reached a terminal deadline.
 - Run and target count/latency use bounded status, trigger, and fetcher labels.
 - Retry, rate-limit wait, extracted-record, and serialized-byte totals show

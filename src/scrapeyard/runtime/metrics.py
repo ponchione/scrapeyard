@@ -222,9 +222,17 @@ _active_targets = 0
 for _priority in ("high", "normal", "low"):
     QUEUE_DEPTH.labels(_priority).set(0)
     QUEUE_OLDEST_AGE.labels(_priority).set(0)
-for _kind in ("jobs", "targets", "browsers", "run_threads", "lingering_run_threads"):
+for _kind in (
+    "jobs",
+    "targets",
+    "browsers",
+    "run_threads",
+    "lingering_run_threads",
+    "result_response_threads",
+    "lingering_result_response_threads",
+):
     ACTIVE_WORK.labels(_kind).set(0)
-for _kind in ("jobs", "browsers", "run_threads"):
+for _kind in ("jobs", "browsers", "run_threads", "result_response_threads"):
     WORK_CAPACITY.labels(_kind).set(0)
 for _kind in ("missing", "corrupt", "unreadable", "unsafe"):
     CLEANUP_ARTIFACT_FINDINGS.labels(_kind)

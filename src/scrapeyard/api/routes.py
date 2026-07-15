@@ -16,11 +16,13 @@ from yaml import YAMLError
 from scrapeyard.api.dependencies import (
     get_error_store,
     get_job_store,
+    get_result_response_thread_pool,
     get_result_store,
     get_scheduler,
     get_worker_pool,
 )
 from scrapeyard.api.query_parsing import parse_error_filters
+from scrapeyard.api.result_responses import encoded_result_response
 from scrapeyard.api.response_utils import (
     apply_paginated_list_response,
     json_response,
@@ -58,10 +60,8 @@ from scrapeyard.api.serializers import (
     serialize_job_created,
     serialize_job_detail,
     serialize_job_summary,
-    serialize_results_payload,
     serialize_schedule_state,
     serialize_scrape_queued,
-    serialize_scrape_result,
 )
 from scrapeyard.api.transport_policy import enforce_submission_transport_policy
 from scrapeyard.common.settings import get_settings
@@ -81,6 +81,7 @@ from scrapeyard.scheduler.cron import (
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.types import (
+    ResultArtifactReadError,
     ScheduledJobMutationAction,
     ScheduledJobMutationOutcome,
 )
@@ -319,6 +320,7 @@ async def scrape(
             sync_poll_delay_seconds=settings.sync_poll_delay_seconds,
             idempotency=idempotency,
             idempotency_retention_hours=settings.idempotency_retention_hours,
+            load_result=False,
         )
     except IdempotencyConflictError:
         raise_json_error(409, "Idempotency-Key was already used with different request content")
@@ -337,16 +339,25 @@ async def scrape(
             replayed=submission.replayed,
         )
 
-    response = json_response(
-        200,
-        serialize_scrape_result(
-            submission.job_id,
+    response_pool = get_result_response_thread_pool()
+    async with response_pool.request_capacity():
+        try:
+            payload = await result_store.get_result(
+                submission.job_id,
+                run_id=submission.run_id,
+            )
+        except (KeyError, FileNotFoundError, ResultArtifactReadError):
+            raise_json_error(404, "Completed result artifact is no longer available")
+        response = await encoded_result_response(
+            request,
+            pool=response_pool,
+            job_id=submission.job_id,
             run_id=submission.run_id,
             status=submission.status,
-            results=submission.results,
+            artifact=payload.data,
             compatibility=compatibility,
-        ),
-    )
+            max_bytes=2 * settings.run_max_serialized_result_bytes,
+        )
     if submission.replayed:
         response.headers["Idempotency-Replayed"] = "true"
     return response
@@ -687,18 +698,24 @@ async def get_results(
             # response so cross-project job/run IDs are not an enumeration oracle.
             raise_json_error(404, f"No results found for job {job_id!r}")
         result_run_id = metadata.run_id
-    try:
-        payload = await result_store.get_result(job_id, run_id=result_run_id)
-    except (KeyError, FileNotFoundError):
-        raise_json_error(404, f"No results found for job {job_id!r}")
+    settings = get_settings()
+    response_pool = get_result_response_thread_pool()
+    async with response_pool.request_capacity():
+        try:
+            payload = await result_store.get_result(job_id, run_id=result_run_id)
+        except (KeyError, FileNotFoundError, ResultArtifactReadError):
+            raise_json_error(404, f"No results found for job {job_id!r}")
 
-    return serialize_results_payload(
-        job_id,
-        run_id=payload.run_id,
-        status=payload.status,
-        results=payload.data,
-        compatibility=compatibility,
-    )
+        return await encoded_result_response(
+            request,
+            pool=response_pool,
+            job_id=job_id,
+            run_id=payload.run_id,
+            status=payload.status,
+            artifact=payload.data,
+            compatibility=compatibility,
+            max_bytes=2 * settings.run_max_serialized_result_bytes,
+        )
 
 
 @router.get(
