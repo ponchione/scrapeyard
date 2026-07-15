@@ -432,6 +432,83 @@ async def test_real_redis_priority_backlog_is_weighted_fifo_and_non_preemptive(
 
 @pytest.mark.asyncio
 @pytest.mark.live_redis
+async def test_real_redis_priority_backlog_refills_each_freed_worker_slot(
+    live_app,
+):
+    """Keep parallel capacity full as controlled jobs finish one at a time."""
+
+    del live_app
+    settings = get_settings()
+    initial_jobs = [f"initial-{index}" for index in range(4)]
+    backlog_jobs = [f"backlog-{index}" for index in range(4)]
+    job_names = [*initial_jobs, *backlog_jobs]
+    started = {name: asyncio.Event() for name in job_names}
+    releases = {name: asyncio.Event() for name in job_names}
+    active = 0
+    max_active = 0
+
+    async def _controlled_job(job_id, *_args, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        started[job_id].set()
+        try:
+            await releases[job_id].wait()
+        finally:
+            active -= 1
+
+    pool = WorkerPool(
+        max_concurrent=4,
+        max_browsers=1,
+        memory_limit_mb=0,
+        redis_settings=RedisSettings.from_dsn(settings.redis_dsn),
+        queue_name=f"{settings.queue_name}:parallel-refill",
+        task_handler=_controlled_job,
+    )
+    await pool.start()
+    assert pool._worker is not None
+    pool._worker.poll_delay_s = 0.01
+    pool._worker.allow_pick_jobs = False
+    try:
+        handles = [
+            await pool.enqueue(
+                name,
+                "config: test",
+                "normal",
+                run_id=f"parallel-refill-{name}",
+            )
+            for name in job_names
+        ]
+        pool._worker.allow_pick_jobs = True
+
+        await asyncio.gather(
+            *(asyncio.wait_for(started[name].wait(), timeout=2) for name in initial_jobs)
+        )
+        assert active == 4
+
+        for completed, replacement in zip(initial_jobs, backlog_jobs, strict=True):
+            releases[completed].set()
+            await asyncio.wait_for(started[replacement].wait(), timeout=2)
+            assert active == 4
+            assert max_active == 4
+
+        for release in releases.values():
+            release.set()
+        await asyncio.gather(
+            *(handle.result(timeout=10, poll_delay=0.01) for handle in handles)
+        )
+
+        assert max_active == 4
+        assert await pool.queue_depths() == {"high": 0, "normal": 0, "low": 0}
+    finally:
+        pool._worker.allow_pick_jobs = True
+        for release in releases.values():
+            release.set()
+        await pool.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
 async def test_queued_cancellation_prevents_real_redis_handler_execution(
     client,
     monkeypatch,

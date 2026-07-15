@@ -189,6 +189,34 @@ def test_worker_background_health_detects_stopped_runner():
 
 
 @pytest.mark.asyncio
+async def test_priority_worker_refills_slot_without_double_counting_active_jobs(
+    monkeypatch,
+) -> None:
+    redis = MagicMock()
+    redis.zcount = AsyncMock(return_value=3)
+    worker = object.__new__(_PriorityWorker)
+    worker.allow_pick_jobs = True
+    worker.job_counter = 3
+    worker.max_jobs = 4
+    worker.queue_name = "test-queue"
+    worker._pool = redis
+    worker._admit_one = AsyncMock(return_value=True)
+    base_poll = AsyncMock()
+    monkeypatch.setattr("scrapeyard.queue.pool.timestamp_ms", lambda: 123_456)
+    monkeypatch.setattr("arq.worker.Worker._poll_iteration", base_poll)
+
+    await worker._poll_iteration()
+
+    redis.zcount.assert_awaited_once_with(
+        "test-queue",
+        min=float("-inf"),
+        max=123_456,
+    )
+    worker._admit_one.assert_awaited_once_with()
+    base_poll.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_priority_worker_shutdown_uses_warning_clean_redis_close() -> None:
     redis = MagicMock()
     redis.delete = AsyncMock()
