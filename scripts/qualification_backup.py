@@ -36,7 +36,11 @@ REQUIRED_TABLES = {
         "schema_migrations",
     },
     "errors.db": {"errors", "schema_migrations"},
-    "results_meta.db": {"results_meta", "schema_migrations"},
+    "results_meta.db": {
+        "results_meta",
+        "result_reconciliation_state",
+        "schema_migrations",
+    },
 }
 REQUIRED_MIGRATION_FILES = {
     "jobs.db": (
@@ -60,6 +64,7 @@ REQUIRED_MIGRATION_FILES = {
         "006_add_results_meta_indexes.sql",
         "008_results_meta_unique_job_run.sql",
         "011_add_results_artifact_lookup_index.sql",
+        "020_create_result_reconciliation_state.sql",
     ),
 }
 _SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
@@ -174,6 +179,13 @@ REQUIRED_COLUMNS = {
             "record_count",
             "file_path",
             "created_at",
+        },
+        "result_reconciliation_state": {
+            "singleton",
+            "metadata_cursor",
+            "filesystem_project",
+            "filesystem_job_name",
+            "filesystem_run_id",
         },
     },
 }
