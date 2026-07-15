@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -59,6 +60,7 @@ _MAX_BROWSER_WINDOW_DIMENSION = 16_384
 
 MAX_BROWSER_ACTIONS = 50
 MAX_BROWSER_ACTION_REPEAT = 50
+MAX_BROWSER_HUMANIZE_SECONDS = 60.0
 MAX_BROWSER_TIMEOUT_MS = 300_000
 MAX_BROWSER_WAIT_MS = 60_000
 MAX_DETECTION_CSS_SELECTORS = 50
@@ -191,7 +193,7 @@ class StockStatus(str, Enum):
 class StrictConfigModel(BaseModel):
     """Base for user-facing YAML config models; unknown keys are errors."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     @field_validator("*", mode="before")
     @classmethod
@@ -614,7 +616,11 @@ class BrowserConfig(StrictConfigModel):
     )
     humanize: bool | float | None = Field(
         default=None,
-        description="Optional humanization delay/behavior override for the stealthy fetcher",
+        description=(
+            "Optional stealthy-fetcher humanization behavior; a numeric value is "
+            "the maximum cursor-movement duration in seconds and must be positive "
+            f"and no greater than {MAX_BROWSER_HUMANIZE_SECONDS:g}"
+        ),
     )
     os_randomize: bool = Field(
         default=False,
@@ -681,6 +687,26 @@ class BrowserConfig(StrictConfigModel):
         if value is None:
             return value
         return _validate_header_value(value, label="useragent")
+
+    @field_validator("humanize", mode="before")
+    @classmethod
+    def _validate_humanize(cls, value: object) -> object:
+        if value is None or isinstance(value, bool):
+            return value
+        if not isinstance(value, (str, int, float)):
+            return value
+        try:
+            duration = float(value)
+        except ValueError:
+            return value
+        except OverflowError:
+            duration = math.inf
+        if not math.isfinite(duration) or not 0 < duration <= MAX_BROWSER_HUMANIZE_SECONDS:
+            raise ValueError(
+                "browser.humanize numeric duration must be finite, positive, "
+                f"and no greater than {MAX_BROWSER_HUMANIZE_SECONDS:g} seconds"
+            )
+        return value
 
     @field_validator("extra_headers")
     @classmethod
