@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.engine.browser_debug import (
     BrowserPageActionError,
+    BrowserTransportTimeout,
     capture_browser_state,
     default_debug_blob,
     fetch_browser_response,
@@ -31,6 +33,34 @@ def _debug_budget(max_bytes: int) -> RunBudget:
         max_serialized_result_bytes=4096,
         max_browser_debug_bytes=max_bytes,
     )
+
+
+async def test_browser_timeout_translation_preserves_cause_and_debug() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    upstream = PlaywrightTimeoutError("page.goto timed out")
+    upstream.debug = {"navigation_stage": "goto"}
+
+    class TimeoutFetcher:
+        @classmethod
+        async def async_fetch(cls, _url, **_kwargs):
+            raise upstream
+
+    with pytest.raises(BrowserTransportTimeout) as exc_info:
+        await fetch_browser_response(
+            TimeoutFetcher,
+            target.url,
+            target,
+            FetcherType.dynamic,
+            {},
+            None,
+        )
+
+    assert exc_info.value.__cause__ is upstream
+    assert exc_info.value.debug == {"navigation_stage": "goto"}
 
 
 class FakeConsoleMessage:

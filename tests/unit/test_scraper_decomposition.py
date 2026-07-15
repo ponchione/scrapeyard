@@ -6,17 +6,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from scrapling import Fetcher
 
-from scrapeyard.config.schema import FetcherType, TargetConfig
+from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import (
     log_adaptive_selector_gap,
     missing_adaptive_selectors,
 )
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
+from scrapeyard.engine.resilience import RetryHandler
 from scrapeyard.engine.scraper import (
     _fetch_basic_with_safe_redirects,
     _fetch_page,
+    _fetch_target_page,
 )
 from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
 
@@ -415,6 +418,46 @@ async def test_browser_navigation_rate_limits_immediately_before_fetch(monkeypat
 
     assert events == ["acquire", "navigate"]
     limiter.acquire.assert_awaited_once_with("example.com", 4)
+
+
+@pytest.mark.asyncio
+async def test_browser_navigation_timeout_retries_the_complete_adapter_boundary(monkeypatch):
+    target = TargetConfig(
+        url="https://example.com/products",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    limiter = AsyncMock()
+    attempts = 0
+
+    class TimeoutThenSuccessFetcher:
+        @classmethod
+        async def async_fetch(cls, url, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PlaywrightTimeoutError("page.goto timed out")
+            return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+
+    outcome = await _fetch_target_page(
+        RetryHandler(RetryConfig(max_attempts=2, backoff_max=0)),
+        TimeoutThenSuccessFetcher,
+        target.url,
+        target,
+        adaptive=False,
+        retryable_status={500},
+        adaptive_dir="/tmp/adaptive",
+        proxy_url=None,
+        artifacts_dir=None,
+        rate_limiter=limiter,
+        domain_rate_limit=4,
+    )
+
+    assert outcome.page.status == 200
+    assert attempts == 2
+    assert limiter.acquire.await_args_list == [call("example.com", 4)] * 2
 
 
 def test_browser_fetch_kwargs_uses_defaults_when_browser_config_missing():

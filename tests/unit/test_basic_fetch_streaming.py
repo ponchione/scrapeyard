@@ -173,6 +173,75 @@ async def test_connection_retries_reenter_full_service_policy(
     assert _retry_metric("exhausted") - exhausted_before == 1
 
 
+async def test_streaming_response_reset_retries_and_later_attempt_succeeds(
+    monkeypatch,
+) -> None:
+    attempts = 0
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal attempts
+        attempts += 1
+        try:
+            await _read_request(reader)
+            if attempts == 1:
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n"
+                    b"<h1>interrupted"
+                )
+            else:
+                body = b"<h1>ok</h1>"
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                    + body
+                )
+            await writer.drain()
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+
+    server, connect_url = await _request_url(handler)
+    target = TargetConfig.model_validate(
+        {"url": "http://origin.example/products", "selectors": {"title": "h1"}}
+    )
+    limiter = AsyncMock()
+    cancellation_guard = AsyncMock()
+    budget = _budget(duration=30)
+    budget.sleep = AsyncMock()
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda _url: ResolvedPublicURL(
+            connect_url,
+            "origin.example",
+            "origin.example",
+        ),
+    )
+    try:
+        result = await scrape_target(
+            target,
+            adaptive=False,
+            retry=RetryConfig(max_attempts=2, backoff_max=0),
+            adaptive_dir="/tmp/adaptive",
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+            rate_limiter=limiter,
+            domain_rate_limit=3,
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result.status == "success"
+    assert [record["title"] for record in result.data] == ["ok"]
+    assert attempts == 2
+    assert limiter.acquire.await_args_list == [call("origin.example", 3)] * 2
+    assert budget.sleep.await_args_list == [call(0)]
+    checkpoint_names = [item.args[0] for item in cancellation_guard.await_args_list]
+    assert checkpoint_names.count("before_retry_attempt") == 2
+    assert checkpoint_names.count("before_rate_limit_wait") == 2
+
+
 async def test_chunked_body_stops_at_live_byte_ceiling() -> None:
     connection_closed = asyncio.Event()
 
