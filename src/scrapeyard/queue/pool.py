@@ -180,12 +180,15 @@ class _PriorityWorker(Worker):
 
     async def _poll_iteration(self) -> None:
         if self.allow_pick_jobs and self.job_counter < self.max_jobs:
-            ready_staged = await self.pool.zcount(
+            # arq 0.26.x keeps a running job in the execution queue until
+            # finish_job() removes it. These ready members therefore already
+            # include job_counter and must only be counted once.
+            ready_execution_members = await self.pool.zcount(
                 self.queue_name,
                 min=float("-inf"),
                 max=timestamp_ms(),
             )
-            available = max(0, self.max_jobs - self.job_counter - ready_staged)
+            available = max(0, self.max_jobs - ready_execution_members)
             for _ in range(available):
                 if not await self._admit_one():
                     break
