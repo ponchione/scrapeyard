@@ -18,7 +18,7 @@ from scrapeyard.models.job import (
 )
 from scrapeyard.queue.run_lifecycle import build_run_paths, handle_crash
 from scrapeyard.queue.worker import _run_superseded, scrape_task
-from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.database import close_db, init_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import RunOwnershipError
@@ -171,7 +171,7 @@ class TestRunCreation:
         expected_hash = hashlib.sha256(SIMPLE_YAML.encode()).hexdigest()
         assert config_hash == expected_hash
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_config_hash_is_sha256_of_yaml(self, tmp_path):
@@ -218,7 +218,7 @@ class TestRunCreation:
         assert row is not None
         assert row[0] == expected_hash
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_no_run_id_generates_and_claims_owned_run(self, tmp_path):
@@ -260,7 +260,7 @@ class TestRunCreation:
         assert job_store.claim_run.await_args.args[0] == generated_run_id
         assert job_store.finalize_owned_run.await_args.args[1] == generated_run_id
 
-        reset_db()
+        await close_db()
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ class TestRunFinalization:
         assert record_count == 3
         assert error_count == 0
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_finalization_counts_errors_from_error_db(self, tmp_path):
@@ -379,7 +379,7 @@ class TestRunFinalization:
         assert row is not None
         assert row[0] == 3
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_failed_run_finalized_with_failed_status(self, tmp_path):
@@ -429,7 +429,7 @@ class TestRunFinalization:
         assert completed_at is not None
         assert record_count == 0
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_generated_run_id_is_finalized_when_delivery_omits_id(self, tmp_path):
@@ -470,7 +470,7 @@ class TestRunFinalization:
         generated_run_id = job_store.queue_run.await_args.kwargs["new_run_id"]
         assert job_store.finalize_owned_run.await_args.args[1] == generated_run_id
 
-        reset_db()
+        await close_db()
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ class TestRunCrashHandling:
         assert status == "failed"
         assert completed_at is not None
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_crash_does_not_overwrite_already_finalized_run(self, tmp_path):
@@ -552,7 +552,7 @@ class TestRunCrashHandling:
         assert status == "complete"
         assert record_count == 5
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_crash_no_run_id_skips_run_update(self, tmp_path):
@@ -582,7 +582,7 @@ class TestRunCrashHandling:
 
         job_store.fail_owned_run.assert_not_awaited()
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_crash_db_failure_does_not_reraise(self, tmp_path):
@@ -680,7 +680,7 @@ class TestErrorLoggingWithRunId:
             assert record.run_id == "run-err-tag"
             assert record.job_id == "job-1"
 
-        reset_db()
+        await close_db()
 
     @pytest.mark.asyncio
     async def test_errors_use_generated_owned_id_when_delivery_omits_run_id(self, tmp_path):
@@ -734,4 +734,4 @@ class TestErrorLoggingWithRunId:
         for record in logged_errors:
             assert record.run_id == "run-generated"
 
-        reset_db()
+        await close_db()

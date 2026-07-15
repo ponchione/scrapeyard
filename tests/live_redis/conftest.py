@@ -19,7 +19,7 @@ from scrapeyard.api.dependencies import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.main import app
 from scrapeyard.api.auth import parse_api_credentials
-from scrapeyard.storage.database import init_db, reset_db
+from scrapeyard.storage.database import close_db, init_db
 
 
 def _clear_singletons() -> None:
@@ -103,7 +103,7 @@ async def live_app() -> AsyncIterator:
         if redis is not None:
             await redis.flushdb()
             await redis.aclose()
-        reset_db()
+        await close_db()
 
 
 @pytest.fixture()

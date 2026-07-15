@@ -489,11 +489,6 @@ class DatabaseManager:
         self._connections: dict[str, aiosqlite.Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
-    def reset(self) -> None:
-        """Clear state, signalling teardown."""
-        self._db_dir = None
-        self._locks.clear()
-
     async def _close_cached_connections(self) -> None:
         connections = list(self._connections.values())
         self._connections.clear()
@@ -503,14 +498,14 @@ class DatabaseManager:
     async def close(self) -> None:
         """Close cached SQLite connections and clear state."""
         await self._close_cached_connections()
-        self.reset()
+        self._db_dir = None
+        self._locks.clear()
 
     async def init(self, db_dir: str) -> None:
         """Create *db_dir* (if needed), open each database, and apply migrations."""
         db_path = Path(db_dir)
         if self._connections and self._db_dir != db_path:
-            await self._close_cached_connections()
-            self.reset()
+            await self.close()
         db_path.mkdir(parents=True, exist_ok=True)
         self._db_dir = db_path
 
@@ -550,11 +545,6 @@ class DatabaseManager:
 
 
 _default_manager = DatabaseManager()
-
-
-def reset_db() -> None:
-    """Clear module-level database state, signalling teardown."""
-    _default_manager.reset()
 
 
 async def close_db() -> None:
