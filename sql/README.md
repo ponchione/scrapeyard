@@ -46,3 +46,5 @@ objects are verified.
 | `015_add_jobs_current_trigger.sql` | Preserve accepted ad-hoc, scheduled, or manual trigger provenance through queued-delivery recovery. |
 | `016_add_webhook_decode_failure_reason.sql` | Add a terminal reason for quarantined malformed webhook outbox rows. |
 | `017_add_history_retention_summary.sql` | Add lifetime run summaries and bounded history-retention indexes. |
+| `018_add_run_snapshots_and_schedule_health.sql` | Add encrypted run configuration snapshots, failure classification, terminal-reconciliation retry state, and durable schedule health. |
+| `019_create_queued_run_snapshots.sql` | Persist an encrypted immutable configuration snapshot for each accepted delivery before it enters Redis. |
