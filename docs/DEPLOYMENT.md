@@ -359,6 +359,7 @@ Set limits to match host capacity:
 - `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` (default `500`)
 - `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` (default `86400`)
 - `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` (default `true`)
+- `SCRAPEYARD_STORAGE_RECONCILIATION_MAX_ENTRIES_PER_RUN` (default `10000`)
 - `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB`
 
 Queued delivery replacement and running execution recovery use independent
@@ -622,9 +623,13 @@ batches in one maintenance cycle. Artifact reconciliation likewise drains
 independent metadata and filesystem cursor pages until each scan is exhausted
 or its cycle ceiling is reached. Each transaction/page remains bounded by its
 category batch setting, while
-`SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` and
-`SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` bound aggregate cycle work. If
-either budget is reached, the loop waits only
+`SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` bounds completed items
+per phase. `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` is carried into
+artifact reads and tree walks as an absolute monotonic deadline. No new
+metadata row, run candidate, or recursive directory chunk is admitted after
+that deadline. An already admitted bounded filesystem call or candidate is
+allowed to finish so mutation never continues after cleanup returns. If either
+budget is reached, the loop waits only
 `SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` before continuing instead
 of sleeping for the normal six-hour interval. It commits each metadata batch
 and releases SQLite before removing
@@ -644,6 +649,14 @@ for containment and exact depth, all metadata paths are re-read, queued/running
 ownership is queried again from `jobs.db`, and filesystem timestamps are
 rechecked. Recursive byte accounting uses non-following stats; recursive
 removal does not follow a symlink, so an external symlink target is untouched.
+Metadata validation reads at most `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES`;
+larger files are reported as corrupt without being loaded. A run-tree snapshot
+is bounded by twice the sum of the configured serialized-result and
+browser-debug byte limits (covering both committed targets and interrupted
+atomic-writer temp files) and by
+`SCRAPEYARD_STORAGE_RECONCILIATION_MAX_ENTRIES_PER_RUN`. Exceeding either tree
+bound records a typed scan failure and leaves the directory untouched. The
+same entry ceiling bounds each project/job hierarchy directory listing.
 
 An unreferenced directory is eligible only when the run directory and every
 non-followed contained entry are older than
@@ -666,10 +679,12 @@ validates and scans cursor-paginated work no larger than
 `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE`, performs the same eligibility checks,
 and reports what would be removed without mutating files or metadata. The two
 scans expose exhaustion independently, and their keyset cursors are committed
-to `results_meta.db` after each page. Process restarts therefore resume later
-entries instead of repeatedly starting at the lexicographically earliest
-directories. Large stores are covered without one unbounded metadata load or
-full-tree candidate list. Review at least one grace-period window of summaries
+to `results_meta.db` after each page only through the completed prefix. A
+deadline reached inside a page leaves later rows and candidates at the durable
+cursor for the catch-up pass. Process restarts therefore resume later entries
+without skipping unfinished work. Large stores are covered without one
+unbounded metadata load or full-tree candidate list. Review at least one
+grace-period window of summaries
 before setting dry-run to `false`. Destructive passes
 remove only eligible directories and known temp files, converge idempotently,
 and never modify `results_meta`.

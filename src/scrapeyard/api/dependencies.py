@@ -72,7 +72,22 @@ def get_result_store() -> ResultStore:
     async def _active_lookup(project: str, job_name: str, run_id: str) -> bool:
         return await job_store.result_run_is_active(project, job_name, run_id)
 
-    return LocalResultStore(settings.storage_results_dir, _lookup, _active_lookup)
+    return LocalResultStore(
+        settings.storage_results_dir,
+        _lookup,
+        _active_lookup,
+        max_serialized_result_bytes=settings.run_max_serialized_result_bytes,
+        max_artifact_tree_bytes=(
+            2
+            * (
+                settings.run_max_serialized_result_bytes
+                + settings.run_max_browser_debug_bytes
+            )
+        ),
+        max_artifact_tree_entries=(
+            settings.storage_reconciliation_max_entries_per_run
+        ),
+    )
 
 
 @lru_cache(maxsize=1)

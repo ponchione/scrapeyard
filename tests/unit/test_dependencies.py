@@ -58,3 +58,6 @@ def test_result_store_cache_reset_applies_changed_reconciliation_environment(
     assert first_store._results_dir == first
     assert second_store._results_dir == second
     assert second_store._active_run_lookup is not None
+    assert second_store._max_serialized_result_bytes == 52428800
+    assert second_store._max_artifact_tree_bytes == 157286400
+    assert second_store._max_artifact_tree_entries == 10000
