@@ -220,7 +220,10 @@ async def delete_reserved_job(
         await _cleanup_deletion_phase(
             "results",
             job_id,
-            result_store.delete_results(job_id),
+            result_store.delete_results(
+                job_id,
+                owned_run_ids=reservation.owned_run_ids,
+            ),
         )
 
     try:

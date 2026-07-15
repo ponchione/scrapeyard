@@ -116,6 +116,7 @@ class DeletionReservationOutcome:
     run_id: str | None
     prior_status: JobStatus | None
     delete_results: bool
+    owned_run_ids: tuple[str, ...] = ()
 
 
 class DeletionFinalizationAction(str, Enum):

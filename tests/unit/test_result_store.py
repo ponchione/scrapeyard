@@ -628,3 +628,104 @@ async def test_delete_result_removes_unindexed_browser_artifacts_idempotently(st
     assert await store.delete_result("j-1", "run-unindexed") is True
     assert not run_dir.exists()
     assert await store.delete_result("j-1", "run-unindexed") is False
+
+
+async def test_delete_results_removes_unindexed_owned_browser_artifacts(store):
+    run_dir = store._results_dir / "acme" / "scrape-prices" / "run-unindexed"
+    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    (artifacts_dir / "page.png").write_bytes(b"debug")
+
+    await store.delete_results("j-1", owned_run_ids=("run-unindexed",))
+
+    assert not run_dir.exists()
+
+
+async def test_delete_results_removes_indexed_and_unindexed_owned_runs(store):
+    indexed = await store.save_result("j-1", [{"price": 9.99}], run_id="run-indexed")
+    unindexed = store._results_dir / "acme" / "scrape-prices" / "run-unindexed"
+    (unindexed / "artifacts").mkdir(parents=True)
+
+    await store.delete_results(
+        "j-1",
+        owned_run_ids=("run-indexed", "run-unindexed"),
+    )
+
+    assert not Path(indexed.file_path).exists()
+    assert not unindexed.exists()
+    assert await store.get_result_metadata("j-1", "run-indexed") is None
+
+
+async def test_delete_results_preserves_reused_name_results_from_another_job(store):
+    retained = await store.save_result(
+        "j-retained",
+        [{"price": 19.99}],
+        run_id="run-retained",
+    )
+    owned = store._results_dir / "acme" / "scrape-prices" / "run-owned"
+    (owned / "artifacts").mkdir(parents=True)
+
+    await store.delete_results("j-1", owned_run_ids=("run-owned",))
+
+    assert not owned.exists()
+    assert Path(retained.file_path).is_dir()
+    assert await store.get_result_metadata("j-retained", "run-retained") is not None
+
+
+async def test_delete_results_unindexed_filesystem_failure_is_retryable(store):
+    indexed = await store.save_result("j-1", [{"price": 9.99}], run_id="run-indexed")
+    unindexed = store._results_dir / "acme" / "scrape-prices" / "run-unindexed"
+    (unindexed / "artifacts").mkdir(parents=True)
+    real_remove = result_store_module.remove_directories
+
+    with patch.object(
+        result_store_module,
+        "remove_directories",
+        side_effect=PermissionError("injected filesystem fault"),
+    ):
+        with pytest.raises(PermissionError, match="injected filesystem fault"):
+            await store.delete_results(
+                "j-1",
+                owned_run_ids=("run-indexed", "run-unindexed"),
+            )
+
+    assert Path(indexed.file_path).is_dir()
+    assert unindexed.is_dir()
+    assert await store.get_result_metadata("j-1", "run-indexed") is not None
+
+    with patch.object(result_store_module, "remove_directories", real_remove):
+        await store.delete_results(
+            "j-1",
+            owned_run_ids=("run-indexed", "run-unindexed"),
+        )
+
+    assert not Path(indexed.file_path).exists()
+    assert not unindexed.exists()
+    assert await store.get_result_metadata("j-1", "run-indexed") is None
+
+
+async def test_delete_results_rejects_symlinked_owned_run(store, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    job_dir = store._results_dir / "acme" / "scrape-prices"
+    job_dir.mkdir(parents=True)
+    (job_dir / "run-link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked result path"):
+        await store.delete_results("j-1", owned_run_ids=("run-link",))
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+async def test_delete_results_rejects_uncontained_owned_run_id(store, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsafe path component"):
+        await store.delete_results("j-1", owned_run_ids=("../outside",))
+
+    assert marker.read_text(encoding="utf-8") == "keep"

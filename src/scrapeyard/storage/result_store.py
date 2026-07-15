@@ -288,6 +288,7 @@ class LocalResultStore:
         self,
         db: Any,
         rows: Sequence[Mapping[str, Any]],
+        additional_paths: Sequence[Path] = (),
     ) -> int:
         """Delete explicit lifecycle artifacts before their resumable metadata.
 
@@ -296,12 +297,15 @@ class LocalResultStore:
         contained directory removal succeeds preserves the paths for a retry.
         """
 
-        if not rows:
+        if not rows and not additional_paths:
             return 0
         paths = [self._checked_result_dir(str(row["file_path"])) for row in rows]
+        paths.extend(self._checked_result_dir(str(path)) for path in additional_paths)
+        paths = list(dict.fromkeys(paths))
         await cleanup_safe_to_thread(remove_directories, paths)
-        async with db_transaction(db):
-            await self._delete_metadata_ids(db, rows)
+        if rows:
+            async with db_transaction(db):
+                await self._delete_metadata_ids(db, rows)
         return len(rows)
 
     async def save_result(
@@ -442,12 +446,23 @@ class LocalResultStore:
             created_at=created_at,
         )
 
-    async def delete_results(self, job_id: str) -> None:
-        """Delete all job results with retryable filesystem-first ordering."""
+    async def delete_results(
+        self,
+        job_id: str,
+        *,
+        owned_run_ids: tuple[str, ...] = (),
+    ) -> None:
+        """Delete all exact job/run artifacts with filesystem-first ordering."""
+
+        project, job_name = await self._job_lookup(job_id)
+        expected_paths = [
+            safe_join(self._results_dir, project, job_name, run_id)
+            for run_id in owned_run_ids
+        ]
         async with get_db("results_meta.db") as db:
             cursor = await db.execute(JOB_RESULTS_DELETE_QUERY, (job_id,))
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            await self._delete_files_then_ids(db, rows)
+            await self._delete_files_then_ids(db, rows, expected_paths)
 
     async def delete_result(self, job_id: str, run_id: str) -> bool:
         """Delete one run artifact, including an unindexed browser-debug directory."""
