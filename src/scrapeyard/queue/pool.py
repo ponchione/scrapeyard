@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Awaitable, Protocol, cast
@@ -148,6 +149,19 @@ class _PriorityWorker(Worker):
         super().__init__(*args, **kwargs)
         self.priority_queues = priority_queues
         self.priority_policy = WeightedPriorityPolicy()
+
+    async def close(self) -> None:
+        """Close arq 0.26.x without its deprecated redis-py compatibility call."""
+        if not self._handle_signals:
+            self.handle_sig(signal.SIGUSR1)
+        if not self._pool:
+            return
+        await asyncio.gather(*self.tasks.values())
+        await self.pool.delete(self.health_check_key)
+        if self.on_shutdown:
+            await self.on_shutdown(self.ctx)
+        await self.pool.aclose(close_connection_pool=True)
+        self._pool = None
 
     async def _poll_iteration(self) -> None:
         if self.allow_pick_jobs and self.job_counter < self.max_jobs:

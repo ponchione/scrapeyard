@@ -15,6 +15,7 @@ from scrapeyard.queue.pool import (
     QueueDeliveryState,
     WorkerPool,
     _DeliverySnapshot,
+    _PriorityWorker,
 )
 from scrapeyard.queue.priority import WeightedPriorityPolicy
 
@@ -183,6 +184,32 @@ def test_worker_background_health_detects_stopped_runner():
 
     assert pool.background_ok is False
     assert pool.background_detail == "worker runner task failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_priority_worker_shutdown_uses_warning_clean_redis_close() -> None:
+    redis = MagicMock()
+    redis.delete = AsyncMock()
+    redis.aclose = AsyncMock()
+    redis.close = MagicMock()
+    shutdown = AsyncMock()
+    task = asyncio.create_task(asyncio.sleep(0))
+    worker = object.__new__(_PriorityWorker)
+    worker._handle_signals = True
+    worker._pool = redis
+    worker.tasks = {"job": task}
+    worker.health_check_key = "arq:health:test"
+    worker.on_shutdown = shutdown
+    worker.ctx = {"worker": "test"}
+
+    await worker.close()
+
+    assert task.done()
+    redis.delete.assert_awaited_once_with("arq:health:test")
+    shutdown.assert_awaited_once_with(worker.ctx)
+    redis.aclose.assert_awaited_once_with(close_connection_pool=True)
+    redis.close.assert_not_called()
+    assert worker._pool is None
 
 
 @pytest.mark.asyncio

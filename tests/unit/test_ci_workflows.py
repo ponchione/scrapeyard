@@ -58,7 +58,7 @@ def test_ci_required_gate_contracts() -> None:
     assert live_redis["env"]["SCRAPEYARD_REDIS_DSN"].endswith("/15")
     live_commands = _run_commands(live_redis)
     assert "python scripts/check_packaging_toolchain.py" in live_commands
-    assert "pytest --no-cov -m live_redis tests/live_redis" in live_commands
+    assert "pytest -W error --no-cov -m live_redis tests/live_redis" in live_commands
 
 
 def test_ci_caches_only_dependency_downloads() -> None:
