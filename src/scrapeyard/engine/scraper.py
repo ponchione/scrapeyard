@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
@@ -217,6 +218,7 @@ async def _fetch_basic_with_safe_redirects(
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
     redirects: list[str] = []
+    cookie_jar = httpx.Cookies()
     call_kwargs["follow_redirects"] = False
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
         request_url = current_url
@@ -245,6 +247,8 @@ async def _fetch_basic_with_safe_redirects(
             cancellation_guard=cancellation_guard,
         )
         if production_stream:
+            request_kwargs["cookie_jar"] = cookie_jar
+            request_kwargs["cookie_url"] = current_url
             response = await fetch_basic_response(
                 fetcher_cls,
                 request_url,

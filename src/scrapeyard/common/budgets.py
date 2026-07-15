@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, NoReturn, TypeVar
@@ -226,6 +227,51 @@ class RunBudget:
         cancel_task_nowait(task)
         self._exhausted = self._duration_error()
         raise self._exhausted
+
+    async def wait_for_owned(self, awaitable: Awaitable[T]) -> T:
+        """Enforce the deadline while retaining ownership through cancellation.
+
+        Use this for browser work whose external concurrency permit must not be
+        released until the browser coroutine has acknowledged cancellation.
+        """
+
+        try:
+            self.check_deadline()
+        except BaseException:
+            if isinstance(awaitable, asyncio.Future):
+                await self._cancel_owned(awaitable)
+            elif inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise
+
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.remaining_seconds)
+        except BaseException:
+            if not task.done():
+                await self._cancel_owned(task)
+            raise
+        if task in done:
+            return task.result()
+        await self._cancel_owned(task)
+        self._exhausted = self._duration_error()
+        raise self._exhausted
+
+    @staticmethod
+    async def _cancel_owned(task: asyncio.Future[Any]) -> None:
+        """Wait for cancellation acknowledgement despite repeated caller cancels."""
+
+        task.cancel()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if task.done() and not task.cancelled():
+            with suppress(Exception):
+                task.result()
 
     async def sleep(self, delay_seconds: float) -> None:
         """Sleep under the one overall deadline."""

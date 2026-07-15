@@ -51,7 +51,11 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
     insert_webhook_delivery,
 )
-from scrapeyard.storage.secret_envelope import protect_text, reveal_text
+from scrapeyard.storage.secret_envelope import (
+    SecretDecryptionError,
+    protect_text,
+    reveal_text,
+)
 
 
 _TERMINAL_RUN_STATUSES = {
@@ -133,6 +137,28 @@ class SQLiteJobStore:
                 job.schedule_consecutive_failures,
             ),
         )
+        if job.status is JobStatus.queued and job.current_run_id is not None:
+            trigger = current_trigger or "adhoc"
+            queued_at = job.updated_at or job.created_at
+            await db.execute(
+                """INSERT INTO queued_run_snapshots
+                       (run_id, job_id, trigger, config_hash, config_yaml, queued_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    job.current_run_id,
+                    job.job_id,
+                    trigger,
+                    hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
+                    protect_text(
+                        job.config_yaml,
+                        purpose=(
+                            "queued_run_snapshots.config_yaml:"
+                            f"{job.current_run_id}"
+                        ),
+                    ),
+                    fmt_dt(queued_at),
+                ),
+            )
 
     @staticmethod
     async def _get_job_in_db(
@@ -734,6 +760,11 @@ class SQLiteJobStore:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Running job cancellation could not update its exact run")
+            elif run_id is not None:
+                await db.execute(
+                    "DELETE FROM queued_run_snapshots WHERE job_id = ? AND run_id = ?",
+                    (job_id, run_id),
+                )
 
             cursor = await db.execute(
                 """UPDATE jobs
@@ -970,6 +1001,10 @@ class SQLiteJobStore:
                 "DELETE FROM scrape_idempotency WHERE job_id = ?",
                 (job_id,),
             )
+            await db.execute(
+                "DELETE FROM queued_run_snapshots WHERE job_id = ?",
+                (job_id,),
+            )
             await db.execute("DELETE FROM job_runs WHERE job_id = ?", (job_id,))
             cursor = await db.execute(
                 """DELETE FROM jobs
@@ -1047,6 +1082,147 @@ class SQLiteJobStore:
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_project_summary(row) for row in rows]
 
+    async def get_queued_run_config(self, job_id: str, run_id: str) -> str:
+        """Load the encrypted immutable config for one accepted delivery."""
+
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT queued_run_snapshots.config_yaml,
+                          queued_run_snapshots.config_hash
+                   FROM queued_run_snapshots
+                   JOIN jobs ON jobs.job_id = queued_run_snapshots.job_id
+                   WHERE queued_run_snapshots.job_id = ?
+                     AND queued_run_snapshots.run_id = ?
+                     AND jobs.status = 'queued'
+                     AND jobs.current_run_id = queued_run_snapshots.run_id""",
+                (job_id, run_id),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                config_yaml = reveal_text(
+                    cast(str, row["config_yaml"]),
+                    purpose=f"queued_run_snapshots.config_yaml:{run_id}",
+                )
+                if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != row["config_hash"]:
+                    raise ValueError("Queued run configuration hash mismatch")
+                return config_yaml
+
+            # Upgrade compatibility for deliveries accepted before migration
+            # 019. New writes always use queued_run_snapshots.
+            cursor = await db.execute(
+                """SELECT config_yaml, config_hash FROM jobs
+                   WHERE job_id = ? AND status = 'queued' AND current_run_id = ?""",
+                (job_id, run_id),
+            )
+            legacy = await cursor.fetchone()
+            if legacy is None:
+                raise RunOwnershipError("load queued config", job_id, run_id)
+            config_yaml = reveal_text(
+                cast(str, legacy["config_yaml"]),
+                purpose=f"jobs.config_yaml:{job_id}",
+            )
+            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != legacy["config_hash"]:
+                raise ValueError("Legacy queued configuration hash mismatch")
+            return config_yaml
+
+    @staticmethod
+    async def _insert_failed_queued_run(
+        db: aiosqlite.Connection,
+        *,
+        job_id: str,
+        run_id: str,
+        failed_at: datetime,
+        error_count: int,
+        failure_code: str,
+    ) -> None:
+        cursor = await db.execute(
+            """SELECT queued_run_snapshots.trigger,
+                      queued_run_snapshots.config_hash,
+                      queued_run_snapshots.config_yaml AS queued_config_yaml,
+                      queued_run_snapshots.queued_at,
+                      jobs.config_hash AS parent_config_hash,
+                      jobs.config_yaml AS parent_config_yaml,
+                      jobs.current_trigger
+               FROM jobs
+               LEFT JOIN queued_run_snapshots
+                 ON queued_run_snapshots.job_id = jobs.job_id
+                AND queued_run_snapshots.run_id = jobs.current_run_id
+               WHERE jobs.job_id = ? AND jobs.current_run_id = ?""",
+            (job_id, run_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise RunOwnershipError("fail queued snapshot", job_id, run_id)
+
+        config_hash = cast(str, row["config_hash"] or row["parent_config_hash"])
+        config_yaml: str | None = None
+        queued_config = cast(str | None, row["queued_config_yaml"])
+        if queued_config is not None:
+            try:
+                config_yaml = reveal_text(
+                    queued_config,
+                    purpose=f"queued_run_snapshots.config_yaml:{run_id}",
+                )
+            except SecretDecryptionError:
+                logger.exception(
+                    "Queued run snapshot could not be decrypted; falling back to "
+                    "the matching encrypted parent snapshot job_id=%s run_id=%s",
+                    job_id,
+                    run_id,
+                )
+        if config_yaml is None and row["parent_config_hash"] == config_hash:
+            try:
+                config_yaml = reveal_text(
+                    cast(str, row["parent_config_yaml"]),
+                    purpose=f"jobs.config_yaml:{job_id}",
+                )
+            except SecretDecryptionError:
+                logger.exception(
+                    "Parent config fallback could not be decrypted for failed queued "
+                    "run job_id=%s run_id=%s",
+                    job_id,
+                    run_id,
+                )
+        if (
+            config_yaml is not None
+            and hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != config_hash
+        ):
+            config_yaml = None
+
+        failed_text = fmt_dt(failed_at)
+        started_text = cast(str | None, row["queued_at"]) or failed_text
+        trigger = cast(str | None, row["trigger"] or row["current_trigger"]) or "adhoc"
+        await db.execute(
+            """INSERT INTO job_runs
+                   (run_id, job_id, status, trigger, config_hash, config_yaml,
+                    started_at, heartbeat_at, completed_at, record_count,
+                    error_count, failure_code)
+                   VALUES (?, ?, 'failed', ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+            (
+                run_id,
+                job_id,
+                trigger,
+                config_hash,
+                (
+                    None
+                    if config_yaml is None
+                    else protect_text(
+                        config_yaml,
+                        purpose=f"job_runs.config_yaml:{run_id}",
+                    )
+                ),
+                started_text,
+                started_text,
+                failed_text,
+                error_count,
+                failure_code,
+            ),
+        )
+        await db.execute(
+            "DELETE FROM queued_run_snapshots WHERE job_id = ? AND run_id = ?",
+            (job_id, run_id),
+        )
+
     async def claim_run(
         self,
         run_id: str,
@@ -1071,17 +1247,37 @@ class SQLiteJobStore:
                 await db.rollback()
                 return False
             cursor = await db.execute(
-                "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
-                (job_id,),
+                """SELECT queued_run_snapshots.config_yaml,
+                          queued_run_snapshots.config_hash,
+                          queued_run_snapshots.trigger
+                   FROM queued_run_snapshots
+                   WHERE job_id = ? AND run_id = ?""",
+                (job_id, run_id),
             )
             config_row = await cursor.fetchone()
+            if config_row is None:
+                # Upgrade compatibility for a delivery accepted before 019.
+                cursor = await db.execute(
+                    "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
+                    (job_id,),
+                )
+                config_row = await cursor.fetchone()
+                config_purpose = f"jobs.config_yaml:{job_id}"
+            else:
+                if config_row["trigger"] != trigger:
+                    await db.rollback()
+                    return False
+                config_purpose = f"queued_run_snapshots.config_yaml:{run_id}"
             if config_row is None or config_row["config_hash"] != config_hash:
                 await db.rollback()
                 return False
             config_yaml = reveal_text(
                 cast(str, config_row["config_yaml"]),
-                purpose=f"jobs.config_yaml:{job_id}",
+                purpose=config_purpose,
             )
+            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != config_hash:
+                await db.rollback()
+                return False
             await db.execute(
                 """INSERT INTO job_runs
                        (run_id, job_id, status, trigger, config_hash, config_yaml,
@@ -1099,6 +1295,10 @@ class SQLiteJobStore:
                     timestamp,
                     timestamp,
                 ),
+            )
+            await db.execute(
+                "DELETE FROM queued_run_snapshots WHERE job_id = ? AND run_id = ?",
+                (job_id, run_id),
             )
             return True
 
@@ -1363,6 +1563,14 @@ class SQLiteJobStore:
                 self._raise_ownership("fail", job_id, run_id)
             job_status = str(row["status"])
             if job_status == JobStatus.queued.value:
+                await self._insert_failed_queued_run(
+                    db,
+                    job_id=job_id,
+                    run_id=run_id,
+                    failed_at=failed_at,
+                    error_count=error_count,
+                    failure_code="preclaim_execution_failure",
+                )
                 cursor = await db.execute(
                     """UPDATE jobs
                            SET status = 'failed', updated_at = ?
@@ -1374,7 +1582,30 @@ class SQLiteJobStore:
                 if cursor.rowcount != 1:
                     await db.rollback()
                     self._raise_ownership("fail", job_id, run_id)
+                intent_created = False
+                if webhook_delivery is not None:
+                    intent_created = await insert_webhook_delivery(
+                        db,
+                        webhook_delivery,
+                        created_at=failed_at,
+                    )
                 await db.commit()
+                if webhook_delivery is not None:
+                    logger.info(
+                        "Terminal webhook intent persisted atomically "
+                        "job_id=%s run_id=%s event=%s delivery_id=%s "
+                        "terminal_status=%s recovery_action=%s",
+                        job_id,
+                        run_id,
+                        webhook_delivery.event,
+                        webhook_delivery.delivery_id,
+                        JobStatus.failed.value,
+                        (
+                            "atomic_intent_created"
+                            if intent_created
+                            else "existing_intent_noop"
+                        ),
+                    )
                 return
             if job_status != JobStatus.running.value:
                 await db.rollback()
@@ -1744,18 +1975,53 @@ class SQLiteJobStore:
             params.append(
                 hashlib.sha256(expected_config_yaml.encode("utf-8")).hexdigest()
             )
-        cursor = await self._execute_write(
-            """UPDATE jobs
-               SET status = 'queued', updated_at = ?, current_run_id = ?,
-                   current_trigger = ?
-               WHERE job_id = ?
-                 AND status = ?
-                 AND current_run_id IS ?"""
-            + stale_clause
-            + config_clause,
-            params,
-        )
-        return cursor.rowcount == 1
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = 'queued', updated_at = ?, current_run_id = ?,
+                       current_trigger = ?
+                   WHERE job_id = ?
+                     AND status = ?
+                     AND current_run_id IS ?"""
+                + stale_clause
+                + config_clause,
+                params,
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            row = await (
+                await db.execute(
+                    "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
+                    (job_id,),
+                )
+            ).fetchone()
+            if row is None:  # pragma: no cover - transaction invariant
+                raise RuntimeError("Queued parent disappeared inside its transaction")
+            config_yaml = reveal_text(
+                cast(str, row["config_yaml"]),
+                purpose=f"jobs.config_yaml:{job_id}",
+            )
+            config_hash = cast(str, row["config_hash"])
+            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != config_hash:
+                raise ValueError("Queued parent configuration hash mismatch")
+            await db.execute(
+                """INSERT INTO queued_run_snapshots
+                       (run_id, job_id, trigger, config_hash, config_yaml, queued_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    new_run_id,
+                    job_id,
+                    new_trigger,
+                    config_hash,
+                    protect_text(
+                        config_yaml,
+                        purpose=f"queued_run_snapshots.config_yaml:{new_run_id}",
+                    ),
+                    fmt_dt(queued_at),
+                ),
+            )
+            return True
 
     async def fail_queued_run(
         self,
@@ -1764,15 +2030,27 @@ class SQLiteJobStore:
         failed_at: datetime,
     ) -> bool:
         """Fail an enqueue attempt only while its delivery is still current."""
-        cursor = await self._execute_write(
-            """UPDATE jobs
-               SET status = 'failed', updated_at = ?
-               WHERE job_id = ?
-                 AND status = 'queued'
-                 AND current_run_id = ?""",
-            (fmt_dt(failed_at), job_id, run_id),
-        )
-        return cursor.rowcount == 1
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = 'failed', updated_at = ?
+                   WHERE job_id = ?
+                     AND status = 'queued'
+                     AND current_run_id = ?""",
+                (fmt_dt(failed_at), job_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            await self._insert_failed_queued_run(
+                db,
+                job_id=job_id,
+                run_id=run_id,
+                failed_at=failed_at,
+                error_count=1,
+                failure_code="enqueue_failure",
+            )
+            return True
 
     async def list_stale_queued_jobs(
         self,
@@ -1788,14 +2066,21 @@ class SQLiteJobStore:
         no owned run or no queued timestamp are deliberately excluded.
         """
         async with get_db("jobs.db") as db:
-            query = """SELECT job_id, current_run_id, current_trigger, config_yaml, updated_at,
-                          schedule_cron, schedule_enabled
+            query = """SELECT jobs.job_id, jobs.current_run_id,
+                          jobs.current_trigger,
+                          jobs.config_yaml AS parent_config_yaml,
+                          queued_run_snapshots.config_yaml AS queued_config_yaml,
+                          jobs.updated_at, jobs.schedule_cron,
+                          jobs.schedule_enabled
                    FROM jobs
-                   WHERE status = 'queued'
-                     AND current_run_id IS NOT NULL
-                     AND updated_at IS NOT NULL
-                     AND updated_at <= ?
-                   ORDER BY updated_at ASC, job_id ASC"""
+                   LEFT JOIN queued_run_snapshots
+                     ON queued_run_snapshots.job_id = jobs.job_id
+                    AND queued_run_snapshots.run_id = jobs.current_run_id
+                   WHERE jobs.status = 'queued'
+                     AND jobs.current_run_id IS NOT NULL
+                     AND jobs.updated_at IS NOT NULL
+                     AND jobs.updated_at <= ?
+                   ORDER BY jobs.updated_at ASC, jobs.job_id ASC"""
             params: tuple[object, ...] = (fmt_dt(stale_before),)
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
@@ -1820,9 +2105,16 @@ class SQLiteJobStore:
                 StaleQueuedJob(
                     job_id=cast(str, row["job_id"]),
                     run_id=run_id,
-                    config_yaml=reveal_text(
-                        cast(str, row["config_yaml"]),
-                        purpose=f"jobs.config_yaml:{cast(str, row['job_id'])}",
+                    config_yaml=(
+                        reveal_text(
+                            cast(str, row["queued_config_yaml"]),
+                            purpose=f"queued_run_snapshots.config_yaml:{run_id}",
+                        )
+                        if row["queued_config_yaml"] is not None
+                        else reveal_text(
+                            cast(str, row["parent_config_yaml"]),
+                            purpose=f"jobs.config_yaml:{cast(str, row['job_id'])}",
+                        )
                     ),
                     queued_at=queued_at,
                     trigger=trigger,
@@ -1842,23 +2134,27 @@ class SQLiteJobStore:
         reserved_at: datetime,
     ) -> bool:
         """Reserve the exact stale snapshot while preserving its run ID."""
-        cursor = await self._execute_write(
-            """UPDATE jobs
-               SET updated_at = ?
-               WHERE job_id = ?
-                 AND status = 'queued'
-                 AND current_run_id = ?
-                 AND updated_at = ?
-                 AND updated_at <= ?""",
-            (
-                fmt_dt(reserved_at),
-                job_id,
-                run_id,
-                fmt_dt(expected_queued_at),
-                fmt_dt(stale_before),
-            ),
-        )
-        return cursor.rowcount == 1
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET updated_at = ?
+                   WHERE job_id = ?
+                     AND status = 'queued'
+                     AND current_run_id = ?
+                     AND updated_at = ?
+                     AND updated_at <= ?""",
+                (
+                    fmt_dt(reserved_at),
+                    job_id,
+                    run_id,
+                    fmt_dt(expected_queued_at),
+                    fmt_dt(stale_before),
+                ),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            return True
 
     async def fail_queued_run_recovery(
         self,
@@ -1869,21 +2165,33 @@ class SQLiteJobStore:
         failed_at: datetime,
     ) -> bool:
         """Fail only the exact queued timestamp reconciliation still owns."""
-        cursor = await self._execute_write(
-            """UPDATE jobs
-               SET status = 'failed', updated_at = ?
-               WHERE job_id = ?
-                 AND status = 'queued'
-                 AND current_run_id = ?
-                 AND updated_at = ?""",
-            (
-                fmt_dt(failed_at),
-                job_id,
-                run_id,
-                fmt_dt(expected_queued_at),
-            ),
-        )
-        return cursor.rowcount == 1
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            cursor = await db.execute(
+                """UPDATE jobs
+                   SET status = 'failed', updated_at = ?
+                   WHERE job_id = ?
+                     AND status = 'queued'
+                     AND current_run_id = ?
+                     AND updated_at = ?""",
+                (
+                    fmt_dt(failed_at),
+                    job_id,
+                    run_id,
+                    fmt_dt(expected_queued_at),
+                ),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            await self._insert_failed_queued_run(
+                db,
+                job_id=job_id,
+                run_id=run_id,
+                failed_at=failed_at,
+                error_count=1,
+                failure_code="queued_reconciliation_failure",
+            )
+            return True
 
     @staticmethod
     def _heartbeat_is_stale(value: str | None, cutoff: datetime) -> bool:
@@ -2053,12 +2361,10 @@ class SQLiteJobStore:
     async def rollback_queued_submission(self, job_id: str, run_id: str) -> bool:
         """Remove only a queued ad-hoc row whose Redis enqueue never succeeded."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             cursor = await db.execute(
-                """DELETE FROM jobs
-                   WHERE job_id = ?
-                     AND status = 'queued'
-                     AND current_run_id = ?
+                """SELECT 1 FROM jobs
+                   WHERE job_id = ? AND status = 'queued' AND current_run_id = ?
                      AND NOT EXISTS (
                          SELECT 1 FROM job_runs WHERE job_runs.job_id = jobs.job_id
                      )
@@ -2068,5 +2374,22 @@ class SQLiteJobStore:
                      )""",
                 (job_id, run_id),
             )
-            await db.commit()
-            return cursor.rowcount == 1
+            if await cursor.fetchone() is None:
+                await db.rollback()
+                return False
+            await db.execute(
+                "DELETE FROM scrape_idempotency WHERE job_id = ? AND run_id = ?",
+                (job_id, run_id),
+            )
+            await db.execute(
+                "DELETE FROM queued_run_snapshots WHERE job_id = ? AND run_id = ?",
+                (job_id, run_id),
+            )
+            cursor = await db.execute(
+                """DELETE FROM jobs
+                   WHERE job_id = ? AND status = 'queued' AND current_run_id = ?""",
+                (job_id, run_id),
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - transaction invariant
+                raise RuntimeError("Queued submission rollback lost ownership")
+            return True

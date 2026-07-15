@@ -23,7 +23,7 @@ from scrapeyard.api.auth import (
     authenticate_api_key,
     parse_api_credentials,
 )
-from scrapeyard.runtime.metrics import observe_api_request
+from scrapeyard.runtime.metrics import observe_api_request, observe_rate_limit_state
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +111,17 @@ class RateLimitMiddleware:
         api_keys: set[str] | None = None,
         exempt_paths: Iterable[str] = (),
         clock: Callable[[], float] | None = None,
+        max_keys: int = 10000,
     ) -> None:
+        if max_keys < 1:
+            raise ValueError("max_keys must be positive")
         self.app = app
         self.request_limit = requests
         self.window_seconds = window_seconds
         self.api_keys = set(api_keys or ())
         self.exempt_paths = set(exempt_paths)
         self.clock = clock or time.monotonic
+        self.max_keys = max_keys
         self._lock = asyncio.Lock()
         self._requests_by_key: dict[str, deque[float]] = {}
         self._last_prune_at = 0.0
@@ -163,7 +167,18 @@ class RateLimitMiddleware:
         async with self._lock:
             cutoff = now - self.window_seconds
             self._prune_expired_keys(cutoff, now)
-            requests = self._requests_by_key.setdefault(key, deque())
+            requests = self._requests_by_key.get(key)
+            if requests is None:
+                if len(self._requests_by_key) >= self.max_keys:
+                    observe_rate_limit_state("api", "saturated")
+                    earliest_expiry = min(
+                        bucket[-1] + self.window_seconds
+                        for bucket in self._requests_by_key.values()
+                        if bucket
+                    )
+                    return max(0.0, earliest_expiry - now)
+                requests = deque()
+                self._requests_by_key[key] = requests
             while requests and requests[0] <= cutoff:
                 requests.popleft()
 
@@ -180,6 +195,7 @@ class RateLimitMiddleware:
         for key, requests in list(self._requests_by_key.items()):
             if not requests or requests[-1] <= cutoff:
                 self._requests_by_key.pop(key, None)
+                observe_rate_limit_state("api", "expired")
 
 
 class RequestSizeLimitMiddleware:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import httpx
+from scrapling.engines.toolbelt.navigation import construct_proxy_dict
 
 from scrapeyard.config.schema import ProxyConfig, TargetConfig
 from scrapeyard.engine.proxy import normalize_proxy_url, redact_proxy_url, resolve_proxy
@@ -75,6 +77,24 @@ class TestResolveProxy:
 def test_normalize_proxy_url_rejects_control_characters():
     with pytest.raises(ValueError, match="control characters"):
         normalize_proxy_url("http://proxy.example:8080/\x00")
+
+
+@pytest.mark.parametrize("scheme", ["socks4", "socks4a", "socks5h"])
+def test_normalize_proxy_url_rejects_schemes_not_shared_by_all_fetchers(scheme):
+    with pytest.raises(ValueError, match="scheme"):
+        normalize_proxy_url(f"{scheme}://proxy.example.com:1080")
+
+
+@pytest.mark.parametrize("scheme", ["http", "https", "socks5"])
+def test_every_admitted_proxy_scheme_constructs_basic_and_browser_transports(scheme):
+    proxy_url = normalize_proxy_url(f"{scheme}://proxy.example.com:1080")
+    transport = httpx.AsyncHTTPTransport(proxy=proxy_url, trust_env=False)
+    assert transport is not None
+    assert construct_proxy_dict(proxy_url) == {
+        "server": f"{scheme}://proxy.example.com:1080",
+        "username": "",
+        "password": "",
+    }
 
 
 # --- redact_proxy_url ---

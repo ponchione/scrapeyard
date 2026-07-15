@@ -159,7 +159,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     monkeypatch.setattr(
         main_module,
         "start_cleanup_loop",
-        lambda _result_store, _outbox_store, *, interval_hours, job_store, error_store: (
+        lambda _result_store, _outbox_store, *, interval_hours, job_store, error_store, monitor: (
             cleanup_task
         ),
     )
@@ -355,6 +355,79 @@ async def test_shutdown_retains_shared_services_for_unresolved_worker(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_attribute", "phase"),
+    [
+        ("cleanup_task", "cleanup"),
+        ("queued_reconciliation_task", "queued_reconciliation"),
+        ("running_reconciliation_task", "running_reconciliation"),
+    ],
+)
+async def test_shutdown_retains_shared_services_for_cancellation_resistant_background_task(
+    monkeypatch,
+    task_attribute,
+    phase,
+):
+    app = FastAPI()
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resistant_task() -> None:
+        started.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+
+    task = asyncio.create_task(resistant_task())
+    await started.wait()
+    setattr(app.state, task_attribute, task)
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    close_webhook = AsyncMock()
+    close_database = AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    try:
+        with pytest.raises(RuntimeError, match=phase):
+            await main_module._shutdown_runtime_services(
+                app,
+                shutdown_grace_seconds=0.005,
+            )
+
+        assert cancellation_seen.is_set()
+        assert not task.done()
+        assert app.state.shutdown_pending is True
+        close_webhook.assert_not_awaited()
+        close_database.assert_not_awaited()
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retains_database_for_unresolved_webhook_task(monkeypatch):
+    app = FastAPI()
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    app.state.webhook_dispatcher = SimpleNamespace(shutdown_pending=True)
+    close_webhook = AsyncMock(side_effect=asyncio.TimeoutError("webhook workers"))
+    close_database = AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+
+    with pytest.raises(RuntimeError, match="shared services retained"):
+        await main_module._shutdown_runtime_services(
+            app,
+            shutdown_grace_seconds=0.01,
+        )
+
+    assert app.state.shutdown_pending is True
+    close_database.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_webhook_backlog_drains_before_database_close(monkeypatch):
     app = FastAPI()
     app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
@@ -545,6 +618,56 @@ async def test_lifespan_retains_instance_guard_for_unresolved_worker(
     )
 
     with pytest.raises(RuntimeError, match="worker still live"):
+        async with main_module.lifespan(app):
+            pass
+
+    retained_lock = app.state.instance_lock
+    assert retained_lock is not None
+    contender = main_module.SingleInstanceLock(
+        main_module.instance_lock_path(settings.db_dir),
+        main_module.instance_identity(
+            db_dir=settings.db_dir,
+            queue_name=settings.queue_name,
+            redis_dsn=settings.redis_dsn,
+        ),
+    )
+    try:
+        with pytest.raises(SingleInstanceError):
+            contender.acquire()
+    finally:
+        retained_lock.release()
+        app.state.instance_lock = None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_retains_instance_guard_for_any_unresolved_owned_task(
+    monkeypatch,
+    tmp_path,
+):
+    app = FastAPI()
+    settings = SimpleNamespace(
+        log_dir=str(tmp_path / "logs"),
+        log_level="INFO",
+        db_dir=str(tmp_path / "db"),
+        redis_dsn="redis://redis:6379/0",
+        queue_name="retained-background-task",
+        workers_shutdown_grace_seconds=0,
+    )
+
+    async def shutdown(target_app: FastAPI, **_kwargs) -> None:
+        target_app.state.shutdown_pending = True
+        raise RuntimeError("background task still live")
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
+    monkeypatch.setattr(main_module, "init_db", AsyncMock())
+    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
+    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
+    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
+    monkeypatch.setattr(main_module, "_startup_runtime_services", AsyncMock())
+    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+
+    with pytest.raises(RuntimeError, match="background task still live"):
         async with main_module.lifespan(app):
             pass
 

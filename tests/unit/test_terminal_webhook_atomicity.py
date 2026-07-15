@@ -88,6 +88,54 @@ def _delivery(
     )
 
 
+async def test_preclaim_failure_creates_run_history_and_failed_webhook_intent(
+    store: SQLiteJobStore,
+) -> None:
+    config_yaml = _yaml(webhook_on="failed")
+    await store.save_job(
+        Job(
+            job_id="job-1",
+            project="test",
+            name="atomic-job",
+            config_yaml=config_yaml,
+            status=JobStatus.queued,
+            updated_at=NOW,
+            current_run_id="run-1",
+        )
+    )
+    delivery = _delivery(config_yaml, status=JobStatus.failed)
+    assert delivery is not None
+
+    await store.fail_owned_run(
+        "job-1",
+        "run-1",
+        NOW + timedelta(minutes=1),
+        error_count=1,
+        webhook_delivery=delivery,
+    )
+
+    job = await store.get_job("job-1")
+    run = await store.get_job_run("job-1", "run-1")
+    persisted = await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id)
+    count, last_run_at = await store.get_job_run_stats("job-1")
+    async with get_db("jobs.db") as db:
+        queued_snapshot = await (
+            await db.execute(
+                "SELECT 1 FROM queued_run_snapshots WHERE run_id = 'run-1'"
+            )
+        ).fetchone()
+
+    assert job.status is JobStatus.failed
+    assert run is not None and run.status is JobStatus.failed
+    assert run.failure_code == "preclaim_execution_failure"
+    assert run.record_count == 0
+    assert run.error_count == 1
+    assert persisted is not None
+    assert count == 1
+    assert last_run_at == NOW
+    assert queued_snapshot is None
+
+
 async def test_finalization_atomically_creates_one_required_intent(
     store: SQLiteJobStore,
 ) -> None:

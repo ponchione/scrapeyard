@@ -103,6 +103,73 @@ class TestLocalDomainRateLimiter:
         assert max_active_sleepers == 1
         assert current_time == 102.0
 
+    @pytest.mark.asyncio
+    async def test_domain_state_evicts_oldest_idle_entry_at_ceiling(
+        self,
+        monkeypatch,
+    ) -> None:
+        current_time = 100.0
+        monkeypatch.setattr(
+            rate_limiter_module.time,
+            "monotonic",
+            lambda: current_time,
+        )
+        limiter = LocalDomainRateLimiter(max_domains=2)
+
+        await limiter.acquire("old.example", 0.1)
+        current_time += 1
+        await limiter.acquire("newer.example", 0.1)
+        current_time += 1
+        await limiter.acquire("newest.example", 0.1)
+
+        assert set(limiter._locks) == {"newer.example", "newest.example"}
+        assert set(limiter._last_request) == {"newer.example", "newest.example"}
+
+    @pytest.mark.asyncio
+    async def test_domain_state_never_evicts_a_locked_entry(
+        self,
+        monkeypatch,
+    ) -> None:
+        current_time = 100.0
+        sleep_started = asyncio.Event()
+        release_sleep = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        monkeypatch.setattr(
+            rate_limiter_module.time,
+            "monotonic",
+            lambda: current_time,
+        )
+
+        async def blocking_sleep(_delay: float) -> None:
+            sleep_started.set()
+            await release_sleep.wait()
+
+        monkeypatch.setattr(rate_limiter_module.asyncio, "sleep", blocking_sleep)
+        limiter = LocalDomainRateLimiter(max_domains=1)
+        await limiter.acquire("locked.example", 1)
+
+        current_time = 100.1
+        locked = asyncio.create_task(limiter.acquire("locked.example", 1))
+        await sleep_started.wait()
+        same_domain_waiter = asyncio.create_task(
+            limiter.acquire("locked.example", 1)
+        )
+        await real_sleep(0)
+        newcomer = asyncio.create_task(limiter.acquire("new.example", 1))
+        await real_sleep(0)
+        assert set(limiter._locks) == {"locked.example"}
+        assert limiter._domain_users == {"locked.example": 2}
+        assert not same_domain_waiter.done()
+        assert not newcomer.done()
+
+        current_time = 101.0
+        release_sleep.set()
+        await locked
+        await same_domain_waiter
+        await newcomer
+        assert set(limiter._locks) == {"new.example"}
+
 
 # ---------------------------------------------------------------------------
 # RedisDomainRateLimiter

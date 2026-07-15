@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
@@ -54,6 +55,40 @@ def _decode_body(body: bytes, encoding: str) -> str:
         return body.decode("utf-8", errors="replace")
 
 
+def _apply_cookie_jar(
+    cookie_jar: httpx.Cookies,
+    logical_url: str,
+    headers: dict[str, str],
+) -> httpx.Request:
+    """Apply RFC cookie matching against the logical URL, not a pinned IP."""
+
+    logical_request = httpx.Request("GET", logical_url)
+    if "cookie" not in {name.lower() for name in headers}:
+        strict_jar = CookieJar(
+            policy=DefaultCookiePolicy(
+                strict_ns_domain=DefaultCookiePolicy.DomainStrict,
+            )
+        )
+        for cookie in cookie_jar.jar:
+            strict_jar.set_cookie(cookie)
+        httpx.Cookies(strict_jar).set_cookie_header(logical_request)
+        cookie_header = logical_request.headers.get("cookie")
+        if cookie_header is not None:
+            headers["Cookie"] = cookie_header
+    return logical_request
+
+
+def _response_cookie_metadata(cookies: httpx.Cookies) -> dict[str, str]:
+    """Return non-throwing Scrapling metadata for a possibly duplicate jar.
+
+    Cookie routing retains the full domain/path-aware jar.  Scrapling's
+    name-only metadata mapping uses the last value in jar order when response
+    cookies repeat a name at different paths or domains.
+    """
+
+    return {cookie.name: cookie.value for cookie in cookies.jar}
+
+
 async def fetch_streaming_response(
     fetcher_cls: Any,
     url: str,
@@ -74,6 +109,15 @@ async def fetch_streaming_response(
         raise ValueError("Custom parser config must be a mapping")
     extensions = kwargs.pop("extensions", None)
     headers = _request_headers(url, kwargs.pop("headers", None), stealthy=stealthy)
+    cookie_jar = kwargs.pop("cookie_jar", None)
+    cookie_url = str(kwargs.pop("cookie_url", url))
+    if cookie_jar is not None and not isinstance(cookie_jar, httpx.Cookies):
+        raise TypeError("cookie_jar must be an httpx.Cookies instance")
+    logical_request = (
+        _apply_cookie_jar(cookie_jar, cookie_url, headers)
+        if cookie_jar is not None
+        else None
+    )
     parser_arguments = {
         **fetcher_cls._generate_parser_arguments(),
         **custom_config,
@@ -96,8 +140,15 @@ async def fetch_streaming_response(
                 follow_redirects=follow_redirects,
                 timeout=timeout,
                 extensions=extensions,
-                **kwargs,
-            ) as response:
+            **kwargs,
+        ) as response:
+            if cookie_jar is not None and logical_request is not None:
+                logical_response = httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    request=logical_request,
+                )
+                cookie_jar.extract_cookies(logical_response)
             if budget is not None:
                 declared = _declared_content_length(response)
                 if declared is not None:
@@ -116,7 +167,7 @@ async def fetch_streaming_response(
                 status=response.status_code,
                 reason=response.reason_phrase,
                 encoding=encoding,
-                cookies=dict(response.cookies),
+                cookies=_response_cookie_metadata(response.cookies),
                 headers=dict(response.headers),
                 request_headers=dict(response.request.headers),
                 method=response.request.method,

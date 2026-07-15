@@ -105,6 +105,12 @@ RATE_LIMIT_WAIT = Histogram(
     buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 60),
     registry=REGISTRY,
 )
+RATE_LIMIT_STATE_EVENTS = Counter(
+    "scrapeyard_rate_limit_state_events_total",
+    "Bounded rate-limit map saturation and eviction events.",
+    ("scope", "event"),
+    registry=REGISTRY,
+)
 WEBHOOK_DELIVERIES = Counter(
     "scrapeyard_webhook_attempts_total",
     "Webhook HTTP attempts by persisted outcome.",
@@ -278,6 +284,14 @@ def observe_rate_limit_wait(scope: str, seconds: float) -> None:
     RATE_LIMIT_WAIT.labels(scope if scope in {"domain", "api"} else "other").observe(
         max(0.0, seconds)
     )
+
+
+def observe_rate_limit_state(scope: str, event: str) -> None:
+    """Record bounded-cardinality rate-limit map lifecycle events."""
+
+    safe_scope = scope if scope in {"domain", "api"} else "other"
+    safe_event = event if event in {"saturated", "evicted", "expired"} else "other"
+    RATE_LIMIT_STATE_EVENTS.labels(safe_scope, safe_event).inc()
 
 
 def mark_last_success(task: str, *, observed_at: float | None = None) -> None:

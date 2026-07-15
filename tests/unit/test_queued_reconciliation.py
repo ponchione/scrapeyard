@@ -18,9 +18,14 @@ from scrapeyard.queue.reconciliation import (
     reconcile_stale_queued_jobs,
     start_queued_reconciliation_loop,
 )
+from scrapeyard.queue.terminal_reconciliation import (
+    reconcile_terminal_webhook_intents,
+)
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import StaleQueuedJob
+from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
+from scrapeyard.webhook.payload import deterministic_delivery_id
 
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
@@ -429,7 +434,50 @@ async def test_completed_arq_record_is_conditionally_failed_not_reenqueued(
 
     assert summary.failed == 1
     assert (await store.get_job("job-adhoc")).status == JobStatus.failed
+    run = await store.get_job_run("job-adhoc", "run-adhoc")
+    assert run is not None
+    assert run.status is JobStatus.failed
+    assert run.failure_code == "queued_reconciliation_failure"
     pool.enqueue.assert_not_awaited()
+
+
+async def test_queued_reconciliation_failure_repairs_failure_webhook(
+    tmp_path,
+) -> None:
+    store = await _sqlite_store(tmp_path)
+    config_yaml = CONFIG_YAML + """
+webhook:
+  url: https://hooks.example.com/failed
+  on: [failed]
+"""
+    await _save_stale_job(store, config_yaml=config_yaml)
+    pool = _mock_pool(QueueDeliveryState.complete)
+
+    summary = await reconcile_stale_queued_jobs(
+        job_store=store,
+        worker_pool=pool,
+        queued_claim_timeout_seconds=TIMEOUT,
+        now=NOW,
+    )
+    result_store = AsyncMock()
+    result_store.get_result_metadata.return_value = None
+    terminal = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=result_store,
+    )
+
+    delivery_id = deterministic_delivery_id(
+        job_id="job-adhoc",
+        run_id="run-adhoc",
+        event="job.failed",
+    )
+    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
+    count, _last_run_at = await store.get_job_run_stats("job-adhoc")
+    assert summary.failed == 1
+    assert terminal.repaired == 1
+    assert delivery is not None
+    assert delivery.event == "job.failed"
+    assert count == 1
 
 
 async def test_unreconstructable_stored_config_is_conditionally_failed(
@@ -448,6 +496,10 @@ async def test_unreconstructable_stored_config_is_conditionally_failed(
 
     assert summary.failed == 1
     assert (await store.get_job("job-adhoc")).status == JobStatus.failed
+    run = await store.get_job_run("job-adhoc", "run-adhoc")
+    assert run is not None
+    assert run.status is JobStatus.failed
+    assert run.failure_code == "queued_reconciliation_failure"
     pool.enqueue.assert_not_awaited()
 
 

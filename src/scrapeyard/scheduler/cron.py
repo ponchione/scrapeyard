@@ -82,7 +82,6 @@ class SchedulerService:
         self._result_store = result_store
         self._misfire_grace_seconds = misfire_grace_seconds
         self._scheduler = AsyncIOScheduler()
-        self._background_error: str | None = None
         self._schedule_failures: dict[str, str] = {}
 
     def register_job(
@@ -157,7 +156,6 @@ class SchedulerService:
         )
 
         self._scheduler.start()
-        self._background_error = None
         mark_last_success("scheduler")
 
     def shutdown(self) -> None:
@@ -171,14 +169,11 @@ class SchedulerService:
 
         return (
             bool(self._scheduler.running)
-            and self._background_error is None
             and not self._schedule_failures
         )
 
     @property
     def background_detail(self) -> str | None:
-        if self._background_error is not None:
-            return self._background_error
         if self._schedule_failures:
             job_id = sorted(self._schedule_failures)[0]
             return (
@@ -264,7 +259,6 @@ class SchedulerService:
             )
             return
         self._schedule_failures.pop(job_id, None)
-        self._background_error = None
         mark_last_success("scheduler")
 
     async def trigger_job_now(self, job_id: str) -> tuple[str, str]:

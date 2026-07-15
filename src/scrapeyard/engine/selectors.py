@@ -147,17 +147,6 @@ def _extract_selector_value(
     return _collapse_selector_values(texts)
 
 
-def _apply_selector_transforms(texts: list[str], transform_str: str | None) -> list[str]:
-    transforms = parse_transform_pipeline(transform_str) if transform_str else []
-    transformed: list[str] = []
-    for text in texts:
-        checked_selector_value_size(text)
-        value = apply_transforms(text, transforms)
-        checked_selector_value_size(value)
-        transformed.append(value)
-    return transformed
-
-
 def _reserve_json_structure(
     reserve_output_bytes: OutputByteReserver | None,
     amount: int,

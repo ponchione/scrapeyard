@@ -134,6 +134,30 @@ async def test_rate_limit_prunes_expired_client_buckets() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_refuses_new_bucket_at_cardinality_ceiling() -> None:
+    async def app(_scope, _receive, _send) -> None:
+        return None
+
+    clock = ManualClock()
+    middleware = RateLimitMiddleware(
+        app,
+        requests=10,
+        window_seconds=10.0,
+        clock=clock,
+        max_keys=2,
+    )
+
+    assert await middleware._record_or_reject("ip:one", clock()) is None
+    assert await middleware._record_or_reject("ip:two", clock()) is None
+    assert await middleware._record_or_reject("ip:three", clock()) == 10.0
+    assert set(middleware._requests_by_key) == {"ip:one", "ip:two"}
+
+    clock.current += 10.1
+    assert await middleware._record_or_reject("ip:three", clock()) is None
+    assert set(middleware._requests_by_key) == {"ip:three"}
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_uses_valid_api_key_before_client_ip() -> None:
     clock = ManualClock()
     app = _rate_limited_app(

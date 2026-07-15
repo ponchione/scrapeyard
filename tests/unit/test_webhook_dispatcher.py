@@ -347,6 +347,23 @@ async def _wait_until(condition) -> None:
 
 class TestSendOnce:
     @pytest.mark.asyncio
+    async def test_default_client_ignores_ambient_proxy_configuration(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+        monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
+        dispatcher = HttpWebhookDispatcher()
+
+        client = await dispatcher._acquire_client("example.com")
+        try:
+            assert client.trust_env is False
+        finally:
+            await dispatcher._release_client("example.com", client)
+            await dispatcher.shutdown(timeout=1)
+
+    @pytest.mark.asyncio
     async def test_send_once_blocks_non_public_persisted_urls(self) -> None:
         client = AsyncMock()
         client.send = AsyncMock(return_value=_ok_response(200))
@@ -1634,11 +1651,16 @@ class TestBoundedCoordinator:
             delivery_id="stubborn-shutdown",
             created_at=datetime.now(timezone.utc),
         )
+        cached_client = AsyncMock()
         dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: cached_client,
             outbox_store=outbox,
             dispatch_concurrency=1,
             dispatch_batch_size=1,
+            client_cache_idle_ttl_seconds=3600,
         )
+        leased_client = await dispatcher._acquire_client("hooks.example.com")
+        await dispatcher._release_client("hooks.example.com", leased_client)
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -1663,6 +1685,9 @@ class TestBoundedCoordinator:
         assert dispatcher._worker_tasks == [worker]
         assert worker in dispatcher._tasks
         assert dispatcher.pending_tasks == 1
+        assert dispatcher.shutdown_pending is True
+        assert dispatcher.client_cache_size == 1
+        cached_client.aclose.assert_not_awaited()
         with pytest.raises(RuntimeError, match="previous shutdown"):
             await dispatcher.startup()
 
@@ -1672,6 +1697,43 @@ class TestBoundedCoordinator:
 
         await dispatcher.startup()
         await dispatcher.shutdown(timeout=1)
+        cached_client.aclose.assert_awaited_once_with()
+        assert dispatcher.shutdown_pending is False
+
+    @pytest.mark.asyncio
+    async def test_shutdown_tracks_cancellation_resistant_http_client_close(self) -> None:
+        release = asyncio.Event()
+        close_started = asyncio.Event()
+
+        async def resistant_close() -> None:
+            close_started.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+        client = AsyncMock()
+        client.aclose.side_effect = resistant_close
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            client_cache_idle_ttl_seconds=3600,
+        )
+        leased_client = await dispatcher._acquire_client("hooks.example.com")
+        await dispatcher._release_client("hooks.example.com", leased_client)
+
+        with pytest.raises(asyncio.TimeoutError, match="http_client"):
+            await dispatcher.shutdown(timeout=0.005)
+
+        assert close_started.is_set()
+        assert dispatcher.shutdown_pending is True
+        assert dispatcher._client_close_task is not None
+        assert not dispatcher._client_close_task.done()
+
+        release.set()
+        await _wait_until(dispatcher._client_close_task.done)
+        await dispatcher.shutdown(timeout=1)
+        assert dispatcher.shutdown_pending is False
 
     @pytest.mark.asyncio
     async def test_coordinator_store_failure_recovers(self, caplog) -> None:

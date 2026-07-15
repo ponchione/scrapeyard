@@ -30,6 +30,7 @@ REQUIRED_TABLES = {
     "jobs.db": {
         "jobs",
         "job_runs",
+        "queued_run_snapshots",
         "scrape_idempotency",
         "webhook_deliveries",
         "schema_migrations",
@@ -51,6 +52,7 @@ REQUIRED_MIGRATION_FILES = {
         "016_add_webhook_decode_failure_reason.sql",
         "017_add_history_retention_summary.sql",
         "018_add_run_snapshots_and_schedule_health.sql",
+        "019_create_queued_run_snapshots.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (
@@ -101,6 +103,14 @@ REQUIRED_COLUMNS = {
             "config_yaml",
             "failure_code",
             "webhook_reconciliation_failed_at",
+        },
+        "queued_run_snapshots": {
+            "run_id",
+            "job_id",
+            "trigger",
+            "config_hash",
+            "config_yaml",
+            "queued_at",
         },
         "scrape_idempotency": {
             "caller_scope",
@@ -183,6 +193,7 @@ REQUIRED_INDEXES = {
         "idx_job_runs_scheduled_history_retention",
         "idx_jobs_schedule_failures",
         "idx_job_runs_terminal_reconciliation_retry",
+        "idx_queued_run_snapshots_job_id",
     },
     "errors.db": {
         "idx_errors_project",

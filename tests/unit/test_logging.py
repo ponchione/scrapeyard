@@ -1,9 +1,12 @@
 """Tests for scrapeyard.common.logging — JSON formatter correctness."""
 
 import json
+import io
 import logging
 
-from scrapeyard.common.logging import _JsonFormatter
+from scrapling.engines.toolbelt.custom import Response
+
+from scrapeyard.common.logging import _JsonFormatter, setup_logging
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
     reset_deployment_secret_redaction,
@@ -106,3 +109,58 @@ def test_formatter_redacts_run_scoped_secret_from_exception_traceback():
         assert "ValueError: <redacted>" in parsed["message"]
     finally:
         reset_deployment_secret_redaction(token)
+
+
+def test_setup_logging_removes_scrapling_plaintext_handler_and_redacts_once(
+    tmp_path,
+    capsys,
+):
+    root = logging.getLogger()
+    scrapling_logger = logging.getLogger("scrapling")
+    original_root_handlers = list(root.handlers)
+    original_scrapling_handlers = list(scrapling_logger.handlers)
+    original_propagate = scrapling_logger.propagate
+    original_initialized = getattr(root, "_scrapeyard_logging_initialized", None)
+    plaintext = io.StringIO()
+    try:
+        root.handlers.clear()
+        if hasattr(root, "_scrapeyard_logging_initialized"):
+            delattr(root, "_scrapeyard_logging_initialized")
+        dependency_handler = logging.StreamHandler(plaintext)
+        scrapling_logger.handlers[:] = [dependency_handler]
+        scrapling_logger.propagate = True
+
+        setup_logging(str(tmp_path))
+        Response(
+            url="https://user:url-secret@example.com/?token=query-secret",
+            text="<html></html>",
+            body=b"<html></html>",
+            status=200,
+            reason="OK",
+            cookies={},
+            headers={},
+            request_headers={
+                "referer": "https://ref:referrer-secret@example.net/path"
+            },
+        )
+
+        stderr = capsys.readouterr().err
+        file_log = (tmp_path / "scrapeyard.log").read_text()
+        combined = stderr + file_log
+        assert "url-secret" not in combined
+        assert "query-secret" not in combined
+        assert "referrer-secret" not in combined
+        assert len(stderr.splitlines()) == 1
+        assert len(file_log.splitlines()) == 1
+        assert plaintext.getvalue() == ""
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers[:] = original_root_handlers
+        scrapling_logger.handlers[:] = original_scrapling_handlers
+        scrapling_logger.propagate = original_propagate
+        if original_initialized is None:
+            if hasattr(root, "_scrapeyard_logging_initialized"):
+                delattr(root, "_scrapeyard_logging_initialized")
+        else:
+            root._scrapeyard_logging_initialized = original_initialized

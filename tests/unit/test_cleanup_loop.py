@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.storage.cleanup import start_cleanup_loop
+from scrapeyard.runtime.background import BackgroundLoopMonitor
+from scrapeyard.runtime.health import probe_background_service
 
 
 @pytest.mark.asyncio
@@ -165,3 +167,94 @@ async def test_cleanup_loop_wires_durable_history_policy(monkeypatch):
     assert policy.adhoc_job_batch_size == 36
     assert policy.scheduled_run_batch_size == 37
     assert policy.error_batch_size == 38
+
+
+@pytest.mark.asyncio
+async def test_cleanup_monitor_allows_one_failure_then_records_recovery(
+    monkeypatch,
+) -> None:
+    clock = [0.0]
+    monitor = BackgroundLoopMonitor(
+        "cleanup",
+        interval_seconds=1,
+        clock=lambda: clock[0],
+    )
+    recovered = asyncio.Event()
+    calls = 0
+
+    async def fake_run_cleanup(**_kwargs):
+        nonlocal calls
+        calls += 1
+        clock[0] += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        if calls == 2:
+            recovered.set()
+            return
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("scrapeyard.storage.cleanup.run_cleanup", fake_run_cleanup)
+    task = start_cleanup_loop(
+        MagicMock(),
+        interval_hours=0,
+        monitor=monitor,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert recovered.is_set()
+    assert monitor.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_monitor_exposes_repeated_incomplete_passes(
+    monkeypatch,
+) -> None:
+    clock = [0.0]
+    monitor = BackgroundLoopMonitor(
+        "cleanup",
+        interval_seconds=1,
+        clock=lambda: clock[0],
+    )
+    failed_twice = asyncio.Event()
+    calls = 0
+
+    async def fake_run_cleanup(**_kwargs):
+        nonlocal calls
+        calls += 1
+        clock[0] += 1
+        if calls == 2:
+            failed_twice.set()
+        raise RuntimeError("cleanup phases failed")
+
+    monkeypatch.setattr("scrapeyard.storage.cleanup.run_cleanup", fake_run_cleanup)
+    task = start_cleanup_loop(
+        MagicMock(),
+        interval_hours=0,
+        monitor=monitor,
+    )
+    try:
+        await asyncio.wait_for(failed_twice.wait(), timeout=1)
+        await asyncio.sleep(0)
+        probe = probe_background_service("cleanup", monitor)
+        assert probe.ok is False
+        assert "consecutive_failures=" in (probe.detail or "")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_monitor_reports_stopped_task(monkeypatch) -> None:
+    monitor = BackgroundLoopMonitor("cleanup", interval_seconds=1)
+
+    async def stop_after_pass(**_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("scrapeyard.storage.cleanup.run_cleanup", stop_after_pass)
+    task = start_cleanup_loop(MagicMock(), interval_hours=0, monitor=monitor)
+    await asyncio.gather(task, return_exceptions=True)
+
+    probe = probe_background_service("cleanup", monitor)
+    assert probe.ok is False
+    assert probe.detail == "cleanup task stopped"

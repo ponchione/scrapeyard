@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import socket
 from collections.abc import Callable
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
-from scrapeyard.common.budgets import RunBudget
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.engine.browser_debug import (
     BrowserPageActionError,
     capture_browser_state,
@@ -19,6 +20,7 @@ from scrapeyard.engine.browser_debug import (
     run_browser_actions,
 )
 from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 
 
 def _debug_budget(max_bytes: int) -> RunBudget:
@@ -54,16 +56,27 @@ class FakeRequest:
 
 
 class FakeRoute:
-    def __init__(self, url: str, resource_type: str):
-        self.request = SimpleNamespace(url=url, resource_type=resource_type)
+    def __init__(
+        self,
+        url: str,
+        resource_type: str,
+        headers: dict[str, str] | None = None,
+    ):
+        self.request = SimpleNamespace(
+            url=url,
+            resource_type=resource_type,
+            headers=headers or {},
+        )
         self.aborted = False
         self.continued = False
+        self.continued_headers: dict[str, str] | None = None
 
     async def abort(self):
         self.aborted = True
 
-    async def continue_(self):
+    async def continue_(self, **kwargs):
         self.continued = True
+        self.continued_headers = kwargs.get("headers")
 
 
 @pytest.mark.asyncio
@@ -431,6 +444,67 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_url", "expect_credentials"),
+    [
+        ("https://example.com/redirected", True),
+        ("https://example.com:443/redirected", True),
+        ("https://sub.example.com/resource", False),
+        ("https://attacker.example/resource", False),
+        ("http://example.com/downgrade", False),
+    ],
+)
+async def test_browser_extra_headers_are_scoped_to_exact_target_origin(
+    request_url: str,
+    expect_credentials: bool,
+) -> None:
+    target = TargetConfig(
+        url="https://example.com/start",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={
+            "disable_resources": False,
+            "extra_headers": {
+                "Authorization": "Bearer target-secret",
+                "X-API-Key": "api-secret",
+                "X-Shared": "deployment-secret",
+            },
+        },
+    )
+    route = FakeRoute(
+        request_url,
+        "document",
+        headers={
+            "Accept": "text/html",
+            "Authorization": "Bearer target-secret",
+            "X-API-Key": "api-secret",
+            "X-Shared": "deployment-secret",
+        },
+    )
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **_kwargs):
+            await scrapling_pw_engine.async_intercept_route(route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    assert route.continued is True
+    if expect_credentials:
+        assert route.continued_headers is None
+    else:
+        assert route.continued_headers == {"Accept": "text/html"}
+
+
+@pytest.mark.asyncio
 async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() -> None:
     target = TargetConfig(
         url="https://example.com",
@@ -710,3 +784,132 @@ async def test_browser_screenshot_exact_boundary_is_written_atomically(tmp_path)
     assert screenshot_path.read_bytes() == b"1234"
     assert list(screenshot_path.parent.glob(".*.tmp")) == []
     assert budget.browser_debug_bytes == 4
+
+
+@pytest.mark.asyncio
+async def test_browser_budget_retains_limiter_until_cancellation_acknowledged() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    budget = RunBudget(
+        max_duration_seconds=0.01,
+        max_fetched_bytes=1000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1024,
+    )
+    limiter = BrowserExecutionLimiter(1)
+    cancellation_seen = asyncio.Event()
+    release_fetch = asyncio.Event()
+    second_acquired = asyncio.Event()
+
+    class CancellationResistantFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release_fetch.wait()
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    async def first_browser() -> None:
+        async with limiter.slot():
+            await fetch_browser_response(
+                CancellationResistantFetcher,
+                target.url,
+                target,
+                FetcherType.dynamic,
+                {},
+                artifacts_dir=None,
+                budget=budget,
+            )
+
+    async def second_browser() -> None:
+        async with limiter.slot():
+            second_acquired.set()
+
+    first = asyncio.create_task(first_browser())
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+    second = asyncio.create_task(second_browser())
+    await asyncio.sleep(0)
+    assert limiter.active == 1
+    assert first.done() is False
+    assert second_acquired.is_set() is False
+
+    release_fetch.set()
+    with pytest.raises(BudgetExceeded) as exc_info:
+        await first
+    await second
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
+    assert second_acquired.is_set()
+    assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_limiter_survives_repeated_outer_cancellation() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    budget = RunBudget(
+        max_duration_seconds=10,
+        max_fetched_bytes=1000,
+        max_extracted_records=100,
+        max_serialized_result_bytes=4096,
+        max_browser_debug_bytes=1024,
+    )
+    limiter = BrowserExecutionLimiter(1)
+    fetch_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_fetch = asyncio.Event()
+    second_acquired = asyncio.Event()
+
+    class CancellationResistantFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **_kwargs):
+            fetch_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release_fetch.wait()
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    async def first_browser() -> None:
+        async with limiter.slot():
+            await fetch_browser_response(
+                CancellationResistantFetcher,
+                target.url,
+                target,
+                FetcherType.dynamic,
+                {},
+                artifacts_dir=None,
+                budget=budget,
+            )
+
+    async def second_browser() -> None:
+        async with limiter.slot():
+            second_acquired.set()
+
+    first = asyncio.create_task(first_browser())
+    await fetch_started.wait()
+    first.cancel()
+    await cancellation_seen.wait()
+    first.cancel()
+    second = asyncio.create_task(second_browser())
+    await asyncio.sleep(0)
+
+    assert not first.done()
+    assert not second_acquired.is_set()
+    assert limiter.active == 1
+
+    release_fetch.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+    assert limiter.active == 0

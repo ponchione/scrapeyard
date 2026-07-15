@@ -395,11 +395,18 @@ def test_proxy_url_defaults_to_empty(monkeypatch):
 
 
 def test_proxy_url_from_env(monkeypatch):
-    monkeypatch.setenv("SCRAPEYARD_PROXY_URL", " http://gate.example.com:7777 ")
+    monkeypatch.setenv("SCRAPEYARD_PROXY_URL", " http://93.184.216.34:7777 ")
     from scrapeyard.common.settings import ServiceSettings
 
     settings = ServiceSettings()
-    assert settings.proxy_url == "http://gate.example.com:7777"
+    assert settings.proxy_url == "http://93.184.216.34:7777"
+
+
+def test_proxy_url_from_env_rejects_private_runtime_endpoint(monkeypatch):
+    monkeypatch.setenv("SCRAPEYARD_PROXY_URL", "http://127.0.0.1:8080")
+
+    with pytest.raises(ValidationError, match="non-public"):
+        ServiceSettings()
 
 
 def test_proxy_url_from_env_rejects_invalid_url(monkeypatch):

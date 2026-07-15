@@ -145,6 +145,32 @@ async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
     assert restored_delivery.payload["secret"] == PAYLOAD_SECRET
 
 
+async def test_accepted_queue_snapshot_is_encrypted_and_loaded_by_run_identity(
+    tmp_path,
+):
+    await init_db(str(tmp_path / "db"))
+    jobs = SQLiteJobStore()
+    job = _job().model_copy(
+        update={"current_run_id": "run-queued", "updated_at": NOW}
+    )
+
+    await jobs.save_job(job)
+
+    async with get_db("jobs.db") as db:
+        row = await (
+            await db.execute(
+                "SELECT job_id, config_hash, config_yaml FROM queued_run_snapshots "
+                "WHERE run_id = 'run-queued'"
+            )
+        ).fetchone()
+    assert row[0] == job.job_id
+    assert row[1] == hashlib.sha256(job.config_yaml.encode()).hexdigest()
+    assert row[2].startswith("syenc:v1:test-v1:")
+    for sentinel in (CONFIG_SECRET, HEADER_SECRET, URL_SECRET):
+        assert sentinel not in row[2]
+    assert await jobs.get_queued_run_config(job.job_id, "run-queued") == job.config_yaml
+
+
 async def test_retry_error_is_encrypted_at_rest_and_decrypts_for_dispatch(tmp_path):
     await init_db(str(tmp_path / "db"))
     outbox = SQLiteWebhookOutboxStore()
