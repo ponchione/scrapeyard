@@ -5,13 +5,20 @@ from __future__ import annotations
 import asyncio
 import gzip
 from contextlib import suppress
+from unittest.mock import AsyncMock, call, patch
 
-import pytest
+import httpcore
 import httpx
+import pytest
 from scrapling import Fetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
-from scrapeyard.engine.basic_fetch import fetch_streaming_response
+from scrapeyard.config.schema import RetryConfig, TargetConfig
+from scrapeyard.engine.basic_fetch import _response_cookie_metadata, fetch_streaming_response
+from scrapeyard.engine.scraper import scrape_target
+from scrapeyard.engine.url_guard import ResolvedPublicURL
+from scrapeyard.models.job import ErrorType
+from scrapeyard.runtime.metrics import REGISTRY
 
 
 def _budget(*, fetched_bytes: int = 1024, duration: float = 5) -> RunBudget:
@@ -32,6 +39,138 @@ async def _request_url(handler) -> tuple[asyncio.AbstractServer, str]:
 
 async def _read_request(reader: asyncio.StreamReader) -> None:
     await reader.readuntil(b"\r\n\r\n")
+
+
+def _retry_metric(outcome: str) -> float:
+    return REGISTRY.get_sample_value(
+        "scrapeyard_retries_total",
+        {"subsystem": "scrape", "outcome": outcome},
+    ) or 0.0
+
+
+def test_valueless_response_cookie_is_normalized_in_metadata() -> None:
+    response = httpx.Response(
+        200,
+        headers={"Set-Cookie": "flag"},
+        request=httpx.Request("GET", "https://example.test/"),
+    )
+
+    assert [(cookie.name, cookie.value) for cookie in response.cookies.jar] == [("flag", None)]
+    assert _response_cookie_metadata(response.cookies) == {"flag": ""}
+
+
+@pytest.mark.parametrize("proxy_url", [None, "http://proxy.example:8080"])
+async def test_one_configured_attempt_makes_one_physical_connection(
+    monkeypatch,
+    tmp_path,
+    proxy_url,
+) -> None:
+    attempts = 0
+
+    async def fail_connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise httpcore.ConnectError("synthetic connection failure")
+
+    target = TargetConfig.model_validate(
+        {"url": "http://example.test/products", "selectors": {"title": "h1"}}
+    )
+    limiter = AsyncMock()
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda _url: ResolvedPublicURL(
+            "http://93.184.216.34/products",
+            "example.test",
+            "example.test",
+        ),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper._assert_connection_endpoint",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    scheduled_before = _retry_metric("scheduled")
+    exhausted_before = _retry_metric("exhausted")
+
+    with patch("httpcore._backends.auto.AutoBackend.connect_tcp", new=fail_connect):
+        result = await scrape_target(
+            target,
+            adaptive=False,
+            retry=RetryConfig(max_attempts=1),
+            adaptive_dir=str(tmp_path),
+            proxy_url=proxy_url,
+            rate_limiter=limiter,
+            domain_rate_limit=7,
+        )
+
+    assert attempts == 1
+    assert result.error_type is ErrorType.network_error
+    limiter.acquire.assert_awaited_once_with("example.test", 7)
+    assert _retry_metric("scheduled") - scheduled_before == 0
+    assert _retry_metric("exhausted") - exhausted_before == 1
+
+
+@pytest.mark.parametrize("proxy_url", [None, "http://proxy.example:8080"])
+async def test_connection_retries_reenter_full_service_policy(
+    monkeypatch,
+    tmp_path,
+    proxy_url,
+) -> None:
+    attempts = 0
+
+    async def fail_connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise httpcore.ConnectError("synthetic connection failure")
+
+    target = TargetConfig.model_validate(
+        {"url": "http://example.test/products", "selectors": {"title": "h1"}}
+    )
+    limiter = AsyncMock()
+    cancellation_guard = AsyncMock()
+    budget = _budget(duration=30)
+    budget.sleep = AsyncMock()
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda _url: ResolvedPublicURL(
+            "http://93.184.216.34/products",
+            "example.test",
+            "example.test",
+        ),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper._assert_connection_endpoint",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    scheduled_before = _retry_metric("scheduled")
+    exhausted_before = _retry_metric("exhausted")
+
+    with patch("httpcore._backends.auto.AutoBackend.connect_tcp", new=fail_connect):
+        result = await scrape_target(
+            target,
+            adaptive=False,
+            retry=RetryConfig(max_attempts=3, backoff="exponential"),
+            adaptive_dir=str(tmp_path),
+            proxy_url=proxy_url,
+            budget=budget,
+            cancellation_guard=cancellation_guard,
+            rate_limiter=limiter,
+            domain_rate_limit=7,
+        )
+
+    assert attempts == 3
+    assert result.error_type is ErrorType.network_error
+    assert limiter.acquire.await_args_list == [call("example.test", 7)] * 3
+    assert budget.sleep.await_args_list == [call(1.0), call(2.0)]
+    checkpoint_names = [item.args[0] for item in cancellation_guard.await_args_list]
+    assert checkpoint_names.count("before_retry_attempt") == 3
+    assert checkpoint_names.count("before_rate_limit_wait") == 3
+    assert checkpoint_names.count("after_rate_limit_wait") == 3
+    assert checkpoint_names.count("before_retry_backoff") == 2
+    assert checkpoint_names.count("after_retry_backoff") == 2
+    assert _retry_metric("scheduled") - scheduled_before == 2
+    assert _retry_metric("exhausted") - exhausted_before == 1
 
 
 async def test_chunked_body_stops_at_live_byte_ceiling() -> None:

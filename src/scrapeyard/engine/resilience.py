@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, TypeVar
 
+import httpx
+
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import BackoffStrategy, OnEmptyAction, RetryConfig, ValidationConfig
 from scrapeyard.queue.cancellation import (
@@ -62,7 +64,7 @@ class RetryHandler:
         return min(delay, self._backoff_max)
 
     async def execute(self, fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
-        """Call *fn* with retries on :class:`RetryableError`."""
+        """Call *fn* with retries on configured HTTP and transport failures."""
         last_exc: Exception | None = None
         for attempt in range(self._max_attempts):
             await cancellation_checkpoint(
@@ -76,7 +78,12 @@ class RetryHandler:
                     "after_retry_attempt",
                 )
                 return result
-            except (RetryableError, URLResolutionError) as exc:
+            except (
+                RetryableError,
+                URLResolutionError,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as exc:
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
                     RETRIES.labels("scrape", "scheduled").inc()
