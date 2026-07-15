@@ -7,8 +7,10 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict
@@ -63,6 +65,21 @@ class BackgroundTask(Protocol):
 class ProbeResult:
     ok: bool
     detail: str | None = None
+
+
+class SingleFlightSyncProbe:
+    """Admit at most one underlying synchronous probe until it really exits."""
+
+    def __init__(self, executor: Executor) -> None:
+        self._executor = executor
+        self._future: Future[ProbeResult] | None = None
+        self._lock = threading.Lock()
+
+    def submit(self, function: Callable[[], ProbeResult]) -> Future[ProbeResult]:
+        with self._lock:
+            if self._future is None or self._future.done():
+                self._future = self._executor.submit(function)
+            return self._future
 
 
 async def probe_redis(pool: RedisHealthPool) -> ProbeResult:
