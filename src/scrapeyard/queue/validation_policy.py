@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.paths import safe_path_part
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import ResultValidator, ValidationResult
@@ -34,10 +34,12 @@ async def _validate_result(
     data: list[dict[str, object]],
     budget: RunBudget | None,
 ) -> ValidationResult:
-    work = asyncio.to_thread(validator.validate, data, budget=budget)
-    if budget is None:
-        return await work
-    return await budget.wait_for(work)
+    return await run_thread_work(
+        validator.validate,
+        data,
+        run_budget=budget,
+        budget=budget,
+    )
 
 
 async def apply_validation(

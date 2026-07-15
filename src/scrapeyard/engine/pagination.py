@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from scrapeyard.common.budgets import RunBudget
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.scrape_models import FetchOutcome, TargetResult
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
@@ -33,10 +33,7 @@ async def _run_cpu_work(
     budget: RunBudget | None,
     **kwargs: Any,
 ) -> Any:
-    work = asyncio.to_thread(function, *args, **kwargs)
-    if budget is None:
-        return await work
-    return await budget.wait_for(work)
+    return await run_thread_work(function, *args, run_budget=budget, **kwargs)
 
 
 def resolve_href(element: object, base_url: str) -> str | None:
@@ -78,11 +75,12 @@ async def _pagination_url_is_safe(
     if budget is not None:
         budget.check_deadline()
     try:
-        lookup = asyncio.to_thread(assert_public_url, url, allow_unresolved=False)
-        if budget is None:
-            await lookup
-        else:
-            await budget.wait_for(lookup)
+        await run_thread_work(
+            assert_public_url,
+            url,
+            run_budget=budget,
+            allow_unresolved=False,
+        )
     except UnsafeURLError:
         return False
     except URLResolutionError:

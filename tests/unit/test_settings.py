@@ -323,6 +323,15 @@ class TestServiceSettingsFromEnv:
 
         assert settings.storage_cleanup_batch_size == 37
 
+    def test_reads_run_thread_worker_capacity(self):
+        with patch.dict(
+            os.environ,
+            {"SCRAPEYARD_RUN_THREAD_MAX_WORKERS": "7"},
+        ):
+            settings = ServiceSettings()
+
+        assert settings.run_thread_max_workers == 7
+
     def test_reads_history_retention_settings(self):
         values = {
             "SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS": "11",
