@@ -503,6 +503,13 @@ class BrowserActionConfig(StrictConfigModel):
         description="Optional CSS selector to wait for after click or repeat_click",
     )
 
+    @field_validator("selector", "wait_for_selector")
+    @classmethod
+    def _validate_selector(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_short_selector_query(value)
+
     @field_validator("pixels")
     @classmethod
     def _pixels_must_be_nonzero(cls, value: int) -> int:
@@ -679,6 +686,13 @@ class BrowserConfig(StrictConfigModel):
     @classmethod
     def _reject_invalid_extra_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return _validate_http_headers(value)
+
+    @field_validator("click_selector", "wait_for_selector")
+    @classmethod
+    def _validate_selector(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_short_selector_query(value)
 
     @field_validator("additional_arguments")
     @classmethod
