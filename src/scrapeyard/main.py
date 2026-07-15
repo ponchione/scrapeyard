@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -58,6 +58,7 @@ from scrapeyard.queue.terminal_reconciliation import (
 from scrapeyard.runtime.health import (
     HealthCache,
     ProbeResult,
+    ProjectSummary,
     probe_disk,
     probe_background_service,
     probe_redis,
@@ -526,6 +527,51 @@ async def _timed_sync_probe(
     return await _timed_async_probe(name, asyncio.to_thread(function), timeout)
 
 
+async def _project_summary_readiness_probe(
+    *,
+    enabled: bool,
+    timeout: float,
+) -> tuple[ProjectSummary, ProbeResult]:
+    if not enabled:
+        return {}, ProbeResult(True)
+    try:
+        return await _health.project_summary(timeout=timeout), ProbeResult(True)
+    except asyncio.TimeoutError:
+        return (
+            _health.cached_project_summary,
+            ProbeResult(False, f"project summary probe timed out after {timeout:g}s"),
+        )
+    except Exception as exc:
+        return (
+            _health.cached_project_summary,
+            ProbeResult(False, f"project summary probe failed: {type(exc).__name__}"),
+        )
+
+
+async def _queue_depth_readiness_probe(
+    pool: Any,
+    timeout: float,
+) -> tuple[dict[str, int | None], ProbeResult]:
+    unavailable: dict[str, int | None] = {
+        "high": None,
+        "normal": None,
+        "low": None,
+    }
+    try:
+        depths = cast(
+            dict[str, int | None],
+            await asyncio.wait_for(pool.queue_depths(), timeout=timeout),
+        )
+    except asyncio.TimeoutError:
+        return (
+            unavailable,
+            ProbeResult(False, f"redis queue depth probe timed out after {timeout:g}s"),
+        )
+    except Exception as exc:
+        return unavailable, ProbeResult(False, f"redis queue depth probe failed: {exc}")
+    return depths, ProbeResult(True)
+
+
 def _background_probes() -> dict[str, ProbeResult]:
     return {
         "worker": probe_background_service(
@@ -566,67 +612,65 @@ async def health(
 
     uptime = _health.uptime
     timeout = settings.health_probe_timeout_seconds
-    project_summary_probe = ProbeResult(True)
-    projects = {}
-    if settings.health_include_projects:
-        try:
-            projects = await _health.project_summary(timeout=timeout)
-        except asyncio.TimeoutError:
-            projects = _health.cached_project_summary
-            project_summary_probe = ProbeResult(
-                False,
-                f"project summary probe timed out after {timeout:g}s",
-            )
-        except Exception as exc:
-            projects = _health.cached_project_summary
-            project_summary_probe = ProbeResult(
-                False,
-                f"project summary probe failed: {type(exc).__name__}",
-            )
+    sqlite_names = ("jobs.db", "errors.db", "results_meta.db")
+    project_summary_task = asyncio.create_task(
+        _project_summary_readiness_probe(
+            enabled=settings.health_include_projects,
+            timeout=timeout,
+        )
+    )
+    redis_task = asyncio.create_task(
+        _timed_async_probe("redis", probe_redis(pool), timeout)
+    )
+    queue_depth_task = asyncio.create_task(_queue_depth_readiness_probe(pool, timeout))
+    sqlite_tasks = [
+        asyncio.create_task(_timed_async_probe(name, probe_sqlite(name), timeout))
+        for name in sqlite_names
+    ]
+    artifact_task = asyncio.create_task(
+        _timed_sync_probe(
+            "result storage",
+            lambda: probe_result_storage(settings.storage_results_dir),
+            timeout,
+        )
+    )
+    disk_task = asyncio.create_task(
+        _timed_sync_probe(
+            "disk",
+            lambda: probe_disk(
+                settings.storage_results_dir,
+                settings.health_disk_free_min_mb,
+            ),
+            timeout,
+        )
+    )
+    await asyncio.gather(
+        project_summary_task,
+        redis_task,
+        queue_depth_task,
+        *sqlite_tasks,
+        artifact_task,
+        disk_task,
+    )
+
+    projects, project_summary_probe = project_summary_task.result()
+    redis_probe = redis_task.result()
+    queue_depths, queue_depth_probe = queue_depth_task.result()
+    if not queue_depth_probe.ok:
+        redis_probe = queue_depth_probe
+    sqlite_results = [task.result() for task in sqlite_tasks]
+    sqlite_probe = ProbeResult(
+        all(result.ok for result in sqlite_results),
+        next((result.detail for result in sqlite_results if not result.ok), None),
+    )
+    artifact_probe = artifact_task.result()
+    disk_probe = disk_task.result()
     if allowed_projects is not None:
         projects = {
             project: summary
             for project, summary in projects.items()
             if project in allowed_projects
         }
-
-    redis_probe = await _timed_async_probe("redis", probe_redis(pool), timeout)
-    queue_depths: dict[str, int | None]
-    try:
-        queue_depths = cast(
-            dict[str, int | None],
-            await asyncio.wait_for(pool.queue_depths(), timeout=timeout),
-        )
-    except Exception as exc:
-        queue_depths = {"high": None, "normal": None, "low": None}
-        redis_probe = ProbeResult(
-            False,
-            f"redis queue depth probe failed: {exc}",
-        )
-    sqlite_names = ("jobs.db", "errors.db", "results_meta.db")
-    sqlite_results = await asyncio.gather(
-        *(
-            _timed_async_probe(name, probe_sqlite(name), timeout)
-            for name in sqlite_names
-        )
-    )
-    sqlite_probe = ProbeResult(
-        all(result.ok for result in sqlite_results),
-        next((result.detail for result in sqlite_results if not result.ok), None),
-    )
-    artifact_probe = await _timed_sync_probe(
-        "result storage",
-        lambda: probe_result_storage(settings.storage_results_dir),
-        timeout,
-    )
-    disk_probe = await _timed_sync_probe(
-        "disk",
-        lambda: probe_disk(
-            settings.storage_results_dir,
-            settings.health_disk_free_min_mb,
-        ),
-        timeout,
-    )
     background_probes = _background_probes()
 
     dependencies = {
