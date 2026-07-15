@@ -68,6 +68,13 @@ capacity returns a degraded `200`;
 insufficient free disk or any other failed required dependency/background task
 returns `503`. Liveness never performs these operations.
 
+The two synchronous result-filesystem probes are single-flight and run in a
+dedicated two-thread executor. A timed-out probe continues to occupy only its
+own one-probe slot, is logged as still running, and is reused by concurrent or
+later readiness requests until the underlying filesystem call actually exits.
+Monitoring polls therefore cannot queue unbounded abandoned work or starve the
+default executor used by request and worker operations.
+
 Tune the bounded probes with:
 
 - `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` (default `2`)

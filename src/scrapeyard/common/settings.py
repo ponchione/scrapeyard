@@ -132,7 +132,13 @@ class ServiceSettings(BaseSettings):
     qualification_crash_point: str = ""
     qualification_marker_dir: str = "/run/scrapeyard-qualification"
 
-    model_config = {"env_prefix": "SCRAPEYARD_"}
+    model_config = {
+        "env_prefix": "SCRAPEYARD_",
+        # Service delays and limits are resource-safety boundaries. Pydantic's
+        # numeric comparisons otherwise accept positive infinity for fields
+        # constrained only with ``gt=0``.
+        "allow_inf_nan": False,
+    }
 
     @field_validator("proxy_url")
     @classmethod

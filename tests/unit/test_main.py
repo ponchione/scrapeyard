@@ -1040,6 +1040,7 @@ async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monke
 
     timeout = 0.03
     cancelled_async_probes = 0
+    started_sync_probes = 0
 
     async def stalled_async_probe(*_args, **_kwargs):
         nonlocal cancelled_async_probes
@@ -1049,6 +1050,8 @@ async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monke
             cancelled_async_probes += 1
 
     def slow_sync_probe(*_args, **_kwargs):
+        nonlocal started_sync_probes
+        started_sync_probes += 1
         time.sleep(0.2)
         return ProbeResult(True)
 
@@ -1078,13 +1081,14 @@ async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monke
     )
 
     started = asyncio.get_running_loop().time()
-    response = await main_module.health()
+    responses = await asyncio.gather(*(main_module.health() for _ in range(3)))
     elapsed = asyncio.get_running_loop().time() - started
 
-    assert response.status_code == 503
+    assert all(response.status_code == 503 for response in responses)
     assert elapsed < 0.1
-    assert cancelled_async_probes == 5
-    dependencies = json.loads(response.body)["dependencies"]
+    assert cancelled_async_probes == 15
+    assert started_sync_probes == 2
+    dependencies = json.loads(responses[0].body)["dependencies"]
     assert dependencies["redis"]["detail"] == (
         "redis queue depth probe timed out after 0.03s"
     )

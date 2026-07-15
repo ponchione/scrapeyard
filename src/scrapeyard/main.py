@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -61,6 +62,7 @@ from scrapeyard.runtime.health import (
     HealthCache,
     ProbeResult,
     ProjectSummary,
+    SingleFlightSyncProbe,
     probe_disk,
     probe_background_service,
     probe_redis,
@@ -102,6 +104,12 @@ _health = HealthCache(get_job_store)
 logger = logging.getLogger(__name__)
 _metrics_refresh_lock = asyncio.Lock()
 _metrics_refreshed_at = 0.0
+_readiness_probe_executor = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="scrapeyard-readiness",
+)
+_result_storage_probe = SingleFlightSyncProbe(_readiness_probe_executor)
+_disk_probe = SingleFlightSyncProbe(_readiness_probe_executor)
 
 
 async def _recover_stale_running_jobs() -> None:
@@ -537,8 +545,23 @@ async def _timed_sync_probe(
     name: str,
     function: Callable[[], ProbeResult],
     timeout: float,
+    single_flight: SingleFlightSyncProbe,
 ) -> ProbeResult:
-    return await _timed_async_probe(name, asyncio.to_thread(function), timeout)
+    future = single_flight.submit(function)
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(future)),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "%s readiness probe is still running after the %.3fs response timeout",
+            name,
+            timeout,
+        )
+        return ProbeResult(False, f"{name} probe timed out after {timeout:g}s")
+    except Exception as exc:
+        return ProbeResult(False, f"{name} probe failed: {type(exc).__name__}")
 
 
 async def _project_summary_readiness_probe(
@@ -646,6 +669,7 @@ async def health(
             "result storage",
             lambda: probe_result_storage(settings.storage_results_dir),
             timeout,
+            _result_storage_probe,
         )
     )
     disk_task = asyncio.create_task(
@@ -656,6 +680,7 @@ async def health(
                 settings.health_disk_free_min_mb,
             ),
             timeout,
+            _disk_probe,
         )
     )
     await asyncio.gather(

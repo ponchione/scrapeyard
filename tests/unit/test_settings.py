@@ -237,6 +237,32 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
         assert settings.basic_fetch_timeout_seconds == 12.5
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "sync_poll_delay_seconds",
+            "basic_fetch_timeout_seconds",
+            "workers_cancellation_grace_seconds",
+            "workers_redis_connect_timeout_seconds",
+            "run_max_duration_seconds",
+            "webhook_client_cache_idle_ttl_seconds",
+            "storage_cleanup_interval_seconds",
+            "storage_cleanup_cycle_max_seconds",
+            "storage_cleanup_catchup_delay_seconds",
+            "circuit_breaker_inactive_ttl_seconds",
+        ],
+    )
+    @pytest.mark.parametrize("value", ["inf", "+inf", "-inf", "nan"])
+    def test_rejects_non_finite_service_float_from_environment(
+        self,
+        field,
+        value,
+    ):
+        env_name = f"SCRAPEYARD_{field.upper()}"
+        with patch.dict(os.environ, {env_name: value}):
+            with pytest.raises(ValidationError, match="finite number"):
+                ServiceSettings()
+
     def test_reads_workers_redis_connect_timeout_seconds(self):
         with patch.dict(os.environ, {"SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS": "7.0"}):
             settings = ServiceSettings()
