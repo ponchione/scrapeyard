@@ -109,6 +109,7 @@ class ServiceSettings(BaseSettings):
     untrusted_submissions: bool = False
     egress_policy_probe_host: str = ""
     egress_policy_probe_port: int = Field(default=0, ge=0, le=65535)
+    egress_policy_probe_liveness_port: int = Field(default=0, ge=0, le=65535)
     egress_policy_probe_timeout_seconds: float = Field(default=1.0, gt=0, le=30)
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
@@ -170,11 +171,25 @@ class ServiceSettings(BaseSettings):
             if self.qualification_crash_point not in QUALIFICATION_CRASH_POINTS:
                 raise ValueError("qualification_crash_point must name a supported local checkpoint")
         probe_host = self.egress_policy_probe_host.strip()
-        probe_configured = bool(probe_host) or self.egress_policy_probe_port != 0
-        if probe_configured and (not probe_host or self.egress_policy_probe_port == 0):
+        probe_configured = (
+            bool(probe_host)
+            or self.egress_policy_probe_port != 0
+            or self.egress_policy_probe_liveness_port != 0
+        )
+        if probe_configured and (
+            not probe_host
+            or self.egress_policy_probe_port == 0
+            or self.egress_policy_probe_liveness_port == 0
+        ):
             raise ValueError(
-                "egress_policy_probe_host and egress_policy_probe_port must be configured together"
+                "egress_policy_probe_host, egress_policy_probe_port, and "
+                "egress_policy_probe_liveness_port must be configured together"
             )
+        if (
+            probe_configured
+            and self.egress_policy_probe_port == self.egress_policy_probe_liveness_port
+        ):
+            raise ValueError("egress policy challenge and liveness ports must be different")
         if probe_host:
             try:
                 probe_address = ipaddress.ip_address(probe_host)

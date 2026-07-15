@@ -117,6 +117,9 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
     assert "@sha256:" in egress_probe["image"]
     assert egress_probe["read_only"] == "true"
     assert egress_probe["cap_drop"] == ["ALL"]
+    assert "egress_probe.py" in " ".join(egress_probe["command"])
+    assert "--liveness-port" in egress_probe["command"]
+    assert "--healthcheck" in egress_probe["healthcheck"]["test"]
     assert smoke_app["environment"]["SCRAPEYARD_BROWSER_DEBUG_ENABLED"] == "true"
     assert smoke_app["environment"]["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "false"
     assert set(smoke_app["depends_on"]) == {"egress-probe", "redis", "fixture"}
@@ -241,6 +244,8 @@ def test_egress_policy_blocks_reserved_destinations_after_explicit_allows() -> N
     assert '-i "$NETWORK_INTERFACE"' in text
     assert 'CHAIN="SY-EGRESS-${POLICY_ID}"' in text
     assert "--dport 6379 -j ACCEPT" in text
+    assert 'PROBE_LIVENESS_PORT="${SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT:-8081}"' in text
+    assert '-p tcp --dport "$PROBE_LIVENESS_PORT" -j ACCEPT' in text
     for cidr in (
         "10.0.0.0/8",
         "127.0.0.0/8",

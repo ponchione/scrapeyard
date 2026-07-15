@@ -65,8 +65,10 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
 App-level URL guards are a backstop, not the only control. Production Compose
 defaults `SCRAPEYARD_UNTRUSTED_SUBMISSIONS=true`, requires an egress-filtering
 operator `SCRAPEYARD_PROXY_URL`, and points a startup attestation at the
-controlled private `egress-probe` service. The application refuses to start if
-the proxy is empty/`direct`, if the probe pair is incomplete, or if the probe
+controlled private `egress-probe` service. That helper owns a denied challenge
+listener and a distinct, narrowly allowed liveness protocol. The application
+refuses to start if the proxy is empty/`direct`, if any probe setting is
+incomplete, if liveness or protocol validation fails, or if the challenge
 accepts a connection.
 
 In this mode, caller-submitted job/target proxies and `browser.cdp_url` require
@@ -86,6 +88,8 @@ host/orchestrator boundary closes their validation-to-connection races.
 Enforce outbound network policy for the Scrapeyard container or pod:
 
 - Allow Redis.
+- Allow only the controlled probe's liveness port; keep its challenge port
+  subject to the private-address denial.
 - Allow the configured proxy gateway if scraping through a proxy.
 - Allow public HTTP/HTTPS destinations needed for scraping.
 - Block cloud metadata and link-local ranges, including `169.254.169.254` and
@@ -103,9 +107,12 @@ The checked-in `security/deploy-secure-compose.sh` makes installation and
 attestation one deployment transaction. It starts only Redis and the controlled
 private probe, discovers the deployment bridge, installs the checked-in
 bridge-and-source-scoped `DOCKER-USER` policy, and only then starts the app.
-The app independently attempts the probe from its own network namespace; a
-reachable probe aborts lifespan startup. Export the operator proxy (and public
-proxy CIDR when needed), then run the wrapper as root:
+The app independently verifies the helper and its challenge listener over the
+liveness port, attempts the challenge from its own network namespace, then
+verifies liveness again. A reachable challenge, a merely closed/unroutable
+helper, or helper death during attestation aborts lifespan startup. Export the
+operator proxy (and public proxy CIDR when needed), then run the wrapper as
+root:
 
 ```bash
 export SCRAPEYARD_PROXY_URL=https://scrape-proxy.example:8443
@@ -114,13 +121,16 @@ sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
   security/deploy-secure-compose.sh
 ```
 
-The installed policy permits the fixed Redis peer and operator-declared
-destinations before rejecting loopback, metadata/link-local, private,
-carrier-grade NAT, benchmark, multicast, and reserved connected addresses. A
-hostname that returns public during validation and private during connection is
-therefore rejected. A direct `docker compose up` with production defaults is
-not a supported deployment transaction: without the rule the reachable probe
-keeps the app unhealthy, and without the proxy settings validation fails.
+The installed policy permits the fixed Redis peer, the controlled helper's
+liveness port, and operator-declared destinations before rejecting loopback,
+metadata/link-local, private, carrier-grade NAT, benchmark, multicast, and
+reserved connected addresses. The helper reports liveness only while its
+challenge listener is serving, so connection refusal or timeout is accepted as
+policy proof only between two valid liveness exchanges. A hostname that returns
+public during validation and private during connection is therefore rejected.
+A direct `docker compose up` with production defaults is not a supported
+deployment transaction: without the rule the reachable challenge keeps the app
+unhealthy, and without the proxy settings validation fails.
 
 During decommissioning, stop the stack before removing the rule. Resolve the
 bridge exactly as the wrapper does (or retain its exported values), then run:

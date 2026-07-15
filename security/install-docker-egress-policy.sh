@@ -6,6 +6,8 @@ ACTION="${1:-install}"
 APP_SOURCE="${SCRAPEYARD_EGRESS_SOURCE:-172.30.0.250}"
 APP_SOURCE_V6="${SCRAPEYARD_EGRESS_SOURCE_V6:-}"
 REDIS_DESTINATION="${SCRAPEYARD_REDIS_DESTINATION:-172.30.0.249}"
+PROBE_DESTINATION="${SCRAPEYARD_EGRESS_POLICY_PROBE_HOST:-172.30.0.248}"
+PROBE_LIVENESS_PORT="${SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT:-8081}"
 ALLOW_CIDRS="${SCRAPEYARD_EGRESS_ALLOW_CIDRS:-}"
 NETWORK_INTERFACE="${SCRAPEYARD_EGRESS_INTERFACE:-}"
 POLICY_ID="${SCRAPEYARD_EGRESS_POLICY_ID:-}"
@@ -43,7 +45,8 @@ if [[ "$ACTION" == "remove" ]]; then
 fi
 
 # Validate operator inputs before changing host policy.
-python3 - "$APP_SOURCE" "$APP_SOURCE_V6" "$REDIS_DESTINATION" "$ALLOW_CIDRS" <<'PY'
+python3 - "$APP_SOURCE" "$APP_SOURCE_V6" "$REDIS_DESTINATION" \
+  "$PROBE_DESTINATION" "$PROBE_LIVENESS_PORT" "$ALLOW_CIDRS" <<'PY'
 import ipaddress
 import sys
 
@@ -51,7 +54,11 @@ ipaddress.ip_address(sys.argv[1])
 if sys.argv[2]:
     ipaddress.ip_address(sys.argv[2])
 ipaddress.ip_address(sys.argv[3])
-for value in filter(None, sys.argv[4].split(",")):
+ipaddress.ip_address(sys.argv[4])
+port = int(sys.argv[5])
+if not 1 <= port <= 65535:
+    raise ValueError("probe liveness port is out of range")
+for value in filter(None, sys.argv[6].split(",")):
     ipaddress.ip_network(value, strict=False)
 PY
 
@@ -68,6 +75,10 @@ fi
 # reachable; a DNS-rebound destination is filtered by its connected IP.
 iptables -A "$CHAIN" -s "$APP_SOURCE" -d "$REDIS_DESTINATION" \
   -p tcp --dport 6379 -j ACCEPT
+# Permit only the controlled helper's liveness channel. Its challenge port
+# remains subject to the private-address rejection below.
+iptables -A "$CHAIN" -s "$APP_SOURCE" -d "$PROBE_DESTINATION" \
+  -p tcp --dport "$PROBE_LIVENESS_PORT" -j ACCEPT
 IFS=',' read -r -a allowed <<< "$ALLOW_CIDRS"
 for cidr in "${allowed[@]}"; do
   [[ -n "$cidr" ]] || continue
