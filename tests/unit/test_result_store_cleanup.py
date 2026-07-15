@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 
 import scrapeyard.storage.result_store as result_store_module
-from scrapeyard.storage.database import get_db, init_db, reset_db
+from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.storage.types import ResultArtifactReadError
 
@@ -26,7 +26,7 @@ async def store(tmp_path):
 
     store = LocalResultStore(str(results_dir), _lookup)
     yield store
-    reset_db()
+    await close_db()
 
 
 async def _run_to_thread(func, *args, **kwargs):
