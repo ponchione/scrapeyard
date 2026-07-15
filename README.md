@@ -127,9 +127,11 @@ sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
 ```
 
 The production defaults require that proxy and a connected-IP policy probe.
-Startup fails if the proxy is empty/`direct` or if the controlled private probe
-is reachable. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#egress) for the full
-host-policy and decommissioning procedure.
+Startup fails if the proxy is empty/`direct`, if the controlled helper's
+liveness protocol is unavailable before or after the policy challenge, or if
+the private challenge port is reachable. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#egress) for the full host-policy and
+decommissioning procedure.
 
 Load the repository's restrictive Chromium AppArmor profile once per host
 before starting Compose (and remove it during decommissioning):
@@ -452,8 +454,9 @@ profile.
 | `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
 | `SCRAPEYARD_UNTRUSTED_SUBMISSIONS` | `false` (`true` in production Compose) | Require the operator proxy and policy probe; restrict submitted proxy/CDP overrides to `transport-admin` callers |
 | `SCRAPEYARD_PROXY_URL` | empty | Operator-controlled default proxy; required and cannot be `direct` in untrusted-submission mode |
-| `SCRAPEYARD_EGRESS_POLICY_PROBE_HOST` | empty (`172.30.0.248` in production Compose) | Controlled non-public numeric address that must be unreachable from the app at startup |
-| `SCRAPEYARD_EGRESS_POLICY_PROBE_PORT` | `0` (`8080` in production Compose) | TCP port paired with the connected-IP policy probe host |
+| `SCRAPEYARD_EGRESS_POLICY_PROBE_HOST` | empty (`172.30.0.248` in production Compose) | Controlled non-public numeric address hosting the two-channel policy probe |
+| `SCRAPEYARD_EGRESS_POLICY_PROBE_PORT` | `0` (`8080` in production Compose) | Challenge port that must be denied while the helper is live |
+| `SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT` | `0` (`8081` in production Compose) | Narrowly allowed protocol port proving the helper and challenge listener remain live |
 | `SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS` | `1` | Bounded startup attempt for the connected-IP policy probe |
 | `SCRAPEYARD_METRICS_REFRESH_INTERVAL_SECONDS` | `5` | Minimum interval between durable Prometheus gauge refreshes |
 | `SCRAPEYARD_REDIS_DSN` | `redis://redis:6379/0` | Redis connection for `arq` |

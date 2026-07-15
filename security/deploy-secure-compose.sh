@@ -37,8 +37,8 @@ export SCRAPEYARD_EGRESS_POLICY_ID=${SCRAPEYARD_EGRESS_POLICY_ID:-prod}
 security/install-docker-egress-policy.sh install
 security/install-chromium-apparmor-profile.sh install
 
-# The app's lifespan independently connects to the controlled private probe and
-# fails closed if the host rule does not reject the connected destination.
+# The app's lifespan verifies the narrowly allowed probe liveness channel
+# before and after the host rule rejects its separate challenge listener.
 docker compose up -d --wait
 
 echo "Scrapeyard started with connected-IP egress policy attested"
