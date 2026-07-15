@@ -108,6 +108,40 @@ def _canonical_hostname(host: str) -> str:
         raise UnsafeURLError("URL hostname is invalid") from exc
 
 
+def canonical_url_origin(url: str) -> tuple[str, str, int] | None:
+    """Return a browser-compatible canonical origin identity for *url*.
+
+    Unicode and ASCII IDNA spellings share an identity, as do equivalent IP
+    spellings and implicit or explicit default ports. Invalid URLs have no
+    origin identity and fail closed at callers that scope credentials.
+    """
+
+    try:
+        parsed = urlparse(url)
+        raw_host = parsed.hostname
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if not scheme or not raw_host:
+        return None
+    try:
+        literal = ipaddress.ip_address(raw_host.rstrip("."))
+    except ValueError:
+        try:
+            host = _canonical_hostname(raw_host)
+        except UnsafeURLError:
+            return None
+    else:
+        host = str(literal)
+    port = (
+        parsed_port
+        if parsed_port is not None
+        else 443 if scheme == "https" else 80 if scheme == "http" else -1
+    )
+    return scheme, host, port
+
+
 def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
     """Parse IPv4 forms accepted by socket/http stacks but not ipaddress."""
     try:
