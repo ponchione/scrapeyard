@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,13 +29,7 @@ def _mock_element(text: str = "", css_results: dict[str, list] | None = None):
 
 
 def _adaptor_element(html: str, selector: str):
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"The 'strip_cdata' option of HTMLParser\(\) has never done anything and will eventually be removed\.",
-            category=DeprecationWarning,
-        )
-        return Adaptor(html).css(selector)[0]
+    return Adaptor(html).css(selector)[0]
 
 
 class TestDetectPricingVisibilityExplicit:

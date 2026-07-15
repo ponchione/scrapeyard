@@ -55,7 +55,7 @@ jobs:
       - name: Type check
         run: poetry run mypy src
       - name: Test with coverage
-        run: poetry run pytest --junitxml=test-results/junit.xml --cov-report=xml:coverage.xml
+        run: poetry run pytest -W error --junitxml=test-results/junit.xml --cov-report=xml:coverage.xml
       - name: Upload test diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

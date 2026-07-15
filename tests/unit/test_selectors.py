@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import random
-import warnings
 
 import pytest
 from pydantic import ValidationError
@@ -130,13 +129,7 @@ class _NestedTextNode(_Node):
 
 
 def _adaptor(html: str) -> Adaptor:
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"The 'strip_cdata' option of HTMLParser\(\) has never done anything and will eventually be removed\.",
-            category=DeprecationWarning,
-        )
-        return Adaptor(html)
+    return Adaptor(html)
 
 
 def test_extract_selectors_page_wide_scalar_and_list() -> None:
