@@ -97,7 +97,7 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
     egress_probe = production["services"]["egress-probe"]
     smoke_app = smoke["services"]["scrapeyard"]
 
-    assert production_app["build"] == "."
+    assert production_app["build"]["context"] == "."
     assert "ports" not in production_app
     assert production_app["read_only"] == "true"
     assert production_app["cap_drop"] == ["ALL"]
@@ -114,12 +114,19 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
         "${SCRAPEYARD_BIND_ADDRESS:-127.0.0.1}:"
     )
     assert "@sha256:" in production["services"]["redis"]["image"]
-    assert production_app["environment"]["SCRAPEYARD_API_CREDENTIALS"].startswith(
-        "${SCRAPEYARD_API_CREDENTIALS:?"
+    assert production_app["environment"]["SCRAPEYARD_API_CREDENTIALS"] == (
+        "${SCRAPEYARD_API_CREDENTIALS:-}"
+    )
+    assert production_app["environment"]["SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED"] == "false"
+    assert production_app["environment"]["SCRAPEYARD_HEALTH_PROBE_API_KEY"] == (
+        "${SCRAPEYARD_HEALTH_PROBE_API_KEY:-}"
     )
     assert production_app["depends_on"]["egress-probe"]["condition"] == "service_healthy"
-    assert egress_probe["networks"]["backend"]["ipv4_address"] == "172.30.0.248"
-    assert "@sha256:" in egress_probe["image"]
+    assert egress_probe["networks"]["backend"]["ipv4_address"] == (
+        "${SCRAPEYARD_EGRESS_POLICY_PROBE_HOST:-172.30.0.248}"
+    )
+    assert egress_probe["image"] == production_app["image"]
+    assert egress_probe["entrypoint"] == ["python"]
     assert egress_probe["read_only"] == "true"
     assert egress_probe["cap_drop"] == ["ALL"]
     assert "egress_probe.py" in " ".join(egress_probe["command"])
@@ -178,6 +185,9 @@ def test_smoke_runner_has_bounded_cleanup_diagnostics_and_privilege_contracts() 
         "timeout 60 docker compose",
         "run_egress_policy install",
         "run_egress_policy remove",
+        "iptables python3",
+        "SCRAPEYARD_SMOKE_BACKEND_SUBNET",
+        "SCRAPEYARD_SMOKE_APP_ADDRESS",
         'SCRAPEYARD_EGRESS_INTERFACE="br-${NETWORK_ID:0:12}"',
         "run_apparmor_profile install",
         "run_apparmor_profile remove",
@@ -195,19 +205,18 @@ def test_smoke_runner_has_bounded_cleanup_diagnostics_and_privilege_contracts() 
     assert "chown -R root:root /data" not in text
 
 
-def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cache() -> None:
+def test_container_browser_workflow_is_required_least_privilege_and_no_cache() -> None:
     workflow = _yaml(".github/workflows/container-browser-smoke.yml")
-    assert set(workflow["on"]) == {"pull_request", "workflow_dispatch"}
+    assert set(workflow["on"]) == {
+        "pull_request",
+        "push",
+        "schedule",
+        "workflow_dispatch",
+    }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"]["cancel-in-progress"] == "true"
-    paths = workflow["on"]["pull_request"]["paths"]
-    assert "Dockerfile" in paths
-    assert "poetry.lock" in paths
-    assert "src/scrapeyard/main.py" in paths
-    assert "src/scrapeyard/runtime/**" in paths
-    assert "src/scrapeyard/scheduler/**" in paths
-    assert "src/scrapeyard/webhook/**" in paths
-    assert "tests/smoke/**" in paths
+    assert workflow["on"]["pull_request"] == ""
+    assert workflow["on"]["push"]["branches"] == ["main"]
 
     job = workflow["jobs"]["production-container-smoke"]
     assert job["timeout-minutes"] == "60"
@@ -228,9 +237,11 @@ def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cach
 
 def test_dockerfile_has_immutable_inputs_and_non_root_runtime_contract() -> None:
     text = Path("Dockerfile").read_text(encoding="utf-8")
-    assert "python:3.12.11-slim-bookworm@sha256:" in text
-    assert "ARG DEBIAN_SNAPSHOT=20260715T000000Z" in text
-    assert "snapshot.debian.org/archive/debian/" in text
+    assert "ubuntu:24.04@sha256:" in text
+    assert "ARG UBUNTU_SNAPSHOT=20260715T000000Z" in text
+    assert "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}" in text
+    assert "archive.ubuntu.com" not in text
+    assert "security.ubuntu.com" not in text
     assert "apt-get upgrade -y --no-install-recommends" in text
     assert "--without-hashes" not in text
     assert "USER 10001:10001" in text
@@ -287,14 +298,15 @@ def test_secure_compose_deployment_installs_policy_before_starting_app() -> None
     path = Path("security/deploy-secure-compose.sh")
     subprocess.run(["bash", "-n", str(path)], check=True)
     text = path.read_text(encoding="utf-8")
-    dependency_start = text.index("docker compose up -d --wait egress-probe redis")
-    image_build = text.index("docker compose build scrapeyard")
+    dependency_start = text.index("docker compose up -d --wait --no-build --pull never egress-probe redis")
+    preflight = text.index("scripts/production_preflight.py")
     policy_install = text.index("install-docker-egress-policy.sh install")
     application_stop = text.index("docker compose stop scrapeyard")
     application_start = text.index("docker compose up -d --wait", policy_install)
 
-    assert image_build < application_stop < dependency_start < policy_install < application_start
+    assert preflight < application_stop < dependency_start < policy_install < application_start
     assert "SCRAPEYARD_PROXY_URL" in text
+    assert "SCRAPEYARD_IMAGE" in text
     assert "SCRAPEYARD_EGRESS_INTERFACE" in text
     assert "install-chromium-apparmor-profile.sh install" in text
 
@@ -312,9 +324,14 @@ def test_security_scan_uses_digest_pinned_tools_and_enforces_findings() -> None:
     path = Path("scripts/run_container_security_scan.sh")
     subprocess.run(["bash", "-n", str(path)], check=True)
     text = path.read_text(encoding="utf-8")
-    assert "anchore/syft:v1.27.1@sha256:" in text
-    assert "aquasec/trivy:0.65.0@sha256:" in text
+    assert "anchore/syft:v1.44.0@sha256:" in text
+    assert "aquasec/trivy:0.72.0@sha256:" in text
+    assert "redis:7.4.9-alpine3.21@sha256:" in text
     assert "cyclonedx-json=/out/sbom.cdx.json" in text
-    assert text.count("--exit-code 1") == 2
-    assert "--scanners vuln" in text
+    assert "--ignore-unfixed" not in text
+    assert "--severity MEDIUM,HIGH,CRITICAL" in text
+    assert "--scanners vuln,secret" in text
+    assert "evaluate_container_scan.py" in text
+    assert "augment_browser_sbom.py" in text
     assert '"$TRIVY_IMAGE" config' in text
+    assert "redis-vulnerabilities.json" in text

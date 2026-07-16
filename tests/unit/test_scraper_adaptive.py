@@ -102,7 +102,7 @@ async def test_dynamic_fetcher_adaptive_uses_custom_config_only(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.DynamicFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=True, retry=retry, adaptive_dir=str(adaptive_dir))
 
@@ -116,7 +116,7 @@ async def test_dynamic_fetcher_adaptive_uses_custom_config_only(tmp_path):
 
 @pytest.mark.asyncio
 async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
-    """Dynamic fetcher should get a longer timeout and resource suppression."""
+    """Dynamic fetcher should use a longer timeout and the guarded route."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -130,19 +130,20 @@ async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.DynamicFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 60000
-        assert call_kwargs["disable_resources"] is True
+        assert call_kwargs["disable_resources"] is False
+        assert callable(call_kwargs["page_setup"])
         assert call_kwargs["network_idle"] is False
 
 
 @pytest.mark.asyncio
 async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
-    """Stealthy fetcher should get a longer timeout and only supported browser kwargs."""
+    """Stealthy fetcher should use a longer timeout and guarded route."""
     adaptive_dir = tmp_path / "adaptive"
 
     mock_response = MagicMock()
@@ -156,16 +157,17 @@ async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.StealthyFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.CamoufoxFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 60000
-        assert call_kwargs["disable_resources"] is True
+        assert call_kwargs["disable_resources"] is False
+        assert callable(call_kwargs["page_setup"])
         assert call_kwargs["network_idle"] is False
         assert "stealth" not in call_kwargs
-        assert "hide_canvas" not in call_kwargs
+        assert call_kwargs["hide_canvas"] is False
         assert "useragent" not in call_kwargs
 
 
@@ -217,13 +219,14 @@ async def test_browser_override_changes_fetcher_kwargs(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.DynamicFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 90000
-        assert call_kwargs["disable_resources"] is True
+        assert call_kwargs["disable_resources"] is False
+        assert callable(call_kwargs["page_setup"])
         assert call_kwargs["network_idle"] is True
         assert call_kwargs["wait_selector"] == ".product-card a"
         assert call_kwargs["wait"] == 1250
@@ -251,7 +254,7 @@ async def test_browser_click_selector_runs_in_page_action(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.DynamicFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 
@@ -295,7 +298,7 @@ async def test_browser_click_selector_fails_open_when_absent(tmp_path):
     )
     retry = RetryConfig()
 
-    with patch("scrapeyard.engine.scraper.PlayWrightFetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper.DynamicFetcher") as mock_fetcher:
         mock_fetcher.async_fetch.return_value = mock_response
         await scrape_target(target, adaptive=False, retry=retry, adaptive_dir=str(adaptive_dir))
 

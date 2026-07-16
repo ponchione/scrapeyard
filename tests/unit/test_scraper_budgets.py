@@ -25,8 +25,7 @@ def _budget(max_fetched_bytes: int) -> RunBudget:
 def _scrapling_response(*, body: bytes, url: str = "https://example.com/") -> Response:
     return Response(
         url=url,
-        text=body.decode(),
-        body=body,
+        content=body,
         status=200,
         reason="OK",
         cookies={},
@@ -61,8 +60,8 @@ async def test_real_scrapling_response_body_is_counted(monkeypatch):
         budget=budget,
     )
 
-    assert isinstance(response.body, str)
-    assert budget.fetched_bytes == len(response.body.encode(response.encoding))
+    assert isinstance(response.body, bytes)
+    assert budget.fetched_bytes == len(response.body)
 
 
 @pytest.mark.asyncio

@@ -671,11 +671,13 @@ def test_stealthy_browser_fetch_kwargs_includes_optional_stealthy_overrides_and_
         "timeout": 90000,
         "disable_resources": False,
         "network_idle": True,
+        "hide_canvas": True,
         "humanize": 1.25,
         "os_randomize": True,
         "geoip": True,
         "disable_ads": True,
         "additional_arguments": {"window": [1920, 1080]},
+        "useragent": "ua-test",
         "extra_headers": {"X-Test": "1"},
         "wait_selector": ".product-card",
         "wait": 1200,
@@ -712,11 +714,11 @@ def test_stealthy_browser_fetch_kwargs_drop_unsupported_playwright_only_options(
     kwargs = browser_fetch_kwargs(target, FetcherType.stealthy, proxy_url="http://proxy.local:8080")
 
     assert "stealth" not in kwargs
-    assert "hide_canvas" not in kwargs
+    assert kwargs["hide_canvas"] is True
     assert "real_chrome" not in kwargs
     assert "cdp_url" not in kwargs
     assert "nstbrowser_mode" not in kwargs
-    assert "useragent" not in kwargs
+    assert kwargs["useragent"] == "ua-test"
 
 
 def test_response_title_prefers_explicit_title_attribute():

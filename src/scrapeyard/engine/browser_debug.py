@@ -12,15 +12,10 @@ from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
+from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from rebrowser_playwright.async_api import TimeoutError as RebrowserPlaywrightTimeoutError
-from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
-from scrapling.engines import camo as scrapling_camo_engine
-from scrapling.engines import pw as scrapling_pw_engine
-from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
-from scrapling.engines.toolbelt.navigation import (
-    async_intercept_route as scrapling_async_intercept_route,
-)
+from scrapling import Fetcher
+from scrapling.engines.constants import EXTRA_RESOURCES
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.run_threads import run_thread_work
@@ -99,7 +94,7 @@ class BrowserTransportTimeout(TimeoutError):
         super().__init__(message)
 
 
-_BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, RebrowserPlaywrightTimeoutError)
+_BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, PatchrightTimeoutError)
 
 
 async def _request_header_mapping(request: Any) -> dict[str, str] | None:
@@ -132,7 +127,7 @@ async def _guarded_async_intercept_route(route: Any) -> None:
     request_url = getattr(request, "url", "")
     resource_type = getattr(request, "resource_type", None)
 
-    if block_resources and resource_type in DEFAULT_DISABLED_RESOURCES:
+    if block_resources and resource_type in EXTRA_RESOURCES:
         logger.debug(
             'Blocking background resource "%s" of type "%s"',
             redact_userinfo_in_url(str(request_url)),
@@ -192,33 +187,7 @@ async def _guarded_async_intercept_route(route: Any) -> None:
         await route.continue_(headers=filtered)
         return
 
-    if block_resources is None:
-        await scrapling_async_intercept_route(route)
-        return
     await route.continue_()
-
-
-def _install_browser_route_guard() -> None:
-    # Scrapling exposes these runtime hook points without declaring them in its
-    # package surface, so contain the dynamic mutation at this adapter boundary.
-    _set_dynamic_attribute(
-        scrapling_pw_engine,
-        "async_intercept_route",
-        _guarded_async_intercept_route,
-    )
-    _set_dynamic_attribute(
-        scrapling_camo_engine,
-        "async_intercept_route",
-        _guarded_async_intercept_route,
-    )
-
-
-def _set_dynamic_attribute(target: object, name: str, value: object) -> None:
-    """Set one attribute at an explicitly dynamic dependency boundary."""
-    setattr(target, name, value)
-
-
-_install_browser_route_guard()
 
 
 def _safe_text_attr(value: Any, attr: str) -> str | None:
@@ -309,13 +278,34 @@ def target_browser_config(target: TargetConfig) -> BrowserConfig:
 
 @cache
 def _supported_fetcher_kwargs(fetcher_type: FetcherType) -> set[str]:
-    fetcher_cls = {
-        FetcherType.dynamic: PlayWrightFetcher,
-        FetcherType.stealthy: StealthyFetcher,
-    }.get(fetcher_type)
-    if fetcher_cls is None:
-        return set()
-    return set(inspect.signature(fetcher_cls.async_fetch).parameters)
+    common = {
+        "timeout",
+        "disable_resources",
+        "network_idle",
+        "useragent",
+        "extra_headers",
+        "proxy",
+        "wait_selector",
+        "wait",
+    }
+    if fetcher_type is FetcherType.dynamic:
+        return common | {
+            "stealth",
+            "hide_canvas",
+            "real_chrome",
+            "cdp_url",
+            "nstbrowser_mode",
+        }
+    if fetcher_type is FetcherType.stealthy:
+        return common | {
+            "hide_canvas",
+            "humanize",
+            "os_randomize",
+            "geoip",
+            "disable_ads",
+            "additional_arguments",
+        }
+    return set()
 
 
 def browser_fetch_kwargs(
@@ -747,7 +737,14 @@ async def fetch_browser_response(
             raise action_exc from exc
 
     call_kwargs["page_action"] = _page_action
-    call_kwargs["disable_resources"] = True
+
+    async def _page_setup(page: Any) -> None:
+        await page.route("**/*", _guarded_async_intercept_route)
+
+    call_kwargs["page_setup"] = _page_setup
+    # The local route owns both resource blocking and SSRF validation. Keep the
+    # upstream handler disabled so it cannot continue a request first.
+    call_kwargs["disable_resources"] = False
     blocked_requests: list[dict[str, str]] = []
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)

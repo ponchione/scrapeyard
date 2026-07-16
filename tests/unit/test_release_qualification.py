@@ -430,14 +430,18 @@ def test_runner_has_scoped_cleanup_signal_timeout_and_secret_scan_contracts() ->
 
 def test_release_workflow_triggers_permissions_jobs_and_no_mutable_cache() -> None:
     workflow = _yaml(".github/workflows/release-qualification.yml")
-    assert set(workflow["on"]) == {"pull_request", "schedule", "workflow_dispatch"}
+    assert set(workflow["on"]) == {
+        "pull_request",
+        "push",
+        "schedule",
+        "workflow_dispatch",
+    }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["on"]["schedule"] == [{"cron": "41 7 * * 6"}]
     assert "github.event_name == 'pull_request'" in workflow["concurrency"]["cancel-in-progress"]
     assert set(workflow["jobs"]) == {"quick-recovery-restore", "full-load-soak"}
-    qualification_paths = set(workflow["on"]["pull_request"]["paths"])
-    assert "src/scrapeyard/**" in qualification_paths
-    assert "sql/**" in qualification_paths
+    assert workflow["on"]["pull_request"] == ""
+    assert workflow["on"]["push"]["branches"] == ["main"]
     quick = workflow["jobs"]["quick-recovery-restore"]
     full = workflow["jobs"]["full-load-soak"]
     assert quick["timeout-minutes"] == "60"

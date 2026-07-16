@@ -5,10 +5,15 @@ services:
       - backend
 
   fixture:
-    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
-    command: ["python", "/srv/fixture_site.py", "--host", "0.0.0.0", "--port", "8080"]
+    image: "${SCRAPEYARD_IMAGE:-scrapeyard:local}"
+    entrypoint: ["python"]
+    command: ["/srv/fixture_site.py", "--host", "0.0.0.0", "--port", "8080"]
     restart: "no"
     init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - "no-new-privileges:true"
     volumes:
       - ./tests/smoke/fixture_site.py:/srv/fixture_site.py:ro
     ports:
@@ -70,8 +75,9 @@ services:
         ipv4_address: 203.66.81.243
 
   peer:
-    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
-    command: ["sh", "-c", "sleep 3600"]
+    image: "${SCRAPEYARD_IMAGE:-scrapeyard:local}"
+    entrypoint: ["sh", "-c"]
+    command: ["sleep 3600"]
     init: true
     restart: "no"
     read_only: true

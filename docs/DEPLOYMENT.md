@@ -57,15 +57,18 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
   is used, restrict the proxy route to Eyebox. Public `/health` and
   `/health/live` reveal only process liveness; protect `/health/ready` for
   internal monitoring.
-- Always set `SCRAPEYARD_API_CREDENTIALS`; when no named or legacy credentials
-  exist, the warned `local-development` caller receives all scopes.
+- Always set `SCRAPEYARD_API_CREDENTIALS`. Missing credentials make startup
+  fail. Unauthenticated administration exists only when the local overlay
+  explicitly sets `SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED=true`; that
+  setting is disabled by production Compose and must never be used there.
 
 ## Egress
 
 App-level URL guards are a backstop, not the only control. Production Compose
 defaults `SCRAPEYARD_UNTRUSTED_SUBMISSIONS=true`, requires an egress-filtering
 operator `SCRAPEYARD_PROXY_URL`, and points a startup attestation at the
-controlled private `egress-probe` service. That helper owns a denied challenge
+controlled private `egress-probe` service running from the same scanned immutable
+candidate image. That helper owns a denied challenge
 listener and a distinct, narrowly allowed liveness protocol. The application
 refuses to start if the proxy is empty/`direct`, if any probe setting is
 incomplete, if liveness or protocol validation fails, or if the challenge
@@ -106,23 +109,28 @@ the host policy can use a public allowlist, allow Scrapeyard egress only to that
 gateway plus Redis. This keeps browser runtime and target DNS behavior outside
 the application trust boundary.
 
-The checked-in `security/deploy-secure-compose.sh` makes installation and
-attestation one deployment transaction. On redeploy it builds the replacement
-image, stops any existing application container, starts only Redis and the
-controlled private probe, discovers the deployment bridge, installs the
-checked-in bridge-and-source-scoped `DOCKER-USER` policy, and only then starts
-the app.
+The checked-in `security/deploy-secure-compose.sh` makes preflight,
+installation, and attestation one deployment transaction. It accepts only a
+prequalified immutable image reference in `SCRAPEYARD_IMAGE`; it
+never builds or pulls a different image. On redeploy it validates the host and
+rendered Compose topology, stops any existing application container, starts
+only Redis and the controlled private probe, discovers the deployment bridge,
+installs the checked-in bridge-and-source-scoped `DOCKER-USER` policy, and only
+then starts the exact image.
 The app independently verifies the helper and its challenge listener over the
 liveness port, attempts the challenge from its own network namespace, then
 verifies liveness again. A reachable challenge, a merely closed/unroutable
 helper, or helper death during attestation aborts lifespan startup. Export the
-operator proxy (and public proxy CIDR when needed), then run the wrapper as
-root:
+operator proxy, immutable image, application and health credentials,
+encryption keyring, and public proxy CIDR when needed, then run the wrapper as
+root. Preserve all of those variables through `sudo`; omitting any required
+production value fails before the application is replaced:
 
 ```bash
 export SCRAPEYARD_PROXY_URL=https://scrape-proxy.example:8443
 export SCRAPEYARD_EGRESS_ALLOW_CIDRS=203.0.113.10/32
-sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
+export SCRAPEYARD_IMAGE=ghcr.io/example/scrapeyard@sha256:<digest>
+sudo --preserve-env=SCRAPEYARD_IMAGE,SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS,SCRAPEYARD_API_CREDENTIALS,SCRAPEYARD_HEALTH_PROBE_API_KEY,SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID,SCRAPEYARD_ENCRYPTION_KEYS \
   security/deploy-secure-compose.sh
 ```
 
@@ -187,7 +195,7 @@ sudo security/install-chromium-apparmor-profile.sh install
 ```
 
 The profile is Moby's normal container boundary plus the single `userns`
-permission. Compose also applies Playwright 1.58.0's pinned seccomp allowlist,
+permission. Compose also applies Playwright 1.61.0's pinned seccomp allowlist,
 enables no-new-privileges, drops every capability, and retains only
 `SYS_CHROOT` in the bounding set for Chromium after it enters its user
 namespace. The application process has no permitted or effective capabilities.
@@ -200,7 +208,7 @@ bind-mounted data directory while the application is stopped:
 
 ```bash
 docker run --rm --user 0 -v scrapeyard_scrapeyard-data:/data \
-  redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08 \
+  redis:7.4.9-alpine3.21@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99 \
   sh -c 'chown -R 10001:10001 /data && find /data -type d -exec chmod 0750 {} +'
 ```
 
@@ -209,6 +217,15 @@ wrong; it never recursively changes a mounted volume. CPU, memory, PIDs,
 open-files, shared memory, and temporary-filesystem sizes are bounded in
 Compose. Update the pinned digests and browser checksums intentionally and run
 the container smoke plus security scan before promotion.
+
+The reviewed browser floor is checked in at `security/browser-policy.json`.
+It records the exact executed Chromium and Camoufox versions, binding versions,
+primary upstream sources, review date, and a short expiry. The Docker build and
+release workflow run `scripts/audit_browser_security.py`; an expired review,
+an unreviewed version, Camoufox 135, or Chromium 136.0.7103.25 fails closed.
+The runtime manifest is produced by executing both browser binaries and is
+then added to the CycloneDX SBOM. Package metadata alone is not accepted as
+browser evidence.
 
 Remove the host profile only after all Scrapeyard containers have stopped:
 
@@ -260,6 +277,15 @@ sudo security/install-chromium-apparmor-profile.sh remove
 - Failed authentication is counted per process and logged with reason, method,
   and path. Successful request audit logs include stable identity and
   credential name. Neither path logs the supplied secret.
+- Configure one dedicated credential with exactly the `health-detail` scope,
+  no project restriction, and set its secret in
+  `SCRAPEYARD_HEALTH_PROBE_API_KEY`. Startup rejects a missing, unknown,
+  over-privileged, or project-restricted probe credential. The production
+  container healthcheck reads this value from its environment and sends it to
+  `/health/ready` without placing the secret in process arguments or output.
+- Empty or malformed credential configuration fails startup. The only
+  exception is the explicit local-development opt-in described above; it
+  cannot be combined with configured credentials or a health-probe key.
 - Treat proxy URLs, webhook headers, and browser extra headers as secrets.
 - Set `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` to a JSON project-to-name map
   before accepting YAML that uses `${SCRAPEYARD_SECRET_*}`. References are
@@ -932,7 +958,24 @@ kills, volume inode exhaustion, and host/network policy outside the process.
 
 ## Preflight Checks
 
-Run these before promoting a new deployment:
+The secure wrapper invokes the locally checkable production preflight itself.
+Operators may run it separately against the rendered deployment:
+
+```bash
+SCRAPEYARD_IMAGE=ghcr.io/example/scrapeyard@sha256:<digest> \
+  poetry run python scripts/production_preflight.py
+```
+
+It enforces Linux/amd64, Docker and firewall tooling, loaded AppArmor,
+unprivileged user namespaces, bridge netfilter, an immutable Linux/amd64 image,
+one worker process and one replica, persistent `/data`, private ingress and
+Redis, the seccomp/AppArmor/capability boundary, a trustworthy proxy plus both
+egress probes, fail-closed application and dedicated health credentials, a
+valid active 32-byte encryption key, and production untrusted-submission mode.
+The host firewall must still be independently reviewed for the intended proxy
+and Eyebox addresses.
+
+Run these checks after deployment and before promotion:
 
 ```bash
 curl -fsS http://127.0.0.1:8420/health
@@ -961,11 +1004,12 @@ curl -fsS \
   http://127.0.0.1:8420/jobs
 ```
 
-Detailed monitoring requires its own least-privilege credential:
+Detailed monitoring and container readiness require the dedicated probe
+credential:
 
 ```bash
 curl -fsS \
-  -H "X-API-Key: $SCRAPEYARD_MONITOR_API_KEY" \
+  -H "X-API-Key: $SCRAPEYARD_HEALTH_PROBE_API_KEY" \
   http://127.0.0.1:8420/health/ready
 ```
 
@@ -990,14 +1034,48 @@ curl -i \
 
 The expected response is `422` with an unsafe URL validation error.
 
+Artifact reconciliation is dry-run by default. Review its structured startup
+and maintenance findings. Promotion to destructive reconciliation is a
+separate, observable operator decision: set
+`SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN=false` and
+`SCRAPEYARD_STORAGE_RECONCILIATION_PROMOTION_ACK` to the zoned RFC 3339 time of
+that approval. Startup logs the acknowledgement time and refuses a destructive
+mode without it.
+
+## Release artifact procedure
+
+The `Immutable release candidate` workflow builds the production image once
+with no cache, records its Docker image ID, and passes that exact identity to
+the browser-aware SBOM/security scan, cold and warm browser smoke, quick
+recovery/restore, and full load/soak qualification. It archives the exact
+qualified bytes for three days. Its optional promotion job is protected by the
+`production-release` environment and loads, hashes, and republishes that
+archive without rebuilding it. The workflow never creates a Git tag.
+
+Before authorizing promotion, match the candidate manifest's source revision,
+package version, image ID, image archive hash, and SBOM hash to the reviewed
+commit and reports. Create the annotated version tag only after independent
+review and repository approval; tag creation and publishing remain explicit
+external release actions.
+
 ## Go/No-Go Checklist
 
 - `SCRAPEYARD_API_CREDENTIALS` is set, least-privileged, and stored as a secret.
+- The dedicated health credential has only `health-detail`, is stored as a
+  secret, and production unauthenticated-local mode is false.
 - Scrapeyard HTTP is reachable only from Eyebox and internal monitoring.
 - Redis is not exposed outside the private runtime network.
 - Egress policy blocks metadata and private/internal networks.
 - `/data` is persistent and has disk alerts.
 - Database and result-artifact restore has been tested.
+- Encryption keys are backed up separately, escrow access has been exercised,
+  and the restored state decrypts with the escrowed key material.
+- Browser policy is current; the executed binaries, SBOM, and Medium-or-higher
+  container scans pass without ungoverned exceptions.
+- Reconciliation findings were reviewed in dry-run mode and any destructive
+  promotion has a recorded acknowledgement timestamp.
+- The immutable candidate ID is identical in security, cold/warm browser,
+  quick recovery/restore, and full load/soak evidence.
 - Full test suite passes in CI.
 - Staging has run representative Eyebox scrapes, unreachable targets, bad
   configs, and a restart during queued/running work.

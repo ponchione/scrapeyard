@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "owner": "Scrapeyard maintainers",
+  "reviewed_on": "2026-07-16",
+  "expires_on": "2026-08-15",
+  "maximum_review_age_days": 30,
+  "components": {
+    "scrapling": {
+      "docker_arg": "SCRAPLING_VERSION",
+      "current": "0.4.11",
+      "minimum": "0.4.11",
+      "source": "https://pypi.org/project/scrapling/0.4.11/"
+    },
+    "playwright": {
+      "docker_arg": "PLAYWRIGHT_VERSION",
+      "current": "1.61.0",
+      "minimum": "1.61.0",
+      "source": "https://pypi.org/project/playwright/1.61.0/"
+    },
+    "patchright": {
+      "docker_arg": "PATCHRIGHT_VERSION",
+      "current": "1.61.2",
+      "minimum": "1.61.2",
+      "source": "https://pypi.org/project/patchright/1.61.2/"
+    },
+    "chromium": {
+      "docker_arg": "CHROMIUM_VERSION",
+      "current": "149.0.7827.55",
+      "minimum": "149.0.7827.55",
+      "revision": "1228",
+      "source": "https://github.com/microsoft/playwright/releases/tag/v1.61.0"
+    },
+    "camoufox-package": {
+      "docker_arg": "CAMOUFOX_PACKAGE_VERSION",
+      "current": "0.6.0",
+      "minimum": "0.6.0",
+      "distribution": "cloverlabs-camoufox",
+      "source": "https://pypi.org/project/cloverlabs-camoufox/0.6.0/"
+    },
+    "camoufox-browser": {
+      "docker_arg": "CAMOUFOX_BROWSER_VERSION",
+      "current": "150.0.2",
+      "minimum": "150.0.2",
+      "release": "beta.25",
+      "asset": "camoufox-150.0.2-alpha.26-lin.x86_64.zip",
+      "sha256": "b146b98b0c2c41023716feef36451f319a534309f72c54584a4b0b88670f510b",
+      "source": "https://github.com/daijro/camoufox/releases/tag/v150.0.2-beta.25"
+    }
+  },
+  "known_rejected_versions": [
+    {"component": "camoufox-browser", "version": "135.0.1"},
+    {"component": "chromium", "version": "136.0.7103.25"}
+  ]
+}

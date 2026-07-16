@@ -2,17 +2,6 @@ name: Container security and SBOM
 
 on:
   pull_request:
-    paths:
-      - Dockerfile
-      - docker-compose.yml
-      - docker-compose.local.yml
-      - docker-compose.smoke.yml
-      - poetry.lock
-      - pyproject.toml
-      - security/**
-      - scripts/container-entrypoint.sh
-      - scripts/run_container_security_scan.sh
-      - .github/workflows/container-security.yml
   push:
     branches: [main]
   schedule:

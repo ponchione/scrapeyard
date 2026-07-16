@@ -7,11 +7,11 @@ cd "$ROOT_DIR"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/run_container_browser_smoke.sh [--no-cache]
+Usage: ./scripts/run_container_browser_smoke.sh [--no-cache] [--image IMMUTABLE_REF] [--run-mode cold|warm]
 
-Build the production image and exercise basic, dynamic, dynamic-stealth, and
-stealthy fetchers against an isolated local fixture. Use --no-cache for the
-required cold-cache build; omit it for the repeatability/warm-cache run.
+Exercise basic, dynamic, dynamic-stealth, and Camoufox fetchers against an
+isolated local fixture. ``--image`` consumes a prebuilt candidate without a
+hidden rebuild. Use --no-cache only when producing a non-release CI image.
 
 Configuration:
   SCRAPEYARD_SMOKE_PROJECT        Compose project (default: scrapeyard-container-smoke)
@@ -25,16 +25,25 @@ EOF
 }
 
 NO_CACHE=0
-case "${1:-}" in
-  "") ;;
-  --no-cache) NO_CACHE=1 ;;
-  -h|--help) usage; exit 0 ;;
-  *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
-esac
-if (($# > 1)); then
-  echo "Only one optional argument is supported" >&2
+IMAGE_REF=""
+RUN_MODE="cold"
+while (($#)); do
+  case "$1" in
+    --no-cache) NO_CACHE=1; shift ;;
+    --image) (($# >= 2)) || { echo "--image requires a reference" >&2; exit 2; }; IMAGE_REF=$2; shift 2 ;;
+    --run-mode) (($# >= 2)) || { echo "--run-mode requires cold or warm" >&2; exit 2; }; RUN_MODE=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[[ "$RUN_MODE" == "cold" || "$RUN_MODE" == "warm" ]] || {
+  echo "--run-mode must be cold or warm" >&2
   exit 2
-fi
+}
+[[ -z "$IMAGE_REF" || "$NO_CACHE" == 0 ]] || {
+  echo "--no-cache cannot be combined with --image" >&2
+  exit 2
+}
 
 PROJECT="${SCRAPEYARD_SMOKE_PROJECT:-scrapeyard-container-smoke}"
 API_PORT="${SCRAPEYARD_SMOKE_API_PORT:-18420}"
@@ -43,6 +52,11 @@ BUILD_TIMEOUT="${SCRAPEYARD_SMOKE_BUILD_TIMEOUT:-2400}"
 START_TIMEOUT="${SCRAPEYARD_SMOKE_START_TIMEOUT:-180}"
 JOB_TIMEOUT="${SCRAPEYARD_SMOKE_JOB_TIMEOUT:-120}"
 DIAGNOSTICS_DIR="${SCRAPEYARD_SMOKE_DIAGNOSTICS_DIR:-$ROOT_DIR/artifacts/container-browser-smoke}"
+export SCRAPEYARD_BACKEND_SUBNET="${SCRAPEYARD_SMOKE_BACKEND_SUBNET:-172.29.14.0/24}"
+export SCRAPEYARD_BACKEND_IP_RANGE="${SCRAPEYARD_SMOKE_BACKEND_IP_RANGE:-172.29.14.0/25}"
+export SCRAPEYARD_EGRESS_SOURCE="${SCRAPEYARD_SMOKE_APP_ADDRESS:-172.29.14.250}"
+export SCRAPEYARD_REDIS_DESTINATION="${SCRAPEYARD_SMOKE_REDIS_ADDRESS:-172.29.14.249}"
+export SCRAPEYARD_EGRESS_POLICY_PROBE_HOST="${SCRAPEYARD_SMOKE_EGRESS_PROBE_ADDRESS:-172.29.14.248}"
 COMPOSE_ARGS=(-p "$PROJECT" -f docker-compose.yml -f docker-compose.smoke.yml)
 TOTAL_STARTED_AT=$SECONDS
 CREDENTIAL_DIR=""
@@ -97,10 +111,11 @@ API_KEY_FILE="$CREDENTIAL_DIR/api-key"
 printf 'item14-smoke-%s\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$API_KEY_FILE"
 chmod 600 "$API_KEY_FILE"
 API_KEY="$(<"$API_KEY_FILE")"
+HEALTH_KEY="item14-health-$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 printf -v SCRAPEYARD_API_CREDENTIALS \
-  '{"item14-smoke":{"secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail"]}}' \
-  "$API_KEY"
-export SCRAPEYARD_API_CREDENTIALS
+  '{"item14-smoke":{"secret":"%s","scopes":["submit","read","schedule-admin","delete"]},"item14-health":{"secret":"%s","scopes":["health-detail"]}}' \
+  "$API_KEY" "$HEALTH_KEY"
+export SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_HEALTH_PROBE_API_KEY="$HEALTH_KEY"
 ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
 printf -v SCRAPEYARD_ENCRYPTION_KEYS '{"item20-smoke":"%s"}' "$ENCRYPTION_KEY"
 export SCRAPEYARD_ENCRYPTION_KEYS
@@ -125,9 +140,11 @@ run_egress_policy() {
     container)
       docker run --rm --network host --cap-add NET_ADMIN --cap-add NET_RAW \
         -e SCRAPEYARD_EGRESS_INTERFACE -e SCRAPEYARD_EGRESS_POLICY_ID \
+        -e SCRAPEYARD_EGRESS_SOURCE -e SCRAPEYARD_REDIS_DESTINATION \
+        -e SCRAPEYARD_EGRESS_POLICY_PROBE_HOST \
         -v "$ROOT_DIR:/repo:ro" \
-        python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7 \
-        sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends iptables >/dev/null && /repo/security/install-docker-egress-policy.sh "$1"' \
+        ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 \
+        sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends iptables python3 >/dev/null && /repo/security/install-docker-egress-policy.sh "$1"' \
         _ "$action"
       ;;
     *) fail "egress policy runner was not selected" ;;
@@ -202,9 +219,11 @@ on_exit() {
   if [[ -n "$CREDENTIAL_DIR" ]]; then
     rm -rf -- "$CREDENTIAL_DIR"
   fi
-  unset SCRAPEYARD_API_CREDENTIALS
+  unset SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_HEALTH_PROBE_API_KEY SCRAPEYARD_IMAGE
   unset SCRAPEYARD_ENCRYPTION_KEYS SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID
   unset SCRAPEYARD_BIND_ADDRESS SCRAPEYARD_PORT
+  unset SCRAPEYARD_BACKEND_SUBNET SCRAPEYARD_BACKEND_IP_RANGE
+  unset SCRAPEYARD_EGRESS_SOURCE SCRAPEYARD_REDIS_DESTINATION
   exit "$status"
 }
 
@@ -225,35 +244,43 @@ assert_no_project_resources() {
 
 assert_no_project_resources
 
-BUILD_ARGS=(build scrapeyard)
-if ((NO_CACHE == 1)); then
-  BUILD_ARGS=(build --no-cache scrapeyard)
-fi
 BUILD_STARTED_AT=$SECONDS
-echo "Building the production Dockerfile (no_cache=$NO_CACHE)..."
-timeout "$BUILD_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" "${BUILD_ARGS[@]}"
-BUILD_DURATION=$((SECONDS - BUILD_STARTED_AT))
+if [[ -n "$IMAGE_REF" ]]; then
+  docker image inspect "$IMAGE_REF" >/dev/null 2>&1 || fail "candidate image is unavailable: $IMAGE_REF"
+  export SCRAPEYARD_IMAGE="$IMAGE_REF"
+  BUILD_DURATION=0
+else
+  export SCRAPEYARD_APP_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+  export SCRAPEYARD_SOURCE_REVISION="$(git rev-parse HEAD)"
+  export SCRAPEYARD_BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export SCRAPEYARD_IMAGE="$PROJECT-scrapeyard:candidate"
+  BUILD_ARGS=(build scrapeyard)
+  if ((NO_CACHE == 1)); then
+    BUILD_ARGS=(build --no-cache scrapeyard)
+  fi
+  echo "Building the production Dockerfile (no_cache=$NO_CACHE)..."
+  timeout "$BUILD_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" "${BUILD_ARGS[@]}"
+  BUILD_DURATION=$((SECONDS - BUILD_STARTED_AT))
+fi
 
-IMAGE_ID="$(docker image ls -q \
-  --filter "label=com.docker.compose.project=$PROJECT" \
-  --filter "label=com.docker.compose.service=scrapeyard" | head -n 1)"
-[[ -n "$IMAGE_ID" ]] || fail "Compose did not produce a Scrapeyard image"
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$SCRAPEYARD_IMAGE")"
 IMAGE_SIZE="$(docker image inspect --format '{{.Size}}' "$IMAGE_ID")"
 while IFS='=' read -r label expected; do
   actual="$(docker image inspect --format "{{index .Config.Labels \"$label\"}}" "$IMAGE_ID")"
   [[ "$actual" == "$expected" ]] || fail "image label $label expected $expected, got $actual"
 done <<'EOF'
-org.scrapeyard.browser.playwright.version=1.58.0
-org.scrapeyard.browser.playwright.chromium-revision=1208
-org.scrapeyard.browser.rebrowser-playwright.version=1.52.0
-org.scrapeyard.browser.rebrowser-playwright.chromium-revision=1169
-org.scrapeyard.browser.camoufox-package.version=0.4.11
-org.scrapeyard.browser.camoufox.version=135.0.1
-org.scrapeyard.browser.camoufox.release=beta.24
-org.scrapeyard.browser.camoufox.sha256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e381ba2676a4888
+org.scrapeyard.browser.scrapling.version=0.4.11
+org.scrapeyard.browser.playwright.version=1.61.0
+org.scrapeyard.browser.patchright.version=1.61.2
+org.scrapeyard.browser.chromium.version=149.0.7827.55
+org.scrapeyard.browser.chromium.revision=1228
+org.scrapeyard.browser.camoufox-package.version=0.6.0
+org.scrapeyard.browser.camoufox.version=150.0.2
+org.scrapeyard.browser.camoufox.release=beta.25
+org.scrapeyard.browser.camoufox.sha256=b146b98b0c2c41023716feef36451f319a534309f72c54584a4b0b88670f510b
 org.scrapeyard.browser.ubo.version=1.72.2
 org.scrapeyard.browser.ubo.sha256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
-org.opencontainers.image.base.digest=sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+org.opencontainers.image.base.digest=sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 EOF
 
 if ((EUID == 0)); then
@@ -282,7 +309,8 @@ EGRESS_POLICY_ACTIVE=1
 echo "Starting Scrapeyard after the connected-IP policy is installed..."
 timeout 120 docker compose "${COMPOSE_ARGS[@]}" up -d --no-build scrapeyard peer
 HEALTH_DEADLINE=$((SECONDS + START_TIMEOUT))
-until curl --silent --fail --max-time 5 "http://127.0.0.1:$API_PORT/health" \
+until curl --silent --fail --max-time 5 -H "X-API-Key: $HEALTH_KEY" \
+  "http://127.0.0.1:$API_PORT/health/ready" \
   > "$DIAGNOSTICS_DIR/health.json" 2>/dev/null; do
   ((SECONDS < HEALTH_DEADLINE)) || fail "Scrapeyard did not become healthy within ${START_TIMEOUT}s"
   sleep 2
@@ -294,12 +322,12 @@ PORT_BINDING="$(docker port "$(compose ps -q scrapeyard)" 8420/tcp)"
 compose exec -T peer python -c \
   "import urllib.request; assert urllib.request.urlopen('http://scrapeyard:8420/health/live', timeout=3).status == 200"
 
-if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
-  'http://fixture.private.test:8080/protected?case=network-layer'; then
+if compose exec -T scrapeyard python -c \
+  "import urllib.request; urllib.request.urlopen('http://fixture.private.test:8080/protected?case=network-layer', timeout=2).read()"; then
   fail "network policy allowed a private target"
 fi
-if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
-  'http://169.254.169.254/latest/meta-data/'; then
+if compose exec -T scrapeyard python -c \
+  "import urllib.request; urllib.request.urlopen('http://169.254.169.254/latest/meta-data/', timeout=2).read()"; then
   fail "network policy allowed a metadata target"
 fi
 
@@ -347,18 +375,28 @@ grep -Eq 'Application shutdown complete|Finished server process' \
 TOTAL_DURATION=$((SECONDS - TOTAL_STARTED_AT))
 cat > "$DIAGNOSTICS_DIR/timings.txt" <<EOF
 no_cache=$NO_CACHE
+run_mode=$RUN_MODE
 build_seconds=$BUILD_DURATION
 total_seconds=$TOTAL_DURATION
+image_id=$IMAGE_ID
 image_bytes=$IMAGE_SIZE
 EOF
+
+for secret in "$API_KEY" "$HEALTH_KEY" "$ENCRYPTION_KEY"; do
+  if grep -R -a -F -- "$secret" "$DIAGNOSTICS_DIR" >/dev/null 2>&1; then
+    fail "generated secret appeared in smoke diagnostics"
+  fi
+done
 
 cleanup_resources
 assert_no_project_resources
 rm -rf -- "$CREDENTIAL_DIR"
 CREDENTIAL_DIR=""
-unset SCRAPEYARD_API_CREDENTIALS
+unset SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_HEALTH_PROBE_API_KEY SCRAPEYARD_IMAGE
 unset SCRAPEYARD_ENCRYPTION_KEYS SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID
 unset SCRAPEYARD_BIND_ADDRESS SCRAPEYARD_PORT
+unset SCRAPEYARD_BACKEND_SUBNET SCRAPEYARD_BACKEND_IP_RANGE
+unset SCRAPEYARD_EGRESS_SOURCE SCRAPEYARD_REDIS_DESTINATION
 trap - EXIT INT TERM HUP
 
 echo "Container/browser smoke passed."

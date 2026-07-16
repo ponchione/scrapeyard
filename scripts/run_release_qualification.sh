@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/run_release_qualification.sh [--profile quick|full] [--phase NAME] [--no-build] [--no-cache]
+Usage: ./scripts/run_release_qualification.sh [--profile quick|full] [--phase NAME] [--image IMMUTABLE_REF] [--no-build] [--no-cache]
 
 Run Audit Item 15 against the production Dockerfile, real Redis AOF, and real
 browser runtimes. The quick profile is the bounded automated lane; full is the
@@ -32,7 +32,7 @@ Configuration:
   SCRAPEYARD_QUALIFICATION_TASK_GROWTH      threshold (default 4)
   SCRAPEYARD_QUALIFICATION_CPU_PERCENT      threshold (default 400)
 
-Phases: all, recovery, redis_restart, load, soak, backup_restore.
+Phases: all, readiness, recovery, redis_restart, load, soak, backup_restore.
 EOF
 }
 
@@ -40,6 +40,7 @@ PROFILE="quick"
 ONLY_PHASE="all"
 BUILD=1
 NO_CACHE=0
+IMAGE_REF=""
 while (($#)); do
   case "$1" in
     --profile)
@@ -48,6 +49,12 @@ while (($#)); do
       shift 2
       ;;
     --no-build) BUILD=0; shift ;;
+    --image)
+      (($# >= 2)) || { echo "--image requires a reference" >&2; exit 2; }
+      IMAGE_REF=$2
+      BUILD=0
+      shift 2
+      ;;
     --no-cache) NO_CACHE=1; shift ;;
     --phase)
       (($# >= 2)) || { echo "--phase requires a phase name" >&2; exit 2; }
@@ -66,6 +73,10 @@ done
   echo "--no-cache cannot be combined with --no-build" >&2
   exit 2
 }
+[[ -z "$IMAGE_REF" || "$NO_CACHE" == 0 ]] || {
+  echo "--no-cache cannot be combined with --image" >&2
+  exit 2
+}
 
 fail() {
   echo "release qualification: $*" >&2
@@ -73,8 +84,8 @@ fail() {
 }
 
 case "$ONLY_PHASE" in
-  all|recovery|redis_restart|load|soak|backup_restore) ;;
-  *) fail "--phase must be all, recovery, redis_restart, load, soak, or backup_restore" ;;
+  all|readiness|recovery|redis_restart|load|soak|backup_restore) ;;
+  *) fail "--phase must be all, readiness, recovery, redis_restart, load, soak, or backup_restore" ;;
 esac
 
 validate_integer() {
@@ -108,6 +119,11 @@ else
   SOAK_SECONDS="${SCRAPEYARD_QUALIFICATION_SOAK_SECONDS:-900}"
 fi
 DIAGNOSTICS_DIR="${SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR:-$ROOT_DIR/artifacts/release-qualification-$PROFILE}"
+export SCRAPEYARD_BACKEND_SUBNET="${SCRAPEYARD_QUALIFICATION_BACKEND_SUBNET:-172.29.15.0/24}"
+export SCRAPEYARD_BACKEND_IP_RANGE="${SCRAPEYARD_QUALIFICATION_BACKEND_IP_RANGE:-172.29.15.0/25}"
+export SCRAPEYARD_EGRESS_POLICY_PROBE_HOST="${SCRAPEYARD_QUALIFICATION_EGRESS_PROBE_ADDRESS:-172.29.15.248}"
+export SCRAPEYARD_REDIS_DESTINATION="${SCRAPEYARD_QUALIFICATION_REDIS_ADDRESS:-172.29.15.249}"
+export SCRAPEYARD_EGRESS_SOURCE="${SCRAPEYARD_QUALIFICATION_APP_ADDRESS:-172.29.15.250}"
 READ_P95="${SCRAPEYARD_QUALIFICATION_READ_P95_MS:-750}"
 RECOVERY_SECONDS="${SCRAPEYARD_QUALIFICATION_RECOVERY_SECONDS:-30}"
 DRAIN_SECONDS="${SCRAPEYARD_QUALIFICATION_DRAIN_SECONDS:-180}"
@@ -233,8 +249,10 @@ cleanup_resources() {
   [[ -n "$CREDENTIAL_DIR" ]] && rm -rf -- "$CREDENTIAL_DIR"
   [[ -n "$BACKUP_DIR" ]] && rm -rf -- "$BACKUP_DIR"
   unset SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_ENCRYPTION_KEYS \
-    SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID SCRAPEYARD_BIND_ADDRESS SCRAPEYARD_PORT
+    SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID SCRAPEYARD_HEALTH_PROBE_API_KEY \
+    SCRAPEYARD_BIND_ADDRESS SCRAPEYARD_PORT SCRAPEYARD_IMAGE
   unset SCRAPEYARD_SMOKE_API_PORT SCRAPEYARD_SMOKE_FIXTURE_PORT
+  unset SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB
   unset SCRAPEYARD_QUALIFICATION_CRASH_POINT
   set -e
   CLEANUP_COMPLETE=1
@@ -277,14 +295,17 @@ CREDENTIAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrapeyard-qualification-credential
 BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrapeyard-qualification-backup.XXXXXX")"
 chmod 700 "$CREDENTIAL_DIR" "$BACKUP_DIR"
 API_KEY_FILE="$CREDENTIAL_DIR/api-key"
+HEALTH_KEY_FILE="$CREDENTIAL_DIR/health-key"
 printf 'item15-qualification-%s\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$API_KEY_FILE"
-chmod 600 "$API_KEY_FILE"
+printf 'item15-health-%s\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$HEALTH_KEY_FILE"
+chmod 600 "$API_KEY_FILE" "$HEALTH_KEY_FILE"
 API_KEY="$(<"$API_KEY_FILE")"
+HEALTH_KEY="$(<"$HEALTH_KEY_FILE")"
 
 printf -v SCRAPEYARD_API_CREDENTIALS \
-  '{"item15-qualification":{"secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail"]}}' \
-  "$API_KEY"
-export SCRAPEYARD_API_CREDENTIALS
+  '{"item15-qualification":{"secret":"%s","scopes":["submit","read","schedule-admin","delete"]},"item15-health":{"secret":"%s","scopes":["health-detail"]}}' \
+  "$API_KEY" "$HEALTH_KEY"
+export SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_HEALTH_PROBE_API_KEY="$HEALTH_KEY"
 ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
 printf -v SCRAPEYARD_ENCRYPTION_KEYS \
   '{"item20-qualification":"%s"}' \
@@ -297,15 +318,25 @@ export SCRAPEYARD_SMOKE_API_PORT="$API_PORT"
 export SCRAPEYARD_SMOKE_FIXTURE_PORT="$FIXTURE_PORT"
 export SCRAPEYARD_QUALIFICATION_CRASH_POINT=""
 
-if ((BUILD == 1)); then
+if [[ -n "$IMAGE_REF" ]]; then
+  docker image inspect "$IMAGE_REF" >/dev/null 2>&1 || \
+    fail "candidate image is unavailable: $IMAGE_REF"
+  export SCRAPEYARD_IMAGE="$IMAGE_REF"
+elif ((BUILD == 1)); then
+  export SCRAPEYARD_APP_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+  export SCRAPEYARD_SOURCE_REVISION="$(git rev-parse HEAD)"
+  export SCRAPEYARD_BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export SCRAPEYARD_IMAGE="$PROJECT-scrapeyard:candidate"
   build_args=(build scrapeyard)
   ((NO_CACHE == 0)) || build_args=(build --no-cache scrapeyard)
   echo "Building the production Dockerfile (profile=$PROFILE no_cache=$NO_CACHE)..."
   timeout "$BUILD_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" "${build_args[@]}"
 else
-  docker image inspect "$PROJECT-scrapeyard" >/dev/null 2>&1 || \
-    fail "--no-build requires existing image $PROJECT-scrapeyard"
+  export SCRAPEYARD_IMAGE="${SCRAPEYARD_IMAGE:-$PROJECT-scrapeyard:candidate}"
+  docker image inspect "$SCRAPEYARD_IMAGE" >/dev/null 2>&1 || \
+    fail "--no-build requires existing image $SCRAPEYARD_IMAGE"
 fi
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$SCRAPEYARD_IMAGE")"
 
 if ((EUID == 0)); then
   POLICY_MODE=root
@@ -322,7 +353,8 @@ run_apparmor_profile install
 echo "Starting isolated Redis, fixture, and production Scrapeyard runtime..."
 timeout 120 docker compose "${COMPOSE_ARGS[@]}" up -d --no-build
 health_deadline=$((SECONDS + 120))
-until curl --silent --fail --max-time 3 "http://127.0.0.1:$API_PORT/health" \
+until curl --silent --fail --max-time 3 -H "X-API-Key: $HEALTH_KEY" \
+  "http://127.0.0.1:$API_PORT/health/ready" \
   > "$DIAGNOSTICS_DIR/health-initial.json" 2>/dev/null; do
   ((SECONDS < health_deadline)) || fail "Scrapeyard did not become healthy within 120 seconds"
   sleep 1
@@ -348,6 +380,7 @@ driver_args=(
   --api-url "http://127.0.0.1:$API_PORT"
   --fixture-url "http://127.0.0.1:$FIXTURE_PORT"
   --api-key-file "$API_KEY_FILE"
+  --health-key-file "$HEALTH_KEY_FILE"
   --diagnostics-dir "$DIAGNOSTICS_DIR"
   --backup-dir "$BACKUP_DIR"
   --repo-root "$ROOT_DIR"
@@ -383,8 +416,11 @@ soak_seconds=$SOAK_SECONDS
 global_timeout_seconds=$GLOBAL_TIMEOUT
 phase_timeout_seconds=$PHASE_TIMEOUT
 intended_host=4 CPU / 8 GiB RAM / 15 GiB free disk
+image_id=$IMAGE_ID
 EOF
 scan_diagnostics "$API_KEY"
+scan_diagnostics "$HEALTH_KEY"
+scan_diagnostics "$ENCRYPTION_KEY"
 
 cleanup_resources
 assert_no_project_resources

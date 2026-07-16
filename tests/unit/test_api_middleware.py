@@ -64,7 +64,11 @@ def _size_limited_app(*, max_bytes: int = 3) -> FastAPI:
     return app
 
 
-def _auth_app(*, keys: set[str] | None = None) -> FastAPI:
+def _auth_app(
+    *,
+    keys: set[str] | None = None,
+    local_development_unauthenticated: bool = False,
+) -> FastAPI:
     app = FastAPI()
 
     @app.get("/protected")
@@ -77,6 +81,7 @@ def _auth_app(*, keys: set[str] | None = None) -> FastAPI:
     app.add_middleware(
         APIKeyAuthMiddleware,
         keys={"secret"} if keys is None else keys,
+        local_development_unauthenticated=local_development_unauthenticated,
     )
     return app
 
@@ -237,13 +242,26 @@ async def test_auth_attaches_api_key_digest_identity_without_plaintext() -> None
 
 @pytest.mark.asyncio
 async def test_auth_disabled_attaches_shared_unauthenticated_identity() -> None:
-    transport = ASGITransport(app=_auth_app(keys=set()))
+    transport = ASGITransport(
+        app=_auth_app(keys=set(), local_development_unauthenticated=True)
+    )
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/protected")
 
     assert response.status_code == 200
     assert response.json()["caller_identity"] == "local-development"
+
+
+@pytest.mark.asyncio
+async def test_empty_auth_configuration_fails_closed_without_local_opt_in() -> None:
+    transport = ASGITransport(app=_auth_app(keys=set()))
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/protected")
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "API authentication is not configured"
 
 
 @pytest.mark.asyncio

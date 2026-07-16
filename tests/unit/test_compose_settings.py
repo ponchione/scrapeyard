@@ -20,8 +20,10 @@ _QUALIFICATION_ONLY_SETTINGS = frozenset(
 )
 _REQUIRED_ENV = {
     "SCRAPEYARD_API_CREDENTIALS": (
-        '{"compose-test":{"secret":"0123456789abcdef","scopes":["submit"]}}'
+        '{"compose-test":{"secret":"0123456789abcdef","scopes":["submit","read"]},'
+        '"compose-health":{"secret":"health-key-0123456789","scopes":["health-detail"]}}'
     ),
+    "SCRAPEYARD_HEALTH_PROBE_API_KEY": "health-key-0123456789",
     "SCRAPEYARD_ENCRYPTION_KEYS": (
         '{"v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}'
     ),
@@ -67,9 +69,11 @@ def test_production_compose_enumerates_every_runtime_setting() -> None:
 
     assert set(environment) == model_settings - _QUALIFICATION_ONLY_SETTINGS
     assert _QUALIFICATION_ONLY_SETTINGS.isdisjoint(environment)
+    assert environment["SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED"] == "false"
     assert all(
         expression.startswith(f"${{{name}:")
         for name, expression in environment.items()
+        if name != "SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED"
     )
 
 
@@ -83,6 +87,8 @@ def test_production_compose_preserves_defaults_and_honors_overrides(tmp_path: Pa
     assert defaults["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == "172.30.0.248"
     assert defaults["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT"] == "8080"
     assert defaults["SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT"] == "8081"
+    assert defaults["SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED"] == "false"
+    assert defaults["SCRAPEYARD_HEALTH_PROBE_API_KEY"] == "health-key-0123456789"
 
     overridden = _render_production_compose(
         tmp_path,
@@ -103,3 +109,63 @@ def test_trusted_compose_overlays_explicitly_disable_production_attestation() ->
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == ""
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT"] == "0"
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT"] == "0"
+
+
+def test_local_overlay_explicitly_opts_into_unauthenticated_development() -> None:
+    local = yaml.load(
+        Path("docker-compose.local.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )["services"]["scrapeyard"]["environment"]
+
+    assert local["SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED"] == "true"
+    assert local["SCRAPEYARD_API_CREDENTIALS"] == ""
+    assert local["SCRAPEYARD_HEALTH_PROBE_API_KEY"] == ""
+
+
+def test_production_compose_bounds_camoufox_writable_runtime_state() -> None:
+    compose = yaml.load(
+        Path("docker-compose.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    tmpfs = compose["services"]["scrapeyard"]["tmpfs"]
+
+    assert any(
+        value.startswith("/home/scrapeyard/camoufox:")
+        and "noexec" in value
+        and "uid=10001" in value
+        and "gid=10001" in value
+        for value in tmpfs
+    )
+    assert any(
+        value.startswith("/opt/scrapeyard-cache/fontconfig:")
+        and "noexec" in value
+        and "uid=10001" in value
+        and "gid=10001" in value
+        for value in tmpfs
+    )
+
+
+def test_live_redis_runner_uses_an_isolated_compose_network() -> None:
+    script = Path("scripts/run_live_redis_tests.sh").read_text(encoding="utf-8")
+
+    for setting in (
+        "SCRAPEYARD_TEST_BACKEND_SUBNET",
+        "SCRAPEYARD_TEST_BACKEND_IP_RANGE",
+        "SCRAPEYARD_TEST_EGRESS_POLICY_PROBE_HOST",
+        "SCRAPEYARD_TEST_REDIS_DESTINATION",
+        "SCRAPEYARD_TEST_EGRESS_SOURCE",
+    ):
+        assert setting in script
+    assert "172.29.13.0/24" in script
+    assert "-u SCRAPEYARD_EGRESS_POLICY_PROBE_HOST" in script
+
+
+def test_qualification_overlay_allows_the_disk_failure_injection() -> None:
+    qualification = yaml.load(
+        Path("docker-compose.qualification.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+
+    assert qualification["services"]["scrapeyard"]["environment"][
+        "SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB"
+    ] == "${SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB:-10}"

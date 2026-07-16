@@ -65,6 +65,7 @@ class Harness:
         self.api = args.api_url.rstrip("/")
         self.fixture = args.fixture_url.rstrip("/")
         self.api_key = args.api_key_file.read_text(encoding="utf-8").strip()
+        self.health_key = args.health_key_file.read_text(encoding="utf-8").strip()
         self.diagnostics = args.diagnostics_dir
         self.diagnostics.mkdir(parents=True, exist_ok=True)
         self.profile = args.profile
@@ -108,7 +109,9 @@ class Harness:
         url = path_or_url if path_or_url.startswith("http") else f"{self.api}{path_or_url}"
         headers: dict[str, str] = {}
         if authenticated:
-            headers["X-API-Key"] = self.api_key
+            headers["X-API-Key"] = (
+                self.health_key if path_or_url == "/health/ready" else self.api_key
+            )
         if content_type:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(url, data=data, headers=headers)
@@ -230,6 +233,117 @@ class Harness:
             "exec", "-T", "--user", "scrapeyard", "scrapeyard", "python", "-c", script
         )
         return json.loads(output)
+
+    def wait_container_health(self, expected: str, *, timeout: float = 30) -> str:
+        container = self.compose("ps", "-q", "scrapeyard", timeout=10).strip()
+        deadline = time.monotonic() + timeout
+        last = "missing"
+        while time.monotonic() < deadline:
+            last = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Health.Status}}",
+                    container,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            ).stdout.strip()
+            if last == expected:
+                return last
+            time.sleep(0.5)
+        raise QualificationFailure(
+            f"container_health_convergence expected={expected} actual={last}"
+        )
+
+    def phase_readiness(self) -> None:
+        observations: dict[str, Any] = {}
+        self.wait_health()
+        self.wait_container_health("healthy")
+
+        self.compose(
+            "exec",
+            "-T",
+            "--user",
+            "scrapeyard",
+            "scrapeyard",
+            "chmod",
+            "000",
+            "/data/db/jobs.db",
+        )
+        sqlite_failure = self.wait_health(healthy=False)
+        if sqlite_failure["dependencies"]["sqlite_jobs"]["ok"]:
+            raise QualificationFailure("SQLite permission failure did not fail readiness")
+        self.wait_container_health("unhealthy")
+        self.compose(
+            "exec",
+            "-T",
+            "--user",
+            "scrapeyard",
+            "scrapeyard",
+            "chmod",
+            "640",
+            "/data/db/jobs.db",
+        )
+        self.wait_health()
+        self.wait_container_health("healthy")
+        observations["sqlite"] = {"failed": True, "recovered": True}
+
+        self.compose(
+            "exec",
+            "-T",
+            "--user",
+            "scrapeyard",
+            "scrapeyard",
+            "sh",
+            "-c",
+            "mkdir -p /data/results/readiness-orphan && "
+            "touch -d '10 minutes ago' /data/results/readiness-orphan && "
+            "chmod 000 /data/results",
+        )
+        storage_failure = self.wait_health(healthy=False)
+        if storage_failure["dependencies"]["result_storage"]["ok"]:
+            raise QualificationFailure("artifact-storage permission failure did not fail readiness")
+        self.wait_container_health("unhealthy")
+        background_deadline = time.monotonic() + 15
+        background_failure: dict[str, Any] | None = None
+        while time.monotonic() < background_deadline:
+            _status, payload = self.request("/health/ready", timeout=3)
+            if not payload["background_tasks"]["cleanup"]["ok"]:
+                background_failure = payload
+                break
+            time.sleep(0.5)
+        if background_failure is None:
+            raise QualificationFailure("cleanup task failure did not surface in readiness")
+        self.compose(
+            "exec",
+            "-T",
+            "--user",
+            "scrapeyard",
+            "scrapeyard",
+            "chmod",
+            "750",
+            "/data/results",
+        )
+        self.wait_health(timeout=30)
+        self.wait_container_health("healthy")
+        observations["artifact_storage"] = {"failed": True, "recovered": True}
+        observations["background_cleanup"] = {"failed": True, "recovered": True}
+
+        os.environ["SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB"] = "2147483647"
+        self.compose("up", "-d", "--no-deps", "--force-recreate", "scrapeyard")
+        disk_failure = self.wait_health(healthy=False, timeout=60)
+        if disk_failure["dependencies"]["disk"]["ok"]:
+            raise QualificationFailure("disk-capacity failure did not fail readiness")
+        self.wait_container_health("unhealthy")
+        os.environ["SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB"] = "10"
+        self.compose("up", "-d", "--no-deps", "--force-recreate", "scrapeyard")
+        self.wait_health(timeout=60)
+        self.wait_container_health("healthy")
+        observations["disk_capacity"] = {"failed": True, "recovered": True}
+        self.report.phases["readiness"] = observations
 
     def phase_recovery(self) -> None:
         observations: list[dict[str, Any]] = []
@@ -367,6 +481,7 @@ class Harness:
         self.compose("kill", "-s", "SIGKILL", "redis", timeout=15)
         time.sleep(8)
         unavailable = self.wait_health(healthy=False, timeout=15)
+        self.wait_container_health("unhealthy")
         restart_started = time.monotonic()
         self.compose("start", "redis")
         # A prolonged disconnect terminates arq's control loop even though the
@@ -376,6 +491,7 @@ class Harness:
         self.compose("stop", "-t", "15", "scrapeyard", timeout=30)
         self.compose("start", "scrapeyard", timeout=30)
         self.wait_health(timeout=self.thresholds.recovery_seconds)
+        self.wait_container_health("healthy")
         redis_recovery = time.monotonic() - restart_started
         completed = [self.wait_job(job_id) for job_id, _ in jobs]
         drain_seconds = time.monotonic() - restart_started
@@ -1010,13 +1126,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--fixture-url", required=True)
     parser.add_argument("--api-key-file", type=Path, required=True)
+    parser.add_argument("--health-key-file", type=Path, required=True)
     parser.add_argument("--diagnostics-dir", type=Path, required=True)
     parser.add_argument("--backup-dir", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--profile", choices=("quick", "full"), required=True)
     parser.add_argument(
         "--only-phase",
-        choices=("all", "recovery", "redis_restart", "load", "soak", "backup_restore"),
+        choices=("all", "readiness", "recovery", "redis_restart", "load", "soak", "backup_restore"),
         default="all",
     )
     parser.add_argument("--soak-seconds", type=int, required=True)
@@ -1030,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     harness = Harness(args)
     phases: tuple[tuple[str, Callable[[], None]], ...] = (
+        ("readiness", harness.phase_readiness),
         ("recovery", harness.phase_recovery),
         ("redis_restart", harness.phase_redis_restart),
         ("load", harness.phase_load),

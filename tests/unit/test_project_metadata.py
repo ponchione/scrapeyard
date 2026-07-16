@@ -19,12 +19,12 @@ def test_static_package_metadata_uses_pep621_single_version_source() -> None:
     poetry = _section(pyproject, "tool.poetry")
 
     assert 'name = "scrapeyard"' in project
-    assert 'version = "0.6.0"' in project
+    assert 'version = "0.7.0"' in project
     assert 'requires-python = ">=3.10,<4.0"' in project
     for field in ("name", "version", "description", "authors", "readme"):
         assert re.search(rf"(?m)^{field}\s*=", poetry) is None
 
     package_init = Path("src/scrapeyard/__init__.py").read_text(encoding="utf-8")
     assert 'version("scrapeyard")' in package_init
-    assert "0.6.0" not in package_init
-    assert scrapeyard.__version__ == importlib.metadata.version("scrapeyard") == "0.6.0"
+    assert "0.7.0" not in package_init
+    assert scrapeyard.__version__ == importlib.metadata.version("scrapeyard") == "0.7.0"

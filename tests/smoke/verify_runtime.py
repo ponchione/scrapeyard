@@ -39,8 +39,9 @@ def _assert_writable(path: Path) -> None:
 
 
 def main() -> None:
+    import patchright
     import playwright
-    import rebrowser_playwright
+    from camoufox.multiversion import get_active_path
     from camoufox.pkgman import Version, launch_path
 
     uid = os.getuid()
@@ -73,28 +74,28 @@ def main() -> None:
             )
 
     playwright_version = importlib.metadata.version("playwright")
-    rebrowser_version = importlib.metadata.version("rebrowser-playwright")
-    camoufox_package_version = importlib.metadata.version("camoufox")
+    patchright_version = importlib.metadata.version("patchright")
+    camoufox_package_version = importlib.metadata.version("cloverlabs-camoufox")
     playwright_revision = _chromium_revision(playwright)
-    rebrowser_revision = _chromium_revision(rebrowser_playwright)
+    patchright_revision = _chromium_revision(patchright)
+    assert patchright_revision == playwright_revision
 
     browser_root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
     stock_browser = browser_root / f"chromium-{playwright_revision}"
     assert stock_browser.is_dir(), f"locked Playwright Chromium is missing: {stock_browser}"
 
-    bundled_sandbox = (
-        browser_root
-        / f"chromium-{rebrowser_revision}"
-        / "chrome-linux"
-        / "chrome_sandbox"
-    )
+    sandbox_candidates = list(stock_browser.rglob("chrome_sandbox"))
+    assert len(sandbox_candidates) == 1
+    bundled_sandbox = sandbox_candidates[0]
     assert bundled_sandbox.is_file() and os.access(bundled_sandbox, os.X_OK)
     assert not bundled_sandbox.stat().st_mode & 0o4000
     assert "CHROME_DEVEL_SANDBOX" not in os.environ
 
-    camoufox_executable = Path(launch_path())
+    active_camoufox = get_active_path()
+    assert active_camoufox is not None
+    camoufox_executable = Path(launch_path(active_camoufox))
     assert camoufox_executable.is_file() and os.access(camoufox_executable, os.X_OK)
-    camoufox_version = Version.from_path()
+    camoufox_version = Version.from_path(active_camoufox)
     cache_root = Path(os.environ["XDG_CACHE_HOME"])
     assert cache_root == Path("/opt/scrapeyard-cache")
     assert not os.access(cache_root, os.W_OK), "immutable browser cache is writable"
@@ -145,13 +146,13 @@ def main() -> None:
             "playwright_version": playwright_version,
             "playwright_chromium_revision": playwright_revision,
             "playwright_chromium_path": str(stock_browser),
-            "rebrowser_playwright_version": rebrowser_version,
-            "rebrowser_chromium_revision": rebrowser_revision,
+            "patchright_version": patchright_version,
+            "patchright_chromium_revision": patchright_revision,
             "bundled_sandbox_path": str(bundled_sandbox),
             "sandbox_strategy": "unprivileged-user-namespace",
             "camoufox_package_version": camoufox_package_version,
             "camoufox_browser_version": camoufox_version.version,
-            "camoufox_browser_release": camoufox_version.release,
+            "camoufox_browser_release": camoufox_version.build,
             "camoufox_executable": str(camoufox_executable),
             "ubo_version": "1.72.2",
         },

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+from datetime import datetime
 from functools import lru_cache
 
 from pydantic import Field, field_validator, model_validator
@@ -94,6 +95,7 @@ class ServiceSettings(BaseSettings):
     storage_cleanup_batch_size: int = Field(default=500, ge=1)
     storage_orphan_grace_seconds: int = Field(default=86400, ge=1)
     storage_reconciliation_dry_run: bool = True
+    storage_reconciliation_promotion_ack: str = ""
     storage_cleanup_interval_seconds: float = Field(default=21600.0, gt=0)
     storage_cleanup_cycle_max_items_per_phase: int = Field(default=10000, ge=1)
     storage_cleanup_cycle_max_seconds: float = Field(default=60.0, gt=0)
@@ -119,6 +121,8 @@ class ServiceSettings(BaseSettings):
 
     api_keys: str = ""
     api_credentials: str = ""
+    local_development_unauthenticated: bool = False
+    health_probe_api_key: str = Field(default="", repr=False)
     secret_reference_allowlist: str = ""
     encryption_keys: str = Field(default="", repr=False)
     encryption_active_key_id: str = ""
@@ -171,6 +175,26 @@ class ServiceSettings(BaseSettings):
             )
         if self.webhook_dispatch_batch_size < self.webhook_dispatch_concurrency:
             raise ValueError("webhook_dispatch_batch_size must be >= webhook_dispatch_concurrency")
+        promotion_ack = self.storage_reconciliation_promotion_ack.strip()
+        if not self.storage_reconciliation_dry_run:
+            if not promotion_ack:
+                raise ValueError(
+                    "storage_reconciliation_promotion_ack is required when destructive "
+                    "reconciliation is enabled"
+                )
+            try:
+                promoted_at = datetime.fromisoformat(
+                    promotion_ack.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "storage_reconciliation_promotion_ack must be an RFC 3339 timestamp"
+                ) from exc
+            if promoted_at.tzinfo is None:
+                raise ValueError(
+                    "storage_reconciliation_promotion_ack must include a timezone"
+                )
+            self.storage_reconciliation_promotion_ack = promotion_ack
         if self.qualification_crash_point and not self.qualification_mode:
             raise ValueError("qualification_crash_point requires qualification_mode=true")
         if self.qualification_crash_point:

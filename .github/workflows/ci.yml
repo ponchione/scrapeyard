@@ -52,6 +52,8 @@ jobs:
           poetry sync --no-interaction
       - name: Lint
         run: poetry run ruff check src tests scripts
+      - name: Enforce the browser security review
+        run: poetry run python scripts/audit_browser_security.py --dockerfile Dockerfile
       - name: Type check
         run: poetry run mypy src
       - name: Test with coverage
@@ -120,7 +122,7 @@ jobs:
     timeout-minutes: 20
     services:
       redis:
-        image: redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
+        image: redis:7.4.9-alpine3.21@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
         ports:
           - 6379:6379
         options: >-
@@ -129,7 +131,8 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      SCRAPEYARD_API_CREDENTIALS: '{"live-redis-ci":{"secret":"live-redis-ci-key-0000","scopes":["submit","read","schedule-admin","delete","health-detail"]}}'
+      SCRAPEYARD_API_CREDENTIALS: '{"live-redis-ci":{"secret":"live-redis-ci-key-0000","scopes":["submit","read","schedule-admin","delete"]},"live-redis-health":{"secret":"live-redis-health-key-0000","scopes":["health-detail"]}}'
+      SCRAPEYARD_HEALTH_PROBE_API_KEY: live-redis-health-key-0000
       SCRAPEYARD_REDIS_DSN: redis://127.0.0.1:6379/15
 
     steps:

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
-from scrapling import Adaptor
+from scrapling.parser import Adaptor
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import (
@@ -197,6 +197,26 @@ def test_extract_selectors_excludes_non_visible_script_and_style_text() -> None:
     result = extract_selectors_strict(page, {"text": ".product"})
 
     assert result == {"text": "Before Middle After"}
+
+
+def test_extract_selectors_does_not_duplicate_real_adaptor_text_pseudo_elements() -> None:
+    page = _adaptor(
+        '<div class="product"><span class="sku">SKU 123</span>'
+        '<span class="stock">In Stock</span></div>'
+    )
+
+    result = extract_selectors_strict(
+        page,
+        {
+            "sku": ".sku::text",
+            "stock": SelectorLong(
+                query="//span[@class='stock']/text()",
+                type=SelectorType.xpath,
+            ),
+        },
+    )
+
+    assert result == {"sku": "SKU 123", "stock": "In Stock"}
 
 
 def test_select_items_returns_one_element_per_item() -> None:

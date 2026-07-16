@@ -36,6 +36,7 @@ def test_ci_required_gate_contracts() -> None:
         "poetry sync --no-interaction",
         "python scripts/check_packaging_toolchain.py",
         "poetry run ruff check src tests scripts",
+        "scripts/audit_browser_security.py --dockerfile Dockerfile",
         "poetry run mypy src",
         "poetry run pytest",
     ):
@@ -51,10 +52,11 @@ def test_ci_required_gate_contracts() -> None:
 
     live_redis = workflow["jobs"]["live-redis"]
     assert live_redis["services"]["redis"]["image"] == (
-        "redis:7.4.5-alpine@sha256:"
-        "bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08"
+        "redis:7.4.9-alpine3.21@sha256:"
+        "6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"
     )
     assert live_redis["env"]["SCRAPEYARD_API_CREDENTIALS"]
+    assert live_redis["env"]["SCRAPEYARD_HEALTH_PROBE_API_KEY"]
     assert live_redis["env"]["SCRAPEYARD_REDIS_DSN"].endswith("/15")
     live_commands = _run_commands(live_redis)
     assert "python scripts/check_packaging_toolchain.py" in live_commands
@@ -130,3 +132,32 @@ def test_all_third_party_actions_are_pinned_to_full_commit_shas() -> None:
                         path,
                         uses,
                     )
+
+
+def test_immutable_release_workflow_builds_once_and_promotes_only_qualified_bytes() -> None:
+    workflow = _workflow("release.yml")
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
+    qualify = workflow["jobs"]["qualify"]
+    commands = _run_commands(qualify)
+    assert commands.count("docker build --pull --no-cache") == 1
+    assert "run_container_security_scan.sh \"${CANDIDATE_IMAGE_ID}\"" in commands
+    assert commands.count('--image "${CANDIDATE_IMAGE_ID}"') == 4
+    assert "--profile full" in commands
+    assert "candidate-image.tar.zst.sha256" in commands
+    artifact = next(
+        step
+        for step in qualify["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    )
+    assert artifact["with"]["retention-days"] == "3"
+
+    promote = workflow["jobs"]["promote"]
+    assert promote["if"] == "inputs.promote"
+    assert promote["needs"] == "qualify"
+    assert promote["environment"] == "production-release"
+    assert promote["permissions"] == {"contents": "read", "packages": "write"}
+    promote_commands = _run_commands(promote)
+    assert "sha256sum --check candidate-image.tar.zst.sha256" in promote_commands
+    assert "docker push" in promote_commands

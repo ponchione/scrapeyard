@@ -2,20 +2,8 @@ name: Recovery, restore, load, and soak qualification
 
 on:
   pull_request:
-    paths:
-      - Dockerfile
-      - docker-compose.yml
-      - docker-compose.smoke.yml
-      - docker-compose.qualification.yml
-      - poetry.lock
-      - pyproject.toml
-      - scripts/qualification_backup.py
-      - scripts/run_release_qualification.sh
-      - sql/**
-      - src/scrapeyard/**
-      - tests/qualification/**
-      - tests/smoke/**
-      - .github/workflows/release-qualification.yml
+  push:
+    branches: [main]
   schedule:
     - cron: "41 7 * * 6"
   workflow_dispatch:
@@ -39,7 +27,7 @@ concurrency:
 jobs:
   quick-recovery-restore:
     name: Quick recovery and restore / production runtime
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'quick')
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'quick')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:

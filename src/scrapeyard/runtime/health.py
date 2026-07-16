@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict
 
-from scrapeyard.storage.database import get_db
+from scrapeyard.storage.database import probe_db
 from scrapeyard.storage.protocols import JobStore
 
 logger = logging.getLogger(__name__)
@@ -93,8 +93,7 @@ async def probe_redis(pool: RedisHealthPool) -> ProbeResult:
 
 async def probe_sqlite(db_name: str = "jobs.db") -> ProbeResult:
     try:
-        async with get_db(db_name) as db:
-            await db.execute("SELECT 1")
+        await probe_db(db_name)
     except Exception as exc:  # pragma: no cover
         return ProbeResult(False, f"{db_name} probe failed: {type(exc).__name__}")
     return ProbeResult(True)

@@ -33,6 +33,13 @@ def element_text_content(element: object) -> str:
     root = getattr(element, "_root", None)
     if etree.iselement(root):
         return "".join(_visible_text_segments(root))
+    # Scrapling represents CSS/XPath text pseudo-elements as lxml
+    # ``_ElementUnicodeResult`` objects.  They are string subclasses whose
+    # public ``text`` and ``get_all_text()`` accessors both expose the same
+    # value; falling through to the compatibility branch would concatenate
+    # that value with itself.
+    if isinstance(root, str):
+        return root
 
     direct_text = _text_attribute(element)
     get_all_text = getattr(element, "get_all_text", None)

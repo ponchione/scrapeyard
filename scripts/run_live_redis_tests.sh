@@ -6,13 +6,22 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 if [[ -z "${SCRAPEYARD_API_CREDENTIALS:-}" ]]; then
-  export SCRAPEYARD_API_CREDENTIALS='{"live-redis":{"secret":"live-redis-test-key-0000","scopes":["submit","read","schedule-admin","delete","health-detail"]}}'
+  export SCRAPEYARD_API_CREDENTIALS='{"live-redis":{"secret":"live-redis-test-key-0000","scopes":["submit","read","schedule-admin","delete"]},"live-redis-health":{"secret":"live-redis-health-key-0000","scopes":["health-detail"]}}'
+  export SCRAPEYARD_HEALTH_PROBE_API_KEY="live-redis-health-key-0000"
 fi
 if [[ -z "${SCRAPEYARD_ENCRYPTION_KEYS:-}" ]]; then
   export SCRAPEYARD_ENCRYPTION_KEYS='{"live-test-v1":"MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="}'
 fi
 export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID="${SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID:-live-test-v1}"
 export SCRAPEYARD_TEST_REDIS_PORT="${SCRAPEYARD_TEST_REDIS_PORT:-56379}"
+# The base Compose network is intentionally stable for production. Give this
+# disposable test project its own subnet so it can run alongside a deployed
+# stack without Docker rejecting the overlapping IPAM pool.
+export SCRAPEYARD_BACKEND_SUBNET="${SCRAPEYARD_TEST_BACKEND_SUBNET:-172.29.13.0/24}"
+export SCRAPEYARD_BACKEND_IP_RANGE="${SCRAPEYARD_TEST_BACKEND_IP_RANGE:-172.29.13.0/25}"
+export SCRAPEYARD_EGRESS_POLICY_PROBE_HOST="${SCRAPEYARD_TEST_EGRESS_POLICY_PROBE_HOST:-172.29.13.248}"
+export SCRAPEYARD_REDIS_DESTINATION="${SCRAPEYARD_TEST_REDIS_DESTINATION:-172.29.13.249}"
+export SCRAPEYARD_EGRESS_SOURCE="${SCRAPEYARD_TEST_EGRESS_SOURCE:-172.29.13.250}"
 
 case "$SCRAPEYARD_TEST_REDIS_PORT" in
   ''|*[!0-9]*)
@@ -61,5 +70,11 @@ done
 
 docker compose "${COMPOSE_ARGS[@]}" exec -T redis redis-cli ping >/dev/null
 
-SCRAPEYARD_REDIS_DSN="redis://127.0.0.1:${SCRAPEYARD_TEST_REDIS_PORT}/15" \
-poetry run pytest -W error --no-cov -m live_redis tests/live_redis -q
+env \
+  -u SCRAPEYARD_BACKEND_SUBNET \
+  -u SCRAPEYARD_BACKEND_IP_RANGE \
+  -u SCRAPEYARD_EGRESS_POLICY_PROBE_HOST \
+  -u SCRAPEYARD_REDIS_DESTINATION \
+  -u SCRAPEYARD_EGRESS_SOURCE \
+  SCRAPEYARD_REDIS_DSN="redis://127.0.0.1:${SCRAPEYARD_TEST_REDIS_PORT}/15" \
+  poetry run pytest -W error --no-cov -m live_redis tests/live_redis -q

@@ -1,7 +1,8 @@
 services:
   egress-probe:
-    image: python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
-    command: ["python", "/opt/scrapeyard/egress_probe.py", "--challenge-port", "8080", "--liveness-port", "8081"]
+    image: "${SCRAPEYARD_IMAGE:-scrapeyard:local}"
+    entrypoint: ["python"]
+    command: ["/opt/scrapeyard/egress_probe.py", "--challenge-port", "8080", "--liveness-port", "8081"]
     user: "10001:10001"
     init: true
     read_only: true
@@ -23,10 +24,10 @@ services:
     restart: unless-stopped
     networks:
       backend:
-        ipv4_address: 172.30.0.248
+        ipv4_address: "${SCRAPEYARD_EGRESS_POLICY_PROBE_HOST:-172.30.0.248}"
 
   redis:
-    image: redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
+    image: redis:7.4.9-alpine3.21@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     user: redis
     command: ["redis-server", "--appendonly", "yes"]
     init: true
@@ -47,10 +48,16 @@ services:
     restart: unless-stopped
     networks:
       backend:
-        ipv4_address: 172.30.0.249
+        ipv4_address: "${SCRAPEYARD_REDIS_DESTINATION:-172.30.0.249}"
 
   scrapeyard:
-    build: .
+    image: "${SCRAPEYARD_IMAGE:-scrapeyard:local}"
+    build:
+      context: .
+      args:
+        APP_VERSION: "${SCRAPEYARD_APP_VERSION:-0.7.0}"
+        SOURCE_REVISION: "${SCRAPEYARD_SOURCE_REVISION:-development}"
+        BUILD_CREATED: "${SCRAPEYARD_BUILD_CREATED:-1970-01-01T00:00:00Z}"
     command: ["uvicorn", "scrapeyard.main:app", "--host", "0.0.0.0", "--port", "8420", "--workers", "1"]
     deploy:
       replicas: 1
@@ -84,16 +91,20 @@ services:
       - /home/scrapeyard/.config:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
       - /home/scrapeyard/.local:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
       - /home/scrapeyard/.camoufox:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=0700
+      - /home/scrapeyard/camoufox:rw,nosuid,nodev,noexec,size=64m,uid=10001,gid=10001,mode=0700
+      - /opt/scrapeyard-cache/fontconfig:rw,nosuid,nodev,noexec,size=128m,uid=10001,gid=10001,mode=0700
     volumes:
       - scrapeyard-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8420/health"]
+      test: ["CMD", "/usr/local/bin/scrapeyard-entrypoint", "healthcheck"]
       interval: 30s
       timeout: 10s
       start_period: 30s
       retries: 3
     environment:
-      SCRAPEYARD_API_CREDENTIALS: "${SCRAPEYARD_API_CREDENTIALS:?set SCRAPEYARD_API_CREDENTIALS before running docker compose}"
+      SCRAPEYARD_API_CREDENTIALS: "${SCRAPEYARD_API_CREDENTIALS:-}"
+      SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED: "false"
+      SCRAPEYARD_HEALTH_PROBE_API_KEY: "${SCRAPEYARD_HEALTH_PROBE_API_KEY:-}"
       SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST: "${SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST:-}"
       SCRAPEYARD_ENCRYPTION_KEYS: "${SCRAPEYARD_ENCRYPTION_KEYS:?set SCRAPEYARD_ENCRYPTION_KEYS before running docker compose}"
       SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID: "${SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID:?set SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID before running docker compose}"
@@ -175,6 +186,7 @@ services:
       SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE: "${SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE:-500}"
       SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS: "${SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS:-86400}"
       SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN: "${SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN:-true}"
+      SCRAPEYARD_STORAGE_RECONCILIATION_PROMOTION_ACK: "${SCRAPEYARD_STORAGE_RECONCILIATION_PROMOTION_ACK:-}"
       SCRAPEYARD_STORAGE_CLEANUP_INTERVAL_SECONDS: "${SCRAPEYARD_STORAGE_CLEANUP_INTERVAL_SECONDS:-21600}"
       SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE: "${SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE:-10000}"
       SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS: "${SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS:-60}"
@@ -205,7 +217,7 @@ services:
     restart: unless-stopped
     networks:
       backend:
-        ipv4_address: 172.30.0.250
+        ipv4_address: "${SCRAPEYARD_EGRESS_SOURCE:-172.30.0.250}"
 
 volumes:
   redis-data:
@@ -215,5 +227,5 @@ networks:
   backend:
     ipam:
       config:
-        - subnet: 172.30.0.0/24
-          ip_range: 172.30.0.0/25
+        - subnet: "${SCRAPEYARD_BACKEND_SUBNET:-172.30.0.0/24}"
+          ip_range: "${SCRAPEYARD_BACKEND_IP_RANGE:-172.30.0.0/25}"

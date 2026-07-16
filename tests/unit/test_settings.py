@@ -176,6 +176,17 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.health_include_projects is False
 
+    def test_authentication_defaults_fail_closed(self, monkeypatch):
+        monkeypatch.delenv(
+            "SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED",
+            raising=False,
+        )
+        monkeypatch.delenv("SCRAPEYARD_HEALTH_PROBE_API_KEY", raising=False)
+        settings = ServiceSettings()
+        assert settings.api_credentials == ""
+        assert settings.local_development_unauthenticated is False
+        assert settings.health_probe_api_key == ""
+
 
 class TestServiceSettingsFromEnv:
     """Verify that environment variables override defaults."""
@@ -199,11 +210,30 @@ class TestServiceSettingsFromEnv:
         values = {
             "SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS": "3600",
             "SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN": "false",
+            "SCRAPEYARD_STORAGE_RECONCILIATION_PROMOTION_ACK": (
+                "2026-07-16T12:00:00Z"
+            ),
         }
         with patch.dict(os.environ, values):
             settings = ServiceSettings()
         assert settings.storage_orphan_grace_seconds == 3600
         assert settings.storage_reconciliation_dry_run is False
+        assert (
+            settings.storage_reconciliation_promotion_ack
+            == "2026-07-16T12:00:00Z"
+        )
+
+    def test_destructive_reconciliation_requires_observable_promotion_ack(self):
+        with pytest.raises(ValidationError, match="promotion_ack is required"):
+            ServiceSettings(storage_reconciliation_dry_run=False)
+
+    @pytest.mark.parametrize("value", ["approved", "2026-07-16T12:00:00"])
+    def test_reconciliation_promotion_ack_requires_zoned_timestamp(self, value):
+        with pytest.raises(ValidationError, match="promotion_ack"):
+            ServiceSettings(
+                storage_reconciliation_dry_run=False,
+                storage_reconciliation_promotion_ack=value,
+            )
 
     def test_rejects_non_positive_storage_orphan_grace(self):
         with pytest.raises(ValidationError):
@@ -423,6 +453,16 @@ class TestServiceSettingsFromEnv:
             settings = ServiceSettings()
         assert settings.health_include_projects is True
 
+    def test_reads_explicit_authentication_mode_and_probe_key(self):
+        values = {
+            "SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED": "true",
+            "SCRAPEYARD_HEALTH_PROBE_API_KEY": "health-probe-key-000000000000",
+        }
+        with patch.dict(os.environ, values):
+            settings = ServiceSettings()
+        assert settings.local_development_unauthenticated is True
+        assert settings.health_probe_api_key == "health-probe-key-000000000000"
+
 
 class TestGetSettings:
     """Verify singleton caching behavior of get_settings()."""
@@ -624,6 +664,21 @@ def test_get_settings_cache_reset_applies_worker_lease_environment(monkeypatch):
     get_settings.cache_clear()
 
     assert get_settings().workers_queued_claim_timeout_seconds == 12
+
+
+def test_get_settings_cache_reset_applies_authentication_environment(monkeypatch):
+    get_settings.cache_clear()
+    monkeypatch.setenv("SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED", "false")
+    assert get_settings().local_development_unauthenticated is False
+    monkeypatch.setenv("SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED", "true")
+    monkeypatch.setenv(
+        "SCRAPEYARD_HEALTH_PROBE_API_KEY",
+        "health-probe-key-000000000000",
+    )
+    get_settings.cache_clear()
+
+    assert get_settings().local_development_unauthenticated is True
+    assert get_settings().health_probe_api_key == "health-probe-key-000000000000"
 
 
 def test_secret_reference_allowlist_defaults_to_deny_all():

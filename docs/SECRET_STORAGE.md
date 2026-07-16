@@ -2,6 +2,16 @@
 
 ## Inventory and boundaries
 
+Deployment authentication material is also secret state. Production requires
+non-empty `SCRAPEYARD_API_CREDENTIALS` and a separate
+`SCRAPEYARD_HEALTH_PROBE_API_KEY` that selects a credential with exactly the
+`health-detail` scope. Store both in the deployment secret manager, never in a
+Compose file, image build argument, image layer, or checked-in environment
+file. The production healthcheck reads its key inside the probe process and
+does not echo it or embed it in process arguments. Release smoke,
+qualification, provenance, history, and diagnostics scans reject generated
+credential values in their output.
+
 Reusable secrets can enter a job through proxy userinfo, target URL query
 tokens, browser `extra_headers`, browser/CDP URLs, webhook URL query tokens,
 and webhook headers. The raw YAML historically carried all of those into
@@ -137,3 +147,11 @@ only with the key IDs embedded in its envelopes. Loss of all matching keys is
 not recoverable: preserve the encrypted files, restore key material from the
 deployment secret backup, and do not attempt destructive repair or plaintext
 substitution.
+
+The release go/no-go procedure must exercise the key escrow path rather than
+merely asserting that a backup exists: retrieve the escrowed keyring through
+the authorized recovery process, use it for a destructive fresh-volume
+restore, compare jobs/runs/results/errors/outbox/schedule/adaptive state, and
+then remove the temporary recovery copy. Keep the key retrieval audit separate
+from the data-backup artifact and record only key IDs and success, never key
+bytes.

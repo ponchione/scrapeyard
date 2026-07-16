@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
+from scrapling import Fetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
@@ -24,6 +24,7 @@ from scrapeyard.engine.browser_debug import (
     fetch_browser_response,
     populate_fetch_debug,
 )
+from scrapeyard.engine.browser_fetchers import CamoufoxFetcher, DynamicFetcher
 from scrapeyard.engine.detection import enrich_item_detection
 from scrapeyard.engine.fetch_classifier import (
     classify_fetch_exception,
@@ -181,8 +182,8 @@ def _get_fetcher(fetcher_type: FetcherType) -> Any:
     """Return the Scrapling fetcher class for the given type."""
     mapping = {
         FetcherType.basic: Fetcher,
-        FetcherType.stealthy: StealthyFetcher,
-        FetcherType.dynamic: PlayWrightFetcher,
+        FetcherType.stealthy: CamoufoxFetcher,
+        FetcherType.dynamic: DynamicFetcher,
     }
     return mapping[fetcher_type]
 

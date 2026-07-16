@@ -133,8 +133,7 @@ def test_setup_logging_removes_scrapling_plaintext_handler_and_redacts_once(
         setup_logging(str(tmp_path))
         Response(
             url="https://user:url-secret@example.com/?token=query-secret",
-            text="<html></html>",
-            body=b"<html></html>",
+            content="<html></html>",
             status=200,
             reason="OK",
             cookies={},

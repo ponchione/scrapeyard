@@ -6,6 +6,14 @@ the detailed `GET /health/ready` probe require a credential with the
 constant-cost process-liveness checks and intentionally reveal no dependency
 state.
 
+Production must define a dedicated credential with exactly that one scope, no
+project restriction, and place its secret in
+`SCRAPEYARD_HEALTH_PROBE_API_KEY`. Startup rejects a missing, unknown,
+over-privileged, or project-restricted health credential. Compose sends this
+credential to `/health/ready` from the container healthcheck; it is read from
+the environment inside the process and never printed or placed in the probe's
+command-line arguments. Do not reuse an operator, submitter, or deletion key.
+
 ```yaml
 scrape_configs:
   - job_name: scrapeyard
@@ -56,9 +64,12 @@ grow.
 
 ## Readiness semantics
 
-`/health/ready` applies an explicit short timeout to Redis, queue, every SQLite
+`/health/ready` applies an explicit short timeout to Redis, queue, a newly
+opened read/write connection plus `PRAGMA quick_check(1)` for every SQLite
 database (`jobs.db`, `errors.db`, and `results_meta.db`), disk, and a one-byte
-atomic create/read/remove operation in the result directory. It also fails when
+atomic create/read/remove operation in the result directory. Opening a fresh
+connection ensures a cached process connection cannot mask an inaccessible or
+damaged database path. It also fails when
 the worker runner, APScheduler, cleanup task, webhook coordinator/worker set, or
 either interval-aware reconciliation service has stopped or gone too long without
 a successful pass. Optional project summaries use the same configured timeout,
@@ -67,6 +78,12 @@ retain the last successful cache on refresh failure, and make readiness return
 capacity returns a degraded `200`;
 insufficient free disk or any other failed required dependency/background task
 returns `503`. Liveness never performs these operations.
+
+The quick and full release qualifications prove this contract destructively:
+Redis is stopped, a SQLite database and result storage are made inaccessible,
+the disk floor is raised above available space, and a required cleanup task is
+forced to fail. Each condition must make both `/health/ready` and Docker health
+unhealthy; restoring the dependency or task must return both to healthy.
 
 The two synchronous result-filesystem probes are single-flight and run in a
 dedicated two-thread executor. A timed-out probe continues to occupy only its

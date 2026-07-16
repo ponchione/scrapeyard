@@ -3,13 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
+def test_dockerfile_installs_current_playwright_and_patchright_chromium() -> None:
     dockerfile = Path("Dockerfile").read_text()
 
     assert "python -m playwright install --with-deps chromium" in dockerfile
-    assert "python -m rebrowser_playwright install chromium" in dockerfile
-    assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1208" in dockerfile
-    assert "ARG REBROWSER_CHROMIUM_REVISION=1169" in dockerfile
+    assert "python -m patchright install chromium" in dockerfile
+    assert "ARG PLAYWRIGHT_VERSION=1.61.0" in dockerfile
+    assert "ARG PATCHRIGHT_VERSION=1.61.2" in dockerfile
+    assert "ARG CHROMIUM_VERSION=149.0.7827.55" in dockerfile
+    assert "ARG CHROMIUM_REVISION=1228" in dockerfile
+    assert "ARG CAMOUFOX_BROWSER_VERSION=150.0.2" in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
     assert "XDG_CACHE_HOME=/opt/scrapeyard-cache" in dockerfile
     assert "HOME=/home/scrapeyard" in dockerfile
@@ -62,7 +65,7 @@ def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
 
     assert "SCRAPEYARD_BIND_ADDRESS=0.0.0.0" in readme
     assert "docker-compose.local.yml" in readme
-    assert "rebrowser Chromium" in readme
+    assert "Patchright Chromium" in readme
     assert "browser.stealth: true" in readme
     assert "up -d --build --force-recreate scrapeyard" in readme
     assert "non-root" in readme

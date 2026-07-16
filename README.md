@@ -64,9 +64,10 @@ to writable directories:
 
 ```bash
 export SCRAPEYARD_API_KEY="$(openssl rand -hex 32)"
+export SCRAPEYARD_HEALTH_PROBE_API_KEY="$(openssl rand -hex 32)"
 printf -v SCRAPEYARD_API_CREDENTIALS \
-  '{"local-admin":{"identity":"local-admin","secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail","transport-admin"]}}' \
-  "$SCRAPEYARD_API_KEY"
+  '{"local-admin":{"identity":"local-admin","secret":"%s","scopes":["submit","read","schedule-admin","delete","transport-admin"]},"local-health":{"secret":"%s","scopes":["health-detail"]}}' \
+  "$SCRAPEYARD_API_KEY" "$SCRAPEYARD_HEALTH_PROBE_API_KEY"
 export SCRAPEYARD_API_CREDENTIALS
 export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID=local-v1
 export SCRAPEYARD_ENCRYPTION_KEYS="{\"local-v1\":\"$(openssl rand -base64 32 | tr -d '\n')\"}"
@@ -81,6 +82,8 @@ Check health:
 
 ```bash
 curl -s http://127.0.0.1:8420/health
+curl -s -H "X-API-Key: $SCRAPEYARD_HEALTH_PROBE_API_KEY" \
+  http://127.0.0.1:8420/health/ready
 ```
 
 ## Docker
@@ -88,11 +91,6 @@ curl -s http://127.0.0.1:8420/health
 Start the full local stack:
 
 ```bash
-export SCRAPEYARD_API_KEY="$(openssl rand -hex 32)"
-printf -v SCRAPEYARD_API_CREDENTIALS \
-  '{"local-admin":{"identity":"local-admin","secret":"%s","scopes":["submit","read","schedule-admin","delete","health-detail","transport-admin"]}}' \
-  "$SCRAPEYARD_API_KEY"
-export SCRAPEYARD_API_CREDENTIALS
 export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID=local-v1
 export SCRAPEYARD_ENCRYPTION_KEYS="{\"local-v1\":\"$(openssl rand -base64 32 | tr -d '\n')\"}"
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
@@ -104,9 +102,12 @@ Stop it:
 docker compose -f docker-compose.yml -f docker-compose.local.yml down
 ```
 
-The Compose setup starts Scrapeyard and Redis, mounts persistent data at
-`/data`, and expects `SCRAPEYARD_API_CREDENTIALS` from the shell or a local `.env`
-file.
+The Compose setup starts Scrapeyard and Redis and mounts persistent data at
+`/data`. The local overlay deliberately enables
+`SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED=true` and clears credentials.
+Never use that overlay in production. Source launches and production Compose
+fail startup when credentials or the dedicated health-probe credential are
+missing or malformed.
 
 The production base Compose file exposes no host port. The explicit local
 override publishes `127.0.0.1:8420` by default. Set
@@ -122,7 +123,10 @@ root deployment transaction instead of calling `docker compose up` directly:
 ```bash
 export SCRAPEYARD_PROXY_URL=https://scrape-proxy.example:8443
 export SCRAPEYARD_EGRESS_ALLOW_CIDRS=203.0.113.10/32  # proxy address, if needed
-sudo --preserve-env=SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS \
+export SCRAPEYARD_IMAGE=ghcr.io/example/scrapeyard@sha256:<qualified-digest>
+# Also export API/health credentials and the encryption keyring from the
+# deployment secret store.
+sudo --preserve-env=SCRAPEYARD_IMAGE,SCRAPEYARD_PROXY_URL,SCRAPEYARD_EGRESS_ALLOW_CIDRS,SCRAPEYARD_API_CREDENTIALS,SCRAPEYARD_HEALTH_PROBE_API_KEY,SCRAPEYARD_ENCRYPTION_KEYS,SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID \
   security/deploy-secure-compose.sh
 ```
 
@@ -148,9 +152,13 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml \
 ```
 
 The image installs Playwright Chromium for standard `fetcher: dynamic` jobs,
-rebrowser Chromium for `fetcher: dynamic` with `browser.stealth: true`, and
-Camoufox assets for `fetcher: stealthy`. Browser versions, revisions, base
-images, and the Camoufox archive checksum are pinned. The image starts directly
+Patchright Chromium for `fetcher: dynamic` with `browser.stealth: true`, and
+the maintained Camoufox package/assets for `fetcher: stealthy`. Browser
+versions, revisions, primary upstream sources, review/expiry dates, and the
+Camoufox archive checksum are enforced by `security/browser-policy.json`.
+The built image executes both browser binaries, records their reported versions
+in `/usr/share/scrapeyard-browser-runtime.json`, and the container SBOM adds
+those binaries explicitly. The image starts directly
 as the non-root UID/GID 10001 with a Chromium-specific seccomp/AppArmor policy
 and no-new-privileges. Chromium uses unprivileged user namespaces; there is no
 setuid helper or startup root repair. The root filesystem is read-only, the
@@ -184,8 +192,9 @@ policy, and pagination headers are documented in
 | `GET` | `/results/{job_id}` | Read stored results |
 | `GET` | `/errors` | Query stored errors |
 
-Protected endpoints require `X-API-Key` when `SCRAPEYARD_API_CREDENTIALS` is
-set. Named credentials declare `submit`, `read`, `schedule-admin`, `delete`,
+Protected endpoints always require `X-API-Key` unless the explicit
+`SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED=true` local-only mode is enabled.
+Missing credentials never imply access. Named credentials declare `submit`, `read`, `schedule-admin`, `delete`,
 `health-detail`, and/or `transport-admin` scopes and may be restricted to
 project names. Reserve `transport-admin` for operators: in untrusted-submission
 mode it permits caller-selected proxy and CDP transports.
@@ -450,6 +459,8 @@ profile.
 | --- | --- | --- |
 | `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
 | `SCRAPEYARD_API_KEYS` | empty | Deprecated full-admin migration allow-list; remove after converting to named credentials |
+| `SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED` | `false` | Explicit local-only full-admin opt-in; cannot be combined with credentials or a health key |
+| `SCRAPEYARD_HEALTH_PROBE_API_KEY` | empty | Required production probe secret; must match a credential with only `health-detail` and no project restriction |
 | `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` | empty | JSON map of project names to permitted `SCRAPEYARD_SECRET_*` references; `*` defines explicitly shared names |
 | `SCRAPEYARD_ENCRYPTION_KEYS` | empty | Required JSON key-ID to base64 32-byte AES key map for persisted secrets; startup fails while empty |
 | `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Required key ID used for new writes and startup rotation |
@@ -471,6 +482,7 @@ profile.
 | `SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` | `5` | Delay before another cycle when a cleanup budget is saturated |
 | `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` | `86400` | Minimum artifact age before orphan/temp removal eligibility |
 | `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` | `true` | Report eligible orphan/temp removals without changing files |
+| `SCRAPEYARD_STORAGE_RECONCILIATION_PROMOTION_ACK` | empty | Zoned RFC 3339 operator timestamp required before destructive reconciliation can start |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive state directory |
 | `SCRAPEYARD_LOG_DIR` | `/data/logs` | Log directory |
 | `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | Max wait for sync scrape responses |
@@ -566,7 +578,9 @@ for exact boundaries, dead-letter reasons, restart semantics, and limitations.
 Fast checks:
 
 ```bash
-poetry run ruff check src tests
+poetry run ruff check src tests scripts
+poetry run mypy src/scrapeyard
+poetry run python scripts/audit_dependencies.py all
 poetry run pytest
 ```
 

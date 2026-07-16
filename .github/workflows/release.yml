@@ -1,0 +1,179 @@
+name: Immutable release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: Publish the qualified image to GHCR after environment approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: immutable-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Build once / security / browsers / recovery / restore / load / soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CANDIDATE_TAG: scrapeyard:release-candidate
+      SCRAPEYARD_APP_VERSION: "0.7.0"
+      SCRAPEYARD_SOURCE_REVISION: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate source browser policy before building
+        run: python3 scripts/audit_browser_security.py --dockerfile Dockerfile
+      - name: Build the production candidate exactly once without cache
+        run: |
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker build --pull --no-cache \
+            --build-arg APP_VERSION="${SCRAPEYARD_APP_VERSION}" \
+            --build-arg SOURCE_REVISION="${SCRAPEYARD_SOURCE_REVISION}" \
+            --build-arg BUILD_CREATED="${created}" \
+            --tag "${CANDIDATE_TAG}" .
+      - name: Record immutable identity and assert OCI/package/browser provenance
+        run: |
+          image_id="$(docker image inspect --format '{{.Id}}' "${CANDIDATE_TAG}")"
+          echo "CANDIDATE_IMAGE_ID=${image_id}" >> "${GITHUB_ENV}"
+          mkdir -p artifacts/release
+          poetry_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${poetry_version}" = "${SCRAPEYARD_APP_VERSION}"
+          python3 scripts/inspect_container_provenance.py "${image_id}" \
+            --expected-version "${SCRAPEYARD_APP_VERSION}" \
+            --expected-revision "${SCRAPEYARD_SOURCE_REVISION}" \
+            --output artifacts/release/provenance.json
+      - name: Generate browser-aware SBOM and enforce all Medium/High/Critical findings
+        env:
+          SCRAPEYARD_SECURITY_REPORT_DIR: artifacts/release/security
+        run: ./scripts/run_container_security_scan.sh "${CANDIDATE_IMAGE_ID}"
+      - name: Cold production-container browser smoke
+        env:
+          SCRAPEYARD_SMOKE_PROJECT: scrapeyard-release-cold-${{ github.run_id }}
+          SCRAPEYARD_SMOKE_API_PORT: "18420"
+          SCRAPEYARD_SMOKE_FIXTURE_PORT: "18080"
+          SCRAPEYARD_SMOKE_DIAGNOSTICS_DIR: artifacts/release/browser-cold
+        run: >-
+          ./scripts/run_container_browser_smoke.sh
+          --image "${CANDIDATE_IMAGE_ID}" --run-mode cold
+      - name: Warm production-container browser smoke
+        env:
+          SCRAPEYARD_SMOKE_PROJECT: scrapeyard-release-warm-${{ github.run_id }}
+          SCRAPEYARD_SMOKE_API_PORT: "18421"
+          SCRAPEYARD_SMOKE_FIXTURE_PORT: "18081"
+          SCRAPEYARD_SMOKE_DIAGNOSTICS_DIR: artifacts/release/browser-warm
+        run: >-
+          ./scripts/run_container_browser_smoke.sh
+          --image "${CANDIDATE_IMAGE_ID}" --run-mode warm
+      - name: Quick recovery and destructive restore qualification
+        env:
+          SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-release-quick-${{ github.run_id }}
+          SCRAPEYARD_QUALIFICATION_API_PORT: "19420"
+          SCRAPEYARD_QUALIFICATION_FIXTURE_PORT: "19080"
+          SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release/qualification-quick
+        run: >-
+          ./scripts/run_release_qualification.sh --profile quick
+          --image "${CANDIDATE_IMAGE_ID}"
+      - name: Full no-cache release qualification against the same image
+        env:
+          SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-release-full-${{ github.run_id }}
+          SCRAPEYARD_QUALIFICATION_API_PORT: "19421"
+          SCRAPEYARD_QUALIFICATION_FIXTURE_PORT: "19081"
+          SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release/qualification-full
+        run: >-
+          ./scripts/run_release_qualification.sh --profile full
+          --image "${CANDIDATE_IMAGE_ID}"
+      - name: Assert every lane recorded the one candidate image
+        run: |
+          test "$(jq -r .image_id artifacts/release/provenance.json)" = "${CANDIDATE_IMAGE_ID}"
+          grep -R -F "image_id=${CANDIDATE_IMAGE_ID}" \
+            artifacts/release/browser-{cold,warm}/timings.txt \
+            artifacts/release/qualification-{quick,full}/runner-summary.txt
+      - name: Package the qualified candidate and immutable manifest
+        run: |
+          docker save "${CANDIDATE_IMAGE_ID}" | zstd -T0 -15 -o artifacts/release/candidate-image.tar.zst
+          sha256sum artifacts/release/candidate-image.tar.zst > artifacts/release/candidate-image.tar.zst.sha256
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path("artifacts/release")
+          sbom = root / "security/sbom.cdx.json"
+          archive = root / "candidate-image.tar.zst"
+          manifest = {
+              "schema_version": 1,
+              "package_version": os.environ["SCRAPEYARD_APP_VERSION"],
+              "source_revision": os.environ["SCRAPEYARD_SOURCE_REVISION"],
+              "image_id": os.environ["CANDIDATE_IMAGE_ID"],
+              "image_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+              "sbom_sha256": hashlib.sha256(sbom.read_bytes()).hexdigest(),
+              "qualified_lanes": [
+                  "container-security", "browser-cold", "browser-warm",
+                  "qualification-quick", "qualification-full",
+              ],
+          }
+          (root / "candidate-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload short-lived qualified candidate and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualified-release-candidate-${{ github.run_id }}
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 3
+
+  promote:
+    name: Approved promotion of the already-qualified bytes
+    if: inputs.promote
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: qualified-release-candidate-${{ github.run_id }}
+          path: artifacts/release
+      - name: Verify and load the exact qualified image archive
+        run: |
+          cd artifacts/release
+          sha256sum --check candidate-image.tar.zst.sha256
+          zstd -dc candidate-image.tar.zst | docker load
+          expected_id="$(jq -r .image_id candidate-manifest.json)"
+          docker image inspect "${expected_id}" >/dev/null
+          echo "CANDIDATE_IMAGE_ID=${expected_id}" >> "${GITHUB_ENV}"
+          echo "RELEASE_VERSION=$(jq -r .package_version candidate-manifest.json)" >> "${GITHUB_ENV}"
+      - name: Reassert provenance before publishing
+        run: >-
+          python3 scripts/inspect_container_provenance.py "${CANDIDATE_IMAGE_ID}"
+          --expected-version "${RELEASE_VERSION}"
+          --expected-revision "${GITHUB_SHA}"
+      - name: Publish only the approved qualified image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          registry_image="ghcr.io/${GITHUB_REPOSITORY,,}:${RELEASE_VERSION}"
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker tag "${CANDIDATE_IMAGE_ID}" "${registry_image}"
+          docker push "${registry_image}"
+          docker image inspect --format '{{index .RepoDigests 0}}' "${registry_image}" \
+            > published-image-digest.txt
+      - name: Retain the published immutable digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: published-image-digest-${{ github.run_id }}
+          path: published-image-digest.txt
+          if-no-files-found: error
+          retention-days: 30

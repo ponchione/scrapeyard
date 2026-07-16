@@ -51,6 +51,7 @@ def inspect_distributions(
     dist_dir: Path,
     migrations_dir: Path = Path("sql"),
     project_file: Path = Path("pyproject.toml"),
+    changelog_file: Path | None = None,
 ) -> None:
     """Require complete package, version metadata, and SQL in wheel and sdist."""
     expected = {path.name for path in migrations_dir.glob("*.sql")}
@@ -66,6 +67,24 @@ def inspect_distributions(
         )
 
     expected_version = _project_version(project_file)
+    if changelog_file is not None:
+        changelog = changelog_file.read_text(encoding="utf-8")
+        released = re.search(
+            rf"(?m)^## {re.escape(expected_version)} — (\d{{4}}-\d{{2}}-\d{{2}})$",
+            changelog,
+        )
+        if released is None:
+            raise DistributionInspectionError(
+                f"{changelog_file} has no dated release for {expected_version}"
+            )
+        unreleased = re.search(
+            r"(?ms)^## Unreleased\s*(.*?)^## ",
+            changelog,
+        )
+        if unreleased is None or unreleased.group(1).strip():
+            raise DistributionInspectionError(
+                f"{changelog_file} must retain an empty Unreleased section"
+            )
     with zipfile.ZipFile(wheels[0]) as archive:
         wheel_members = archive.namelist()
         wheel_migrations = _migration_names(wheel_members)
@@ -115,7 +134,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dist_dir", nargs="?", type=Path, default=Path("dist"))
     args = parser.parse_args()
-    inspect_distributions(args.dist_dir)
+    inspect_distributions(args.dist_dir, changelog_file=Path("CHANGELOG.md"))
     return 0
 
 

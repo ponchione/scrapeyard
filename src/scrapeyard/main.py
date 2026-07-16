@@ -36,7 +36,12 @@ from scrapeyard.api.middleware import (
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
 )
-from scrapeyard.api.auth import AuthScope, authorize_request, parse_api_credentials
+from scrapeyard.api.auth import (
+    AuthScope,
+    authorize_request,
+    parse_api_credentials,
+    validate_auth_configuration,
+)
 from scrapeyard.api.routes import router
 from scrapeyard.api.response_models import (
     ERROR_RESPONSES,
@@ -376,7 +381,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _health.mark_started()
 
     settings = get_settings()
+    validate_auth_configuration(
+        raw_credentials=settings.api_credentials,
+        legacy_keys=settings.parsed_api_keys(),
+        local_development_unauthenticated=(
+            settings.local_development_unauthenticated
+        ),
+        health_probe_api_key=settings.health_probe_api_key,
+    )
     setup_logging(settings.log_dir, settings.log_level)
+    if not getattr(settings, "storage_reconciliation_dry_run", True):
+        logger.warning(
+            "Destructive artifact reconciliation promotion is active acknowledged_at=%s",
+            settings.storage_reconciliation_promotion_ack,
+        )
     validate_single_process_configuration(arguments=sys.argv[1:])
     identity = instance_identity(
         db_dir=settings.db_dir,
@@ -465,6 +483,9 @@ app.add_middleware(
     APIKeyAuthMiddleware,
     credentials=_credentials_for_middleware,
     exempt_paths={"/health", "/health/live"},
+    local_development_unauthenticated=(
+        _settings_for_middleware.local_development_unauthenticated
+    ),
 )
 app.add_middleware(
     RateLimitMiddleware,

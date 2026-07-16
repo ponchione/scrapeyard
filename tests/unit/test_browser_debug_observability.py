@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
@@ -107,6 +106,16 @@ class FakeRoute:
     async def continue_(self, **kwargs):
         self.continued = True
         self.continued_headers = kwargs.get("headers")
+
+
+async def _run_configured_route(kwargs: dict[str, object], route: FakeRoute) -> None:
+    page = MagicMock()
+    page.route = AsyncMock()
+    page_setup = kwargs["page_setup"]
+    assert callable(page_setup)
+    await page_setup(page)
+    handler = page.route.await_args.args[1]
+    await handler(route)
 
 
 @pytest.mark.asyncio
@@ -455,8 +464,8 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
     class RouteFetcher:
         @staticmethod
         async def async_fetch(url: str, **kwargs):
-            assert kwargs["disable_resources"] is True
-            await scrapling_pw_engine.async_intercept_route(route)
+            assert kwargs["disable_resources"] is False
+            await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     with pytest.raises(UnsafeURLError, match="non-public"):
@@ -514,8 +523,8 @@ async def test_browser_extra_headers_are_scoped_to_exact_target_origin(
 
     class RouteFetcher:
         @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
+        async def async_fetch(url: str, **kwargs):
+            await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(
@@ -569,8 +578,8 @@ async def test_browser_extra_headers_use_canonical_idna_target_origin(
 
     class RouteFetcher:
         @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
+        async def async_fetch(url: str, **kwargs):
+            await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(
@@ -611,7 +620,7 @@ async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() ->
             last_error: UnsafeURLError | None = None
             for route in routes:
                 try:
-                    await scrapling_pw_engine.async_intercept_route(route)
+                    await _run_configured_route(kwargs, route)
                 except UnsafeURLError as exc:
                     last_error = exc
             assert last_error is not None
@@ -651,7 +660,7 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
     class RouteFetcher:
         @staticmethod
         async def async_fetch(url: str, **kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
+            await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
@@ -696,7 +705,7 @@ async def test_fetch_browser_response_applies_configured_resource_blocking(
     class RouteFetcher:
         @staticmethod
         async def async_fetch(url: str, **kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
+            await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(

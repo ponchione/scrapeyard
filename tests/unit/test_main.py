@@ -78,6 +78,10 @@ async def test_health_cache_surfaces_store_unavailability():
 async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(
+        api_credentials="",
+        parsed_api_keys=lambda: set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
         log_dir="/tmp/logs",
         log_level="DEBUG",
         db_dir=str(tmp_path / "db"),
@@ -264,6 +268,28 @@ async def test_lifespan_rejects_invalid_keyring_before_database_start(
         async with main_module.lifespan(FastAPI()):
             pytest.fail("invalid encryption settings must prevent serving")
 
+    init_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_rejects_missing_authentication_before_database_start(
+    monkeypatch,
+):
+    monkeypatch.setenv("SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED", "false")
+    monkeypatch.delenv("SCRAPEYARD_API_CREDENTIALS", raising=False)
+    monkeypatch.delenv("SCRAPEYARD_API_KEYS", raising=False)
+    monkeypatch.delenv("SCRAPEYARD_HEALTH_PROBE_API_KEY", raising=False)
+    main_module.get_settings.cache_clear()
+    init_db = AsyncMock()
+    setup_logging = MagicMock()
+    monkeypatch.setattr(main_module, "init_db", init_db)
+    monkeypatch.setattr(main_module, "setup_logging", setup_logging)
+
+    with pytest.raises(ValueError, match="API credentials are required"):
+        async with main_module.lifespan(FastAPI()):
+            pytest.fail("missing authentication must prevent serving")
+
+    setup_logging.assert_not_called()
     init_db.assert_not_awaited()
 
 
@@ -550,6 +576,10 @@ async def test_shutdown_deadline_bounds_cancellation_resistant_database(monkeypa
 async def test_lifespan_rejects_second_instance_before_database_start(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(
+        api_credentials="",
+        parsed_api_keys=lambda: set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
         log_dir=str(tmp_path / "logs"),
         log_level="INFO",
         db_dir=str(tmp_path / "db"),
@@ -593,6 +623,10 @@ async def test_lifespan_retains_instance_guard_for_unresolved_worker(
 ):
     app = FastAPI()
     settings = SimpleNamespace(
+        api_credentials="",
+        parsed_api_keys=lambda: set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
         log_dir=str(tmp_path / "logs"),
         log_level="INFO",
         db_dir=str(tmp_path / "db"),
@@ -647,6 +681,10 @@ async def test_lifespan_retains_instance_guard_for_any_unresolved_owned_task(
 ):
     app = FastAPI()
     settings = SimpleNamespace(
+        api_credentials="",
+        parsed_api_keys=lambda: set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
         log_dir=str(tmp_path / "logs"),
         log_level="INFO",
         db_dir=str(tmp_path / "db"),
@@ -847,6 +885,10 @@ async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
 async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch, tmp_path):
     app = FastAPI()
     settings = SimpleNamespace(
+        api_credentials="",
+        parsed_api_keys=lambda: set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
         log_dir="/tmp/logs",
         log_level="DEBUG",
         db_dir=str(tmp_path / "db"),

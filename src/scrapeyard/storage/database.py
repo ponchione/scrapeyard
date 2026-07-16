@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.resources
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -528,6 +529,22 @@ class DatabaseManager:
             self._connections[db_name] = connection
         return connection
 
+    async def probe(self, db_name: str) -> None:
+        """Open the real database read/write and verify its on-disk structure."""
+
+        if self._db_dir is None:
+            raise RuntimeError("Database not initialised — call init_db() first")
+        if db_name not in _DB_MIGRATIONS:
+            raise ValueError(f"Unknown database: {db_name!r}")
+        path = self._db_dir / db_name
+        descriptor = os.open(path, os.O_RDWR)
+        os.close(descriptor)
+        async with aiosqlite.connect(f"file:{path}?mode=rw", uri=True) as db:
+            cursor = await db.execute("PRAGMA quick_check(1)")
+            row = await cursor.fetchone()
+            if row is None or row[0] != "ok":
+                raise RuntimeError(f"SQLite quick_check failed for {db_name}")
+
     @asynccontextmanager
     async def get(self, db_name: str) -> AsyncIterator[aiosqlite.Connection]:
         """Yield a cached connection to the named database.
@@ -581,3 +598,9 @@ async def get_db(db_name: str) -> AsyncIterator[aiosqlite.Connection]:
     """
     async with _default_manager.get(db_name) as conn:
         yield conn
+
+
+async def probe_db(db_name: str) -> None:
+    """Verify a fresh read/write open and structural check of one database."""
+
+    await _default_manager.probe(db_name)

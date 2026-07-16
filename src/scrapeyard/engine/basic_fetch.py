@@ -4,19 +4,38 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from functools import lru_cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from scrapling.engines.toolbelt.custom import Response
-from scrapling.engines.toolbelt.fingerprints import (
-    generate_convincing_referer,
-    generate_headers,
-)
+from scrapling.engines.toolbelt.fingerprints import generate_headers
+from tld import Result, get_tld
+from tld.exceptions import TldDomainNotFound
 
 from scrapeyard.common.budgets import RunBudget
+from scrapeyard.engine.scrapling_compat import install_scrapling_compatibility
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+install_scrapling_compatibility()
+
+
+@lru_cache(maxsize=64)
+def _generate_convincing_referer(url: str) -> str:
+    website_name: str | None = None
+    try:
+        parsed = get_tld(url, as_object=True, fix_protocol=True)
+        if isinstance(parsed, Result):
+            website_name = parsed.domain
+    except TldDomainNotFound:
+        pass
+    if website_name is None:
+        hostname = urlsplit(url).hostname or "website"
+        labels = hostname.rstrip(".").split(".")
+        website_name = labels[-2] if len(labels) > 1 else labels[0]
+    return f"https://www.google.com/search?q={website_name}"
 
 
 def _request_headers(url: str, supplied: object, *, stealthy: bool) -> dict[str, str]:
@@ -31,7 +50,7 @@ def _request_headers(url: str, supplied: object, *, stealthy: bool) -> dict[str,
             if name.lower() not in names:
                 headers[str(name)] = str(value)
         if "referer" not in names:
-            headers["referer"] = generate_convincing_referer(url)
+            headers["referer"] = _generate_convincing_referer(url)
     elif "user-agent" not in names:
         user_agent = generated.get("User-Agent")
         if user_agent is not None:
@@ -46,13 +65,6 @@ def _declared_content_length(response: httpx.Response) -> int | None:
     if len(values) != 1 or not values[0].isdigit():
         return None
     return int(values[0])
-
-
-def _decode_body(body: bytes, encoding: str) -> str:
-    try:
-        return body.decode(encoding, errors="replace")
-    except LookupError:
-        return body.decode("utf-8", errors="replace")
 
 
 def _apply_cookie_jar(
@@ -170,8 +182,7 @@ async def fetch_streaming_response(
             encoding = response.encoding or "utf-8"
             return Response(
                 url=str(response.url),
-                text=_decode_body(body_bytes, encoding),
-                body=body_bytes,
+                content=body_bytes,
                 status=response.status_code,
                 reason=response.reason_phrase,
                 encoding=encoding,

@@ -9,6 +9,10 @@ services:
       # Local development is an explicit trusted-input mode. Production uses
       # security/deploy-secure-compose.sh and leaves these base defaults on.
       SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "false"
+      SCRAPEYARD_API_CREDENTIALS: ""
+      SCRAPEYARD_API_KEYS: ""
+      SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED: "true"
+      SCRAPEYARD_HEALTH_PROBE_API_KEY: ""
       SCRAPEYARD_EGRESS_POLICY_PROBE_HOST: ""
       SCRAPEYARD_EGRESS_POLICY_PROBE_PORT: "0"
       SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT: "0"

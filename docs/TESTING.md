@@ -18,10 +18,12 @@ The `CI` workflow exposes these checks:
 
 The separate `Container and browser smoke` workflow adds the production-image
 lane. Its `Production image / real browsers` job runs on
-manual dispatch and on pull requests that change the Docker/Compose build,
-lock file, smoke harness, or runtime API/config/browser/queue/storage paths.
-This intentionally resource-intensive lane does not replace or weaken any of
-the always-on CI, live-Redis, distribution, or dependency-audit gates.
+every pull request, every protected `main` update, weekly schedule, and manual
+dispatch. The separate `Container security and SBOM` and quick `Recovery,
+restore, load, and soak qualification` jobs run on those pull requests and
+protected-main updates as well. These intentionally resource-intensive lanes
+do not replace or weaken any of the CI, live-Redis, distribution, or
+dependency-audit gates.
 
 The separate `Dependency audit` workflow exposes `Python 3.10` and `Python
 3.12` checks. Each audits the pinned packaging tools and both the locked
@@ -180,11 +182,16 @@ Recommended branch-protection checks are all of the following:
 - `CI / Live Redis / Python 3.12`
 - `Dependency audit / Python 3.10`
 - `Dependency audit / Python 3.12`
+- `Container security and SBOM / Pinned image / SBOM / vulnerability and config scan`
+- `Container and browser smoke / Production image / real browsers`
+- `Recovery, restore, load, and soak qualification / Quick recovery and restore / production runtime`
 
-For pull requests matched by its path filter, also require `Container and
-browser smoke / Production image / real browsers`. Dispatch that workflow as a
-pre-release check when a release candidate did not naturally match those
-paths.
+Configure the `main` branch/ruleset to require a pull request, all nine
+checks above, dismissal of stale approvals when the head changes, resolution
+of review threads, and no direct pushes or force pushes. Also protect the
+`production-release` environment with an independent required reviewer and
+prevent self-review. These repository settings are an administrator action;
+the checked-in workflows cannot assert that the ruleset is enabled.
 
 The workflows use read-only repository permissions, cancel superseded runs for
 the same pull request or ref, continue independent matrix entries after one
@@ -268,7 +275,7 @@ The fresh named volume inherits build-time UID/GID 10001; startup performs no
 root ownership repair. In-container checks verify PID 1's UID, zero effective
 capabilities, seccomp filtering, a read-only root filesystem, runtime-user
 ownership/write access for `/data` and tmpfs paths, immutable browser caches,
-locked Playwright and rebrowser package versions and Chromium revisions, the
+locked Playwright and Patchright package versions and Chromium revisions, the
 unprivileged Chromium user-namespace sandbox, the installed Camoufox
 asset/version, result ownership, and PNG contents. The runner copies
 only the `item14-smoke` result subtree to a temporary host directory to prove
@@ -364,8 +371,17 @@ Run the longer pre-release profile, normally on the intended host class:
 ./scripts/run_release_qualification.sh --profile full --no-cache
 ```
 
-Use `--no-build` only after the Compose project image already exists. For
-focused diagnosis, `--phase recovery`, `redis_restart`, `load`, `soak`, or
+Release qualification must use a prebuilt immutable reference so no lane can
+hide a rebuild:
+
+```bash
+./scripts/run_release_qualification.sh --profile quick --image sha256:<image-id>
+./scripts/run_release_qualification.sh --profile full --image sha256:<same-image-id>
+./scripts/run_container_browser_smoke.sh --image sha256:<same-image-id> --run-mode cold
+./scripts/run_container_browser_smoke.sh --image sha256:<same-image-id> --run-mode warm
+```
+
+For focused diagnosis, `--phase recovery`, `redis_restart`, `load`, `soak`, or
 `backup_restore` runs one phase with the same traps and cleanup. The full
 profile repeats every phase; it is not a substitute for a successful complete
 quick run. `./scripts/run_release_qualification.sh --help` lists every port,
@@ -374,8 +390,8 @@ duration, resource, and threshold override.
 The `Recovery, restore, load, and soak qualification` workflow has two jobs:
 
 - `Quick recovery and restore / production runtime` runs the complete quick
-  profile with a no-cache image build on relevant pull-request paths or a
-  manual `profile=quick` dispatch.
+  profile with a no-cache image build on every pull request and protected-main
+  update, or a manual `profile=quick` dispatch.
 - `Full load and soak / production runtime` runs the full profile on a manual
   `profile=full` dispatch and at 07:41 UTC each Saturday.
 
@@ -511,7 +527,7 @@ and all three priority depths ended at zero.
 Load uses only the local fixture and proves these behaviors:
 
 - 12 concurrent delayed basic jobs cannot exceed 4 active workers;
-- four concurrent targets spanning stock Playwright, rebrowser stealth, and
+- four concurrent targets spanning stock Playwright, Patchright stealth, and
   Camoufox cannot exceed 2 active browsers;
 - a 990-record result near the 1,000-record cap and a separate 350-record
   result near the 2-MiB qualification output budget both succeed;
@@ -586,7 +602,7 @@ Machine-readable samples remain in each `qualification-report.json`;
 update this paragraph when a materially different release host becomes the
 baseline.
 
-After adding the separate 990-record success and mixed Playwright/rebrowser/
+After adding the separate 990-record success and mixed Playwright/Patchright/
 Camoufox concurrency cases, the final focused load rerun took 54.2 seconds:
 p50/p95 were 1.854/16.399 ms, worker/browser peaks were exactly 4/2, sampled
 RSS/CPU peaks were 677.7 MiB/175.57%, and total DB/result/adaptive growth was
@@ -595,8 +611,9 @@ RSS/CPU peaks were 677.7 MiB/175.57%, and total DB/result/adaptive growth was
 ### Ports, diagnostics, and cleanup
 
 Defaults are authenticated API `127.0.0.1:19420` and fixture control
-`127.0.0.1:19080`; Redis is never host-published. A random mode-0600 API key is
-held in a mode-0700 temporary directory and removed on every exit. Override
+`127.0.0.1:19080`; Redis is never host-published. Separate random mode-0600
+operator and health-detail API keys are held in a mode-0700 temporary directory
+and removed on every exit. Override
 ports/project with `SCRAPEYARD_QUALIFICATION_API_PORT`,
 `SCRAPEYARD_QUALIFICATION_FIXTURE_PORT`, and
 `SCRAPEYARD_QUALIFICATION_PROJECT`. Existing listeners or project resources
@@ -619,6 +636,60 @@ prune, or global image/volume/network cleanup. Camoufox virtual-display and
 Redis host `vm.overcommit_memory` warnings are upstream/platform warnings;
 they do not replace successful browser extraction, AOF reload, or threshold
 assertions.
+
+## Browser policy, container security, and immutable release
+
+Audit the dated browser policy and Docker pins directly:
+
+```bash
+poetry run python scripts/audit_browser_security.py --dockerfile Dockerfile
+```
+
+The policy in `security/browser-policy.json` expires after at most 30 days and
+records the responsible owner, reviewed versions, minimum acceptable versions,
+and primary upstream sources. Unit tests prove that Camoufox 135.0.1,
+Chromium 136.0.7103.25, and an expired review fail. During image construction,
+`scripts/inspect_browser_runtime.py` executes the installed Chromium and
+Camoufox binaries; the resulting manifest is re-audited in the smoke and
+security lanes.
+
+Run the browser-aware SBOM and container gate against an immutable image:
+
+```bash
+SCRAPEYARD_SECURITY_REPORT_DIR=artifacts/container-security \
+  ./scripts/run_container_security_scan.sh sha256:<image-id>
+```
+
+The runner augments the CycloneDX SBOM with the executed browser binaries and
+their real versions, scans vulnerabilities and secrets without ignoring
+unfixed findings, and scans Docker configuration. Every Medium, High, or
+Critical vulnerability, misconfiguration, or secret is blocking. A necessary
+acceptance must match the exact kind, ID, severity, package and installed
+version, plus either the immutable target or its exact operating-system target
+scope. It must include an owner, rationale, non-empty compensating controls,
+acceptance date, and expiry no more than 30 days later. High and Critical
+findings cannot be excepted; Medium findings may be accepted only through that
+governed record.
+
+The 2026-07-16 Ubuntu 24.04 review records 25 package findings across 11 Medium
+CVEs in `security/container-scan-exceptions.json`, all expiring 2026-08-15.
+Ubuntu and the scanner publish no fixed package for those exact versions. The
+image additionally disables the affected setuid mount helpers, removes the two
+affected IBM iconv modules, verifies that the Avahi and p11-kit server packages
+are absent, and confines retained browser libraries with the production
+sandbox. The scheduled security lane fails when any acceptance expires or a
+new Medium-or-higher finding appears; replace an accepted package as soon as a
+fixed Ubuntu build is available instead of extending the acceptance by
+default.
+
+For an actual release, dispatch `Immutable release candidate`. It performs one
+no-cache build and records the image ID, then runs provenance, container
+security, cold and warm browser smoke, quick recovery/destructive restore, and
+full load/soak against that same ID. It records the image archive and SBOM
+hashes and retains the exact candidate for three days. Optional publication is
+a separate `production-release` environment-approved job which reloads the
+qualified archive and never rebuilds. The workflow does not create or push a
+Git tag.
 
 ## Dependency vulnerability audits
 

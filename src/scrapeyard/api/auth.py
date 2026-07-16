@@ -178,6 +178,55 @@ def authenticate_api_key(
     )
 
 
+def validate_auth_configuration(
+    *,
+    raw_credentials: str,
+    legacy_keys: set[str],
+    local_development_unauthenticated: bool,
+    health_probe_api_key: str,
+) -> tuple[APICredential, ...]:
+    """Validate the startup authentication and readiness-probe contract.
+
+    Missing credentials never imply an open service. The only unauthenticated
+    mode is the explicit local-development opt-in, and that mode cannot be
+    combined with configured credentials or a probe secret.
+    """
+
+    credentials = parse_api_credentials(raw_credentials, legacy_keys=legacy_keys)
+    if local_development_unauthenticated:
+        if credentials:
+            raise ValueError(
+                "SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED cannot be enabled "
+                "when API credentials are configured"
+            )
+        if health_probe_api_key:
+            raise ValueError(
+                "SCRAPEYARD_HEALTH_PROBE_API_KEY must be empty in unauthenticated "
+                "local-development mode"
+            )
+        return credentials
+
+    if not credentials:
+        raise ValueError(
+            "API credentials are required; unauthenticated access requires the explicit "
+            "SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED=true local-development opt-in"
+        )
+    if not health_probe_api_key:
+        raise ValueError("SCRAPEYARD_HEALTH_PROBE_API_KEY is required")
+
+    probe = authenticate_api_key(health_probe_api_key, credentials)
+    if probe is None:
+        raise ValueError(
+            "SCRAPEYARD_HEALTH_PROBE_API_KEY must match a configured API credential"
+        )
+    if probe.scopes != frozenset({AuthScope.health_detail}) or probe.projects is not None:
+        raise ValueError(
+            "The health probe credential must have only the health-detail scope and no "
+            "project restriction"
+        )
+    return credentials
+
+
 def get_authenticated_caller(request: Request) -> AuthenticatedCaller:
     caller = getattr(request.state, "caller", None)
     if not isinstance(caller, AuthenticatedCaller):

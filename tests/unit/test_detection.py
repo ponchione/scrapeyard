@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from scrapling import Adaptor
+from scrapling.parser import Adaptor
 
 from scrapeyard.config.schema import MapDetectionConfig, StockDetectionConfig, StockPatternConfig
 from scrapeyard.engine.detection import (

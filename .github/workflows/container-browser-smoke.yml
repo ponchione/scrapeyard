@@ -2,31 +2,10 @@ name: Container and browser smoke
 
 on:
   pull_request:
-    paths:
-      - Dockerfile
-      - docker-compose.yml
-      - docker-compose.smoke.yml
-      - security/apparmor/**
-      - security/seccomp/**
-      - security/install-chromium-apparmor-profile.sh
-      - security/install-docker-egress-policy.sh
-      - scripts/container-entrypoint.sh
-      - poetry.lock
-      - pyproject.toml
-      - scripts/run_container_browser_smoke.sh
-      - src/scrapeyard/api/**
-      - src/scrapeyard/common/**
-      - src/scrapeyard/config/**
-      - src/scrapeyard/engine/**
-      - src/scrapeyard/main.py
-      - src/scrapeyard/queue/**
-      - src/scrapeyard/runtime/**
-      - src/scrapeyard/scheduler/**
-      - src/scrapeyard/storage/**
-      - src/scrapeyard/webhook/**
-      - tests/smoke/**
-      - tests/unit/test_container_browser_smoke.py
-      - .github/workflows/container-browser-smoke.yml
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 8 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -58,6 +37,8 @@ jobs:
           docker compose version
           df -h . /var/lib/docker || true
           free -h
+      - name: Enforce the current browser security review
+        run: python3 scripts/audit_browser_security.py --dockerfile Dockerfile
       - name: Build the production image and run real browser smoke tests
         run: ./scripts/run_container_browser_smoke.sh --no-cache
       - name: Upload focused smoke diagnostics on failure

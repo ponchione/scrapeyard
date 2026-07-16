@@ -10,6 +10,7 @@ from scrapeyard.api.auth import (
     AuthScope,
     authenticate_api_key,
     parse_api_credentials,
+    validate_auth_configuration,
 )
 
 
@@ -110,3 +111,106 @@ def test_legacy_key_migration_has_full_scope_but_named_format_is_primary():
     assert caller is not None
     assert caller.scopes == ALL_AUTH_SCOPES
     assert AuthScope.health_detail in caller.scopes
+
+
+def _production_credentials() -> tuple[str, str]:
+    probe_key = "health-probe-key-000000000000"
+    return (
+        json.dumps(
+            {
+                "operator": {
+                    "secret": "operator-key-000000000000000",
+                    "scopes": ["submit", "read", "schedule-admin", "delete"],
+                },
+                "health-probe": {
+                    "secret": probe_key,
+                    "scopes": ["health-detail"],
+                },
+            }
+        ),
+        probe_key,
+    )
+
+
+def test_missing_credentials_fail_closed_by_default():
+    with pytest.raises(ValueError, match="API credentials are required"):
+        validate_auth_configuration(
+            raw_credentials="",
+            legacy_keys=set(),
+            local_development_unauthenticated=False,
+            health_probe_api_key="",
+        )
+
+
+def test_explicit_local_development_mode_allows_empty_credentials_only():
+    assert validate_auth_configuration(
+        raw_credentials="",
+        legacy_keys=set(),
+        local_development_unauthenticated=True,
+        health_probe_api_key="",
+    ) == ()
+
+    raw, probe_key = _production_credentials()
+    with pytest.raises(ValueError, match="cannot be enabled"):
+        validate_auth_configuration(
+            raw_credentials=raw,
+            legacy_keys=set(),
+            local_development_unauthenticated=True,
+            health_probe_api_key=probe_key,
+        )
+
+
+def test_valid_production_credentials_require_a_dedicated_health_identity():
+    raw, probe_key = _production_credentials()
+    credentials = validate_auth_configuration(
+        raw_credentials=raw,
+        legacy_keys=set(),
+        local_development_unauthenticated=False,
+        health_probe_api_key=probe_key,
+    )
+
+    assert {credential.name for credential in credentials} == {
+        "operator",
+        "health-probe",
+    }
+
+
+@pytest.mark.parametrize(
+    ("probe_key", "match"),
+    [
+        ("", "HEALTH_PROBE_API_KEY is required"),
+        ("unconfigured-probe-key-000000", "must match"),
+        ("operator-key-000000000000000", "only the health-detail scope"),
+    ],
+)
+def test_invalid_health_probe_credentials_fail_startup(probe_key, match):
+    raw, _valid_probe = _production_credentials()
+
+    with pytest.raises(ValueError, match=match):
+        validate_auth_configuration(
+            raw_credentials=raw,
+            legacy_keys=set(),
+            local_development_unauthenticated=False,
+            health_probe_api_key=probe_key,
+        )
+
+
+def test_project_restricted_health_probe_is_rejected():
+    probe_key = "health-probe-key-000000000000"
+    raw = json.dumps(
+        {
+            "health-probe": {
+                "secret": probe_key,
+                "scopes": ["health-detail"],
+                "projects": ["alpha"],
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="no project restriction"):
+        validate_auth_configuration(
+            raw_credentials=raw,
+            legacy_keys=set(),
+            local_development_unauthenticated=False,
+            health_probe_api_key=probe_key,
+        )

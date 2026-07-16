@@ -13,13 +13,31 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+## 0.7.0 — 2026-07-16
+
+**Fail-closed production release and browser security refresh.**
+
 ### Added
+- Added a checked-in, expiring browser security policy, executed-binary runtime
+  inventory, browser-aware CycloneDX SBOM enrichment, and scheduled/release
+  enforcement.
+- Added dedicated least-privilege readiness credentials, immutable image
+  provenance inspection, and governed container finding exceptions.
 - Added configurable transform pipeline-step and intermediate-value byte caps,
   with environment and Compose wiring.
 - Added a deny-by-default, project-scoped allowlist for deployment secret
   references in submitted YAML.
 
 ### Changed
+- Upgraded Scrapling to 0.4.11, Playwright to 1.61.0, Patchright to 1.61.2,
+  Chromium to 149.0.7827.55, and the maintained Camoufox binding/browser to
+  0.6.0/150.0.2; Chromium's native sandbox is explicitly enabled.
+- Missing API credentials now fail startup. Unauthenticated administrator access
+  requires an explicit local-development-only opt-in.
+- Production health checks now authenticate to detailed dependency readiness;
+  public liveness remains intentionally shallow.
+- Container scanning now evaluates unfixed Medium, High, and Critical findings
+  and permits only owner-assigned, reasoned, short-lived exact exceptions.
 - Browser configuration is now rejected for `fetcher: basic`, action fields
   that do not apply to the selected browser action are rejected, and YAML
   booleans are no longer coerced into numeric execution controls.
@@ -43,9 +61,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   the smoke harness to exercise direct-private literal-address validation.
 - Made qualification backup migration paths explicit so quiesced backups can
   be validated and restored when the helper is mounted at the container root.
-- Refreshed the dated Debian snapshot, upgraded inherited base packages before
-  scanning, and made the egress-probe health watchdog reliable under its
-  production CPU quota.
+- Moved the runtime to the dated Ubuntu 24.04 LTS snapshot, upgraded inherited
+  packages before scanning, disabled setuid mount helpers, removed unused
+  vulnerable iconv modules, and made the egress-probe health watchdog reliable
+  under its production CPU quota.
 - Protected active runs during both age-based and per-job result retention,
   and let webhook workers drain their already-queued batch during shutdown.
 - Restored aggregate fetched-byte accounting for real Scrapling response

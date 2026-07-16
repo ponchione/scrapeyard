@@ -69,3 +69,15 @@ lock alone:
 
 Until those changes land together, the startup guard is a correctness boundary
 and must not be disabled.
+
+## Intentional operating limitations
+
+- Horizontal scaling is unsupported: one deployment means one process and one
+  replica. Increasing only the in-process worker/browser limits is the supported
+  capacity control.
+- APScheduler does not backfill cron fires missed while Scrapeyard is stopped.
+  On recovery, the next future cron occurrence is eligible; use an explicit
+  manual run when operators decide missed work must be replayed.
+- Webhook delivery is at-least-once. A crash after a receiver accepts a request
+  but before the delivered transition can repeat it, so receivers must
+  deduplicate by the stable delivery/event identifiers.

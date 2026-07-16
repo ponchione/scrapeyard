@@ -258,8 +258,8 @@ class RequestSizeLimitMiddleware:
 class APIKeyAuthMiddleware:
     """Require a valid ``X-API-Key`` header on every non-exempt request.
 
-    If *keys* is empty, the middleware is a no-op (useful for local dev) and
-    logs a single warning on the first request to make the state obvious.
+    An empty credential set fails closed unless the explicit local-development
+    opt-in is supplied by the application.
     """
 
     def __init__(
@@ -268,6 +268,7 @@ class APIKeyAuthMiddleware:
         keys: set[str] | None = None,
         credentials: tuple[APICredential, ...] | None = None,
         exempt_paths: Iterable[str] = (),
+        local_development_unauthenticated: bool = False,
     ) -> None:
         self.app = app
         self.credentials = (
@@ -276,6 +277,7 @@ class APIKeyAuthMiddleware:
             else tuple(credentials)
         )
         self.exempt_paths = set(exempt_paths)
+        self.local_development_unauthenticated = local_development_unauthenticated
         self._warned_open = False
         self.failed_auth_attempts = 0
 
@@ -284,15 +286,20 @@ class APIKeyAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if not self.credentials:
+        if not self.credentials and self.local_development_unauthenticated:
             if not self._warned_open:
                 self._warned_open = True
                 logger.warning(
-                    "API authentication is disabled (no named or legacy credentials); "
-                    "local-development caller has all scopes"
+                    "API authentication is disabled by the explicit local-development "
+                    "opt-in; local-development caller has all scopes"
                 )
             _set_caller(scope, LOCAL_DEVELOPMENT_CALLER)
             await self._call_with_audit(scope, receive, send, LOCAL_DEVELOPMENT_CALLER)
+            return
+
+        if not self.credentials and scope.get("path") not in self.exempt_paths:
+            self._record_auth_failure(scope, reason="unconfigured")
+            await _reject(scope, send, 503, "API authentication is not configured")
             return
 
         if scope.get("path") in self.exempt_paths:
