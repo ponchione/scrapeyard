@@ -12,7 +12,12 @@ from typing import Any
 import yaml
 
 from tests.smoke.fixture_site import PRIVATE_ORIGIN, PUBLIC_ORIGIN, create_server
-from tests.smoke.verify_api import browser_config, unsafe_subrequest_config
+from tests.smoke.verify_api import (
+    PRIVATE_LITERAL_ORIGIN,
+    basic_config,
+    browser_config,
+    unsafe_subrequest_config,
+)
 
 
 def _yaml(path: str) -> dict[str, Any]:
@@ -120,6 +125,7 @@ def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_netw
     assert "egress_probe.py" in " ".join(egress_probe["command"])
     assert "--liveness-port" in egress_probe["command"]
     assert "--healthcheck" in egress_probe["healthcheck"]["test"]
+    assert egress_probe["healthcheck"]["timeout"] == "3s"
     assert smoke_app["environment"]["SCRAPEYARD_BROWSER_DEBUG_ENABLED"] == "true"
     assert smoke_app["environment"]["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "false"
     assert set(smoke_app["depends_on"]) == {"egress-probe", "redis", "fixture"}
@@ -149,6 +155,13 @@ def test_smoke_driver_contract_covers_all_modes_actions_and_ssrf_proof() -> None
     assert PRIVATE_ORIGIN not in unsafe.split("url:", 1)[1].splitlines()[0]
     assert "disable_resources: false" in unsafe
     assert "#trigger-unsafe" in unsafe
+    direct_private = basic_config(
+        "direct-private-rejected",
+        "/protected",
+        private_target=True,
+    )
+    assert f"url: {PRIVATE_LITERAL_ORIGIN}/protected" in direct_private
+    assert PRIVATE_ORIGIN not in direct_private
 
 
 def test_smoke_runner_has_bounded_cleanup_diagnostics_and_privilege_contracts() -> None:
@@ -216,9 +229,9 @@ def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cach
 def test_dockerfile_has_immutable_inputs_and_non_root_runtime_contract() -> None:
     text = Path("Dockerfile").read_text(encoding="utf-8")
     assert "python:3.12.11-slim-bookworm@sha256:" in text
-    assert "ARG DEBIAN_SNAPSHOT=20260701T000000Z" in text
+    assert "ARG DEBIAN_SNAPSHOT=20260715T000000Z" in text
     assert "snapshot.debian.org/archive/debian/" in text
-    assert "apt-get upgrade" not in text
+    assert "apt-get upgrade -y --no-install-recommends" in text
     assert "--without-hashes" not in text
     assert "USER 10001:10001" in text
     assert 'CMD ["uvicorn"' in text and '"--workers", "1"' in text
@@ -246,6 +259,7 @@ def test_egress_policy_blocks_reserved_destinations_after_explicit_allows() -> N
     assert 'CHAIN_A="${LEGACY_CHAIN}-A"' in text
     assert 'CHAIN_B="${LEGACY_CHAIN}-B"' in text
     assert "--dport 6379 -j ACCEPT" in text
+    assert text.count("--ctstate ESTABLISHED,RELATED -j ACCEPT") == 2
     assert 'PROBE_LIVENESS_PORT="${SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT:-8081}"' in text
     assert '-p tcp --dport "$PROBE_LIVENESS_PORT" -j ACCEPT' in text
     rendered = subprocess.run(

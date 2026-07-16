@@ -761,7 +761,7 @@ class Harness:
             "-v", backup_mount, "-v", tool_mount,
             "scrapeyard", "-c",
             "python /qualification_backup.py create --data-root /data "
-            "--output /qualification-backup/set --quiesced "
+            "--output /qualification-backup/set --quiesced --sql-dir /app/sql "
             "&& chmod -R g+rwX /qualification-backup/set",
             timeout=120,
         )
@@ -783,6 +783,7 @@ class Harness:
             "-v", backup_mount, "-v", tool_mount,
             "scrapeyard", "/qualification_backup.py", "restore",
             "--backup", "/qualification-backup/set", "--data-root", "/data",
+            "--sql-dir", "/app/sql",
             timeout=120,
         )
         os.environ["SCRAPEYARD_QUALIFICATION_CRASH_POINT"] = ""

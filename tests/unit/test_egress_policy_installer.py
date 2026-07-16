@@ -137,11 +137,23 @@ def _run(installer: Path, env: dict[str, str]) -> subprocess.CompletedProcess[st
 
 
 def _assert_old_policy_active(state_dir: Path) -> None:
-    for tool in ("iptables", "ip6tables"):
+    for tool, source in (
+        ("iptables", "172.30.0.250"),
+        ("ip6tables", "2001:db8::250"),
+    ):
         state = json.loads((state_dir / f"{tool}.json").read_text())
         assert "SY-EGRESS-test-A" in state["jumps"]
         rules = state["chains"]["SY-EGRESS-test-A"]
-        assert any("-j REJECT" in rule for rule in rules)
+        established = next(
+            index
+            for index, rule in enumerate(rules)
+            if "--ctstate ESTABLISHED,RELATED -j ACCEPT" in rule
+        )
+        rejected = next(
+            index for index, rule in enumerate(rules) if "-j REJECT" in rule
+        )
+        assert rules[established].startswith(f"-s {source} -m conntrack ")
+        assert established < rejected
 
 
 def test_policy_replacement_restores_prior_deny_path_at_every_mutation_stage(

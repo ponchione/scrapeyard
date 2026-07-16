@@ -204,6 +204,21 @@ def test_backup_requires_quiescing_and_restore_requires_fresh_destination(tmp_pa
         restore_backup(tmp_path / "backup", destination)
 
 
+def test_backup_classifies_missing_explicit_migration_directory(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _minimal_data(data)
+
+    with pytest.raises(BackupError, match="required migration SQL is missing"):
+        create_backup(
+            data,
+            tmp_path / "backup",
+            quiesced=True,
+            sql_dir=tmp_path / "missing-sql",
+        )
+
+    assert not (tmp_path / "backup").exists()
+
+
 @pytest.mark.parametrize("link_target", ["file", "directory"])
 def test_backup_rejects_source_symlinks_without_copying_external_content(
     tmp_path: Path,
@@ -409,6 +424,8 @@ def test_runner_has_scoped_cleanup_signal_timeout_and_secret_scan_contracts() ->
     assert harness.count('"--user", "10001:1000"') == 2
     assert '"--user", "1000:1000"' not in harness
     assert "chmod -R g+rwX /qualification-backup/set" in harness
+    assert "--sql-dir /app/sql" in harness
+    assert '"--sql-dir", "/app/sql"' in harness
 
 
 def test_release_workflow_triggers_permissions_jobs_and_no_mutable_cache() -> None:

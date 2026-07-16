@@ -221,6 +221,11 @@ prepare_chain() {
 
 append_v4_policy() {
   local chain=$1 cidr
+  # With bridge netfilter enabled, replies from the application traverse this
+  # source-scoped chain too. Admit only packets belonging to connections whose
+  # NEW packet already passed the destination policy below.
+  iptables -A "$chain" -s "$APP_SOURCE" -m conntrack \
+    --ctstate ESTABLISHED,RELATED -j ACCEPT
   iptables -A "$chain" -s "$APP_SOURCE" -d "$REDIS_DESTINATION" \
     -p tcp --dport 6379 -j ACCEPT
   iptables -A "$chain" -s "$APP_SOURCE" -d "$PROBE_DESTINATION" \
@@ -241,6 +246,8 @@ append_v4_policy() {
 
 append_v6_policy() {
   local chain=$1 cidr
+  ip6tables -A "$chain" -s "$APP_SOURCE_V6" -m conntrack \
+    --ctstate ESTABLISHED,RELATED -j ACCEPT
   IFS=',' read -r -a allowed <<<"$ALLOW_CIDRS"
   for cidr in "${allowed[@]}"; do
     [[ -n "$cidr" && "$cidr" == *:* ]] || continue

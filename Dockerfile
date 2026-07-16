@@ -37,7 +37,7 @@ ARG UBO_SHA256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
-ARG DEBIAN_SNAPSHOT=20260701T000000Z
+ARG DEBIAN_SNAPSHOT=20260715T000000Z
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -81,6 +81,7 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
       'Check-Valid-Until: no' \
       > /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
