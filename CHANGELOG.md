@@ -36,6 +36,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Closed owned subprocess pipes on every egress-probe helper path, including
+  assertion and timeout cleanup, so the warning-clean test gate stays clean.
+- Allowed source-scoped established return traffic through the deployment
+  egress policy while retaining private-destination rejection, and corrected
+  the smoke harness to exercise direct-private literal-address validation.
+- Made qualification backup migration paths explicit so quiesced backups can
+  be validated and restored when the helper is mounted at the container root.
+- Refreshed the dated Debian snapshot, upgraded inherited base packages before
+  scanning, and made the egress-probe health watchdog reliable under its
+  production CPU quota.
 - Protected active runs during both age-based and per-job result retention,
   and let webhook workers drain their already-queued batch during shutdown.
 - Restored aggregate fetched-byte accounting for real Scrapling response

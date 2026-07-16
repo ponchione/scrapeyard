@@ -17,7 +17,7 @@ The `CI` workflow exposes these checks:
   isolated Redis 7 service and the real arq queue/worker implementation.
 
 The separate `Container and browser smoke` workflow adds the production-image
-lane owned by Audit Item 14. Its `Production image / real browsers` job runs on
+lane. Its `Production image / real browsers` job runs on
 manual dispatch and on pull requests that change the Docker/Compose build,
 lock file, smoke harness, or runtime API/config/browser/queue/storage paths.
 This intentionally resource-intensive lane does not replace or weaken any of
@@ -26,8 +26,8 @@ the always-on CI, live-Redis, distribution, or dependency-audit gates.
 The separate `Dependency audit` workflow exposes `Python 3.10` and `Python
 3.12` checks. Each audits the pinned packaging tools and both the locked
 development environment and exported production-only graph. It runs on every
-pull request and push to `main`, can be dispatched manually, and retains the
-weekly Monday schedule introduced by Audit Item 11. The CI workflow does not
+pull request and push to `main`, can be dispatched manually, and runs on a
+weekly Monday schedule. The CI workflow does not
 duplicate those audit jobs.
 
 The minimum supported interpreter is Python 3.10. Python 3.12 matches the
@@ -41,9 +41,9 @@ local equivalents of the CI gates are:
 ```bash
 poetry check --lock
 poetry sync --no-interaction
-poetry run ruff check src tests
+poetry run ruff check src tests scripts
 poetry run mypy src
-poetry run pytest
+poetry run pytest -W error
 rm -rf dist
 poetry build
 poetry run python scripts/inspect_distribution.py dist
@@ -342,15 +342,15 @@ coverage.
 
 ## Recovery, restore, load, and soak release qualification
 
-Audit Item 15 adds a separate destructive qualification lane. It runs the
-unchanged production Dockerfile/runtime class with real Redis 7 AOF, real
-Playwright Chromium, the Item 14 fixture and browser/security networks, the
-normal non-root UID/GID 10001 runtime, the production `/data` volume, default
-Chromium seccomp/AppArmor policies, read-only root filesystem, and the same
-capability boundary. It does not contact public scrape targets or webhook
-services. The fixture's emulated-public and private networks remain isolated,
-and Item 14's browser-route/connected-IP rejection and protected-endpoint
-SSRF proof are unchanged.
+The separate destructive qualification lane runs the unchanged production
+Dockerfile/runtime class with real Redis 7 AOF, real Playwright Chromium, the
+production smoke fixture and browser/security networks, the normal non-root
+UID/GID 10001 runtime, the production `/data` volume, default Chromium
+seccomp/AppArmor policies, read-only root filesystem, and the same capability
+boundary. It does not contact public scrape targets or webhook services. The
+fixture's emulated-public and private networks remain isolated, and the
+browser-route/connected-IP rejection and protected-endpoint SSRF proof are
+unchanged.
 
 Run the complete bounded profile locally:
 
@@ -675,25 +675,3 @@ Allowed scopes are `development` and `production`. Expired, duplicate,
 incomplete, or malformed entries fail closed before `pip-audit` runs. Remove an
 exception as soon as a compatible fix is available; extending an expiry
 requires a new review with updated evidence.
-
-### 2026-07-12 refresh record
-
-The pre-refresh audit at commit `74fcb5e` reported 37 advisories across nine
-packages. Runtime dependencies accounted for `aiohttp` (11), `idna` (2),
-`pydantic-settings` (1), `PyJWT` (8), and `Starlette` (6). Development or local
-packaging tooling accounted for `cryptography` (1), `dulwich` (5), `msgpack`
-(1), and `pip` (2). `msgpack` and `pip` came from the locked `pip-audit` graph;
-the local `cryptography` and `dulwich` installations came from untracked Poetry
-tooling and are removed by `poetry sync`.
-
-The refresh raises the direct `pydantic-settings` floor to 2.14.2, locks the
-affected packages to their compatible fixed releases, and refreshes the
-Docker/CI packaging tools because Poetry 1.8.5 constrained Dulwich below its
-fixed line. The final image also upgrades pip to its audited fixed version. No
-vulnerability exception is approved. After synchronization, both the complete
-development audit and the exported production-only audit report no known
-vulnerabilities. The dedicated GitHub Actions workflow runs both audit scopes
-weekly and on every pull request and change to `main` for Python 3.10 and the
-Docker runtime version, Python 3.12. Keeping it separate from the broader CI
-workflow makes the security checks independently requireable without running
-duplicate audit jobs.
