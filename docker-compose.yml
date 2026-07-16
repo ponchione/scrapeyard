@@ -16,7 +16,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "/opt/scrapeyard/egress_probe.py", "--healthcheck", "--challenge-port", "8080", "--liveness-port", "8081"]
       interval: 2s
-      timeout: 1s
+      # The probe enforces its own one-second socket deadline. Allow Docker
+      # enough time to start the Python interpreter under the 0.25 CPU quota.
+      timeout: 3s
       retries: 10
     restart: unless-stopped
     networks:

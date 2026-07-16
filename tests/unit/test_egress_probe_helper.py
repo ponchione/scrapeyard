@@ -36,30 +36,37 @@ def test_controlled_egress_probe_serves_challenge_and_liveness_protocol():
         "--liveness-port",
         str(liveness_port),
     ]
-    process = subprocess.Popen(
+    with subprocess.Popen(
         command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-    )
-    try:
-        deadline = time.monotonic() + 2
-        while True:
-            checked = subprocess.run(healthcheck, capture_output=True, text=True)
-            if checked.returncode == 0:
-                break
-            if process.poll() is not None:
-                raise AssertionError(process.stderr.read())
-            if time.monotonic() >= deadline:
-                raise AssertionError(checked.stderr)
-            time.sleep(0.02)
-
-        with socket.create_connection(("127.0.0.1", challenge_port), timeout=1) as probe:
-            assert probe.recv(1) == b""
-    finally:
-        process.terminate()
+    ) as process:
+        assert process.stderr is not None
         try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
+            deadline = time.monotonic() + 2
+            while True:
+                checked = subprocess.run(healthcheck, capture_output=True, text=True)
+                if checked.returncode == 0:
+                    break
+                if process.poll() is not None:
+                    raise AssertionError(process.stderr.read())
+                if time.monotonic() >= deadline:
+                    raise AssertionError(checked.stderr)
+                time.sleep(0.02)
+
+            with socket.create_connection(
+                ("127.0.0.1", challenge_port), timeout=1
+            ) as probe:
+                assert probe.recv(1) == b""
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+    assert process.returncode is not None
+    assert process.stderr.closed

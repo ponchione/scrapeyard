@@ -67,7 +67,7 @@ REQUIRED_MIGRATION_FILES = {
         "020_create_result_reconciliation_state.sql",
     ),
 }
-_SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
+_DEFAULT_SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 REQUIRED_COLUMNS = {
     "jobs.db": {
         "schema_migrations": {"migration_id", "filename", "checksum", "applied_at"},
@@ -243,6 +243,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def migration_sha256(sql_dir: Path, filename: str) -> str:
+    path = sql_dir / filename
+    if path.is_symlink() or not path.is_file():
+        raise BackupError(f"required migration SQL is missing: {path}")
+    return sha256(path)
+
+
 def regular_files(root: Path) -> list[Path]:
     if root.is_symlink():
         raise BackupError(f"symlink is not allowed in backup set: {root}")
@@ -278,7 +285,13 @@ def sqlite_snapshot(source: Path, destination: Path) -> None:
         src.backup(dst)
 
 
-def create_backup(data_root: Path, output: Path, *, quiesced: bool) -> dict[str, Any]:
+def create_backup(
+    data_root: Path,
+    output: Path,
+    *,
+    quiesced: bool,
+    sql_dir: Path = _DEFAULT_SQL_DIR,
+) -> dict[str, Any]:
     if not quiesced:
         raise BackupError("creation requires --quiesced after the documented shutdown order")
     if output.exists():
@@ -329,7 +342,7 @@ def create_backup(data_root: Path, output: Path, *, quiesced: bool) -> dict[str,
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        validate_backup(stage)
+        validate_backup(stage, sql_dir=sql_dir)
         os.replace(stage, output)
         return manifest
     except BaseException:
@@ -370,7 +383,12 @@ def _source_data_root(manifest: dict[str, Any]) -> Path:
     return Path(*root.parts)
 
 
-def _sqlite_contract(payload: Path, *, source_data_root: Path) -> dict[str, int]:
+def _sqlite_contract(
+    payload: Path,
+    *,
+    source_data_root: Path,
+    sql_dir: Path,
+) -> dict[str, int]:
     counts: dict[str, int] = {}
     for database in DATABASES:
         path = payload / "db" / database
@@ -398,7 +416,7 @@ def _sqlite_contract(payload: Path, *, source_data_root: Path) -> dict[str, int]
                 (
                     filename.split("_", 1)[0],
                     filename,
-                    sha256(_SQL_DIR / filename),
+                    migration_sha256(sql_dir, filename),
                 )
                 for filename in REQUIRED_MIGRATION_FILES[database]
             )
@@ -529,7 +547,11 @@ def _relocate_result_metadata(
             raise BackupError(f"result metadata WAL checkpoint was busy: {checkpoint}")
 
 
-def validate_backup(backup: Path) -> dict[str, Any]:
+def validate_backup(
+    backup: Path,
+    *,
+    sql_dir: Path = _DEFAULT_SQL_DIR,
+) -> dict[str, Any]:
     manifest = load_manifest(backup)
     source_data_root = _source_data_root(manifest)
     payload = backup / "payload"
@@ -563,12 +585,18 @@ def validate_backup(backup: Path) -> dict[str, Any]:
     manifest["row_counts"] = _sqlite_contract(
         payload,
         source_data_root=source_data_root,
+        sql_dir=sql_dir,
     )
     return manifest
 
 
-def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
-    manifest = validate_backup(backup)
+def restore_backup(
+    backup: Path,
+    data_root: Path,
+    *,
+    sql_dir: Path = _DEFAULT_SQL_DIR,
+) -> dict[str, Any]:
+    manifest = validate_backup(backup, sql_dir=sql_dir)
     source_data_root = _source_data_root(manifest)
     data_root.mkdir(parents=True, exist_ok=True)
     existing = list(data_root.iterdir())
@@ -589,14 +617,22 @@ def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
     try:
         shutil.copytree(backup / "payload", stage, symlinks=True)
         regular_files(stage)
-        _sqlite_contract(stage, source_data_root=source_data_root)
+        _sqlite_contract(
+            stage,
+            source_data_root=source_data_root,
+            sql_dir=sql_dir,
+        )
         destination_data_root = data_root.resolve()
         _relocate_result_metadata(
             stage,
             source_data_root=source_data_root,
             destination_data_root=destination_data_root,
         )
-        _sqlite_contract(stage, source_data_root=destination_data_root)
+        _sqlite_contract(
+            stage,
+            source_data_root=destination_data_root,
+            sql_dir=sql_dir,
+        )
         # A fresh production image initializes these empty mount points before
         # the named volume is first used. Preserve their modes for rollback and
         # keep empty logs in place.
@@ -610,7 +646,11 @@ def restore_backup(backup: Path, data_root: Path) -> dict[str, Any]:
             os.replace(child, destination)
             installed.append(destination)
         stage.rmdir()
-        _sqlite_contract(data_root, source_data_root=destination_data_root)
+        _sqlite_contract(
+            data_root,
+            source_data_root=destination_data_root,
+            sql_dir=sql_dir,
+        )
     except BaseException:
         for destination in reversed(installed):
             shutil.rmtree(destination, ignore_errors=True)
@@ -631,11 +671,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     create.add_argument("--data-root", type=Path, required=True)
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--quiesced", action="store_true")
+    create.add_argument("--sql-dir", type=Path, default=_DEFAULT_SQL_DIR)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--backup", type=Path, required=True)
+    validate.add_argument("--sql-dir", type=Path, default=_DEFAULT_SQL_DIR)
     restore = subparsers.add_parser("restore")
     restore.add_argument("--backup", type=Path, required=True)
     restore.add_argument("--data-root", type=Path, required=True)
+    restore.add_argument("--sql-dir", type=Path, default=_DEFAULT_SQL_DIR)
     return parser.parse_args(argv)
 
 
@@ -643,11 +686,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     try:
         if args.command == "create":
-            result = create_backup(args.data_root, args.output, quiesced=args.quiesced)
+            result = create_backup(
+                args.data_root,
+                args.output,
+                quiesced=args.quiesced,
+                sql_dir=args.sql_dir,
+            )
         elif args.command == "validate":
-            result = validate_backup(args.backup)
+            result = validate_backup(args.backup, sql_dir=args.sql_dir)
         else:
-            result = restore_backup(args.backup, args.data_root)
+            result = restore_backup(
+                args.backup,
+                args.data_root,
+                sql_dir=args.sql_dir,
+            )
     except BackupError as exc:
         print(f"backup_contract_failure: {exc}", file=sys.stderr)
         return 2

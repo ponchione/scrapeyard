@@ -14,6 +14,7 @@ from typing import Any
 
 PUBLIC_ORIGIN = "http://fixture.public.test:8080"
 PRIVATE_ORIGIN = "http://fixture.private.test:8080"
+PRIVATE_LITERAL_ORIGIN = "http://10.77.14.2:8080"
 TERMINAL_STATUSES = {"complete", "partial", "failed", "cancelled"}
 
 
@@ -70,7 +71,7 @@ retry:
 
 
 def basic_config(name: str, path: str, *, private_target: bool = False) -> str:
-    origin = PRIVATE_ORIGIN if private_target else PUBLIC_ORIGIN
+    origin = PRIVATE_LITERAL_ORIGIN if private_target else PUBLIC_ORIGIN
     return f"""project: item14-smoke
 name: {name}
 {_execution_block()}target:
