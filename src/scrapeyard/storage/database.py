@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib.resources
 import os
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -50,6 +51,46 @@ _CONNECTION_PRAGMAS: tuple[str, ...] = (
     "PRAGMA synchronous = NORMAL",
     "PRAGMA foreign_keys = ON",
 )
+
+
+class SQLiteProbeError(RuntimeError):
+    """Sanitized failure from one named SQLite readiness operation."""
+
+    def __init__(self, db_name: str, operation: str, error: str) -> None:
+        self.db_name = db_name
+        self.operation = operation
+        self.error = error
+        super().__init__(f"{db_name} SQLite {operation} failed: {error}")
+
+
+def _sqlite_probe_error_name(exc: aiosqlite.Error) -> str:
+    """Return bounded SQLite diagnostics without filesystem paths or SQL text."""
+
+    error_type = type(exc).__name__
+    error_name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(error_name, str) and error_name.startswith("SQLITE_"):
+        return f"{error_type} ({error_name})"
+    return error_type
+
+
+def _has_deleted_sidecar_descriptor(db_path: Path) -> bool:
+    """Detect detached WAL/SHM descriptors when procfs exposes this process."""
+
+    descriptor_root = Path("/proc/self/fd")
+    try:
+        descriptors = tuple(descriptor_root.iterdir())
+    except OSError:
+        return False
+    base = str(db_path.resolve())
+    deleted_targets = {f"{base}-wal (deleted)", f"{base}-shm (deleted)"}
+    for descriptor in descriptors:
+        try:
+            target = os.readlink(descriptor)
+        except OSError:
+            continue
+        if target in deleted_targets:
+            return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,20 +571,52 @@ class DatabaseManager:
         return connection
 
     async def probe(self, db_name: str) -> None:
-        """Open the real database read/write and verify its on-disk structure."""
+        """Verify read/write access and integrity entirely through SQLite."""
 
         if self._db_dir is None:
             raise RuntimeError("Database not initialised — call init_db() first")
         if db_name not in _DB_MIGRATIONS:
             raise ValueError(f"Unknown database: {db_name!r}")
-        path = self._db_dir / db_name
-        descriptor = os.open(path, os.O_RDWR)
-        os.close(descriptor)
-        async with aiosqlite.connect(f"file:{path}?mode=rw", uri=True) as db:
-            cursor = await db.execute("PRAGMA quick_check(1)")
-            row = await cursor.fetchone()
-            if row is None or row[0] != "ok":
-                raise RuntimeError(f"SQLite quick_check failed for {db_name}")
+        uri = (self._db_dir / db_name).resolve().as_uri() + "?mode=rw"
+        operation = "open_readwrite"
+        try:
+            async with aiosqlite.connect(uri, uri=True) as db:
+                operation = "quick_check(1)"
+                cursor = await db.execute("PRAGMA quick_check(1)")
+                row = await cursor.fetchone()
+                if row is None or row[0] != "ok":
+                    raise SQLiteProbeError(
+                        db_name,
+                        operation,
+                        "integrity validation failed",
+                    )
+
+                # This obtains SQLite's write reservation without changing any
+                # committed database content. The rolled-back schema write proves
+                # that the main database/WAL is writable, while keeping all
+                # descriptor and lock handling inside SQLite's VFS.
+                operation = "begin_immediate"
+                await db.execute("BEGIN IMMEDIATE")
+                operation = "write_test"
+                probe_table = f"__scrapeyard_readiness_{secrets.token_hex(8)}"
+                await db.execute(f'CREATE TABLE "{probe_table}" (value INTEGER)')
+                operation = "rollback"
+                await db.rollback()
+                operation = "close"
+        except SQLiteProbeError:
+            raise
+        except aiosqlite.Error as exc:
+            raise SQLiteProbeError(
+                db_name,
+                operation,
+                _sqlite_probe_error_name(exc),
+            ) from exc
+        if _has_deleted_sidecar_descriptor(self._db_dir / db_name):
+            raise SQLiteProbeError(
+                db_name,
+                "descriptor_check",
+                "deleted WAL/SHM descriptor",
+            )
 
     @asynccontextmanager
     async def get(self, db_name: str) -> AsyncIterator[aiosqlite.Connection]:

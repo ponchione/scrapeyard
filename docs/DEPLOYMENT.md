@@ -333,6 +333,31 @@ Restore testing matters. A deployment is not production-ready until a restored
 `/data/db` plus `/data/results` can serve `GET /jobs/{job_id}` and
 `GET /results/{job_id}` for a known completed scrape.
 
+### SQLite runtime and readiness safety
+
+The image pins the active SQLite runtime to 3.51.3 using SQLite's official
+`sqlite-autoconf-3510300.tar.gz` source archive and its published SHA3-256.
+Build-time Python checks, the `org.scrapeyard.runtime.sqlite.version` image
+label, and runtime inspection must all report 3.51.3. Python's `_sqlite3`
+extension dynamically resolves `/usr/local/lib/libsqlite3.so.0`; do not remove
+that library or allow it to fall back to Ubuntu 24.04's 3.45.1 package.
+
+Version 3.51.3 was selected as the bounded upgrade because it includes both the
+3.51 broken-POSIX-lock defenses and the WAL-reset corruption fix without a
+database-format migration. All processes that touch one database must use a
+compatible SQLite library and the same local locking protocol. Requalify
+migrations, cached WAL writes, independent readers, readiness, backup/restore,
+and graceful restart before changing the pin.
+
+Readiness opens each existing database through SQLite in read/write URI mode,
+runs `PRAGMA quick_check(1)`, performs and rolls back a write transaction, and
+checks its own procfs descriptors for deleted WAL/SHM sidecars. Never use shell
+redirection, `open(2)`, file-copy tools, antivirus/file-identification readers,
+or backup tools that bypass SQLite against a live database path. Use SQLite's
+backup API or the documented quiesced backup transaction instead. See
+[MONITORING.md](MONITORING.md#readiness-semantics) for failure diagnostics and
+[TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for the remaining packaging debt.
+
 ## Runtime Limits
 
 Set limits to match host capacity:

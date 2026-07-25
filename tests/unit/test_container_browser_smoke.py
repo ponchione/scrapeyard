@@ -249,6 +249,11 @@ def test_dockerfile_has_immutable_inputs_and_non_root_runtime_contract() -> None
     assert "scrapeyard-entrypoint" in text
     assert "CAMOUFOX_BROWSER_SHA256=" in text
     assert "sha256sum --check --strict" in text
+    assert "ARG SQLITE_VERSION=3.51.3" in text
+    assert "SQLITE_SHA3_256=581215771b32ea4c" in text
+    assert "sqlite-autoconf-${SQLITE_VERSION_NUMBER}.tar.gz" in text
+    assert 'sqlite3.sqlite_version)\')\" = \"${SQLITE_VERSION}' in text
+    assert 'org.scrapeyard.runtime.sqlite.version="${SQLITE_VERSION}"' in text
     assert "UBO_VERSION=1.72.2" in text
     assert "UBO_SHA256=40c315b0" in text
     assert "ublock_origin-${UBO_VERSION}.xpi" in text

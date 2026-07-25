@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +14,9 @@ import aiosqlite
 import pytest
 
 from scrapeyard.storage.database import (
+    DatabaseManager,
     Migration,
+    SQLiteProbeError,
     _apply_migration,
     _load_migrations,
     _resolve_sql_dir,
@@ -23,6 +27,31 @@ from scrapeyard.storage.database import (
 )
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.secret_envelope import migrate_persisted_secrets
+
+
+def _sidecar_identities(db_path: Path) -> dict[str, tuple[int, int]]:
+    sidecars = (Path(f"{db_path}-wal"), Path(f"{db_path}-shm"))
+    assert all(path.is_file() for path in sidecars)
+    return {
+        path.name: (path.stat().st_dev, path.stat().st_ino)
+        for path in sidecars
+    }
+
+
+def _deleted_sidecar_descriptors(db_path: Path) -> list[str]:
+    fd_root = Path("/proc/self/fd")
+    if not fd_root.is_dir():
+        return []
+    sidecars = {f"{db_path.resolve()}-wal", f"{db_path.resolve()}-shm"}
+    deleted: list[str] = []
+    for descriptor in fd_root.iterdir():
+        try:
+            target = os.readlink(descriptor)
+        except OSError:
+            continue
+        if target.endswith(" (deleted)") and target.removesuffix(" (deleted)") in sidecars:
+            deleted.append(target)
+    return deleted
 
 
 def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
@@ -676,6 +705,128 @@ async def test_get_db_reuses_cached_connection(tmp_path):
         pass
 
     assert first is second
+
+
+async def test_readiness_preserves_cached_wal_sidecars_across_external_reader(tmp_path):
+    """A readiness probe must never cancel the cached connection's POSIX locks."""
+
+    manager = DatabaseManager()
+    db_dir = tmp_path / "db"
+    await manager.init(str(db_dir))
+    db_path = db_dir / "jobs.db"
+
+    try:
+        async with manager.get("jobs.db") as cached:
+            await cached.execute("PRAGMA wal_autocheckpoint = 0")
+            await cached.execute("CREATE TABLE readiness_writes (value TEXT NOT NULL)")
+            await cached.execute("INSERT INTO readiness_writes VALUES ('before')")
+            await cached.commit()
+            original_sidecars = _sidecar_identities(db_path)
+
+            for _ in range(3):
+                await manager.probe("jobs.db")
+                assert _sidecar_identities(db_path) == original_sidecars
+                assert _deleted_sidecar_descriptors(db_path) == []
+
+            independent_reader = (
+                "import sqlite3, sys\n"
+                "uri = 'file:' + sys.argv[1] + '?mode=rw'\n"
+                "db = sqlite3.connect(uri, uri=True)\n"
+                "assert db.execute('SELECT value FROM readiness_writes').fetchall() "
+                "== [('before',)]\n"
+                "assert db.execute('PRAGMA quick_check(1)').fetchone() == ('ok',)\n"
+                "db.close()\n"
+            )
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                independent_reader,
+                str(db_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            assert process.returncode == 0, stderr.decode(errors="replace")
+            assert _sidecar_identities(db_path) == original_sidecars
+            assert _deleted_sidecar_descriptors(db_path) == []
+
+            await cached.execute("INSERT INTO readiness_writes VALUES ('after')")
+            await cached.commit()
+
+            uri = db_path.resolve().as_uri() + "?mode=rw"
+            async with aiosqlite.connect(uri, uri=True) as fresh:
+                rows = await (await fresh.execute(
+                    "SELECT value FROM readiness_writes ORDER BY rowid"
+                )).fetchall()
+                quick_check = await (
+                    await fresh.execute("PRAGMA quick_check(1)")
+                ).fetchone()
+            assert rows == [("before",), ("after",)]
+            assert quick_check == ("ok",)
+            assert _sidecar_identities(db_path) == original_sidecars
+            assert _deleted_sidecar_descriptors(db_path) == []
+    finally:
+        await manager.close()
+
+
+async def test_readiness_rejects_missing_database(tmp_path):
+    manager = DatabaseManager()
+    manager._db_dir = tmp_path
+
+    with pytest.raises(
+        SQLiteProbeError,
+        match=r"jobs\.db SQLite open_readwrite failed: OperationalError \(SQLITE_CANTOPEN\)",
+    ):
+        await manager.probe("jobs.db")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem write permissions")
+async def test_readiness_rejects_unwritable_database(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("CREATE TABLE retained (value TEXT)")
+        await db.commit()
+    db_path.chmod(0o400)
+    tmp_path.chmod(0o500)
+    manager = DatabaseManager()
+    manager._db_dir = tmp_path
+
+    try:
+        with pytest.raises(
+            SQLiteProbeError,
+            match=r"jobs\.db SQLite (open_readwrite|begin_immediate|write_test) failed",
+        ):
+            await manager.probe("jobs.db")
+    finally:
+        tmp_path.chmod(0o700)
+        db_path.chmod(0o600)
+
+
+async def test_readiness_rejects_corrupt_database(tmp_path):
+    (tmp_path / "jobs.db").write_bytes(b"not a SQLite database" * 64)
+    manager = DatabaseManager()
+    manager._db_dir = tmp_path
+
+    with pytest.raises(
+        SQLiteProbeError,
+        match=r"jobs\.db SQLite quick_check\(1\) failed: DatabaseError \(SQLITE_NOTADB\)",
+    ):
+        await manager.probe("jobs.db")
+
+
+async def test_readiness_rejects_deleted_wal_or_shm_descriptor(tmp_path, monkeypatch):
+    manager = DatabaseManager()
+    await manager.init(str(tmp_path))
+    monkeypatch.setattr(
+        "scrapeyard.storage.database._has_deleted_sidecar_descriptor",
+        lambda _path: True,
+    )
+
+    with pytest.raises(
+        SQLiteProbeError,
+        match=r"jobs\.db SQLite descriptor_check failed: deleted WAL/SHM descriptor",
+    ):
+        await manager.probe("jobs.db")
 
 
 async def test_init_db_switches_cached_connections_for_new_path(tmp_path):

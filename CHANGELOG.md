@@ -13,6 +13,19 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+### Changed
+- Pinned the container's active SQLite runtime to 3.51.3 from the official
+  SHA3-verified source release, adding the newer broken-POSIX-lock defenses and
+  the WAL-reset corruption fix while retaining the existing database format.
+
+### Fixed
+- Removed the readiness probe's raw `os.open()`/`os.close()` of live SQLite
+  database paths. Readiness now uses only SQLite lifecycle operations for a
+  fresh read/write open, `PRAGMA quick_check(1)`, a rolled-back write test, and
+  detection of deleted WAL/SHM descriptors.
+- Added regression coverage for the cached-WAL/external-reader failure sequence
+  and for missing, unwritable, corrupt, and detached-sidecar readiness failures.
+
 ## 0.7.0 — 2026-07-16
 
 **Fail-closed production release and browser security refresh.**

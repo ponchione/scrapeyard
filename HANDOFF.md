@@ -1,6 +1,95 @@
 # Scrapeyard production-readiness handoff
 
-Date: 2026-07-16
+Date: 2026-07-25
+
+## SQLite WAL/SHM readiness repair
+
+Commit `d482b5cd` introduced a readiness preflight that called
+`os.open(database_path, os.O_RDWR)` and immediately `os.close()` before opening
+SQLite. On Unix, closing that independently opened descriptor can cancel every
+POSIX advisory lock held on the same inode by the process, including locks held
+by Scrapeyard's cached WAL connection. A later external SQLite reader can then
+appear to be the final connection and unlink the on-path WAL/SHM files. The
+cached connection continues against deleted sidecar inodes while new readers
+create and use different on-path files, producing invisible writes and eventual
+`disk I/O error` failures.
+
+The raw database-path open/close is removed. Readiness now uses a fresh SQLite
+`mode=rw` connection for `PRAGMA quick_check(1)`, an actual schema write inside
+a rolled-back `BEGIN IMMEDIATE` transaction, SQLite-managed close, and a Linux
+self-descriptor check for deleted WAL/SHM files. Failures report only the
+database name, bounded SQLite operation, exception class, and SQLite error name;
+paths, SQL, raw exception messages, and secrets remain hidden.
+
+Regression coverage reproduces the former sequence using only temporary
+databases: it retains a cached WAL connection, commits before and after repeated
+readiness calls and an independent SQLite process, verifies both writes through
+a fresh reader, runs `quick_check(1)`, preserves WAL/SHM device/inode identity,
+and rejects deleted descriptors. Focused tests cover missing, unwritable,
+corrupt, and simulated detached-sidecar databases.
+
+The active container runtime was upgraded from SQLite 3.45.1 to pinned SQLite
+3.51.3 using the official source archive and published SHA3-256. This is a
+bounded ABI-compatible dynamic-library replacement and includes SQLite's newer
+broken-POSIX-lock defenses plus the separate WAL-reset corruption fix. The
+build, image label, Python runtime, and dynamic linker path all assert the pin.
+
+Local verification used no live database access and submitted no scrape. The
+repository static, unit, integration, container, restart, API-preservation, and
+descriptor-readiness results are recorded below after the final image rebuild.
+Immediately before the first restart there were zero active tasks/browsers,
+zero queued/running jobs, and zero members in the base and all priority Redis
+queues. Only the Scrapeyard container was gracefully recreated; the Redis
+container and named data volumes were retained. All 199 jobs and 199 runs
+remained API-visible with unchanged status counts; the same 198 result
+endpoints returned 200 and one returned 404. The Brownells retest was not run.
+
+### SQLite repair verification completed
+
+- `poetry check --lock`, `poetry run ruff check src tests scripts`, and strict
+  `poetry run mypy src` passed for 96 source files.
+- `poetry run pytest -W error` passed: 2,103 passed, 15 isolated live-Redis
+  tests skipped, 88.82% coverage, 170.07 seconds. The separately invoked unit
+  and integration gates passed before the final combined run.
+- The final image built successfully as
+  `sha256:c538d607c86458252beaacab3bfa1d6f3f49738a0f105b14f51a50acf27db2f4`.
+  Its SQLite source SHA3 check and two Python runtime assertions passed.
+- The complete cached-WAL/readiness/independent-process regression passed in a
+  throwaway container on SQLite 3.51.3. No retained volume was mounted.
+- Immediately before the final restart, active task/browser counts, queued and
+  running job counts, the Redis base queue, and all three priority queues were
+  zero. Only `scrapeyard-scrapeyard-1` was recreated with `--no-deps`; Redis's
+  container ID remained `3bcda85aea076be3ca01c2af898e5c7460d465a87313b07ead2256c68822af35`.
+- The named `scrapeyard_scrapeyard-data` and `scrapeyard_redis-data` volumes
+  remained mounted at `/data`; no volume was recreated.
+- Five consecutive authenticated readiness requests returned `ok`, including
+  all three SQLite probes and their in-process deleted-sidecar descriptor
+  checks. The active Python runtime reported SQLite 3.51.3, and `ldd` resolved
+  `_sqlite3` to `/usr/local/lib/libsqlite3.so.0`.
+- Scrapeyard, Redis, and the existing egress probe were healthy. Redis returned
+  `PONG`; active tasks/browsers and all four Redis queues remained zero.
+- Post-restart APIs exposed the same 199 jobs (178 complete, 12 failed, 9
+  partial), 199 runs, 198 result responses at HTTP 200, and one unchanged HTTP
+  404 result response.
+- The live-Redis queue lane, browser smoke, and release qualification were not
+  run for this repair because those workflows submit fixture scrape jobs and/or
+  perform destructive qualification, both explicitly prohibited for this
+  task. The focused production-image WAL/readiness test and retained-service
+  read-only verification ran instead.
+
+### Remaining SQLite technical debt
+
+Ubuntu 24.04's packaged SQLite 3.45.1 remains installed as a Python package
+dependency, although `_sqlite3` resolves the pinned 3.51.3 library under
+`/usr/local/lib`. Return to one vendor-managed library when the pinned Ubuntu
+snapshot supplies at least 3.51.3, then remove the source override and re-run
+container/security/backup qualification. Procfs deleted-descriptor detection is
+Linux-specific; non-Linux deployment would need an equivalent signal. These
+items are tracked in [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md).
+
+Scrapeyard is ready for a separately authorized Brownells retest after review
+of this repair and verification evidence; this handoff does not authorize that
+retest.
 
 ## Release decision
 

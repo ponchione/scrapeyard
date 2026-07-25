@@ -64,12 +64,17 @@ grow.
 
 ## Readiness semantics
 
-`/health/ready` applies an explicit short timeout to Redis, queue, a newly
-opened read/write connection plus `PRAGMA quick_check(1)` for every SQLite
-database (`jobs.db`, `errors.db`, and `results_meta.db`), disk, and a one-byte
-atomic create/read/remove operation in the result directory. Opening a fresh
-connection ensures a cached process connection cannot mask an inaccessible or
-damaged database path. It also fails when
+`/health/ready` applies an explicit short timeout to Redis, queue, and a newly
+opened SQLite `mode=rw` connection for every database (`jobs.db`, `errors.db`,
+and `results_meta.db`). Each database probe runs `PRAGMA quick_check(1)`, then
+performs a schema write inside `BEGIN IMMEDIATE` and rolls it back. This proves
+actual write access without retaining a table or row. On Linux, it also rejects
+any cached descriptor that procfs identifies as a deleted database WAL or SHM
+sidecar. Every database-path descriptor and lock operation stays inside
+SQLite's connection lifecycle; readiness must never use raw file opens against
+a live database path. Opening a fresh connection ensures a cached process
+connection cannot mask a missing, inaccessible, read-only, or damaged database
+path. It also fails when
 the worker runner, APScheduler, cleanup task, webhook coordinator/worker set, or
 either interval-aware reconciliation service has stopped or gone too long without
 a successful pass. Optional project summaries use the same configured timeout,
@@ -78,6 +83,21 @@ retain the last successful cache on refresh failure, and make readiness return
 capacity returns a degraded `200`;
 insufficient free disk or any other failed required dependency/background task
 returns `503`. Liveness never performs these operations.
+
+SQLite failures identify the database, bounded operation (`open_readwrite`,
+`quick_check(1)`, `begin_immediate`, `write_test`, `rollback`, `close`, or
+`descriptor_check`), exception class, and SQLite error name when available.
+Filesystem paths, SQL text, exception messages, configuration, and credentials
+are not returned. For example, a missing file reports the operation and
+`OperationalError (SQLITE_CANTOPEN)` without exposing its path.
+
+The raw descriptor prohibition is a correctness boundary on Unix. Closing any
+separately opened descriptor for a database file can cancel all process-local
+POSIX advisory locks on that inode, including locks owned by cached SQLite
+connections. An independent reader may then act as the apparent final
+connection and unlink WAL/SHM paths underneath the cached connection. SQLite
+3.51.3 adds defense in depth, but callers must still use SQLite's APIs for all
+live database access.
 
 The quick and full release qualifications prove this contract destructively:
 Redis is stopped, a SQLite database and result storage are made inaccessible,

@@ -25,6 +25,9 @@ FROM ${RUNTIME_IMAGE} AS runtime
 
 ARG PIP_VERSION=26.1.2
 ARG SCRAPLING_VERSION=0.4.11
+ARG SQLITE_VERSION=3.51.3
+ARG SQLITE_VERSION_NUMBER=3510300
+ARG SQLITE_SHA3_256=581215771b32ea4c4062e6fb9842c4aa43d0a7fb2b6670ff6fa4ebb807781204
 ARG PLAYWRIGHT_VERSION=1.61.0
 ARG PATCHRIGHT_VERSION=1.61.2
 ARG CHROMIUM_VERSION=149.0.7827.55
@@ -65,6 +68,7 @@ LABEL org.opencontainers.image.base.name="ubuntu:24.04" \
       org.opencontainers.image.documentation="${DOCUMENTATION_URL}" \
       org.scrapeyard.os.snapshot="${UBUNTU_SNAPSHOT}" \
       org.scrapeyard.runtime.uid="10001" \
+      org.scrapeyard.runtime.sqlite.version="${SQLITE_VERSION}" \
       org.scrapeyard.browser.scrapling.version="${SCRAPLING_VERSION}" \
       org.scrapeyard.browser.playwright.version="${PLAYWRIGHT_VERSION}" \
       org.scrapeyard.browser.patchright.version="${PATCHRIGHT_VERSION}" \
@@ -107,6 +111,22 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         python3 \
         python3-venv \
         unzip \
+    && curl --fail --location --retry 3 \
+        --output /tmp/sqlite-autoconf.tar.gz \
+        "https://www.sqlite.org/2026/sqlite-autoconf-${SQLITE_VERSION_NUMBER}.tar.gz" \
+    && python3 -c 'import hashlib, pathlib, sys; archive = pathlib.Path(sys.argv[1]).read_bytes(); actual = hashlib.sha3_256(archive).hexdigest(); expected = sys.argv[2]; assert actual == expected, f"SQLite archive SHA3-256 mismatch: {actual}"' \
+        /tmp/sqlite-autoconf.tar.gz "${SQLITE_SHA3_256}" \
+    && mkdir /tmp/sqlite-src \
+    && tar --extract --gzip --file /tmp/sqlite-autoconf.tar.gz \
+        --strip-components=1 --directory /tmp/sqlite-src \
+    && cd /tmp/sqlite-src \
+    && ./configure --prefix=/usr/local --disable-static \
+    && make -j2 \
+    && make install \
+    && ldconfig \
+    && cd /app \
+    && test "$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')" = "${SQLITE_VERSION}" \
+    && rm -rf /tmp/sqlite-src /tmp/sqlite-autoconf.tar.gz \
     && python3 -m venv "${VIRTUAL_ENV}" \
     && python -m pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" \
     && pip install --no-cache-dir -r requirements.txt \
@@ -143,6 +163,7 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" = "${PLAYWRIGHT_VERSION}" \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("patchright"))')" = "${PATCHRIGHT_VERSION}" \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("cloverlabs-camoufox"))')" = "${CAMOUFOX_PACKAGE_VERSION}" \
+    && test "$(python -c 'import sqlite3; print(sqlite3.sqlite_version)')" = "${SQLITE_VERSION}" \
     && test "$(python -c 'import json, pathlib, playwright; p=pathlib.Path(playwright.__file__).parent/"driver"/"package"/"browsers.json"; b=next(x for x in json.loads(p.read_text())["browsers"] if x["name"] == "chromium"); print(b["revision"], b["browserVersion"])')" = "${CHROMIUM_REVISION} ${CHROMIUM_VERSION}" \
     && python /usr/local/lib/scrapeyard/inspect_browser_runtime.py --output /usr/share/scrapeyard-browser-runtime.json \
     && python /usr/local/lib/scrapeyard/audit_browser_security.py \

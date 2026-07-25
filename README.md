@@ -167,6 +167,12 @@ bounding set for Chromium's namespace sandbox. Only `/data` plus bounded tmpfs
 mounts are writable. Existing volumes need the one-time ownership migration in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+The active container SQLite runtime is pinned to 3.51.3 from SQLite's official,
+SHA3-verified source release. This supplies the broken-POSIX-lock defenses and
+WAL-reset fix that are absent from Ubuntu 24.04's SQLite 3.45.1 package. The
+build and image metadata assert the active runtime version; see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#sqlite-runtime-and-readiness-safety).
+
 ## API
 
 The typed v1 response/error contract, result compatibility mode, versioning

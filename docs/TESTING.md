@@ -117,6 +117,32 @@ After both graceful termination and `SIGKILL` of the owner, a replacement must
 reach liveness using the same identity. Never run this check against production
 state. See [SCALING.md](SCALING.md) for the supported topology and state map.
 
+## SQLite readiness and WAL regression
+
+Run the focused readiness coverage with temporary databases only:
+
+```bash
+poetry run pytest --no-cov tests/unit/test_database.py tests/unit/test_health.py
+```
+
+The regression keeps Scrapeyard's cached WAL connection open, commits a first
+write, invokes readiness repeatedly, and opens and closes an independent Python
+SQLite process. It then commits through the original cached connection and
+requires a fresh reader to observe both writes, `PRAGMA quick_check(1)` to
+return `ok`, the WAL/SHM paths to retain their original device/inode identities,
+and procfs to contain no deleted WAL/SHM descriptors. On SQLite 3.45.1, the
+former raw readiness `open()`/`close()` makes the independent reader unlink both
+sidecars and the cached write fail with `disk I/O error`; the fixed probe passes
+that exact sequence.
+
+Focused cases also require missing, filesystem-unwritable, corrupt, and
+simulated deleted-sidecar states to fail with sanitized operation/error
+diagnostics. `tests/conftest.py` keeps every test database under pytest's
+temporary directory. The built-image check must additionally assert
+`sqlite3.sqlite_version == "3.51.3"` and rerun the cached-WAL sequence inside a
+throwaway container `/tmp`; never point these checks at `/data` or a retained
+volume.
+
 Run the install, lint, type, and full-suite commands once under Python 3.10 and
 once under Python 3.12 when reproducing the complete matrix locally. The live
 Redis script is the local equivalent of the service lane: it enables API-key

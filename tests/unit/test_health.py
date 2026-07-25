@@ -13,6 +13,7 @@ import scrapeyard.main as main_module
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.main import app
 from scrapeyard.runtime.health import ProbeResult
+from scrapeyard.storage.database import SQLiteProbeError
 
 
 @pytest.fixture
@@ -138,6 +139,25 @@ async def test_readiness_probes_every_database_and_fails_on_one(monkeypatch):
     assert response.status_code == 503
     assert set(seen) == {"jobs.db", "errors.db", "results_meta.db"}
     assert response.json()["dependencies"]["sqlite_errors"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_sqlite_readiness_reports_sanitized_operation_and_error(monkeypatch):
+    async def _failed_probe(_db_name: str) -> None:
+        raise SQLiteProbeError(
+            "jobs.db",
+            "quick_check(1)",
+            "DatabaseError (SQLITE_CORRUPT)",
+        )
+
+    monkeypatch.setattr("scrapeyard.runtime.health.probe_db", _failed_probe)
+
+    result = await main_module.probe_sqlite("jobs.db")
+
+    assert result == ProbeResult(
+        False,
+        "jobs.db SQLite quick_check(1) failed: DatabaseError (SQLITE_CORRUPT)",
+    )
 
 
 @pytest.mark.asyncio
