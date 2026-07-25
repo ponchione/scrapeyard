@@ -11,6 +11,7 @@ from scrapeyard.runtime.health import (
     load_project_summary,
     probe_asyncio_task,
     probe_background_service,
+    probe_disk,
     probe_redis,
     probe_result_storage,
 )
@@ -78,7 +79,22 @@ async def test_redis_probe_sanitizes_adapter_failure():
     result = await probe_redis(pool)
 
     assert result.ok is False
-    assert result.detail == "redis ping failed: not connected"
+    assert result.detail == "redis ping failed: RuntimeError"
+    assert "not connected" not in result.detail
+
+
+def test_disk_probe_sanitizes_path_and_os_error(monkeypatch):
+    secret_path = "/data/redis://user:password@cache.internal/results"
+    monkeypatch.setattr(
+        "scrapeyard.runtime.health.shutil.disk_usage",
+        MagicMock(side_effect=OSError(f"cannot inspect {secret_path}")),
+    )
+
+    result = probe_disk(secret_path, 100)
+
+    assert result.ok is False
+    assert result.detail == "disk usage probe failed: OSError"
+    assert secret_path not in (result.detail or "")
 
 
 def test_build_project_summary_classifies_project_statuses():

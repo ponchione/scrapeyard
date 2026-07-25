@@ -241,8 +241,9 @@ async def test_health_queue_depth_failure_is_stable_and_marks_redis_unhealthy(
     }
     assert response.json()["dependencies"]["redis"] == {
         "ok": False,
-        "detail": "redis queue depth probe failed: depth unavailable",
+        "detail": "redis queue depth probe failed: ConnectionError",
     }
+    assert "depth unavailable" not in response.text
 
 
 @pytest.mark.asyncio

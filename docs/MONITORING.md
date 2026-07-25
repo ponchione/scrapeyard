@@ -92,6 +92,10 @@ SQLite failures identify the database, bounded operation (`open_readwrite`,
 Filesystem paths, SQL text, exception messages, configuration, and credentials
 are not returned. For example, a missing file reports the operation and
 `OperationalError (SQLITE_CANTOPEN)` without exposing its path.
+Redis, queue-depth, result-storage, and disk failures follow the same boundary:
+readiness returns a stable probe category and exception class, never raw adapter
+text, a DSN, credentials, or the configured filesystem path.
+
 The raw descriptor prohibition is a correctness boundary on Unix. Closing any
 separately opened descriptor for a database file can cancel all process-local
 POSIX advisory locks on that inode, including locks owned by cached SQLite

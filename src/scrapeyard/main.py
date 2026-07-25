@@ -636,7 +636,13 @@ async def _queue_depth_readiness_probe(
             ProbeResult(False, f"redis queue depth probe timed out after {timeout:g}s"),
         )
     except Exception as exc:
-        return unavailable, ProbeResult(False, f"redis queue depth probe failed: {exc}")
+        return (
+            unavailable,
+            ProbeResult(
+                False,
+                f"redis queue depth probe failed: {type(exc).__name__}",
+            ),
+        )
     return depths, ProbeResult(True)
 
 

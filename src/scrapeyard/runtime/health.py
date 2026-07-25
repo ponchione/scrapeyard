@@ -87,7 +87,7 @@ async def probe_redis(pool: RedisHealthPool) -> ProbeResult:
     try:
         await pool.ping()
     except Exception as exc:  # pragma: no cover — exercised via live tests
-        return ProbeResult(False, f"redis ping failed: {exc}")
+        return ProbeResult(False, f"redis ping failed: {type(exc).__name__}")
     return ProbeResult(True)
 
 
@@ -164,10 +164,10 @@ def probe_disk(path: str, min_free_mb: int) -> ProbeResult:
     try:
         usage = shutil.disk_usage(path)
     except OSError as exc:
-        return ProbeResult(False, f"disk_usage({path!r}) failed: {exc}")
+        return ProbeResult(False, f"disk usage probe failed: {type(exc).__name__}")
     free_mb = usage.free // (1024 * 1024)
     if free_mb < min_free_mb:
-        return ProbeResult(False, f"only {free_mb}MB free on {path!r} (min {min_free_mb}MB)")
+        return ProbeResult(False, f"only {free_mb}MB free (min {min_free_mb}MB)")
     return ProbeResult(True, f"{free_mb}MB free")
 
 
