@@ -17,8 +17,19 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - Pinned the container's active SQLite runtime to 3.51.3 from the official
   SHA3-verified source release, adding the newer broken-POSIX-lock defenses and
   the WAL-reset corruption fix while retaining the existing database format.
+- Split normal distribution integrity checks from the release-only empty
+  `Unreleased` policy, with strict enforcement retained in the release workflow.
 
 ### Fixed
+- Installed browser HTTP and WebSocket guards at context scope before the first
+  page, blocked service workers, and made guard setup fatal. Target-origin
+  headers are now issued one hop at a time so redirects and popups cannot inherit
+  them, while browser security CI exercises the boundaries in real Chromium.
+- Replaced wall-clock priority-intake scores with durable FIFO sequences and
+  Redis-time execution admission, preventing clock rollback from freezing lanes
+  while retaining oldest-job telemetry and exposing any rollback offset.
+- Sanitized Redis, queue-depth, and disk readiness failures so dependency
+  exception messages, credentials, and internal paths cannot enter readiness JSON.
 - Removed the readiness probe's raw `os.open()`/`os.close()` of live SQLite
   database paths. Readiness now uses only SQLite lifecycle operations for a
   fresh read/write open, `PRAGMA quick_check(1)`, a rolled-back write test, and
