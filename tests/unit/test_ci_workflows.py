@@ -50,6 +50,12 @@ def test_ci_required_gate_contracts() -> None:
     assert build_commands.count("audit_dependencies.py export-production") == 2
     assert 'cmp "${export_dir}/first.txt" "${export_dir}/second.txt"' in build_commands
 
+    browser_security = workflow["jobs"]["browser-security"]
+    browser_commands = _run_commands(browser_security)
+    assert "playwright install --with-deps chromium" in browser_commands
+    assert "pytest -W error --no-cov -m live_browser tests/live_browser" in browser_commands
+    assert browser_security["steps"][-2]["env"]["SCRAPEYARD_RUN_LIVE_BROWSER"] == "1"
+
     live_redis = workflow["jobs"]["live-redis"]
     assert live_redis["services"]["redis"]["image"] == (
         "redis:7.4.9-alpine3.21@sha256:"

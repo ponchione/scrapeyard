@@ -54,13 +54,16 @@ async def test_dynamic_fetcher_selects_current_scrapling_sessions() -> None:
 @pytest.mark.asyncio
 async def test_chromium_adapter_merges_parser_config_and_enables_sandbox() -> None:
     response = object()
-    active = SimpleNamespace(fetch=AsyncMock(return_value=response))
+    context = object()
+    active = SimpleNamespace(fetch=AsyncMock(return_value=response), context=context)
+    context_setup = AsyncMock()
     created: list[object] = []
 
     class Session:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
             self._browser_options: dict[str, object] = {}
+            self._context_options: dict[str, object] = {}
             created.append(self)
 
         async def __aenter__(self) -> object:
@@ -74,7 +77,11 @@ async def test_chromium_adapter_merges_parser_config_and_enables_sandbox() -> No
     )
     actual = await _fetch_chromium(
         "https://example.com",
-        {"custom_config": {"auto_match": True}, "timeout": 500},
+        {
+            "custom_config": {"auto_match": True},
+            "timeout": 500,
+            "context_setup": context_setup,
+        },
         fetcher=fetcher,
         session_type=Session,
     )
@@ -85,6 +92,8 @@ async def test_chromium_adapter_merges_parser_config_and_enables_sandbox() -> No
         "auto_match": True,
     }
     assert session._browser_options["chromium_sandbox"] is True
+    assert session._context_options["service_workers"] == "block"
+    context_setup.assert_awaited_once_with(context)
     active.fetch.assert_awaited_once_with("https://example.com")
 
 
@@ -120,6 +129,7 @@ async def test_chromium_cdp_session_does_not_mutate_launch_sandbox() -> None:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
             self._browser_options: dict[str, object] = {}
+            self._context_options: dict[str, object] = {}
             created.append(self)
 
         async def __aenter__(self) -> object:
@@ -135,10 +145,42 @@ async def test_chromium_cdp_session_does_not_mutate_launch_sandbox() -> None:
         session_type=Session,
     )
     assert created[0]._browser_options == {}
+    assert created[0]._context_options == {"service_workers": "block"}
+
+
+@pytest.mark.asyncio
+async def test_chromium_guard_setup_failure_prevents_first_fetch() -> None:
+    active = SimpleNamespace(
+        context=object(),
+        fetch=AsyncMock(side_effect=AssertionError("navigation must not start")),
+    )
+
+    class Session:
+        def __init__(self, **_kwargs: object) -> None:
+            self._browser_options: dict[str, object] = {}
+            self._context_options: dict[str, object] = {}
+
+        async def __aenter__(self) -> object:
+            return active
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    setup_failure = RuntimeError("route setup failed")
+    with pytest.raises(RuntimeError, match="route setup failed"):
+        await _fetch_chromium(
+            "https://example.com",
+            {"context_setup": AsyncMock(side_effect=setup_failure)},
+            fetcher=SimpleNamespace(_generate_parser_arguments=lambda: {}),
+            session_type=Session,
+        )
+
+    active.fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_camoufox_adapter_preserves_navigation_and_page_controls() -> None:
+    context_setup = AsyncMock()
     page_setup = AsyncMock()
     page_action = AsyncMock()
     locator = SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()))
@@ -191,7 +233,7 @@ async def test_camoufox_adapter_preserves_navigation_and_page_controls() -> None
             wait_selector="h1",
             wait_selector_state="visible",
             wait=25,
-            extra_headers={"X-Test": "safe"},
+            context_setup=context_setup,
             useragent="Scrapeyard-Test",
             proxy="socks5://proxy.example:1080",
             headless=False,
@@ -205,7 +247,10 @@ async def test_camoufox_adapter_preserves_navigation_and_page_controls() -> None
     assert response.status == 201
     assert response.url == "https://example.com/final"
     assert response.cookies == {"session": "safe"}
-    browser.new_context.assert_awaited_once_with(no_viewport=True)
+    browser.new_context.assert_awaited_once_with(
+        no_viewport=True,
+        service_workers="block",
+    )
     assert launch_options == {
         "headless": False,
         "proxy": {"server": "socks5://proxy.example:1080"},
@@ -220,7 +265,8 @@ async def test_camoufox_adapter_preserves_navigation_and_page_controls() -> None
     }
     page.set_default_navigation_timeout.assert_called_once_with(1234.0)
     page.set_default_timeout.assert_called_once_with(1234.0)
-    page.set_extra_http_headers.assert_awaited_once_with({"X-Test": "safe"})
+    page.set_extra_http_headers.assert_not_awaited()
+    context_setup.assert_awaited_once_with(context)
     page.wait_for_load_state.assert_any_await("domcontentloaded")
     page.wait_for_load_state.assert_any_await("networkidle")
     locator.first.wait_for.assert_awaited_once_with(state="visible")

@@ -13,6 +13,9 @@ The `CI` workflow exposes these checks:
   pytest suite with branch coverage and the 80% coverage floor.
 - `Distribution build / Python 3.12` builds both the wheel and sdist and then
   verifies that each archive contains exactly the checked-in SQL migrations.
+- `Browser transport security / Chromium` installs the locked Chromium runtime
+  and exercises header scoping, redirects, popups, service-worker isolation,
+  and WebSocket blocking against local listeners.
 - `Live Redis / Python 3.12` runs only the `live_redis` tests against an
   isolated Redis 7 service and the real arq queue/worker implementation.
 
@@ -51,6 +54,7 @@ poetry build
 poetry run python scripts/inspect_distribution.py dist
 poetry run python scripts/smoke_install_distribution.py dist
 poetry run python scripts/audit_dependencies.py all
+SCRAPEYARD_RUN_LIVE_BROWSER=1 poetry run pytest --no-cov -m live_browser tests/live_browser
 ./scripts/run_live_redis_tests.sh
 ```
 

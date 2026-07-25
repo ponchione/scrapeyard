@@ -7,7 +7,7 @@ import inspect
 import logging
 import re
 from collections.abc import Callable
-from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -52,32 +52,6 @@ _MAX_BLOCKED_REQUESTS = 20
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
 
 
-_BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
-    "scrapeyard_browser_block_resources",
-    default=None,
-)
-_BROWSER_REQUIRE_RESOLVED_DNS: ContextVar[bool] = ContextVar(
-    "scrapeyard_browser_require_resolved_dns",
-    default=False,
-)
-_BROWSER_RUN_BUDGET: ContextVar[RunBudget | None] = ContextVar(
-    "scrapeyard_browser_run_budget",
-    default=None,
-)
-_BROWSER_BLOCKED_REQUESTS: ContextVar[list[dict[str, str]] | None] = ContextVar(
-    "scrapeyard_browser_blocked_requests",
-    default=None,
-)
-_BROWSER_TARGET_ORIGIN: ContextVar[tuple[str, str, int] | None] = ContextVar(
-    "scrapeyard_browser_target_origin",
-    default=None,
-)
-_BROWSER_ORIGIN_SCOPED_HEADERS: ContextVar[frozenset[str]] = ContextVar(
-    "scrapeyard_browser_origin_scoped_headers",
-    default=frozenset(),
-)
-
-
 class BrowserPageActionError(RuntimeError):
     """Raised when Scrapling swallowed a configured browser action failure."""
 
@@ -120,74 +94,135 @@ def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit
         del items[: len(items) - limit]
 
 
-async def _guarded_async_intercept_route(route: Any) -> None:
-    """Scrapling route handler wrapper that blocks unsafe browser requests."""
-    block_resources = _BROWSER_BLOCK_RESOURCES.get()
-    request = route.request
-    request_url = getattr(request, "url", "")
-    resource_type = getattr(request, "resource_type", None)
+@dataclass(slots=True)
+class _BrowserNetworkGuard:
+    """Context-wide HTTP/WebSocket policy installed before the first page."""
 
-    if block_resources and resource_type in EXTRA_RESOURCES:
-        logger.debug(
-            'Blocking background resource "%s" of type "%s"',
-            redact_userinfo_in_url(str(request_url)),
-            resource_type,
+    block_resources: bool
+    require_resolved_dns: bool
+    budget: RunBudget | None
+    blocked_requests: list[dict[str, str]]
+    target_origin: tuple[str, str, int] | None
+    extra_headers: dict[str, str]
+
+    def _record_blocked(self, kind: str, request_url: str) -> str:
+        safe_request_url = truncate_text(
+            redact_userinfo_in_url(request_url),
+            _EVENT_TEXT_CHARS,
         )
-        await route.abort()
-        return
+        _bounded_append(
+            self.blocked_requests,
+            {"kind": kind, "url": safe_request_url},
+            limit=_MAX_BLOCKED_REQUESTS,
+        )
+        return safe_request_url
 
-    if isinstance(request_url, str) and request_url:
+    async def _validate_url(self, request_url: str, *, kind: str) -> None:
         try:
             await run_thread_work(
                 assert_public_url,
                 request_url,
-                run_budget=_BROWSER_RUN_BUDGET.get(),
-                allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
+                run_budget=self.budget,
+                allow_unresolved=not self.require_resolved_dns,
             )
-        except URLResolutionError:
-            # Do not release an unvalidated subrequest. Aborting this browser
-            # attempt still lets the outer RetryHandler retry transient DNS.
-            await route.abort()
-            raise
         except UnsafeURLError:
-            safe_request_url = truncate_text(
-                redact_userinfo_in_url(request_url),
-                _EVENT_TEXT_CHARS,
-            )
-            blocked_requests = _BROWSER_BLOCKED_REQUESTS.get()
-            if blocked_requests is not None:
-                _bounded_append(
-                    blocked_requests,
-                    {"kind": "request", "url": safe_request_url},
-                    limit=_MAX_BLOCKED_REQUESTS,
-                )
+            safe_request_url = self._record_blocked(kind, request_url)
             logger.warning(
-                "Blocked browser request to non-public URL: %s",
+                "Blocked browser %s to non-public URL: %s",
+                kind,
                 safe_request_url,
             )
-            await route.abort()
             raise
 
-    scoped_headers = _BROWSER_ORIGIN_SCOPED_HEADERS.get()
-    target_origin = _BROWSER_TARGET_ORIGIN.get()
-    request_origin = canonical_url_origin(request_url) if isinstance(request_url, str) else None
-    if scoped_headers and target_origin is not None and request_origin != target_origin:
+    async def route_http(self, route: Any) -> None:
+        """Apply the request policy to every page in the browser context."""
+
+        request = route.request
+        request_url = getattr(request, "url", "")
+        resource_type = getattr(request, "resource_type", None)
+
+        if self.block_resources and resource_type in EXTRA_RESOURCES:
+            logger.debug(
+                'Blocking background resource "%s" of type "%s"',
+                redact_userinfo_in_url(str(request_url)),
+                resource_type,
+            )
+            await route.abort()
+            return
+
+        if isinstance(request_url, str) and request_url:
+            try:
+                await self._validate_url(request_url, kind="request")
+            except (URLResolutionError, UnsafeURLError):
+                await route.abort()
+                return
+
+        if not self.extra_headers:
+            await route.continue_()
+            return
+
         headers = await _request_header_mapping(request)
         if headers is None:
             await route.abort()
-            raise UnsafeURLError(
-                "Browser could not safely remove target-origin headers from a "
-                "cross-origin request"
-            )
+            logger.warning("Blocked browser request whose headers could not be scoped")
+            return
+
+        scoped_names = {name.lower() for name in self.extra_headers}
         filtered = {
             name: value
             for name, value in headers.items()
-            if name.lower() not in scoped_headers
+            if name.lower() not in scoped_names
         }
-        await route.continue_(headers=filtered)
-        return
+        request_origin = (
+            canonical_url_origin(request_url) if isinstance(request_url, str) else None
+        )
+        if self.target_origin is None or request_origin != self.target_origin:
+            await route.continue_(headers=filtered)
+            return
 
-    await route.continue_()
+        # Playwright carries continue_() header overrides through redirects.
+        # Fetch exactly one hop and fulfill it so a redirect becomes a fresh,
+        # independently classified browser request before credentials are added.
+        response = await route.fetch(
+            headers={**filtered, **self.extra_headers},
+            max_redirects=0,
+        )
+        await route.fulfill(response=response)
+
+    async def route_websocket(self, route: Any) -> None:
+        """Block disabled WebSockets and classify every enabled destination."""
+
+        request_url = getattr(route, "url", "")
+        if self.block_resources:
+            if isinstance(request_url, str) and request_url:
+                self._record_blocked("websocket", request_url)
+            await route.close(code=1008, reason="WebSocket resources are disabled")
+            return
+
+        if not isinstance(request_url, str) or not request_url:
+            await route.close(code=1008, reason="WebSocket URL unavailable")
+            return
+        try:
+            await self._validate_url(request_url, kind="websocket")
+        except (URLResolutionError, UnsafeURLError):
+            await route.close(code=1008, reason="WebSocket destination blocked")
+            return
+        route.connect_to_server()
+
+    async def install(self, context: Any) -> None:
+        """Install all guards at context scope; any failure is navigation-fatal."""
+
+        async def route_http(route: Any) -> None:
+            await self.route_http(route)
+
+        async def route_websocket(route: Any) -> None:
+            await self.route_websocket(route)
+
+        await context.route("**/*", route_http)
+        route_web_socket = getattr(context, "route_web_socket", None)
+        if not callable(route_web_socket):
+            raise RuntimeError("Browser context does not support WebSocket routing")
+        await route_web_socket("**/*", route_websocket)
 
 
 def _safe_text_attr(value: Any, attr: str) -> str | None:
@@ -580,6 +615,7 @@ async def capture_browser_state(
     artifacts_dir: str | None,
     capture: dict[str, Any],
     budget: RunBudget | None = None,
+    require_resolved_dns: bool = False,
 ) -> Any:
     capture.setdefault("console_messages", [])
     capture.setdefault("request_failures", [])
@@ -616,7 +652,7 @@ async def capture_browser_state(
             assert_public_url,
             capture["final_url"],
             run_budget=budget,
-            allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
+            allow_unresolved=not require_resolved_dns,
         )
     try:
         title = page.title()
@@ -714,6 +750,7 @@ async def fetch_browser_response(
                 artifacts_dir=artifacts_dir,
                 capture=capture,
                 budget=budget,
+                require_resolved_dns=require_resolved_dns,
             )
         except BudgetExceeded as exc:
             capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
@@ -738,48 +775,38 @@ async def fetch_browser_response(
 
     call_kwargs["page_action"] = _page_action
 
-    async def _page_setup(page: Any) -> None:
-        await page.route("**/*", _guarded_async_intercept_route)
-
-    call_kwargs["page_setup"] = _page_setup
-    # The local route owns both resource blocking and SSRF validation. Keep the
-    # upstream handler disabled so it cannot continue a request first.
+    # Never give target-only credentials to browser-wide header APIs. The
+    # context guard adds them to one same-origin HTTP hop at a time.
+    call_kwargs.pop("extra_headers", None)
     call_kwargs["disable_resources"] = False
     blocked_requests: list[dict[str, str]] = []
-    guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
-    dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
-    budget_token = _BROWSER_RUN_BUDGET.set(budget)
-    blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
-    origin_token = _BROWSER_TARGET_ORIGIN.set(canonical_url_origin(url))
-    headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
-        frozenset(name.lower() for name in browser.extra_headers)
+    network_guard = _BrowserNetworkGuard(
+        block_resources=browser.disable_resources,
+        require_resolved_dns=require_resolved_dns,
+        budget=budget,
+        blocked_requests=blocked_requests,
+        target_origin=canonical_url_origin(url),
+        extra_headers=dict(browser.extra_headers),
     )
+    call_kwargs["context_setup"] = network_guard.install
+    fetch = fetcher_cls.async_fetch(url, **call_kwargs)
     try:
-        fetch = fetcher_cls.async_fetch(url, **call_kwargs)
-        try:
-            response = await fetch if budget is None else await budget.wait_for_owned(fetch)
-        except _BROWSER_TIMEOUT_ERRORS as exc:
-            original_debug = getattr(exc, "debug", None)
-            timeout_debug = dict(original_debug) if isinstance(original_debug, dict) else {}
-            timeout_debug.update(capture)
-            if blocked_requests:
-                timeout_debug["blocked_requests"] = blocked_requests
-            raise BrowserTransportTimeout(str(exc), debug=timeout_debug) from exc
-        except Exception as exc:
-            if blocked_requests:
-                capture["blocked_requests"] = blocked_requests
-                try:
-                    cast(Any, exc).debug = capture
-                except Exception:
-                    pass
-            raise
-    finally:
-        _BROWSER_RUN_BUDGET.reset(budget_token)
-        _BROWSER_ORIGIN_SCOPED_HEADERS.reset(headers_token)
-        _BROWSER_TARGET_ORIGIN.reset(origin_token)
-        _BROWSER_BLOCKED_REQUESTS.reset(blocked_token)
-        _BROWSER_REQUIRE_RESOLVED_DNS.reset(dns_token)
-        _BROWSER_BLOCK_RESOURCES.reset(guard_token)
+        response = await fetch if budget is None else await budget.wait_for_owned(fetch)
+    except _BROWSER_TIMEOUT_ERRORS as exc:
+        original_debug = getattr(exc, "debug", None)
+        timeout_debug = dict(original_debug) if isinstance(original_debug, dict) else {}
+        timeout_debug.update(capture)
+        if blocked_requests:
+            timeout_debug["blocked_requests"] = blocked_requests
+        raise BrowserTransportTimeout(str(exc), debug=timeout_debug) from exc
+    except Exception as exc:
+        if blocked_requests:
+            capture["blocked_requests"] = blocked_requests
+            try:
+                cast(Any, exc).debug = capture
+            except Exception:
+                pass
+        raise
     if blocked_requests:
         capture["blocked_requests"] = blocked_requests
     action_exc = capture.pop(_PAGE_ACTION_EXCEPTION_KEY, None)

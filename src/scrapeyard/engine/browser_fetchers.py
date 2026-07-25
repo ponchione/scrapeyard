@@ -64,6 +64,11 @@ async def _fetch_chromium(
     fetcher: Any,
     session_type: Any,
 ) -> Response:
+    context_setup = kwargs.pop("context_setup", None)
+    if kwargs.pop("extra_headers", None):
+        raise RuntimeError(
+            "Browser extra headers must be installed by the context network guard"
+        )
     selector_config = kwargs.get("selector_config", {}) or kwargs.pop(
         "custom_config", {}
     )
@@ -78,9 +83,18 @@ async def _fetch_chromium(
     browser_options = getattr(session, "_browser_options", None)
     if not isinstance(browser_options, dict):
         raise RuntimeError("Scrapling did not expose Chromium launch options")
+    context_options = getattr(session, "_context_options", None)
+    if not isinstance(context_options, dict):
+        raise RuntimeError("Scrapling did not expose Chromium context options")
+    context_options["service_workers"] = "block"
     if not kwargs.get("cdp_url"):
         browser_options["chromium_sandbox"] = True
     async with session as active_session:
+        if context_setup is not None:
+            context = getattr(active_session, "context", None)
+            if context is None:
+                raise RuntimeError("Chromium context was not initialized before fetch")
+            await context_setup(context)
         return cast(Response, await active_session.fetch(url))
 
 
@@ -92,12 +106,17 @@ class CamoufoxFetcher:
         timeout = float(kwargs.pop("timeout", 30_000))
         kwargs.pop("disable_resources", None)
         network_idle = bool(kwargs.pop("network_idle", False))
+        context_setup = kwargs.pop("context_setup", None)
         page_setup = kwargs.pop("page_setup", None)
         page_action = kwargs.pop("page_action", None)
         wait_selector = kwargs.pop("wait_selector", None)
         wait_selector_state = kwargs.pop("wait_selector_state", "attached")
         wait = float(kwargs.pop("wait", 0))
         extra_headers = dict(kwargs.pop("extra_headers", None) or {})
+        if extra_headers:
+            raise RuntimeError(
+                "Browser extra headers must be installed by the context network guard"
+            )
         useragent = kwargs.pop("useragent", None)
         proxy = _proxy_settings(kwargs.pop("proxy", None))
         selector_config = dict(
@@ -136,13 +155,16 @@ class CamoufoxFetcher:
             # protocol intentionally does not implement. A no-viewport context
             # preserves Camoufox's generated window dimensions and avoids
             # coupling this adapter to Playwright's Firefox protocol additions.
-            context = await browser.new_context(no_viewport=True)
+            context = await browser.new_context(
+                no_viewport=True,
+                service_workers="block",
+            )
             try:
+                if context_setup is not None:
+                    await context_setup(context)
                 page = await context.new_page()
                 page.set_default_navigation_timeout(timeout)
                 page.set_default_timeout(timeout)
-                if extra_headers:
-                    await page.set_extra_http_headers(extra_headers)
                 if page_setup is not None:
                     await page_setup(page)
 
@@ -169,7 +191,7 @@ class CamoufoxFetcher:
                 request_headers = (
                     await navigation.request.all_headers()
                     if navigation is not None
-                    else extra_headers
+                    else {}
                 )
                 cookies = {
                     str(cookie["name"]): str(cookie["value"])

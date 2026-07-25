@@ -137,7 +137,8 @@ async def test_dynamic_fetcher_uses_browser_friendly_defaults(tmp_path):
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 60000
         assert call_kwargs["disable_resources"] is False
-        assert callable(call_kwargs["page_setup"])
+        assert callable(call_kwargs["context_setup"])
+        assert "page_setup" not in call_kwargs
         assert call_kwargs["network_idle"] is False
 
 
@@ -164,7 +165,8 @@ async def test_stealthy_fetcher_uses_browser_friendly_defaults(tmp_path):
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 60000
         assert call_kwargs["disable_resources"] is False
-        assert callable(call_kwargs["page_setup"])
+        assert callable(call_kwargs["context_setup"])
+        assert "page_setup" not in call_kwargs
         assert call_kwargs["network_idle"] is False
         assert "stealth" not in call_kwargs
         assert call_kwargs["hide_canvas"] is False
@@ -226,7 +228,8 @@ async def test_browser_override_changes_fetcher_kwargs(tmp_path):
         call_kwargs = mock_fetcher.async_fetch.call_args.kwargs
         assert call_kwargs["timeout"] == 90000
         assert call_kwargs["disable_resources"] is False
-        assert callable(call_kwargs["page_setup"])
+        assert callable(call_kwargs["context_setup"])
+        assert "page_setup" not in call_kwargs
         assert call_kwargs["network_idle"] is True
         assert call_kwargs["wait_selector"] == ".product-card a"
         assert call_kwargs["wait"] == 1250

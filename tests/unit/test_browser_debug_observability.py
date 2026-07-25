@@ -20,7 +20,7 @@ from scrapeyard.engine.browser_debug import (
     fetch_browser_response,
     run_browser_actions,
 )
-from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
+from scrapeyard.engine.url_guard import UnsafeURLError
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 
 
@@ -99,6 +99,10 @@ class FakeRoute:
         self.aborted = False
         self.continued = False
         self.continued_headers: dict[str, str] | None = None
+        self.fetched = False
+        self.fetch_headers: dict[str, str] | None = None
+        self.fetch_max_redirects: int | None = None
+        self.fulfilled = False
 
     async def abort(self):
         self.aborted = True
@@ -107,14 +111,44 @@ class FakeRoute:
         self.continued = True
         self.continued_headers = kwargs.get("headers")
 
+    async def fetch(self, **kwargs):
+        self.fetched = True
+        self.fetch_headers = kwargs.get("headers")
+        self.fetch_max_redirects = kwargs.get("max_redirects")
+        return object()
+
+    async def fulfill(self, **_kwargs):
+        self.fulfilled = True
+
+
+class FakeWebSocketRoute:
+    def __init__(self, url: str):
+        self.url = url
+        self.close = AsyncMock()
+        self.connect_to_server = MagicMock()
+
 
 async def _run_configured_route(kwargs: dict[str, object], route: FakeRoute) -> None:
-    page = MagicMock()
-    page.route = AsyncMock()
-    page_setup = kwargs["page_setup"]
-    assert callable(page_setup)
-    await page_setup(page)
-    handler = page.route.await_args.args[1]
+    context = MagicMock()
+    context.route = AsyncMock()
+    context.route_web_socket = AsyncMock()
+    context_setup = kwargs["context_setup"]
+    assert callable(context_setup)
+    await context_setup(context)
+    handler = context.route.await_args.args[1]
+    await handler(route)
+
+
+async def _run_configured_websocket(
+    kwargs: dict[str, object], route: FakeWebSocketRoute
+) -> None:
+    context = MagicMock()
+    context.route = AsyncMock()
+    context.route_web_socket = AsyncMock()
+    context_setup = kwargs["context_setup"]
+    assert callable(context_setup)
+    await context_setup(context)
+    handler = context.route_web_socket.await_args.args[1]
     await handler(route)
 
 
@@ -468,18 +502,54 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
             await _run_configured_route(kwargs, route)
             return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
-    with pytest.raises(UnsafeURLError, match="non-public"):
-        await fetch_browser_response(
-            RouteFetcher,
-            target.url,
-            target,
-            FetcherType.dynamic,
-            {},
-            artifacts_dir=None,
-        )
+    _response, debug = await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
 
     assert route.aborted is True
     assert route.continued is False
+    assert debug["blocked_requests"] == [
+        {"kind": "request", "url": "http://127.0.0.1/private"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_blocks_websockets_when_resources_disabled() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    websocket = FakeWebSocketRoute("wss://socket.example/events")
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            await _run_configured_websocket(kwargs, websocket)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    _response, debug = await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    websocket.close.assert_awaited_once_with(
+        code=1008,
+        reason="WebSocket resources are disabled",
+    )
+    websocket.connect_to_server.assert_not_called()
+    assert debug["blocked_requests"] == [
+        {"kind": "websocket", "url": "wss://socket.example/events"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -536,10 +606,20 @@ async def test_browser_extra_headers_are_scoped_to_exact_target_origin(
         artifacts_dir=None,
     )
 
-    assert route.continued is True
     if expect_credentials:
-        assert route.continued_headers is None
+        assert route.continued is False
+        assert route.fetched is True
+        assert route.fulfilled is True
+        assert route.fetch_max_redirects == 0
+        assert route.fetch_headers == {
+            "Accept": "text/html",
+            "Authorization": "Bearer target-secret",
+            "X-API-Key": "api-secret",
+            "X-Shared": "deployment-secret",
+        }
     else:
+        assert route.continued is True
+        assert route.fetched is False
         assert route.continued_headers == {"Accept": "text/html"}
 
 
@@ -591,10 +671,18 @@ async def test_browser_extra_headers_use_canonical_idna_target_origin(
         artifacts_dir=None,
     )
 
-    assert route.continued is True
     if expect_credentials:
-        assert route.continued_headers is None
+        assert route.continued is False
+        assert route.fetched is True
+        assert route.fulfilled is True
+        assert route.fetch_max_redirects == 0
+        assert route.fetch_headers == {
+            "Accept": "text/html",
+            "Authorization": "Bearer target-secret",
+        }
     else:
+        assert route.continued is True
+        assert route.fetched is False
         assert route.continued_headers == {"Accept": "text/html"}
 
 
@@ -617,26 +705,20 @@ async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() ->
     class RouteFetcher:
         @staticmethod
         async def async_fetch(url: str, **kwargs):
-            last_error: UnsafeURLError | None = None
             for route in routes:
-                try:
-                    await _run_configured_route(kwargs, route)
-                except UnsafeURLError as exc:
-                    last_error = exc
-            assert last_error is not None
-            raise last_error
+                await _run_configured_route(kwargs, route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
-    with pytest.raises(UnsafeURLError) as exc_info:
-        await fetch_browser_response(
-            RouteFetcher,
-            target.url,
-            target,
-            FetcherType.dynamic,
-            {},
-            artifacts_dir=None,
-        )
+    _response, debug = await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
 
-    blocked = exc_info.value.debug["blocked_requests"]
+    blocked = debug["blocked_requests"]
     assert len(blocked) == 20
     assert blocked[0]["url"].endswith("...")
     assert all(len(entry["url"]) <= 300 for entry in blocked)
@@ -665,16 +747,15 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
 
-    with pytest.raises(URLResolutionError, match="could not be resolved"):
-        await fetch_browser_response(
-            RouteFetcher,
-            target.url,
-            target,
-            FetcherType.dynamic,
-            {},
-            artifacts_dir=None,
-            require_resolved_dns=True,
-        )
+    await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+        require_resolved_dns=True,
+    )
 
     assert route.aborted is True
     assert route.continued is False

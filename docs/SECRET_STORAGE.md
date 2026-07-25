@@ -44,8 +44,11 @@ and exception types rather than config/header values.
 
 Browser `extra_headers` are target-origin credentials: they are retained only
 when scheme, hostname, and effective port exactly match the configured target.
-Browser interception removes them from cross-origin requests, redirects,
-subdomains, and scheme changes before the request is continued.
+Context-wide browser interception adds them to one HTTP hop at a time without
+using page-wide or browser-wide header state. Redirect destinations, popup
+pages, subdomains, scheme changes, and WebSockets therefore do not inherit
+them. Browser contexts block service workers, validate popup and subresource
+requests, and route WebSockets separately before the first page is created.
 
 Prefer deployment references in submitted YAML:
 

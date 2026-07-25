@@ -48,6 +48,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--cov=scrapeyard --cov-report=term-missing:skip-covered --cov-report=html --cov-fail-under=80 --timeout=60"
 markers = [
+    "live_browser: exercises real browser transport security boundaries",
     "live_redis: exercises the real Redis-backed queue path",
 ]
 
