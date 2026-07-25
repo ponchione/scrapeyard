@@ -432,6 +432,91 @@ async def test_real_redis_priority_backlog_is_weighted_fifo_and_non_preemptive(
 
 @pytest.mark.asyncio
 @pytest.mark.live_redis
+async def test_priority_admission_survives_process_clock_rollback(live_app) -> None:
+    """Intake order and eligibility must not depend on the process wall clock."""
+
+    del live_app
+    settings = get_settings()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    seen: list[str] = []
+
+    async def _record(job_id, *_args, **_kwargs):
+        seen.append(job_id)
+        if job_id == "before-rollback":
+            first_started.set()
+            await release_first.wait()
+
+    pool = WorkerPool(
+        max_concurrent=1,
+        max_browsers=1,
+        memory_limit_mb=0,
+        redis_settings=RedisSettings.from_dsn(settings.redis_dsn),
+        queue_name=f"{settings.queue_name}:clock-rollback",
+        task_handler=_record,
+    )
+    await pool.start()
+    assert pool._worker is not None
+    assert pool.redis is not None
+    pool._worker.poll_delay_s = 0.01
+    pool._worker.allow_pick_jobs = False
+    now_ms = int(utc_now().timestamp() * 1000)
+    try:
+        with patch("scrapeyard.queue.pool.timestamp_ms", return_value=now_ms):
+            first = await pool.enqueue(
+                "before-rollback",
+                "config: test",
+                "normal",
+                run_id="clock-rollback-before",
+            )
+        with patch(
+            "scrapeyard.queue.pool.timestamp_ms",
+            return_value=now_ms - 120_000,
+        ):
+            second = await pool.enqueue(
+                "after-rollback",
+                "config: test",
+                "normal",
+                run_id="clock-rollback-after",
+            )
+            queue_name = pool._priority_queues["normal"]
+            intake = await pool.redis.zrange(queue_name, 0, -1, withscores=True)
+            assert [member for member, _score in intake] == [
+                b"clock-rollback-before",
+                b"clock-rollback-after",
+            ]
+            assert intake[0][1] < intake[1][1]
+            redis_seconds, redis_microseconds = await pool.redis.time()
+            redis_now_ms = redis_seconds * 1000 + redis_microseconds // 1000
+            await pool.redis.hset(
+                f"{queue_name}:enqueued-at",
+                "clock-rollback-before",
+                redis_now_ms + 120_000,
+            )
+            depth, age_seconds, rollback_offset_seconds = (
+                await pool.queue_operational_snapshot()
+            )["normal"]
+            assert depth == 2
+            assert age_seconds == 0
+            assert 119 <= rollback_offset_seconds <= 120
+
+            pool._worker.allow_pick_jobs = True
+            await asyncio.wait_for(first_started.wait(), timeout=2)
+
+        release_first.set()
+        await asyncio.gather(
+            first.result(timeout=5, poll_delay=0.01),
+            second.result(timeout=5, poll_delay=0.01),
+        )
+        assert seen == ["before-rollback", "after-rollback"]
+    finally:
+        pool._worker.allow_pick_jobs = True
+        release_first.set()
+        await pool.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
 async def test_real_redis_priority_backlog_refills_each_freed_worker_slot(
     live_app,
 ):

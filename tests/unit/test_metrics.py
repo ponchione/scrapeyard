@@ -38,9 +38,9 @@ async def test_durable_metric_refresh_is_cached_and_bounded(monkeypatch, tmp_pat
         max_browsers=2,
         queue_operational_snapshot=AsyncMock(
             return_value={
-                "high": (1, 3.0),
-                "normal": (2, 4.0),
-                "low": (0, 0.0),
+                "high": (1, 3.0, 0.0),
+                "normal": (2, 4.0, 1.5),
+                "low": (0, 0.0, 0.0),
             }
         ),
     )
@@ -74,6 +74,10 @@ async def test_durable_metric_refresh_is_cached_and_bounded(monkeypatch, tmp_pat
     outbox.summarize.assert_awaited_once()
     rendered = render_metrics().decode()
     assert 'scrapeyard_queue_depth{priority="normal"} 2.0' in rendered
+    assert (
+        'scrapeyard_queue_clock_rollback_offset_seconds{priority="normal"} 1.5'
+        in rendered
+    )
     assert 'scrapeyard_webhook_deliveries{status="pending"} 3.0' in rendered
 
 

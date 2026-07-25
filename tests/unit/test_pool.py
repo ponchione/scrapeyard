@@ -144,35 +144,28 @@ async def test_queue_depths_reports_only_priority_intake_members():
 
 @pytest.mark.asyncio
 async def test_queue_operational_snapshot_is_constant_cost_and_reports_oldest_age(
-    monkeypatch,
 ):
     pool = _make_pool()
-    redis = MagicMock()
-    pipeline = MagicMock(
-        execute=AsyncMock(
-            return_value=[
-                2,
-                [(b"old-high", 99_000.0)],
-                0,
-                [],
-                1,
-                [(b"future-low", 101_000.0)],
-            ]
+    redis = MagicMock(
+        eval=AsyncMock(
+            return_value=[2, 1_000, 0, 0, 0, 0, 1, 0, 2_000]
         )
     )
-    redis.pipeline.return_value.__aenter__.return_value = pipeline
     pool._redis = redis
-    monkeypatch.setattr("scrapeyard.queue.pool.timestamp_ms", lambda: 100_000)
 
     snapshot = await pool.queue_operational_snapshot()
 
     assert snapshot == {
-        "high": (2, 1.0),
-        "normal": (0, 0.0),
-        "low": (1, 0.0),
+        "high": (2, 1.0, 0.0),
+        "normal": (0, 0.0, 0.0),
+        "low": (1, 0.0, 2.0),
     }
-    assert pipeline.zcard.call_count == 3
-    assert pipeline.zrange.call_count == 3
+    assert redis.eval.await_args.args[1:] == (
+        3,
+        "test-queue:priority:high",
+        "test-queue:priority:normal",
+        "test-queue:priority:low",
+    )
 
 
 def test_worker_background_health_detects_stopped_runner():
@@ -607,7 +600,7 @@ async def test_enqueue_requires_run_id():
     ("pipeline_result", "expected"),
     [
         ([0, 0, 1, None, 99.0, None, None], QueueDeliveryState.queued),
-        ([0, 0, 1, None, None, 101.0, None], QueueDeliveryState.deferred),
+        ([0, 0, 1, 101.0, None, None, None], QueueDeliveryState.deferred),
         ([0, 1, 1, 99.0, None, None, None], QueueDeliveryState.in_progress),
         ([1, 0, 0, None, None, None, None], QueueDeliveryState.complete),
         ([0, 0, 0, None, None, None, None], QueueDeliveryState.missing),

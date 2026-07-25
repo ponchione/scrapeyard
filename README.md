@@ -244,8 +244,9 @@ Ad-hoc, scheduled, and startup-recovered deliveries all use this routing. The
 first enqueue of a `run_id` wins across all queues; a duplicate cannot change
 its priority or create another executable delivery. `/health/ready` reports
 `workers.queue_depths` for the three priority intake queues. These counts
-include waiting and deferred sorted-set members, but exclude work already
-admitted to the base queue and work in progress.
+include waiting members, but exclude work already admitted to the base queue and
+work in progress. Prometheus separately reports an enqueue-clock rollback offset
+without making future timestamps ineligible for admission.
 
 ## Example Config
 

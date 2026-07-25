@@ -40,41 +40,47 @@ if redis.call('EXISTS', KEYS[2], KEYS[3]) > 0 then
 end
 local payload_exists = redis.call('EXISTS', KEYS[1])
 for index = 4, 7 do
-    if payload_exists == 1 and redis.call('ZSCORE', KEYS[index], ARGV[4]) then
+    if payload_exists == 1 and redis.call('ZSCORE', KEYS[index], ARGV[3]) then
         return 0
     end
 end
 if payload_exists == 0 then
     for index = 4, 7 do
-        redis.call('ZREM', KEYS[index], ARGV[4])
+        redis.call('ZREM', KEYS[index], ARGV[3])
+        redis.call('HDEL', KEYS[index] .. ':enqueued-at', ARGV[3])
     end
 end
-local score = tonumber(ARGV[1])
-local last_score = redis.call('GET', KEYS[9])
-if last_score and tonumber(last_score) >= score then
-    score = tonumber(last_score) + 0.001
+local last_sequence = redis.call('GET', KEYS[9])
+if not last_sequence then
+    local latest = redis.call('ZREVRANGE', KEYS[8], 0, 0, 'WITHSCORES')
+    last_sequence = #latest == 0 and 0 or math.floor(tonumber(latest[2]))
 end
-local ttl = tonumber(ARGV[2]) + math.ceil(math.max(0, score - tonumber(ARGV[1])))
-redis.call('PSETEX', KEYS[1], ttl, ARGV[3])
-redis.call('ZADD', KEYS[8], score, ARGV[4])
-redis.call('SET', KEYS[9], string.format('%.3f', score))
+local sequence = tonumber(last_sequence) + 1
+local redis_time = redis.call('TIME')
+local enqueue_time = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('PSETEX', KEYS[1], ARGV[1], ARGV[2])
+redis.call('ZADD', KEYS[8], sequence, ARGV[3])
+redis.call('HSET', KEYS[8] .. ':enqueued-at', ARGV[3], enqueue_time)
+redis.call('SET', KEYS[9], tostring(sequence))
+redis.call('DEL', KEYS[8] .. ':fifo-score')
 return 1
 """
 
 _ADMIT_ONE_LUA = """
 local orphans_removed = 0
-local orphan_limit = tonumber(ARGV[3])
+local orphan_limit = tonumber(ARGV[2])
 for index = 1, 3 do
     while true do
-        local candidate = redis.call(
-            'ZRANGEBYSCORE', KEYS[index], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1
-        )
+        local candidate = redis.call('ZRANGE', KEYS[index], 0, 0, 'WITHSCORES')
         if #candidate == 0 then
             break
         end
         redis.call('ZREM', KEYS[index], candidate[1])
-        if redis.call('EXISTS', ARGV[2] .. candidate[1]) == 1 then
-            redis.call('ZADD', KEYS[4], candidate[2], candidate[1])
+        redis.call('HDEL', KEYS[index] .. ':enqueued-at', candidate[1])
+        if redis.call('EXISTS', ARGV[1] .. candidate[1]) == 1 then
+            local redis_time = redis.call('TIME')
+            local execution_time = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+            redis.call('ZADD', KEYS[4], execution_time, candidate[1])
             return {candidate[1], KEYS[index]}
         end
         orphans_removed = orphans_removed + 1
@@ -92,8 +98,42 @@ if not score then
     return 0
 end
 redis.call('ZREM', KEYS[1], ARGV[1])
-redis.call('ZADD', KEYS[2], score, ARGV[1])
+redis.call('HDEL', KEYS[1] .. ':enqueued-at', ARGV[1])
+local redis_time = redis.call('TIME')
+local execution_time = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZADD', KEYS[2], execution_time, ARGV[1])
 return 1
+"""
+
+_QUEUE_OPERATIONAL_SNAPSHOT_LUA = """
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local result = {}
+for index = 1, 3 do
+    local depth = redis.call('ZCARD', KEYS[index])
+    local age_ms = 0
+    local clock_offset_ms = 0
+    if depth > 0 then
+        local oldest = redis.call('ZRANGE', KEYS[index], 0, 0)
+        local enqueued_at = redis.call('HGET', KEYS[index] .. ':enqueued-at', oldest[1])
+        if enqueued_at then
+            local delta = now_ms - tonumber(enqueued_at)
+            age_ms = math.max(0, delta)
+            clock_offset_ms = math.max(0, -delta)
+        else
+            local legacy_score = tonumber(redis.call('ZSCORE', KEYS[index], oldest[1]))
+            if legacy_score and legacy_score > 1000000000000 then
+                local delta = now_ms - legacy_score
+                age_ms = math.max(0, delta)
+                clock_offset_ms = math.max(0, -delta)
+            end
+        end
+    end
+    table.insert(result, depth)
+    table.insert(result, age_ms)
+    table.insert(result, clock_offset_ms)
+end
+return result
 """
 
 
@@ -204,7 +244,6 @@ class _PriorityWorker(Worker):
                 4,
                 *queue_order,
                 self.queue_name,
-                str(timestamp_ms()),
                 job_key_prefix,
                 "100",
             ),
@@ -471,8 +510,7 @@ class WorkerPool:
                 f"{in_progress_key_prefix}{run_id}",
                 *self._known_queues,
                 queue_name,
-                f"{queue_name}:fifo-score",
-                str(enqueue_time_ms),
+                f"{queue_name}:fifo-sequence",
                 str(self._payload_ttl_ms),
                 cast(str, payload),
                 run_id,
@@ -527,13 +565,13 @@ class WorkerPool:
         score = float(queue_members[0][1])
         state = (
             QueueDeliveryState.deferred
-            if score > timestamp_ms()
+            if located_queue == self._queue_name and score > timestamp_ms()
             else QueueDeliveryState.queued
         )
         return _DeliverySnapshot(state, located_queue)
 
     async def queue_depths(self) -> dict[str, int]:
-        """Return waiting/deferred intake members, excluding admitted/active work."""
+        """Return waiting intake members, excluding admitted/active work."""
 
         if self._redis is None:
             raise RuntimeError("WorkerPool.queue_depths() requires an active Redis connection")
@@ -543,31 +581,28 @@ class WorkerPool:
             depths = await pipe.execute()
         return dict(zip(PRIORITIES, (int(depth) for depth in depths), strict=True))
 
-    async def queue_operational_snapshot(self) -> dict[str, tuple[int, float]]:
-        """Return fixed-priority depth and oldest age without scanning Redis."""
+    async def queue_operational_snapshot(self) -> dict[str, tuple[int, float, float]]:
+        """Return depth, oldest age, and rollback offset without scanning Redis."""
 
         if self._redis is None:
             raise RuntimeError(
                 "WorkerPool.queue_operational_snapshot() requires an active Redis connection"
             )
-        now_ms = timestamp_ms()
-        async with self._redis.pipeline(transaction=True) as pipe:
-            for priority in PRIORITIES:
-                queue_name = self._priority_queues[priority]
-                pipe.zcard(queue_name)
-                pipe.zrange(queue_name, 0, 0, withscores=True)
-            values = await pipe.execute()
+        values = await cast(
+            Awaitable[Any],
+            self._redis.eval(
+                _QUEUE_OPERATIONAL_SNAPSHOT_LUA,
+                3,
+                *(self._priority_queues[priority] for priority in PRIORITIES),
+            ),
+        )
 
-        snapshot: dict[str, tuple[int, float]] = {}
+        snapshot: dict[str, tuple[int, float, float]] = {}
         for index, priority in enumerate(PRIORITIES):
-            depth = int(values[index * 2])
-            oldest = values[index * 2 + 1]
-            age_seconds = (
-                0.0
-                if not oldest
-                else max(0.0, (now_ms - float(oldest[0][1])) / 1000.0)
-            )
-            snapshot[priority] = (depth, age_seconds)
+            depth = int(values[index * 3])
+            age_seconds = float(values[index * 3 + 1]) / 1000.0
+            clock_offset_seconds = float(values[index * 3 + 2]) / 1000.0
+            snapshot[priority] = (depth, age_seconds, clock_offset_seconds)
         return snapshot
 
     async def _move_to_execution_queue(self, run_id: str, source_queue: str) -> bool:

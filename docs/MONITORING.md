@@ -34,12 +34,14 @@ credential in a checked-in configuration file.
 ## What is measured
 
 The exporter has a process-local registry and a five-second durable-gauge cache
-by default. Queue snapshots use a fixed six Redis commands (depth and first
-score for each of three priorities); webhook summaries use aggregate SQLite
-queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
+by default. Queue snapshots use one fixed-cost Redis script that reads the depth,
+oldest member, and enqueue timestamp for each of three priorities; webhook
+summaries use aggregate SQLite queries. Scrapes never scan job IDs, URLs,
+projects, or all queue members.
 
 - API request count and latency use method, route template, and status class.
-- Queue depth and oldest waiting age use only `high`, `normal`, and `low`.
+- Queue depth, oldest waiting age, and enqueue-clock rollback offset use only
+  `high`, `normal`, and `low`.
 - Active jobs, targets, browser targets, bounded run threads, and result-response
   threads are compared with process capacity. Lingering threads separately show work still
   consuming a slot after its owning run reached a terminal deadline.
@@ -90,7 +92,6 @@ SQLite failures identify the database, bounded operation (`open_readwrite`,
 Filesystem paths, SQL text, exception messages, configuration, and credentials
 are not returned. For example, a missing file reports the operation and
 `OperationalError (SQLITE_CANTOPEN)` without exposing its path.
-
 The raw descriptor prohibition is a correctness boundary on Unix. Closing any
 separately opened descriptor for a database file can cancel all process-local
 POSIX advisory locks on that inode, including locks owned by cached SQLite
@@ -129,6 +130,9 @@ Tune the bounded probes with:
   selector, validation, or resolver work that outlived its run deadline.
 - Alert when any priority's oldest queue age exceeds the run service objective,
   even if depth is low.
+- Page when `scrapeyard_queue_clock_rollback_offset_seconds` is nonzero; intake
+  remains admissible, but the signal indicates that a dependency clock stepped
+  behind an already-recorded enqueue timestamp.
 - Alert when webhook pending count or oldest-pending age grows across multiple
   retry windows.
 - Alert before `scrapeyard_result_storage_free_bytes` reaches the configured

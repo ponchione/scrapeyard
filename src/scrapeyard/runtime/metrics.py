@@ -46,13 +46,19 @@ API_DURATION = Histogram(
 )
 QUEUE_DEPTH = Gauge(
     "scrapeyard_queue_depth",
-    "Waiting and deferred queue members by fixed priority.",
+    "Waiting queue members by fixed priority.",
     ("priority",),
     registry=REGISTRY,
 )
 QUEUE_OLDEST_AGE = Gauge(
     "scrapeyard_queue_oldest_age_seconds",
     "Age of the oldest waiting queue member by fixed priority.",
+    ("priority",),
+    registry=REGISTRY,
+)
+QUEUE_CLOCK_ROLLBACK_OFFSET = Gauge(
+    "scrapeyard_queue_clock_rollback_offset_seconds",
+    "How far the oldest enqueue timestamp is ahead of Redis time by fixed priority.",
     ("priority",),
     registry=REGISTRY,
 )

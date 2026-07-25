@@ -89,6 +89,7 @@ from scrapeyard.runtime.metrics import (
     DISK_FREE_BYTES,
     METRICS_REFRESH_DURATION,
     METRICS_REFRESH_FAILURES,
+    QUEUE_CLOCK_ROLLBACK_OFFSET,
     QUEUE_DEPTH,
     QUEUE_OLDEST_AGE,
     WEBHOOK_BACKLOG,
@@ -840,9 +841,16 @@ async def _refresh_metrics() -> None:
         except Exception:
             METRICS_REFRESH_FAILURES.labels("queue").inc()
         else:
-            for priority, (depth, age_seconds) in queue_snapshot.items():
+            for priority, (
+                depth,
+                age_seconds,
+                clock_offset_seconds,
+            ) in queue_snapshot.items():
                 QUEUE_DEPTH.labels(priority).set(depth)
                 QUEUE_OLDEST_AGE.labels(priority).set(age_seconds)
+                QUEUE_CLOCK_ROLLBACK_OFFSET.labels(priority).set(
+                    clock_offset_seconds
+                )
 
         outbox = getattr(app.state, "webhook_outbox_store", None)
         if outbox is None:
