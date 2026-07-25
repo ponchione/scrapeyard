@@ -42,6 +42,15 @@ def _write_project(path: Path, version: str = "0.0.0") -> None:
     path.write_text(f'[project]\nname = "scrapeyard"\nversion = "{version}"\n', encoding="utf-8")
 
 
+def _write_changelog(path: Path, unreleased: str) -> None:
+    path.write_text(
+        "# Changelog\n\n"
+        f"## Unreleased\n\n{unreleased}"
+        "## 0.0.0 — 2026-07-25\n\nReleased.\n",
+        encoding="utf-8",
+    )
+
+
 def test_distribution_inspection_accepts_exact_migration_sets(tmp_path: Path) -> None:
     migrations = tmp_path / "sql"
     migrations.mkdir()
@@ -80,3 +89,47 @@ def test_distribution_inspection_rejects_version_drift(tmp_path: Path) -> None:
 
     with pytest.raises(DistributionInspectionError, match="does not match project version"):
         inspect_distributions(dist, migrations, project)
+
+
+def test_normal_distribution_inspection_allows_post_release_changelog(
+    tmp_path: Path,
+) -> None:
+    migrations = tmp_path / "sql"
+    migrations.mkdir()
+    (migrations / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+    dist = tmp_path / "dist"
+    _write_archives(dist, ["001_first.sql"])
+    project = tmp_path / "pyproject.toml"
+    _write_project(project)
+    changelog = tmp_path / "CHANGELOG.md"
+    _write_changelog(changelog, "### Fixed\n- A legitimate follow-up fix.\n\n")
+
+    inspect_distributions(
+        dist,
+        migrations,
+        project,
+        changelog,
+    )
+
+
+def test_release_distribution_inspection_requires_empty_unreleased(
+    tmp_path: Path,
+) -> None:
+    migrations = tmp_path / "sql"
+    migrations.mkdir()
+    (migrations / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+    dist = tmp_path / "dist"
+    _write_archives(dist, ["001_first.sql"])
+    project = tmp_path / "pyproject.toml"
+    _write_project(project)
+    changelog = tmp_path / "CHANGELOG.md"
+    _write_changelog(changelog, "### Fixed\n- Must be released first.\n\n")
+
+    with pytest.raises(DistributionInspectionError, match="empty Unreleased"):
+        inspect_distributions(
+            dist,
+            migrations,
+            project,
+            changelog,
+            require_empty_unreleased=True,
+        )

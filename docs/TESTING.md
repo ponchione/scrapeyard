@@ -102,6 +102,11 @@ checked-in SQL migration in both archives. The smoke installer uses
 `--no-deps` so it validates the wheel layout and metadata without masking a
 packaging defect with the editable checkout.
 
+Normal archive inspection allows documented post-release entries under
+`Unreleased`. The immutable release workflow additionally runs the inspector
+with `--require-empty-unreleased` after the release version and changelog have
+been finalized.
+
 ## Single-instance runtime checks
 
 The focused lock and process-configuration contract runs with:

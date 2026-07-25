@@ -147,6 +147,7 @@ def test_immutable_release_workflow_builds_once_and_promotes_only_qualified_byte
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
     qualify = workflow["jobs"]["qualify"]
     commands = _run_commands(qualify)
+    assert "inspect_distribution.py dist --require-empty-unreleased" in commands
     assert commands.count("docker build --pull --no-cache") == 1
     assert "run_container_security_scan.sh \"${CANDIDATE_IMAGE_ID}\"" in commands
     assert commands.count('--image "${CANDIDATE_IMAGE_ID}"') == 4

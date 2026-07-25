@@ -52,6 +52,8 @@ def inspect_distributions(
     migrations_dir: Path = Path("sql"),
     project_file: Path = Path("pyproject.toml"),
     changelog_file: Path | None = None,
+    *,
+    require_empty_unreleased: bool = False,
 ) -> None:
     """Require complete package, version metadata, and SQL in wheel and sdist."""
     expected = {path.name for path in migrations_dir.glob("*.sql")}
@@ -81,7 +83,11 @@ def inspect_distributions(
             r"(?ms)^## Unreleased\s*(.*?)^## ",
             changelog,
         )
-        if unreleased is None or unreleased.group(1).strip():
+        if unreleased is None:
+            raise DistributionInspectionError(
+                f"{changelog_file} must contain an Unreleased section"
+            )
+        if require_empty_unreleased and unreleased.group(1).strip():
             raise DistributionInspectionError(
                 f"{changelog_file} must retain an empty Unreleased section"
             )
@@ -133,8 +139,17 @@ def inspect_distributions(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dist_dir", nargs="?", type=Path, default=Path("dist"))
+    parser.add_argument(
+        "--require-empty-unreleased",
+        action="store_true",
+        help="apply the release-only requirement that Unreleased has no entries",
+    )
     args = parser.parse_args()
-    inspect_distributions(args.dist_dir, changelog_file=Path("CHANGELOG.md"))
+    inspect_distributions(
+        args.dist_dir,
+        changelog_file=Path("CHANGELOG.md"),
+        require_empty_unreleased=args.require_empty_unreleased,
+    )
     return 0
 
 
