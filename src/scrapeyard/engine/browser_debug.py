@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -49,6 +50,8 @@ _EVENT_TEXT_CHARS = 300
 _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
 _MAX_BLOCKED_REQUESTS = 20
+_MAX_REQUEST_LEDGER_ENTRIES = 1000
+_REQUEST_URL_CHARS = 2048
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
 
 
@@ -92,6 +95,172 @@ def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit
     items.append(entry)
     if len(items) > limit:
         del items[: len(items) - limit]
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _request_failure_text(request: Any) -> str:
+    try:
+        failure = getattr(request, "failure", None)
+        if callable(failure):
+            failure = failure()
+    except Exception:
+        failure = None
+    if isinstance(failure, dict):
+        failure = failure.get("errorText") or failure.get("error_text")
+    elif failure is not None and not isinstance(failure, str):
+        failure = getattr(failure, "error_text", failure)
+    return truncate_text(redact_userinfo_in_text(coerce_to_text(failure)), _EVENT_TEXT_CHARS)
+
+
+def _response_headers(response: Any) -> dict[str, Any]:
+    try:
+        headers = getattr(response, "headers", None)
+        if callable(headers):
+            headers = headers()
+    except Exception:
+        headers = None
+    if not hasattr(headers, "items"):
+        return {}
+    bounded = {
+        str(name): truncate_text(coerce_to_text(value), _EVENT_TEXT_CHARS)
+        for name, value in headers.items()
+    }
+    return cast(dict[str, Any], redact_sensitive_mapping(bounded))
+
+
+@dataclass(slots=True)
+class _BrowserRequestCapture:
+    """Context-level request capture installed before the first navigation."""
+
+    capture: dict[str, Any]
+    request_indexes: dict[int, int]
+
+    def __init__(self, capture: dict[str, Any]) -> None:
+        self.capture = capture
+        self.request_indexes = {}
+
+    def _entry(self, request: Any) -> dict[str, Any] | None:
+        request_key = id(request)
+        existing = self.request_indexes.get(request_key)
+        ledger = self.capture.setdefault("request_ledger", [])
+        self.capture.setdefault("request_ledger_omitted", 0)
+        if existing is not None:
+            return cast(dict[str, Any], ledger[existing])
+        if len(ledger) >= _MAX_REQUEST_LEDGER_ENTRIES:
+            self.capture["request_ledger_omitted"] += 1
+            return None
+
+        redirected_from = getattr(request, "redirected_from", None)
+        if callable(redirected_from):
+            try:
+                redirected_from = redirected_from()
+            except Exception:
+                redirected_from = None
+        redirected_from_url = _safe_text_attr(redirected_from, "url")
+        if redirected_from_url:
+            redirected_from_url = truncate_text(
+                redact_userinfo_in_url(redirected_from_url),
+                _REQUEST_URL_CHARS,
+            )
+
+        is_navigation = getattr(request, "is_navigation_request", False)
+        if callable(is_navigation):
+            try:
+                is_navigation = is_navigation()
+            except Exception:
+                is_navigation = False
+
+        entry: dict[str, Any] = {
+            "started_at": _utc_timestamp(),
+            "method": _safe_text_attr(request, "method") or "unknown",
+            "url": truncate_text(
+                redact_userinfo_in_url(_safe_text_attr(request, "url") or ""),
+                _REQUEST_URL_CHARS,
+            ),
+            "resource_type": _safe_text_attr(request, "resource_type") or "unknown",
+            "is_navigation_request": bool(is_navigation),
+            "redirected_from": redirected_from_url,
+            "response_status": None,
+            "response_at": None,
+            "finished_at": None,
+            "retry_after": None,
+            "failure": None,
+        }
+        self.request_indexes[request_key] = len(ledger)
+        ledger.append(entry)
+        return entry
+
+    def on_request(self, request: Any) -> None:
+        self._entry(request)
+
+    def on_response(self, response: Any) -> None:
+        request = getattr(response, "request", None)
+        entry = self._entry(request) if request is not None else None
+        if entry is None:
+            return
+        status = getattr(response, "status", None)
+        entry["response_status"] = status if isinstance(status, int) else None
+        entry["response_at"] = _utc_timestamp()
+        headers = _response_headers(response)
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        entry["retry_after"] = retry_after
+        if entry["resource_type"] == "document":
+            entry["response_headers"] = headers
+
+    def on_request_finished(self, request: Any) -> None:
+        entry = self._entry(request)
+        if entry is not None:
+            entry["finished_at"] = _utc_timestamp()
+
+    def on_request_failed(self, request: Any) -> None:
+        entry = self._entry(request)
+        error_text = _request_failure_text(request)
+        if entry is not None:
+            entry["finished_at"] = _utc_timestamp()
+            entry["failure"] = error_text
+        failure_entry = {
+            "url": truncate_text(
+                redact_userinfo_in_url(_safe_text_attr(request, "url") or ""),
+                _REQUEST_URL_CHARS,
+            ),
+            "method": _safe_text_attr(request, "method") or "unknown",
+            "resource_type": _safe_text_attr(request, "resource_type") or "unknown",
+            "error_text": error_text,
+        }
+        _bounded_append(
+            self.capture.setdefault("request_failures", []),
+            failure_entry,
+            limit=_MAX_REQUEST_FAILURES,
+        )
+
+    def install(self, context: Any) -> None:
+        if not hasattr(context, "on"):
+            raise RuntimeError("Browser context does not support request events")
+        self.capture.setdefault("request_ledger", [])
+        self.capture.setdefault("request_ledger_omitted", 0)
+        self.capture.setdefault("request_failures", [])
+
+        # Playwright caches wrappers by assigning attributes to bound-method
+        # owners. This capture uses slots, so register plain closures instead.
+        def on_request(request: Any) -> None:
+            self.on_request(request)
+
+        def on_response(response: Any) -> None:
+            self.on_response(response)
+
+        def on_request_finished(request: Any) -> None:
+            self.on_request_finished(request)
+
+        def on_request_failed(request: Any) -> None:
+            self.on_request_failed(request)
+
+        context.on("request", on_request)
+        context.on("response", on_response)
+        context.on("requestfinished", on_request_finished)
+        context.on("requestfailed", on_request_failed)
 
 
 @dataclass(slots=True)
@@ -169,13 +338,9 @@ class _BrowserNetworkGuard:
 
         scoped_names = {name.lower() for name in self.extra_headers}
         filtered = {
-            name: value
-            for name, value in headers.items()
-            if name.lower() not in scoped_names
+            name: value for name, value in headers.items() if name.lower() not in scoped_names
         }
-        request_origin = (
-            canonical_url_origin(request_url) if isinstance(request_url, str) else None
-        )
+        request_origin = canonical_url_origin(request_url) if isinstance(request_url, str) else None
         if self.target_origin is None or request_origin != self.target_origin:
             await route.continue_(headers=filtered)
             return
@@ -303,6 +468,8 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "screenshot_path": None,
         "console_messages": [],
         "request_failures": [],
+        "request_ledger": [],
+        "request_ledger_omitted": 0,
         "browser_settings": redact_sensitive_mapping(browser.model_dump(mode="json")),
     }
 
@@ -616,11 +783,13 @@ async def capture_browser_state(
     capture: dict[str, Any],
     budget: RunBudget | None = None,
     require_resolved_dns: bool = False,
+    register_request_failures: bool = True,
 ) -> Any:
     capture.setdefault("console_messages", [])
     capture.setdefault("request_failures", [])
     _register_console_capture(page, capture)
-    _register_request_failure_capture(page, capture)
+    if register_request_failures:
+        _register_request_failure_capture(page, capture)
     if browser is not None and browser.click_selector:
         try:
             click = _click_selector(page, browser.click_selector, browser.click_timeout_ms)
@@ -736,6 +905,7 @@ async def fetch_browser_response(
 ) -> tuple[Any, dict[str, Any]]:
     capture: dict[str, Any] = {}
     browser = target_browser_config(target)
+    request_capture = _BrowserRequestCapture(capture)
 
     async def _page_action(page: Any) -> Any:
         # Scrapling invokes this only after navigation has produced a page, so
@@ -751,6 +921,7 @@ async def fetch_browser_response(
                 capture=capture,
                 budget=budget,
                 require_resolved_dns=require_resolved_dns,
+                register_request_failures=False,
             )
         except BudgetExceeded as exc:
             capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
@@ -788,7 +959,12 @@ async def fetch_browser_response(
         target_origin=canonical_url_origin(url),
         extra_headers=dict(browser.extra_headers),
     )
-    call_kwargs["context_setup"] = network_guard.install
+
+    async def _context_setup(context: Any) -> None:
+        request_capture.install(context)
+        await network_guard.install(context)
+
+    call_kwargs["context_setup"] = _context_setup
     fetch = fetcher_cls.async_fetch(url, **call_kwargs)
     try:
         response = await fetch if budget is None else await budget.wait_for_owned(fetch)

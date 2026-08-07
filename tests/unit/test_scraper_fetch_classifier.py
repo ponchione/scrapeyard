@@ -89,6 +89,15 @@ def test_classify_page_signals_detects_akamai_interstitial_markers_in_console_an
     assert classify_page_signals(debug) == ErrorType.challenge_page
 
 
+def test_classify_page_signals_detects_forbidden_redirect_and_title():
+    debug = {
+        "page_title": "Before we continue",
+        "final_url": "https://example.com/forbidden.html?url=products",
+    }
+
+    assert classify_page_signals(debug) == ErrorType.blocked_response
+
+
 def test_classify_rendered_outcome_prefers_challenge_for_akamai_interstitial_over_rendered_empty():
     debug = {
         "page_title": "Bass Pro Shops",
@@ -102,3 +111,39 @@ def test_classify_rendered_outcome_prefers_challenge_for_akamai_interstitial_ove
     result = classify_rendered_outcome(debug, data=[], has_item_selector=True)
 
     assert result == ErrorType.challenge_page
+
+
+def test_classify_rendered_outcome_ignores_uncorroborated_marker_with_usable_rows():
+    debug = {
+        "page_title": "Red Dot Sights for Sale",
+        "final_url": "https://example.com/red-dots",
+        "html_excerpt": "A product description mentions access denied troubleshooting.",
+        "selector_counts": {"title": 1, "price": 1},
+        "item_selector_count": 1,
+    }
+
+    result = classify_rendered_outcome(
+        debug,
+        data=[{"title": "Example Red Dot", "price": "$199.99"}],
+        has_item_selector=True,
+    )
+
+    assert result is None
+
+
+def test_classify_rendered_outcome_keeps_strong_gate_with_extracted_noise():
+    debug = {
+        "page_title": "Before we continue",
+        "final_url": "https://example.com/forbidden.html?url=red-dots",
+        "html_excerpt": "request blocked",
+        "selector_counts": {"title": 1},
+        "item_selector_count": 1,
+    }
+
+    result = classify_rendered_outcome(
+        debug,
+        data=[{"title": "Before we continue"}],
+        has_item_selector=True,
+    )
+
+    assert result == ErrorType.blocked_response

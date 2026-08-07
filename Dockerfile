@@ -190,6 +190,10 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         > /usr/share/scrapeyard-os-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 
+COPY scripts/patch_playwright_camoufox.py /usr/local/lib/scrapeyard/
+RUN python /usr/local/lib/scrapeyard/patch_playwright_camoufox.py && \
+    python /usr/local/lib/scrapeyard/patch_playwright_camoufox.py --check
+
 COPY src/ src/
 COPY sql/ sql/
 COPY pyproject.toml README.md ./

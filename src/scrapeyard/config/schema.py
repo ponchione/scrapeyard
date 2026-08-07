@@ -997,6 +997,15 @@ class ExecutionConfig(StrictConfigModel):
         le=MAX_EXECUTION_DELAY_SECONDS,
         description="Seconds between starting concurrent targets",
     )
+    post_target_delay: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_EXECUTION_DELAY_SECONDS,
+        description=(
+            "Seconds to wait after a target finishes before starting the next target; "
+            "requires sequential execution"
+        ),
+    )
     domain_rate_limit: int = Field(
         default=3,
         ge=0,
@@ -1011,6 +1020,12 @@ class ExecutionConfig(StrictConfigModel):
     fail_strategy: FailStrategy = Field(
         default=FailStrategy.partial, description="How to handle target failures"
     )
+
+    @model_validator(mode="after")
+    def _validate_post_target_delay(self) -> ExecutionConfig:
+        if self.post_target_delay > 0 and self.concurrency != 1:
+            raise ValueError("execution.post_target_delay requires execution.concurrency=1")
+        return self
 
 
 class ScheduleConfig(StrictConfigModel):

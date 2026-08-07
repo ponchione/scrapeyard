@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scrapeyard.engine.fetch_classifier import confirmed_rendered_access_gate
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
@@ -119,6 +120,22 @@ class TargetErrorRecorder:
         else:
             self.circuit_breaker.record_success(domain, probe)
 
+    def record_fetch_outcome(
+        self,
+        domain: str,
+        result: TargetResult,
+        *,
+        probe: CircuitProbe | None = None,
+    ) -> None:
+        """Record a fetched response, treating rendered access gates as failures."""
+        if circuit_breaker_failure(result):
+            if probe is None:
+                self.circuit_breaker.record_failure(domain)
+            else:
+                self.circuit_breaker.record_failure(domain, probe)
+            return
+        self.record_success(domain, probe=probe)
+
     def record_target_failure(
         self,
         *,
@@ -184,6 +201,22 @@ class TargetErrorRecorder:
 
 def circuit_breaker_failure(result: TargetResult) -> bool:
     """Whether a target failure is evidence of upstream unavailability."""
+
+    access_gate_types = {
+        ErrorType.blocked_response,
+        ErrorType.challenge_page,
+        ErrorType.consent_gate,
+        ErrorType.login_gate,
+    }
+    if result.error_type in access_gate_types:
+        return True
+    classification = validation_error_type(result)
+    if classification in access_gate_types and confirmed_rendered_access_gate(
+        result.debug or {},
+        result.data,
+        classification,
+    ):
+        return True
 
     if result.http_status is not None:
         return result.http_status == 429 or 500 <= result.http_status <= 599

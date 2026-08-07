@@ -16,8 +16,9 @@ from scrapeyard.config.schema import (
     OnEmptyAction,
     ScrapeConfig,
 )
+from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
-from scrapeyard.models.job import JobStatus
+from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.target_execution import resolve_target_runtime_context
 from scrapeyard.queue.worker import (
@@ -46,6 +47,7 @@ def _job_execution_context(
     config.resolved_targets.return_value = targets
     config.execution.concurrency = concurrency or len(targets)
     config.execution.delay_between = 0
+    config.execution.post_target_delay = 0
     config.execution.domain_rate_limit = 0
     config.adaptive = False
     config.schedule = None
@@ -131,6 +133,98 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
     assert len(results) == 4
     assert max_active_fetches == 2
     assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+async def test_rendered_access_gates_stop_remaining_same_domain_targets():
+    limiter = BrowserExecutionLimiter(1)
+    targets = [
+        _concurrent_target(f"https://shop.example/category/{index}", FetcherType.basic)
+        for index in range(12)
+    ]
+    context = _job_execution_context(targets, concurrency=1)
+    context.config.execution.delay_between = 10
+    context.config.validation.min_results = 1
+    breaker = CircuitBreaker(3, 60)
+    clock = 100.0
+
+    async def _paced_sleep(delay_seconds: float) -> None:
+        nonlocal clock
+        clock += delay_seconds
+
+    context.budget.sleep = AsyncMock(side_effect=_paced_sleep)
+    scrape = AsyncMock(
+        side_effect=lambda target, *_args, **_kwargs: TargetResult(
+            url=target.url,
+            status=TargetStatus.success,
+            debug={"classification": ErrorType.blocked_response.value},
+        )
+    )
+
+    worker_time = MagicMock()
+    worker_time.monotonic.side_effect = lambda: clock
+    with (
+        patch("scrapeyard.queue.worker.time", worker_time),
+        patch("scrapeyard.queue.worker.scrape_target", new=scrape),
+    ):
+        results = await _process_all_targets(
+            context=context,
+            job_id="access-gate",
+            run_id="run-access-gate",
+            circuit_breaker=breaker,
+            rate_limiter=AsyncMock(),
+            browser_limiter=limiter,
+            error_store=AsyncMock(),
+        )
+
+    assert scrape.await_count == 3
+    assert [call.args[0] for call in context.budget.sleep.await_args_list] == [10, 10]
+    assert [result.status for result in results[:3]] == [TargetStatus.success] * 3
+    assert [result.status for result in results[3:]] == [TargetStatus.failed] * 9
+
+
+@pytest.mark.asyncio
+async def test_post_target_delay_is_measured_after_fetch_completion():
+    limiter = BrowserExecutionLimiter(1)
+    targets = [
+        _concurrent_target(f"https://shop.example/category/{index}", FetcherType.basic)
+        for index in range(2)
+    ]
+    context = _job_execution_context(targets, concurrency=1)
+    context.config.execution.post_target_delay = 15
+    clock = 100.0
+    starts: list[float] = []
+
+    async def _paced_sleep(delay_seconds: float) -> None:
+        nonlocal clock
+        clock += delay_seconds
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        nonlocal clock
+        starts.append(clock)
+        clock += 20
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    context.budget.sleep = AsyncMock(side_effect=_paced_sleep)
+    worker_time = MagicMock()
+    worker_time.monotonic.side_effect = lambda: clock
+    with (
+        patch("scrapeyard.queue.worker.time", worker_time),
+        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
+    ):
+        results = await _process_all_targets(
+            context=context,
+            job_id="post-target-delay",
+            run_id="run-post-target-delay",
+            circuit_breaker=CircuitBreaker(3, 60),
+            rate_limiter=AsyncMock(),
+            browser_limiter=limiter,
+            error_store=AsyncMock(),
+        )
+
+    assert len(results) == 2
+    assert starts == [100.0, 135.0]
+    assert [call.args[0] for call in context.budget.sleep.await_args_list] == [15]
 
 
 @pytest.mark.asyncio

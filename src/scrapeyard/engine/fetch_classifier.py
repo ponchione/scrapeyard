@@ -41,6 +41,7 @@ _LOGIN_MARKERS = (
     "login required",
 )
 _BLOCK_MARKERS = (
+    "before we continue",
     "access denied",
     "access blocked",
     "temporarily blocked",
@@ -74,6 +75,26 @@ _NETWORK_ERROR_MARKERS = (
     "network",
     "socket",
 )
+_ACCESS_GATE_TYPES = {
+    ErrorType.blocked_response,
+    ErrorType.challenge_page,
+    ErrorType.consent_gate,
+    ErrorType.login_gate,
+}
+_STRONG_ACCESS_GATE_TITLE_MARKERS = (
+    "before we continue",
+    "access denied",
+    "access blocked",
+    "verify you are human",
+    "captcha",
+    "forbidden",
+    "security check",
+)
+_STRONG_ACCESS_GATE_URL_MARKERS = (
+    "/forbidden",
+    "/captcha",
+    "/challenge",
+)
 
 
 def token_match(text: str, tokens: tuple[str, ...]) -> bool:
@@ -83,6 +104,7 @@ def token_match(text: str, tokens: tuple[str, ...]) -> bool:
 def _debug_signal_blob(debug: dict[str, Any]) -> str:
     parts: list[str] = [
         str(debug.get("page_title") or ""),
+        str(debug.get("final_url") or ""),
         str(debug.get("html_excerpt") or ""),
     ]
     for message in debug.get("console_messages") or []:
@@ -117,6 +139,26 @@ def classify_page_signals(debug: dict[str, Any]) -> ErrorType | None:
     return None
 
 
+def confirmed_rendered_access_gate(
+    debug: dict[str, Any],
+    data: list[dict[str, Any]],
+    classification: ErrorType | None = None,
+) -> bool:
+    """Require corroboration before an access-marker poisons domain state."""
+    classification = classification or classify_page_signals(debug)
+    if classification not in _ACCESS_GATE_TYPES:
+        return False
+    if not any(has_extracted_value(value) for row in data for value in row.values()):
+        return True
+
+    title = str(debug.get("page_title") or "").strip().lower()
+    final_url = str(debug.get("final_url") or "").strip().lower()
+    return token_match(title, _STRONG_ACCESS_GATE_TITLE_MARKERS) or token_match(
+        final_url,
+        _STRONG_ACCESS_GATE_URL_MARKERS,
+    )
+
+
 def classify_rendered_outcome(
     debug: dict[str, Any],
     data: list[dict[str, Any]],
@@ -124,7 +166,7 @@ def classify_rendered_outcome(
     has_item_selector: bool,
 ) -> ErrorType | None:
     signal_classification = classify_page_signals(debug)
-    if signal_classification is not None:
+    if confirmed_rendered_access_gate(debug, data, signal_classification):
         return signal_classification
 
     selector_counts = debug.get("selector_counts") or {}

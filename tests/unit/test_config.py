@@ -716,6 +716,7 @@ class TestResolvedTargets:
             (ValidationConfig, {"min_results": -1}),
             (ExecutionConfig, {"concurrency": 0}),
             (ExecutionConfig, {"delay_between": -1}),
+            (ExecutionConfig, {"post_target_delay": -1}),
             (ExecutionConfig, {"domain_rate_limit": -1}),
             (WebhookConfig, {"url": "https://example.com/hook", "timeout": 0}),
             (BrowserConfig, {"click_timeout_ms": 0}),
@@ -739,6 +740,7 @@ class TestResolvedTargets:
             (ValidationConfig, "min_results"),
             (ExecutionConfig, "concurrency"),
             (ExecutionConfig, "delay_between"),
+            (ExecutionConfig, "post_target_delay"),
             (ExecutionConfig, "domain_rate_limit"),
             (WebhookConfig, "timeout"),
         ],
@@ -870,6 +872,7 @@ target:
             ),
             (ExecutionConfig, {"concurrency": MAX_EXECUTION_CONCURRENCY + 1}),
             (ExecutionConfig, {"delay_between": MAX_EXECUTION_DELAY_SECONDS + 1}),
+            (ExecutionConfig, {"post_target_delay": MAX_EXECUTION_DELAY_SECONDS + 1}),
             (ExecutionConfig, {"domain_rate_limit": MAX_DOMAIN_RATE_LIMIT_SECONDS + 1}),
             (PaginationConfig, {"next": "a.next", "max_pages": MAX_PAGINATION_PAGES + 1}),
             (RetryConfig, {"max_attempts": MAX_RETRY_ATTEMPTS + 1}),
@@ -884,6 +887,10 @@ target:
     def test_numeric_runtime_config_rejects_unbounded_resource_values(self, model, kwargs):
         with pytest.raises(ValidationError):
             model(**kwargs)
+
+    def test_post_target_delay_requires_sequential_execution(self):
+        with pytest.raises(ValidationError, match="post_target_delay requires"):
+            ExecutionConfig(concurrency=2, post_target_delay=1)
 
     def test_targets_rejects_unbounded_target_lists(self):
         targets = [

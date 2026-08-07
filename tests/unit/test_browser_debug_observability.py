@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import socket
 from collections.abc import Callable
 from pathlib import Path
@@ -74,14 +75,37 @@ class FakeRequestFailure:
 
 
 class FakeRequest:
-    def __init__(self, url: str, method: str, resource_type: str, error_text: str):
+    def __init__(
+        self,
+        url: str,
+        method: str,
+        resource_type: str,
+        error_text: str = "",
+        *,
+        redirected_from: FakeRequest | None = None,
+        is_navigation_request: bool = False,
+    ):
         self.url = url
         self.method = method
         self.resource_type = resource_type
         self._failure = FakeRequestFailure(error_text)
+        self.redirected_from = redirected_from
+        self.is_navigation_request = is_navigation_request
 
     def failure(self):
         return self._failure
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        request: FakeRequest,
+        status: int,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.request = request
+        self.status = status
+        self.headers = headers or {}
 
 
 class FakeRoute:
@@ -139,9 +163,7 @@ async def _run_configured_route(kwargs: dict[str, object], route: FakeRoute) -> 
     await handler(route)
 
 
-async def _run_configured_websocket(
-    kwargs: dict[str, object], route: FakeWebSocketRoute
-) -> None:
+async def _run_configured_websocket(kwargs: dict[str, object], route: FakeWebSocketRoute) -> None:
     context = MagicMock()
     context.route = AsyncMock()
     context.route_web_socket = AsyncMock()
@@ -274,6 +296,105 @@ def test_default_debug_blob_includes_empty_observability_collections() -> None:
 
     assert debug["console_messages"] == []
     assert debug["request_failures"] == []
+    assert debug["request_ledger"] == []
+    assert debug["request_ledger_omitted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_browser_response_captures_requests_before_page_action() -> None:
+    target = TargetConfig(
+        url="https://example.com/start?api_key=secret",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    redirect = FakeRequest(
+        target.url,
+        "GET",
+        "document",
+        is_navigation_request=True,
+    )
+    document = FakeRequest(
+        "https://example.com/final",
+        "GET",
+        "document",
+        redirected_from=redirect,
+        is_navigation_request=True,
+    )
+    failed = FakeRequest(
+        "https://cdn.example.com/app.js?access_token=secret",
+        "GET",
+        "script",
+        "net::ERR_FAILED",
+    )
+    page = MagicMock()
+    page.url = document.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.on = MagicMock()
+
+    class LedgerFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            context = MagicMock()
+            context.route = AsyncMock()
+            context.route_web_socket = AsyncMock()
+            event_handlers: dict[str, Callable[[object], None]] = {}
+
+            def register_context_handler(event, handler):
+                assert not inspect.ismethod(handler)
+                event_handlers.setdefault(event, handler)
+
+            context.on.side_effect = register_context_handler
+            await kwargs["context_setup"](context)
+
+            event_handlers["request"](redirect)
+            event_handlers["response"](FakeResponse(redirect, 302, {"Location": document.url}))
+            event_handlers["requestfinished"](redirect)
+            event_handlers["request"](document)
+            event_handlers["response"](
+                FakeResponse(
+                    document,
+                    429,
+                    {
+                        "Retry-After": "120",
+                        "Set-Cookie": "private-session",
+                        "Content-Type": "text/html",
+                    },
+                )
+            )
+            event_handlers["requestfinished"](document)
+            event_handlers["request"](failed)
+            event_handlers["requestfailed"](failed)
+
+            await kwargs["page_action"](page)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    _response, debug = await fetch_browser_response(
+        LedgerFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    assert debug["request_ledger_omitted"] == 0
+    assert len(debug["request_ledger"]) == 3
+    assert debug["request_ledger"][0]["url"].endswith("api_key=<redacted>")
+    assert debug["request_ledger"][1]["redirected_from"].endswith("api_key=<redacted>")
+    assert debug["request_ledger"][1]["response_status"] == 429
+    assert debug["request_ledger"][1]["retry_after"] == "120"
+    assert debug["request_ledger"][1]["response_headers"]["Set-Cookie"] == ("<redacted>")
+    assert debug["request_ledger"][2]["failure"] == "net::ERR_FAILED"
+    assert debug["request_failures"] == [
+        {
+            "url": "https://cdn.example.com/app.js?access_token=<redacted>",
+            "method": "GET",
+            "resource_type": "script",
+            "error_text": "net::ERR_FAILED",
+        }
+    ]
+    assert all(entry["started_at"] for entry in debug["request_ledger"])
 
 
 def test_default_debug_blob_redacts_sensitive_browser_settings() -> None:
@@ -513,9 +634,7 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
 
     assert route.aborted is True
     assert route.continued is False
-    assert debug["blocked_requests"] == [
-        {"kind": "request", "url": "http://127.0.0.1/private"}
-    ]
+    assert debug["blocked_requests"] == [{"kind": "request", "url": "http://127.0.0.1/private"}]
 
 
 @pytest.mark.asyncio

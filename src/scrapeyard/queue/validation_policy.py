@@ -11,7 +11,7 @@ from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import ResultValidator, ValidationResult
+from scrapeyard.engine.resilience import CircuitProbe, ResultValidator, ValidationResult
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.engine.url_guard import redact_userinfo_in_url
 from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType
@@ -60,6 +60,7 @@ async def apply_validation(
     attempt: int = 1,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    circuit_probe: CircuitProbe | None = None,
 ) -> TargetResult:
     """Validate a successful result; retry once on validation failure."""
     if not result.is_success:
@@ -67,6 +68,7 @@ async def apply_validation(
 
     validation = await _validate_result(validator, result.data, budget)
     if validation.passed:
+        recorder.record_fetch_outcome(domain, result, probe=circuit_probe)
         return result
 
     retry_error = _record_validation_failure(
@@ -79,10 +81,13 @@ async def apply_validation(
     )
 
     if validation.action == OnEmptyAction.warn:
+        recorder.record_fetch_outcome(domain, result, probe=circuit_probe)
         return _handle_warn_action(result, target_cfg, validation.message)
     if validation.action == OnEmptyAction.skip:
+        recorder.record_fetch_outcome(domain, result, probe=circuit_probe)
         return _handle_skip_action(result, target_cfg, validation.message)
     if validation.action == OnEmptyAction.fail:
+        recorder.record_fetch_outcome(domain, result, probe=circuit_probe)
         return _handle_fail_action(result, target_cfg, validation.message)
 
     logger.info(
@@ -110,6 +115,7 @@ async def apply_validation(
         budget=budget,
         cancellation_guard=cancellation_guard,
         retry_error=retry_error,
+        circuit_probe=circuit_probe,
     )
 
 
@@ -172,6 +178,7 @@ async def _retry_after_validation_failure(
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
     retry_error: ErrorRecord,
+    circuit_probe: CircuitProbe | None,
 ) -> TargetResult:
     retry_result = await scrape(
         target_cfg,
@@ -204,12 +211,13 @@ async def _retry_after_validation_failure(
             result=retry_result,
             default_error_type=ErrorType.http_error,
             combine_errors=True,
+            probe=circuit_probe,
         )
         return retry_result
 
-    recorder.record_success(domain)
     retry_validation = await _validate_result(validator, retry_result.data, budget)
     if retry_validation.passed:
+        recorder.record_fetch_outcome(domain, retry_result, probe=circuit_probe)
         retry_error.resolved = True
         return retry_result
 
@@ -221,6 +229,7 @@ async def _retry_after_validation_failure(
         action=ActionTaken.fail,
         message=retry_validation.message,
     )
+    recorder.record_fetch_outcome(domain, retry_result, probe=circuit_probe)
     return _build_validation_failed_result(target_cfg, retry_result, retry_validation.message)
 
 

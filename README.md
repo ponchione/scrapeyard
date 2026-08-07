@@ -156,6 +156,9 @@ Patchright Chromium for `fetcher: dynamic` with `browser.stealth: true`, and
 the maintained Camoufox package/assets for `fetcher: stealthy`. Browser
 versions, revisions, primary upstream sources, review/expiry dates, and the
 Camoufox archive checksum are enforced by `security/browser-policy.json`.
+The image also applies a version-checked Playwright 1.61.0 compatibility patch
+that supplies an empty source location when Camoufox omits location data from a
+Firefox page-error event. The build fails closed if that driver handler changes.
 The built image executes both browser binaries, records their reported versions
 in `/usr/share/scrapeyard-browser-runtime.json`, and the container SBOM adds
 those binaries explicitly. The image starts directly
@@ -550,12 +553,15 @@ profile.
 See [src/scrapeyard/common/settings.py](src/scrapeyard/common/settings.py) for
 the full settings surface.
 
-Circuit breakers count connection/network errors, timeouts, HTTP 429, and HTTP
-5xx responses. Selector, validation, budget, cancellation, local browser, and
-ordinary non-retryable HTTP 4xx failures remain observable errors but do not
-affect shared domain availability. After cooldown, one half-open probe is
-admitted; its transient failure starts a fresh cooldown and its successful
-upstream response closes the circuit.
+Circuit breakers count connection/network errors, timeouts, HTTP 429, HTTP 5xx,
+and confirmed blocked, challenge, consent, or login responses. Rendered access
+gates count even when the upstream transport returned HTTP 200; once the circuit
+opens, remaining same-domain targets are rejected locally without waiting for
+the configured inter-request delay. Selector, ordinary validation, budget,
+cancellation, local browser, and other non-retryable HTTP 4xx failures remain
+observable errors but do not affect shared domain availability. After cooldown,
+one half-open probe is admitted; another availability failure starts a fresh
+cooldown and a usable upstream response closes the circuit.
 
 Run duration, fetched-byte, record, and serialized-result budget violations
 always finish the run as `failed`, regardless of `execution.fail_strategy`.

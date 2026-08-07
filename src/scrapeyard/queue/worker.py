@@ -21,7 +21,7 @@ from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, ScrapeConfig, TargetConfig
 from scrapeyard.engine.fetch_classifier import classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
+from scrapeyard.engine.resilience import CircuitBreaker, CircuitState, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
@@ -846,7 +846,11 @@ async def _process_all_targets(
             await context.activity.checkpoint("before_target_start")
             async with sem:
                 await context.activity.checkpoint("before_target_fetch")
-                if config.execution.delay_between > 0:
+                domain_circuit_open = (
+                    circuit_breaker.state(url_host_label(target_cfg.url))
+                    is CircuitState.open
+                )
+                if config.execution.delay_between > 0 and not domain_circuit_open:
                     async with start_lock:
                         wait_seconds = max(0.0, next_start_at - time.monotonic())
                         if wait_seconds > 0:
@@ -865,6 +869,29 @@ async def _process_all_targets(
                         context=target_context,
                         pending_errors=pending_errors,
                     )
+                configured_post_target_delay = getattr(
+                    config.execution,
+                    "post_target_delay",
+                    0,
+                )
+                post_target_delay = (
+                    configured_post_target_delay
+                    if isinstance(configured_post_target_delay, int)
+                    and not isinstance(configured_post_target_delay, bool)
+                    else 0
+                )
+                is_last_target = target_index == len(targets) - 1
+                domain_circuit_open = (
+                    circuit_breaker.state(url_host_label(target_cfg.url))
+                    is CircuitState.open
+                )
+                if (
+                    post_target_delay > 0
+                    and not is_last_target
+                    and not domain_circuit_open
+                ):
+                    await context.budget.sleep(post_target_delay)
+                    await context.activity.checkpoint("after_post_target_delay")
                 return target_result
         except asyncio.CancelledError:
             cancelled = True
@@ -1018,9 +1045,7 @@ async def _scrape_and_validate_target(
         )
         return result
 
-    recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
-    runtime.circuit_probe = None
-    return await apply_validation(
+    validated = await apply_validation(
         target_cfg=target_cfg,
         domain=runtime.domain,
         adaptive=runtime.adaptive,
@@ -1036,7 +1061,10 @@ async def _scrape_and_validate_target(
         target_index=target_index,
         budget=context.budget,
         cancellation_guard=context.activity.checkpoint,
+        circuit_probe=runtime.circuit_probe,
     )
+    runtime.circuit_probe = None
+    return validated
 
 
 def _exception_detail(exc: Exception) -> str:

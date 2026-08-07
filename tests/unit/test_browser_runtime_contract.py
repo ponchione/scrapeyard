@@ -13,6 +13,10 @@ def test_dockerfile_installs_current_playwright_and_patchright_chromium() -> Non
     assert "ARG CHROMIUM_VERSION=149.0.7827.55" in dockerfile
     assert "ARG CHROMIUM_REVISION=1228" in dockerfile
     assert "ARG CAMOUFOX_BROWSER_VERSION=150.0.2" in dockerfile
+    assert (
+        "python /usr/local/lib/scrapeyard/patch_playwright_camoufox.py --check"
+        in dockerfile
+    )
     assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
     assert "XDG_CACHE_HOME=/opt/scrapeyard-cache" in dockerfile
     assert "HOME=/home/scrapeyard" in dockerfile

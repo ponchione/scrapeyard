@@ -439,7 +439,6 @@ def _recorder(cb: CircuitBreaker) -> TargetErrorRecorder:
         (ErrorType.selector_miss, None),
         (ErrorType.content_empty, None),
         (ErrorType.http_not_found, 404),
-        (ErrorType.blocked_response, 403),
         (ErrorType.budget_exceeded, None),
     ],
 )
@@ -476,10 +475,14 @@ def test_user_and_nontransient_failures_do_not_open_circuit(
         (ErrorType.navigation_timeout, None),
         (ErrorType.http_error, 500),
         (ErrorType.http_error, 503),
+        (ErrorType.blocked_response, 403),
         (ErrorType.blocked_response, 429),
+        (ErrorType.challenge_page, None),
+        (ErrorType.consent_gate, None),
+        (ErrorType.login_gate, None),
     ],
 )
-def test_transient_failures_open_circuit(error_type, http_status):
+def test_domain_availability_failures_open_circuit(error_type, http_status):
     cb = CircuitBreaker(1, 60)
     result = TargetResult(
         url="https://example.com",
@@ -498,6 +501,104 @@ def test_transient_failures_open_circuit(error_type, http_status):
 
     with pytest.raises(CircuitOpenError):
         cb.check("example.com")
+
+
+@pytest.mark.parametrize(
+    "classification",
+    [
+        ErrorType.blocked_response,
+        ErrorType.challenge_page,
+        ErrorType.consent_gate,
+        ErrorType.login_gate,
+    ],
+)
+def test_successful_fetch_with_rendered_access_gate_opens_circuit(classification):
+    cb = CircuitBreaker(1, 60)
+    result = TargetResult(
+        url="https://example.com",
+        status="success",
+        debug={"classification": classification.value},
+    )
+
+    _recorder(cb).record_fetch_outcome("example.com", result)
+
+    with pytest.raises(CircuitOpenError):
+        cb.check("example.com")
+
+
+def test_usable_fetch_with_uncorroborated_marker_does_not_open_circuit():
+    cb = CircuitBreaker(1, 60)
+    result = TargetResult(
+        url="https://example.com/products",
+        status="success",
+        data=[{"title": "Usable product", "price": "$199.99"}],
+        debug={
+            "classification": ErrorType.blocked_response.value,
+            "page_title": "Products for Sale",
+            "final_url": "https://example.com/products",
+        },
+    )
+
+    _recorder(cb).record_fetch_outcome("example.com", result)
+
+    assert cb.check("example.com") is None
+
+
+def test_strong_rendered_gate_with_extracted_noise_opens_circuit():
+    cb = CircuitBreaker(1, 60)
+    result = TargetResult(
+        url="https://example.com/products",
+        status="success",
+        data=[{"title": "Before we continue"}],
+        debug={
+            "classification": ErrorType.blocked_response.value,
+            "page_title": "Before we continue",
+            "final_url": "https://example.com/forbidden.html?url=products",
+        },
+    )
+
+    _recorder(cb).record_fetch_outcome("example.com", result)
+
+    with pytest.raises(CircuitOpenError):
+        cb.check("example.com")
+
+
+def test_rendered_access_gate_reopens_half_open_circuit():
+    clock = [0.0]
+    cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+    cb.record_failure("example.com")
+    clock[0] = 10.0
+    probe = cb.check("example.com")
+    assert isinstance(probe, CircuitProbe)
+    result = TargetResult(
+        url="https://example.com",
+        status="success",
+        debug={"classification": ErrorType.challenge_page.value},
+    )
+
+    _recorder(cb).record_fetch_outcome("example.com", result, probe=probe)
+
+    assert cb.state("example.com") is CircuitState.open
+    with pytest.raises(CircuitOpenError):
+        cb.check("example.com")
+
+
+def test_usable_fetch_closes_half_open_circuit():
+    clock = [0.0]
+    cb = CircuitBreaker(1, 10, clock=lambda: clock[0])
+    cb.record_failure("example.com")
+    clock[0] = 10.0
+    probe = cb.check("example.com")
+    assert isinstance(probe, CircuitProbe)
+    result = TargetResult(
+        url="https://example.com",
+        status="success",
+        data=[{"title": "usable"}],
+    )
+
+    _recorder(cb).record_fetch_outcome("example.com", result, probe=probe)
+
+    assert cb.state("example.com") is CircuitState.closed
 
 
 def test_shared_breaker_only_crosses_jobs_for_transient_same_domain_failure():
