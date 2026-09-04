@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -25,6 +26,7 @@ from scrapeyard.queue.cancellation import (
 
 FetchTargetPageCallable = Callable[..., Awaitable[FetchOutcome]]
 ExtractPageDataCallable = Callable[[object, TargetConfig], list[dict[str, Any]]]
+ExtractPageDebugCallable = Callable[[object, TargetConfig], dict[str, Any]]
 
 
 async def _run_cpu_work(
@@ -115,6 +117,7 @@ async def paginate_target(
     cancellation_guard: CancellationCheckpoint | None = None,
     rate_limiter: DomainRateLimiter | None = None,
     domain_rate_limit: float = 0,
+    extract_page_debug: ExtractPageDebugCallable | None = None,
 ) -> None:
     if target.pagination is None:
         return
@@ -122,7 +125,7 @@ async def paginate_target(
     current_url = (result.debug.get("final_url") if result.debug else None) or target.url
     seen_urls = {pagination_url_key(current_url)}
     next_selector = target.pagination.next
-    for _ in range(target.pagination.max_pages - 1):
+    for _ in range(target.pagination.max_pages):
         await cancellation_checkpoint(
             cancellation_guard,
             "before_pagination_page",
@@ -136,9 +139,20 @@ async def paginate_target(
             budget=budget,
             operation="select_pagination_next",
         )
+        page_debug = None
+        if result.debug is not None:
+            pagination_pages = result.debug.get("pagination_pages") or []
+            page_debug = pagination_pages[-1] if pagination_pages else result.debug
+            page_debug["pagination_current_url"] = current_url
+            page_debug["pagination_next_count"] = len(next_links)
+            page_debug["pagination_next_url"] = None
+        if result.pages_scraped >= target.pagination.max_pages:
+            break
         if not next_links:
             break
         next_url = resolve_href(next_links[0], current_url)
+        if page_debug is not None:
+            page_debug["pagination_next_url"] = next_url
         if not next_url:
             break
         if not await _pagination_url_is_safe(
@@ -159,7 +173,9 @@ async def paginate_target(
             retryable_status,
             adaptive_dir,
             proxy_url,
-            artifacts_dir,
+            str(Path(artifacts_dir) / f"page-{result.pages_scraped + 1}")
+            if artifacts_dir
+            else None,
         )
         rate_limit_kwargs = (
             {}
@@ -201,6 +217,20 @@ async def paginate_target(
             target,
             budget=budget,
         )
+        page_debug = next_outcome.debug
+        if extract_page_debug is not None:
+            page_debug.update(
+                await _run_cpu_work(
+                    extract_page_debug,
+                    page,
+                    target,
+                    budget=budget,
+                )
+            )
+        page_debug["page_number"] = result.pages_scraped + 1
+        page_debug["record_count"] = len(page_data)
+        if result.debug is not None:
+            result.debug.setdefault("pagination_pages", []).append(page_debug)
         result.data.extend(page_data)
         result.pages_scraped += 1
         await cancellation_checkpoint(

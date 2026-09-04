@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import socket
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright._impl._errors import TargetClosedError as PlaywrightTargetClosedError
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
@@ -102,10 +105,12 @@ class FakeResponse:
         request: FakeRequest,
         status: int,
         headers: dict[str, str] | None = None,
+        body: bytes = b"",
     ) -> None:
         self.request = request
         self.status = status
         self.headers = headers or {}
+        self.body = AsyncMock(return_value=body)
 
 
 class FakeRoute:
@@ -638,6 +643,39 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
 
 
 @pytest.mark.asyncio
+async def test_browser_route_ignores_target_closed_during_context_shutdown() -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"disable_resources": False},
+    )
+
+    class ClosedRoute(FakeRoute):
+        async def continue_(self, **_kwargs):
+            raise PlaywrightTargetClosedError("Target page, context or browser has been closed")
+
+    route = ClosedRoute(target.url, "document")
+
+    class RouteFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            await _run_configured_route(kwargs, route)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    response, _debug = await fetch_browser_response(
+        RouteFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+    )
+
+    assert response.status == 200
+
+
+@pytest.mark.asyncio
 async def test_fetch_browser_response_blocks_websockets_when_resources_disabled() -> None:
     target = TargetConfig(
         url="https://example.com",
@@ -993,7 +1031,7 @@ async def test_browser_debug_budget_omits_screenshot_that_does_not_fit(tmp_path)
     page.title = AsyncMock(return_value="Example")
     page.content = AsyncMock(return_value="abc")
     page.screenshot = AsyncMock(return_value=b"1234")
-    budget = _debug_budget(5)
+    budget = _debug_budget(8)
 
     await capture_browser_state(
         page,
@@ -1009,7 +1047,7 @@ async def test_browser_debug_budget_omits_screenshot_that_does_not_fit(tmp_path)
     assert capture["debug_artifact_limits"] == [
         {
             "limit_name": "browser_debug_bytes",
-            "configured_limit": 5,
+            "configured_limit": 8,
             "requested_amount": 4,
             "stored_amount": 0,
             "artifact": "screenshot",
@@ -1017,7 +1055,64 @@ async def test_browser_debug_budget_omits_screenshot_that_does_not_fit(tmp_path)
         }
     ]
     assert list(tmp_path.rglob("*.png")) == []
-    assert budget.browser_debug_bytes == 3
+    assert budget.browser_debug_bytes == 6
+
+
+@pytest.mark.asyncio
+async def test_browser_debug_writes_full_html_and_redacted_fetch_body(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    request = FakeRequest("https://example.com/products", "GET", "fetch")
+    response = FakeResponse(
+        request,
+        200,
+        {"Content-Type": "application/json"},
+        b'{"products":[{"name":"Scope"}],"access_token":"secret"}',
+    )
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(
+        return_value='<html><a href="https://example.com/products?api_key=secret">Scope</a></html>'
+    )
+    page.screenshot = AsyncMock(return_value=b"png")
+
+    class DebugFetcher:
+        @staticmethod
+        async def async_fetch(url: str, **kwargs):
+            context = MagicMock()
+            context.route = AsyncMock()
+            context.route_web_socket = AsyncMock()
+            handlers: dict[str, Callable[[object], None]] = {}
+            context.on.side_effect = lambda event, handler: handlers.setdefault(event, handler)
+            await kwargs["context_setup"](context)
+            handlers["request"](request)
+            handlers["response"](response)
+            handlers["requestfinished"](request)
+            await kwargs["page_action"](page)
+            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    _response, debug = await fetch_browser_response(
+        DebugFetcher,
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    html_path = tmp_path / "artifacts" / debug["html_artifact"]
+    assert html_path.read_text() == (
+        '<html><a href="https://example.com/products?api_key=<redacted>">Scope</a></html>'
+    )
+    body_path = tmp_path / "artifacts" / debug["request_ledger"][0]["body_artifact"]
+    assert json.loads(body_path.read_text()) == {
+        "products": [{"name": "Scope"}],
+        "access_token": "<redacted>",
+    }
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1173,68 @@ async def test_browser_screenshot_exact_boundary_is_written_atomically(tmp_path)
     assert screenshot_path.read_bytes() == b"1234"
     assert list(screenshot_path.parent.glob(".*.tmp")) == []
     assert budget.browser_debug_bytes == 4
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_failure_is_retained_in_debug(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="")
+    page.screenshot = AsyncMock(side_effect=RuntimeError("capture failed"))
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        capture=capture,
+    )
+
+    assert capture["screenshot_requested"] is True
+    assert capture["screenshot_path"] is None
+    assert capture["screenshot_capture_error"] == {
+        "exception_type": "RuntimeError",
+        "message": "capture failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_falls_back_to_viewport(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+    page = MagicMock()
+    page.url = target.url
+    page.title = AsyncMock(return_value="Example")
+    page.content = AsyncMock(return_value="")
+    page.screenshot = AsyncMock(
+        side_effect=[PlaywrightError("full page failed"), b"viewport"]
+    )
+
+    await capture_browser_state(
+        page,
+        browser=target.browser,
+        fetcher_type=FetcherType.dynamic,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        capture=capture,
+    )
+
+    assert page.screenshot.await_args_list == [
+        call(full_page=True),
+        call(full_page=False),
+    ]
+    assert capture["screenshot_mode"] == "viewport_fallback"
+    assert Path(capture["screenshot_path"]).read_bytes() == b"viewport"
 
 
 @pytest.mark.asyncio

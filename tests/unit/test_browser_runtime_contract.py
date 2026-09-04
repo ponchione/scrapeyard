@@ -48,6 +48,15 @@ def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
     assert "deny mount," in apparmor
 
 
+def test_apparmor_installer_persists_profile_across_reboots() -> None:
+    installer = Path("security/install-chromium-apparmor-profile.sh").read_text()
+
+    assert 'PROFILE_PATH="/etc/apparmor.d/$PROFILE_NAME"' in installer
+    assert 'install -o root -g root -m 0644 "$PROFILE_SOURCE" "$PROFILE_PATH"' in installer
+    assert 'apparmor_parser --replace "$PROFILE_PATH"' in installer
+    assert 'rm -f "$PROFILE_PATH"' in installer
+
+
 def test_docker_compose_is_private_and_local_override_is_loopback_only() -> None:
     compose = Path("docker-compose.yml").read_text()
     local = Path("docker-compose.local.yml").read_text()

@@ -646,6 +646,7 @@ async def _scrape_paginated_pages(
         cancellation_guard=context.cancellation_guard,
         rate_limiter=context.rate_limiter,
         domain_rate_limit=context.domain_rate_limit,
+        extract_page_debug=_selector_debug,
     )
 
 

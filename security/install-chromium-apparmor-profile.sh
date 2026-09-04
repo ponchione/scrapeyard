@@ -3,8 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROFILE_PATH="$ROOT_DIR/security/apparmor/scrapeyard-chromium"
+PROFILE_SOURCE="$ROOT_DIR/security/apparmor/scrapeyard-chromium"
 PROFILE_NAME="scrapeyard-chromium"
+PROFILE_PATH="/etc/apparmor.d/$PROFILE_NAME"
 
 usage() {
   echo "Usage: $0 {install|remove|status}" >&2
@@ -26,6 +27,8 @@ case "$1" in
       echo "install must run as root (for example: sudo $0 install)" >&2
       exit 77
     }
+    apparmor_parser --skip-kernel-load --skip-cache "$PROFILE_SOURCE"
+    install -o root -g root -m 0644 "$PROFILE_SOURCE" "$PROFILE_PATH"
     apparmor_parser --replace "$PROFILE_PATH"
     echo "Installed AppArmor profile $PROFILE_NAME"
     ;;
@@ -35,15 +38,17 @@ case "$1" in
       exit 77
     }
     if grep -q "^${PROFILE_NAME} " /sys/kernel/security/apparmor/profiles; then
-      apparmor_parser --remove "$PROFILE_PATH"
+      apparmor_parser --remove "$PROFILE_SOURCE"
       echo "Removed AppArmor profile $PROFILE_NAME"
     fi
+    rm -f "$PROFILE_PATH"
     ;;
   status)
-    if grep -q "^${PROFILE_NAME} " /sys/kernel/security/apparmor/profiles; then
-      echo "$PROFILE_NAME is loaded"
+    if [[ -f "$PROFILE_PATH" ]] && cmp -s "$PROFILE_SOURCE" "$PROFILE_PATH" && \
+      grep -q "^${PROFILE_NAME} " /sys/kernel/security/apparmor/profiles; then
+      echo "$PROFILE_NAME is installed and loaded"
     else
-      echo "$PROFILE_NAME is not loaded" >&2
+      echo "$PROFILE_NAME is missing, stale, or not loaded" >&2
       exit 1
     fi
     ;;

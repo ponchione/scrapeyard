@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -13,8 +14,12 @@ from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
+from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PatchrightTimeoutError
+from patchright._impl._errors import TargetClosedError as PatchrightTargetClosedError
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright._impl._errors import TargetClosedError as PlaywrightTargetClosedError
 from scrapling import Fetcher
 from scrapling.engines.constants import EXTRA_RESOURCES
 
@@ -53,6 +58,7 @@ _MAX_BLOCKED_REQUESTS = 20
 _MAX_REQUEST_LEDGER_ENTRIES = 1000
 _REQUEST_URL_CHARS = 2048
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
+_DEBUG_RESPONSE_TYPES = frozenset({"fetch", "xhr"})
 
 
 class BrowserPageActionError(RuntimeError):
@@ -72,6 +78,8 @@ class BrowserTransportTimeout(TimeoutError):
 
 
 _BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, PatchrightTimeoutError)
+_BROWSER_TARGET_CLOSED_ERRORS = (PlaywrightTargetClosedError, PatchrightTargetClosedError)
+_BROWSER_SCREENSHOT_ERRORS = (PlaywrightError, PatchrightError)
 
 
 async def _request_header_mapping(request: Any) -> dict[str, str] | None:
@@ -137,10 +145,12 @@ class _BrowserRequestCapture:
 
     capture: dict[str, Any]
     request_indexes: dict[int, int]
+    responses: list[tuple[dict[str, Any], Any]]
 
     def __init__(self, capture: dict[str, Any]) -> None:
         self.capture = capture
         self.request_indexes = {}
+        self.responses = []
 
     def _entry(self, request: Any) -> dict[str, Any] | None:
         request_key = id(request)
@@ -209,6 +219,9 @@ class _BrowserRequestCapture:
         entry["retry_after"] = retry_after
         if entry["resource_type"] == "document":
             entry["response_headers"] = headers
+        if entry["resource_type"] in _DEBUG_RESPONSE_TYPES:
+            entry["content_type"] = headers.get("content-type") or headers.get("Content-Type")
+            self.responses.append((entry, response))
 
     def on_request_finished(self, request: Any) -> None:
         entry = self._entry(request)
@@ -261,6 +274,64 @@ class _BrowserRequestCapture:
         context.on("response", on_response)
         context.on("requestfinished", on_request_finished)
         context.on("requestfailed", on_request_failed)
+
+    async def capture_response_bodies(
+        self,
+        artifacts_dir: str | None,
+        budget: RunBudget | None,
+    ) -> None:
+        if artifacts_dir is None:
+            return
+        for index, (entry, response) in enumerate(self.responses, 1):
+            body = getattr(response, "body", None)
+            if not callable(body):
+                entry["body_capture_error"] = "response body API unavailable"
+                continue
+            try:
+                awaitable = body()
+                payload = await awaitable if budget is None else await budget.wait_for(awaitable)
+                if not isinstance(payload, (bytes, bytearray, memoryview)):
+                    raise TypeError("response body API did not return bytes")
+                content_type = str(entry.get("content_type") or "").lower()
+                if not any(marker in content_type for marker in ("json", "text", "javascript")):
+                    entry["body_capture_skipped"] = "non-text content type"
+                    continue
+                suffix = ".json" if "json" in content_type else ".txt"
+                safe_payload = _redact_text_response_body(bytes(payload), content_type)
+                granted = len(safe_payload)
+                if budget is not None:
+                    granted = await budget.reserve_browser_debug_bytes(len(safe_payload))
+                if granted == 0 and safe_payload:
+                    self.capture.setdefault("debug_artifact_limits", []).append(
+                        _debug_limit_diagnostic(
+                            budget,
+                            artifact="response_body",
+                            requested=len(safe_payload),
+                            stored=0,
+                            action="omitted",
+                        )
+                    )
+                    entry["body_capture_skipped"] = "browser debug byte budget"
+                    continue
+                name = f"response-{index:04d}{suffix}"
+                path = Path(artifacts_dir) / "responses" / name
+                try:
+                    await cleanup_safe_to_thread(ensure_directory, path.parent)
+                    await cleanup_safe_to_thread(write_bytes_file, path, safe_payload)
+                except BaseException:
+                    if budget is not None and granted:
+                        await budget.release_browser_debug_bytes(granted)
+                    raise
+                entry["body_artifact"] = f"responses/{name}"
+                entry["body_size"] = len(safe_payload)
+                entry["body_sha256"] = hashlib.sha256(safe_payload).hexdigest()
+            except BudgetExceeded:
+                raise
+            except Exception as exc:
+                entry["body_capture_error"] = (
+                    f"{type(exc).__name__}: "
+                    f"{truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS)}"
+                )
 
 
 @dataclass(slots=True)
@@ -378,7 +449,10 @@ class _BrowserNetworkGuard:
         """Install all guards at context scope; any failure is navigation-fatal."""
 
         async def route_http(route: Any) -> None:
-            await self.route_http(route)
+            try:
+                await self.route_http(route)
+            except _BROWSER_TARGET_CLOSED_ERRORS:
+                return
 
         async def route_websocket(route: Any) -> None:
             await self.route_websocket(route)
@@ -465,6 +539,7 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
         "item_selector_count": None,
         "selector_counts": {},
         "html_excerpt": None,
+        "html_artifact": None,
         "screenshot_path": None,
         "console_messages": [],
         "request_failures": [],
@@ -688,40 +763,89 @@ def _debug_limit_diagnostic(
     }
 
 
-async def _capture_html_excerpt(
+def _redact_text_response_body(payload: bytes, content_type: str) -> bytes:
+    text = payload.decode("utf-8", errors="replace")
+    if "json" in content_type:
+        try:
+            return json.dumps(
+                redact_sensitive_mapping(json.loads(text)),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            pass
+    return redact_userinfo_in_text(text).encode("utf-8")
+
+
+async def _capture_html(
     page: Any,
     capture: dict[str, Any],
     budget: RunBudget | None,
+    *,
+    fetcher_type: FetcherType,
+    artifacts_dir: str | None,
 ) -> None:
     content_awaitable = page.content()
     content = (
         await content_awaitable if budget is None else await budget.wait_for(content_awaitable)
     )
-    excerpt = truncate_text(content)
+    safe_content = redact_userinfo_in_text(content)
+    excerpt = truncate_text(safe_content)
     payload = excerpt.encode("utf-8")
     capture["_html_excerpt_captured"] = True
     if budget is None:
         capture["html_excerpt"] = excerpt
-        return
+    else:
+        granted = await budget.reserve_browser_debug_bytes(len(payload), allow_partial=True)
+        if granted == len(payload):
+            capture["html_excerpt"] = excerpt
+        else:
+            capture.setdefault("debug_artifact_limits", []).append(
+                _debug_limit_diagnostic(
+                    budget,
+                    artifact="html_excerpt",
+                    requested=len(payload),
+                    stored=granted,
+                    action="omitted" if granted == 0 else "truncated",
+                )
+            )
+            capture["html_excerpt_omitted"] = granted == 0
+            capture["html_excerpt"] = (
+                payload[:granted].decode("utf-8", errors="ignore") or None
+                if granted > 0
+                else None
+            )
 
-    granted = await budget.reserve_browser_debug_bytes(len(payload), allow_partial=True)
-    if granted == len(payload):
-        capture["html_excerpt"] = excerpt
+    capture["html_requested"] = artifacts_dir is not None
+    if artifacts_dir is None:
         return
-
-    capture.setdefault("debug_artifact_limits", []).append(
-        _debug_limit_diagnostic(
-            budget,
-            artifact="html_excerpt",
-            requested=len(payload),
-            stored=granted,
-            action="omitted" if granted == 0 else "truncated",
+    full_payload = safe_content.encode("utf-8")
+    granted = len(full_payload)
+    if budget is not None:
+        granted = await budget.reserve_browser_debug_bytes(len(full_payload))
+    if granted == 0 and full_payload:
+        capture.setdefault("debug_artifact_limits", []).append(
+            _debug_limit_diagnostic(
+                budget,
+                artifact="html",
+                requested=len(full_payload),
+                stored=0,
+                action="omitted",
+            )
         )
-    )
-    capture["html_excerpt_omitted"] = granted == 0
-    capture["html_excerpt"] = (
-        payload[:granted].decode("utf-8", errors="ignore") or None if granted > 0 else None
-    )
+        capture["html_artifact"] = None
+        return
+    path = Path(artifacts_dir) / f"{fetcher_type.value}-main.html"
+    try:
+        await cleanup_safe_to_thread(ensure_directory, path.parent)
+        await cleanup_safe_to_thread(write_bytes_file, path, full_payload)
+    except BaseException:
+        if budget is not None and granted:
+            await budget.release_browser_debug_bytes(granted)
+        raise
+    capture["html_artifact"] = path.name
+    capture["html_size"] = len(full_payload)
+    capture["html_sha256"] = hashlib.sha256(full_payload).hexdigest()
 
 
 async def _capture_screenshot(
@@ -732,12 +856,24 @@ async def _capture_screenshot(
     capture: dict[str, Any],
     budget: RunBudget | None,
 ) -> None:
-    screenshot_awaitable = page.screenshot(full_page=True)
-    screenshot = (
-        await screenshot_awaitable
-        if budget is None
-        else await budget.wait_for(screenshot_awaitable)
-    )
+    async def take(*, full_page: bool) -> Any:
+        screenshot_awaitable = page.screenshot(full_page=full_page)
+        return (
+            await screenshot_awaitable
+            if budget is None
+            else await budget.wait_for(screenshot_awaitable)
+        )
+
+    try:
+        screenshot = await take(full_page=True)
+        capture["screenshot_mode"] = "full_page"
+    except _BROWSER_SCREENSHOT_ERRORS as exc:
+        capture["screenshot_full_page_error"] = {
+            "exception_type": type(exc).__name__,
+            "message": truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS),
+        }
+        screenshot = await take(full_page=False)
+        capture["screenshot_mode"] = "viewport_fallback"
     if not isinstance(screenshot, (bytes, bytearray, memoryview)):
         capture["screenshot_path"] = None
         capture["screenshot_capture_error"] = {
@@ -787,6 +923,7 @@ async def capture_browser_state(
 ) -> Any:
     capture.setdefault("console_messages", [])
     capture.setdefault("request_failures", [])
+    capture["screenshot_requested"] = artifacts_dir is not None
     _register_console_capture(page, capture)
     if register_request_failures:
         _register_request_failure_capture(page, capture)
@@ -836,7 +973,13 @@ async def capture_browser_state(
         )
         capture["page_title"] = None
     try:
-        await _capture_html_excerpt(page, capture, budget)
+        await _capture_html(
+            page,
+            capture,
+            budget,
+            fetcher_type=fetcher_type,
+            artifacts_dir=artifacts_dir,
+        )
     except BudgetExceeded:
         raise
     except Exception as exc:
@@ -866,6 +1009,10 @@ async def capture_browser_state(
                 _exception_text(exc),
             )
             capture["screenshot_path"] = None
+            capture["screenshot_capture_error"] = {
+                "exception_type": type(exc).__name__,
+                "message": truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS),
+            }
     return page
 
 
@@ -913,7 +1060,7 @@ async def fetch_browser_response(
         if response_observer is not None:
             response_observer()
         try:
-            return await capture_browser_state(
+            result = await capture_browser_state(
                 page,
                 browser=browser,
                 fetcher_type=fetcher_type,
@@ -923,6 +1070,8 @@ async def fetch_browser_response(
                 require_resolved_dns=require_resolved_dns,
                 register_request_failures=False,
             )
+            await request_capture.capture_response_bodies(artifacts_dir, budget)
+            return result
         except BudgetExceeded as exc:
             capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
             await _close_page_safely(page)

@@ -73,8 +73,21 @@ async def test_paginate_target_fetches_follow_on_pages_and_updates_result():
     result = TargetResult(url=target.url, status="success", data=[{"title": "first"}], pages_scraped=1, debug={"final_url": target.url})
     page1 = _Page([_Element("/page-2")])
     page2 = _Page([])
-    fetch_page = AsyncMock(return_value=FetchOutcome(page=page2, debug={"final_url": "https://example.com/page-2"}))
+    fetch_page = AsyncMock(
+        return_value=FetchOutcome(
+            page=page2,
+            debug={
+                "final_url": "https://example.com/page-2",
+                "page_title": "Page 2",
+                "request_ledger": [{"url": "https://example.com/page-2"}],
+                "screenshot_path": "/tmp/artifacts/page-2/dynamic-main.png",
+            },
+        )
+    )
     extract_page_data = MagicMock(return_value=[{"title": "second"}])
+    extract_page_debug = MagicMock(
+        return_value={"item_selector_count": 1, "selector_counts": {"title": 1}}
+    )
 
     await paginate_target(
         page=page1,
@@ -89,12 +102,32 @@ async def test_paginate_target_fetches_follow_on_pages_and_updates_result():
         adaptive_dir="/tmp/adaptive",
         proxy_url="http://proxy:8080",
         artifacts_dir="/tmp/artifacts",
+        extract_page_debug=extract_page_debug,
     )
 
     assert result.pages_scraped == 2
     assert result.data == [{"title": "first"}, {"title": "second"}]
     fetch_page.assert_awaited_once()
     assert fetch_page.await_args.args[2] == "https://example.com/page-2"
+    assert fetch_page.await_args.args[8] == "/tmp/artifacts/page-2"
+    assert result.debug["pagination_current_url"] == "https://example.com/page-1"
+    assert result.debug["pagination_next_count"] == 1
+    assert result.debug["pagination_next_url"] == "https://example.com/page-2"
+    assert result.debug["pagination_pages"] == [
+        {
+            "final_url": "https://example.com/page-2",
+            "item_selector_count": 1,
+            "page_number": 2,
+            "page_title": "Page 2",
+            "pagination_current_url": "https://example.com/page-2",
+            "pagination_next_count": 0,
+            "pagination_next_url": None,
+            "record_count": 1,
+            "request_ledger": [{"url": "https://example.com/page-2"}],
+            "screenshot_path": "/tmp/artifacts/page-2/dynamic-main.png",
+            "selector_counts": {"title": 1},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -328,6 +361,11 @@ async def test_paginate_target_supports_xpath_next_selector():
     fetch_page.assert_awaited_once()
     assert fetch_page.await_args.args[2] == "https://example.com/page-2"
     assert result.pages_scraped == 2
+    assert result.debug["pagination_pages"][0]["pagination_current_url"] == (
+        "https://example.com/page-2"
+    )
+    assert result.debug["pagination_pages"][0]["pagination_next_count"] == 0
+    assert result.debug["pagination_pages"][0]["pagination_next_url"] is None
 
 
 @pytest.mark.asyncio
