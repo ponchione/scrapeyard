@@ -52,6 +52,40 @@ errors, page counts, and redacted debug details remain under `targets`.
 run); `targets[].observed_count` records how many records extraction observed
 for diagnostics. Fully successful atomic runs publish all records normally.
 
+### Pagination coverage
+
+Job `status: complete` describes execution success, including successful bounded
+samples. Each target summary (and target-group result) includes `pagination`:
+
+```json
+{"stop_reason": "max_pages", "exhausted": false}
+```
+
+| Stop reason | Evidence |
+| --- | --- |
+| `exhausted` | The configured next-page selector matched no links on the last scraped page; `exhausted` is `true`. |
+| `max_pages` | A next link remains at the page cap. Its destination is not fetched or DNS-validated. |
+| `repeated_url` | The next URL, or its redirect destination, was already visited. |
+| `unsafe_next_url` | Destination validation rejected the next link. |
+| `invalid_next_link` | A selected next-page element has no usable href. |
+| `not_configured` | No pagination configuration; coverage is unknown. |
+| `unknown` | No conclusive pagination evidence, including interrupted/failed extraction. |
+
+Only `exhausted` sets the boolean to `true`. The cap takes precedence over URL
+safety/loop checks for an unfetched next link. The final allowed page is inspected
+even when `max_pages: 1`. All returned records remain usable under the existing
+execution/failure policy. Older artifacts can lack `pagination`; treat that as
+unknown coverage.
+
+Exhausting a selector does not establish retailer or category completeness.
+Consumers must declare which target set is an exhaustive business snapshot and
+require successful, error-free, exhausted results for every target contributing
+to a removal scope. A capped, sampled, failed, looping, or unknown target cannot
+authorize absence-based listing removals. Eyebox's declaration is documented in
+its [deployment topology](../../eyebox/docs/deployment-topology.md#listing-removal-coverage).
+The serialized `tests/fixtures/pagination-coverage.json` contract fixture is
+mirrored in Eyebox's `ingest/tests/fixtures/`; update both copies together.
+
 The artifact on disk retains its historical self-describing document so old
 backups and pending webhooks remain readable. The API serializer unwraps that
 document at the boundary. The `legacy-v0` compatibility parameter exposes it

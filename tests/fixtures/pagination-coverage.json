@@ -1,0 +1,58 @@
+{
+  "capped": {
+    "status": "complete",
+    "targets": [
+      {
+        "url": "https://retailer.example/red-dots",
+        "status": "success",
+        "count": 1,
+        "observed_count": 1,
+        "pages_scraped": 1,
+        "pagination": {
+          "stop_reason": "max_pages",
+          "exhausted": false
+        },
+        "error_type": null,
+        "error_detail": null,
+        "errors": [],
+        "debug": {"screenshot_path": null}
+      }
+    ],
+    "results": [
+      {
+        "name": "Example optic",
+        "url": "https://retailer.example/item",
+        "price": "199.99",
+        "_source": "retailer.example"
+      }
+    ]
+  },
+  "exhausted": {
+    "status": "complete",
+    "targets": [
+      {
+        "url": "https://retailer.example/red-dots",
+        "status": "success",
+        "count": 1,
+        "observed_count": 1,
+        "pages_scraped": 1,
+        "pagination": {
+          "stop_reason": "exhausted",
+          "exhausted": true
+        },
+        "error_type": null,
+        "error_detail": null,
+        "errors": [],
+        "debug": {"screenshot_path": null}
+      }
+    ],
+    "results": [
+      {
+        "name": "Example optic",
+        "url": "https://retailer.example/item",
+        "price": "199.99",
+        "_source": "retailer.example"
+      }
+    ]
+  }
+}

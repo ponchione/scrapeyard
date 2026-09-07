@@ -4,7 +4,7 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The five findings below remain outstanding; resolved findings and observations
+The four findings below remain outstanding; resolved findings and observations
 specific to the other branch have been removed. The original documentation
 recheck did not establish that findings on the unmerged branch were fixed.
 
@@ -14,8 +14,8 @@ SQLite transactions, result persistence and cleanup, webhook delivery, runtime
 supervision, and build/security configuration. TD-12 through
 TD-14 are architecture follow-ups: their implementation observations are verified,
 but overload consequences and performance gains have not been measured. The
-Eyebox consumer review adds TD-16 (a completeness-contract mismatch) and TD-17
-(verified default limit differences requiring joint qualification). TD-14 is a
+Eyebox consumer review adds TD-17 (verified default limit differences requiring
+joint qualification). TD-14 is a
 proposed design simplification, not a reproduced correctness defect. Priorities:
 **P1** = security or service availability; **P2** = functional or operational
 correctness; **P3** = efficiency or maintainability improvement, with measurement
@@ -33,7 +33,9 @@ required where the benefit is still a hypothesis.
 
 The full suite ran against the current application code before this documentation
 recheck. The lock, Ruff, mypy, and focused tests were rerun during the recheck.
-A synthetic capped target still finalized successfully with a next link.
+Capped targets still finalize successfully, with explicit non-exhausted pagination
+evidence. Eyebox now requires that evidence plus a declared exhaustive target set
+before authorizing absence-based removals.
 
 The current browser adapter does not capture fetch/XHR response bodies. Repeated
 SQLite readiness probes reuse cached connections and execute only `SELECT 1`;
@@ -69,8 +71,8 @@ downtime primarily delays freshness of Eyebox's persisted catalog. Native cron a
 webhook expansion, horizontal scaling, and metadata consolidation have no new
 consumer requirement from this review. Existing supported behavior remains intact.
 
-For consumer-facing work, address TD-16's removal-safety contract first and qualify
-TD-17's limits alongside it. TD-12's browser memory protection remains important,
+For consumer-facing work, qualify TD-17's limits with the explicit pagination
+coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagination-coverage). TD-12's browser memory protection remains important,
 while the normal scheduler reduces the urgency of a scrape backlog cap. TD-13 is
 the strongest performance candidate after correctness/capacity work. TD-14 is
 deferred until persistence maintenance or measured contention justifies a migration.
@@ -82,7 +84,6 @@ deferred until persistence maintenance or measured contention justifies a migrat
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
-| TD-16 | P2 | Successful capped scrapes can authorize incorrect Eyebox listing removals |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 
 ### TD-12 — Scrape admission lacks a backlog cap and browser-aware memory headroom
@@ -247,65 +248,6 @@ prove that terminal state/result metadata/webhook intent commit together or roll
 back together. Rerun cancellation, retention, recovery, and backup/restore
 qualification. Compare writer contention and API latency under the existing load
 workload before deciding whether consolidation is worth the migration cost.
-
-### TD-16 — Successful capped scrapes can authorize incorrect Eyebox listing removals
-
-**Priority/ownership:** P2; first consumer-correctness follow-up. Requires a
-Scrapeyard result-contract change and an Eyebox adapter/removal-policy change.
-
-**Locations:** `src/scrapeyard/engine/pagination.py:149`;
-`src/scrapeyard/engine/scraper.py:653`;
-`src/scrapeyard/queue/worker.py:1152`, `:1174`;
-`../eyebox/ingest/sources/scrapeyard.py:306`, `:2227`;
-`../eyebox/ingest/pipeline/runner.py:901`;
-`../eyebox/ingest/pipeline/removal.py:17`.
-
-**Observed contract:** reaching `pagination.max_pages` stops pagination without
-marking the target failed or the run partial, even if another next-page link
-exists. Normal finalization can therefore report `complete` for a bounded sample.
-The result has diagnostic page information but no explicit coverage-completeness
-contract. Eyebox unwraps the listing array and sets
-`completed_categories=requested_categories` whenever the job status is `complete`.
-Its removal policy accepts that assertion and marks previously active listings
-absent from the returned set inactive within the authorized scope.
-
-**Local reproduction:** a synthetic target with `max_pages=1`, one scraped page,
-one record, and a next-page link retained `pagination_next_count=1` but finalized
-as `complete`; the next fetch was not called. Independently, passing a `complete`
-payload through Eyebox's real adapter and `_removal_scope()` returned
-`(True, ['red-dots'])` without any evidence that pagination was exhausted.
-Both checks used mocked source data and no network/database writes. Actual
-production deactivations were not reproduced.
-
-**Impact:** a product moving beyond a page cap can appear removed even though it
-is still offered. This matters for price comparison and availability. Existing
-Eyebox safeguards correctly suppress removals for explicitly `partial` results
-and unscoped fetch errors, but do not cover successfully executed samples. Keeping
-the page cap is valid; equating execution success with a full snapshot is the gap.
-
-**Fix direction:** expose per-target pagination stop reason and exhaustion or
-truncation evidence in the result contract, independently of execution success.
-Distinguish exhausted pagination from page limits, repeated URLs, unsafe next
-links, and unknown coverage. Eyebox must preserve and consume that metadata,
-map it to its declared source/category scope, and require affirmative snapshot
-coverage before authorizing removals. Eyebox owns whether the configured target
-set is an exhaustive snapshot or a deliberate sample; Scrapeyard should not
-infer retailer/category business semantics. Missing evidence and capped/sampled
-coverage must suppress absence-based removals while allowing useful returned
-listings to be updated. Account for multiple targets contributing to one scope.
-
-**Acceptance checks:** add a contract fixture where a valid next link remains at
-the cap and verify that the result remains usable but cannot authorize removals.
-Seed a previously seen listing beyond the cap and prove it stays active after
-ingestion. Pair that with an explicitly exhaustive snapshot that legitimately
-removes a missing listing. Cover mixed complete/truncated targets in one category,
-partial failures, loops, and old results lacking the new metadata. Extend
-`tests/unit/test_scraper_pagination_helpers.py` and Eyebox's
-`ingest/tests/test_scrapeyard_source.py`, `test_runner.py`, and `test_removal.py`;
-use a shared serialized contract fixture across both repos without cross-service
-production imports. The existing
-`test_fetch_result_declares_source_completeness` only distinguishes top-level
-`complete` from `partial` and must cover the additional evidence.
 
 ### TD-17 — Eyebox and Scrapeyard limits lack a jointly qualified operating envelope
 

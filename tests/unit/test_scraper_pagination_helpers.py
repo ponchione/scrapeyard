@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
-from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.config.schema import FetcherType, RetryConfig, ScrapeConfig, TargetConfig
 from scrapeyard.engine.pagination import paginate_target, pagination_url_key
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
 from scrapeyard.engine.url_guard import URLResolutionError
+from scrapeyard.queue.worker import _determine_final_status, _format_output
 
 
 class _Element:
@@ -92,6 +95,7 @@ async def test_paginate_target_fetches_follow_on_pages_and_updates_result():
     )
 
     assert result.pages_scraped == 2
+    assert result.pagination_stop_reason == "exhausted"
     assert result.data == [{"title": "first"}, {"title": "second"}]
     fetch_page.assert_awaited_once()
     assert fetch_page.await_args.args[2] == "https://example.com/page-2"
@@ -133,6 +137,7 @@ async def test_paginate_target_stops_when_next_url_is_current_page():
     )
 
     fetch_page.assert_not_awaited()
+    assert result.pagination_stop_reason == "repeated_url"
     extract_page_data.assert_not_called()
     assert result.pages_scraped == 1
     assert result.data == [{"title": "first"}]
@@ -173,6 +178,7 @@ async def test_paginate_target_stops_when_next_url_is_unsafe():
     )
 
     fetch_page.assert_not_awaited()
+    assert result.pagination_stop_reason == "unsafe_next_url"
     assert result.pages_scraped == 1
     assert result.data == [{"title": "first"}]
 
@@ -213,6 +219,7 @@ async def test_paginate_target_stops_when_next_url_was_seen_after_redirect():
     )
 
     fetch_page.assert_awaited_once()
+    assert result.pagination_stop_reason == "repeated_url"
     extract_page_data.assert_not_called()
     assert result.pages_scraped == 1
     assert result.data == [{"title": "first"}]
@@ -246,6 +253,7 @@ async def test_paginate_target_noops_without_pagination_config():
     )
 
     fetch_page.assert_not_called()
+    assert result.pagination_stop_reason == "not_configured"
     assert result.pages_scraped == 1
 
 
@@ -283,6 +291,7 @@ async def test_paginate_target_max_pages_one_is_total_page_bound():
     )
 
     fetch_page.assert_not_awaited()
+    assert result.pagination_stop_reason == "max_pages"
     assert result.pages_scraped == 1
 
 
@@ -328,6 +337,59 @@ async def test_paginate_target_supports_xpath_next_selector():
     fetch_page.assert_awaited_once()
     assert fetch_page.await_args.args[2] == "https://example.com/page-2"
     assert result.pages_scraped == 2
+    assert result.pagination_stop_reason == "exhausted"
+
+
+@pytest.mark.parametrize("scenario", ["capped", "exhausted"])
+async def test_pagination_result_matches_shared_consumer_contract(scenario, monkeypatch):
+    from scrapeyard.engine import scraper
+
+    fixture = json.loads(
+        (Path(__file__).parents[1] / "fixtures/pagination-coverage.json").read_text()
+    )[scenario]
+    config = ScrapeConfig.model_validate({
+        "project": "eyebox", "name": "coverage-optics",
+        "output": {"group_by": "merge"},
+        "target": {
+            "url": fixture["targets"][0]["url"],
+            "selectors": {"name": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 1},
+        },
+    })
+    page = _Page([_Element("?page=2")] if scenario == "capped" else [])
+    fetch_page = AsyncMock(return_value=FetchOutcome(page=page, debug={}))
+    monkeypatch.setattr(scraper, "_fetch_target_page", fetch_page)
+    monkeypatch.setattr(scraper, "_selector_debug", lambda *_: {})
+    monkeypatch.setattr(
+        scraper, "_extract_page_data",
+        lambda *args, **kwargs: [
+            {key: value for key, value in fixture["results"][0].items() if key != "_source"}
+        ],
+    )
+    result = await scraper.scrape_target(config.target, False, config.retry)
+    status = _determine_final_status(config, [result], result.data)
+    artifact = _format_output(config, [result], "contract-run", status, result.errors)
+
+    assert {key: artifact[key] for key in fixture} == fixture
+    fetch_page.assert_awaited_once()
+
+
+async def test_pagination_missing_href_is_unknown_coverage():
+    target = TargetConfig.model_validate({
+        "url": "https://example.com/products", "selectors": {"title": "h1"},
+        "pagination": {"next": "a.next", "max_pages": 2},
+    })
+    result = TargetResult(url=target.url, pages_scraped=1)
+    fetch_page = AsyncMock()
+    await paginate_target(
+        page=_Page([_Element()]), target=target, result=result,
+        fetch_target_page=fetch_page, extract_page_data=MagicMock(),
+        retry_handler=MagicMock(), fetcher_cls=object(), adaptive=False,
+        retryable_status=set(), adaptive_dir="/tmp/adaptive",
+        proxy_url=None, artifacts_dir=None,
+    )
+    assert result.pagination_stop_reason == "invalid_next_link"
+    fetch_page.assert_not_awaited()
 
 
 @pytest.mark.asyncio
