@@ -4,15 +4,14 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The six findings below still apply to `main`; resolved findings and observations
-specific to the other branch have been removed. This recheck changes documentation
-only and does not establish that findings on the unmerged branch were fixed.
+The five findings below remain outstanding; resolved findings and observations
+specific to the other branch have been removed. The original documentation
+recheck did not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. Remaining finding TD-04 has a local
-reproduction and a directly verifiable reference trace. TD-12 through
+supervision, and build/security configuration. TD-12 through
 TD-14 are architecture follow-ups: their implementation observations are verified,
 but overload consequences and performance gains have not been measured. The
 Eyebox consumer review adds TD-16 (a completeness-contract mismatch) and TD-17
@@ -34,7 +33,6 @@ required where the benefit is still a hypothesis.
 
 The full suite ran against the current application code before this documentation
 recheck. The lock, Ruff, mypy, and focused tests were rerun during the recheck.
-Temporary-directory reproductions reconfirmed the directory-fanout failure.
 A synthetic capped target still finalized successfully with a next link.
 
 The current browser adapter does not capture fetch/XHR response bodies. Repeated
@@ -81,51 +79,11 @@ deferred until persistence maintenance or measured contention justifies a migrat
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
 | TD-16 | P2 | Successful capped scrapes can authorize incorrect Eyebox listing removals |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-04 — Directory fanout can permanently prevent artifact reconciliation
-
-**Locations:** `src/scrapeyard/storage/result_store.py:743`, `:822`;
-`src/scrapeyard/storage/filesystem.py:240`;
-`src/scrapeyard/api/dependencies.py:82`.
-
-`_directory_entries()` rejects a directory once it has more than
-`max_artifact_tree_entries` children. `_scan_artifacts()` applies that per-tree
-limit to the result root, project directories, and job directories before applying
-its run cursor. Consequently, a project with more than 10,000 job directories
-(the default configured limit) cannot be scanned at all. Raising the batch size
-does not help.
-
-This is reachable through ordinary ad-hoc usage over time: every submission has a
-unique job name, while result deletion removes run directories and leaves their
-empty job/project parents. Retention therefore does not bound project fanout.
-Once the limit is crossed, orphan and temporary-file reconciliation under that
-project repeatedly fails, even when most job directories are empty.
-
-**Reproduced at a small equivalent limit:** instantiate `LocalResultStore` with
-`max_artifact_tree_entries=2`, create `project/job-{0,1,2}/run`, and invoke
-`_scan_artifacts(..., limit=2, after=None, deadline_reached=lambda: False)` twice.
-Both passes return zero entries and `exhausted=True`, with:
-
-```text
-ReconciliationOperationFailure(action='scan_project', identifier='project',
-                               error_type='DirectoryEntryLimitExceeded')
-```
-
-**Fix direction:** separate the per-run artifact safety ceiling from enumeration
-of project/job/run namespaces. Enumeration must make bounded cursor progress
-through large parent directories instead of rejecting their entire contents.
-Also remove empty parent directories opportunistically where safe; use `rmdir`
-and tolerate non-empty/racing directories, never recursive parent deletion.
-
-**Regression check:** exceed the configured fanout using both empty job directories
-and jobs with orphan runs; repeated cleanup passes must eventually visit every run.
-Retain tests that reject oversized individual artifact trees and symlink traversal.
 
 ### TD-12 — Scrape admission lacks a backlog cap and browser-aware memory headroom
 

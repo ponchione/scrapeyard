@@ -49,3 +49,8 @@ objects are verified.
 | `018_add_run_snapshots_and_schedule_health.sql` | Add encrypted run configuration snapshots, failure classification, terminal-reconciliation retry state, and durable schedule health. |
 | `019_create_queued_run_snapshots.sql` | Persist an encrypted immutable configuration snapshot for each accepted delivery before it enters Redis. |
 | `020_create_result_reconciliation_state.sql` | Persist metadata and filesystem keyset cursors so artifact scans remain fair across process restarts. |
+
+The filesystem cursor uses empty trailing strings for project/job namespace
+entries without runs; all three `NULL` values mean the scan has reset. This fits
+the existing `020` schema and lets empty or malformed parents consume a bounded
+page and resume after restart without a migration.

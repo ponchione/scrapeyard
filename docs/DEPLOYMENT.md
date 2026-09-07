@@ -657,7 +657,16 @@ browser-debug byte limits (covering both committed targets and interrupted
 atomic-writer temp files) and by
 `SCRAPEYARD_STORAGE_RECONCILIATION_MAX_ENTRIES_PER_RUN`. Exceeding either tree
 bound records a typed scan failure and leaves the directory untouched. The
-same entry ceiling bounds each project/job hierarchy directory listing.
+tree entry ceiling does not limit project, job, or run namespace fanout. Those
+directories use lexicographic cursor pages, keeping only a batch-sized selection
+of names plus lookahead in memory. Empty and malformed parents also consume the
+filesystem page budget, so they cannot prevent progress to later runs. Selecting
+a page still enumerates the parent directory's names, with cooperative deadline
+checks; allow enough cleanup time for that enumeration on very large directories.
+Destructive reconciliation opportunistically removes empty job/project parents
+with non-following `rmdir` calls, including parents left by retention. Nonempty
+or racing parents remain for a later pass; the results root is never removed.
+These empty-parent removals do not count as removed run artifacts.
 
 An unreferenced directory is eligible only when the run directory and every
 non-followed contained entry are older than
@@ -703,8 +712,9 @@ retry. A top-level reconciliation exception is isolated so webhook scrubbing
 can continue; cancellation propagates, and failures retry on the next six-hour
 pass.
 
-Scanning is proportional to retained metadata plus files below the results
-root. JSON parsing, directory walks, non-following size accounting, and removal
+Scanning visits retained metadata and files below the results root; namespace
+names are enumerated again when selecting subsequent pages. JSON parsing,
+directory walks, non-following size accounting, and removal
 run in worker threads. Allow I/O headroom and monitor cleanup duration and disk
 capacity on large trees. There is no content repair, metadata synthesis,
 filesystem-to-metadata recovery, or cross-instance reconciliation lease.
