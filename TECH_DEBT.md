@@ -1,54 +1,60 @@
 # Codebase audit: technical debt and architecture follow-ups
 
-Audited on **2026-09-07**, against commit
-`e8b505cb205272231a9810e86ec3ea33bddf2e9c`.
-This is an audit report; application code was not changed.
+Originally audited on **2026-09-07**, against commit
+`e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
+`agent/production-readiness` branch. All outstanding entries were rechecked on
+**2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
+The nine findings below still apply to `main`; resolved findings and observations
+specific to the other branch have been removed. This recheck changes documentation
+only and does not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. Findings through TD-11 have either a
-local reproduction or a directly verifiable failing check/reference trace.
-TD-12 through TD-15 are architecture follow-ups from the same audited revision:
-their implementation observations are verified, but overload consequences and
-performance gains have not been measured. The Eyebox consumer review adds TD-16
-(a locally reproduced completeness-contract mismatch) and TD-17 (verified default
-limit differences requiring joint qualification). TD-14 is a proposed design
-simplification, not a reproduced correctness defect. Priorities:
+supervision, and build/security configuration. Remaining findings through TD-11
+have a local reproduction or a directly verifiable reference trace. TD-12 through
+TD-14 are architecture follow-ups: their implementation observations are verified,
+but overload consequences and performance gains have not been measured. The
+Eyebox consumer review adds TD-16 (a completeness-contract mismatch) and TD-17
+(verified default limit differences requiring joint qualification). TD-14 is a
+proposed design simplification, not a reproduced correctness defect. Priorities:
 **P1** = security or service availability; **P2** = functional or operational
 correctness; **P3** = efficiency or maintainability improvement, with measurement
 required where the benefit is still a hypothesis.
 
 ## Verification
 
-| Check | Observed result |
+| Check | Observed result on current `main` |
 | --- | --- |
 | `poetry check --lock` | Passed |
 | `poetry run ruff check src tests scripts` | Passed |
-| `poetry run pytest` | 2,139 passed, 19 skipped; 88.64% coverage; 176.65 seconds |
-| `SCRAPEYARD_RUN_LIVE_BROWSER=1 poetry run pytest -W error --no-cov -m live_browser tests/live_browser -q` | 3 passed |
-| `poetry run mypy src/scrapeyard` | Failed: three errors in `engine/browser_debug.py` |
-| `poetry run python scripts/audit_browser_security.py --dockerfile Dockerfile` | Failed: browser security review expired |
+| `poetry run mypy --no-incremental src` | Passed: 94 source files |
+| `poetry run pytest -W error` | 2,039 passed, 15 skipped; 88.78% coverage; 169.11 seconds |
+| Focused unit tests for browser/debug, CI, readiness, databases, cleanup, pagination, memory, config, and imports | 550 passed across 12 modules |
 
-The local environment uses Python 3.12. The default suite's skips include live
-Redis tests; real Redis execution, container builds, host firewall installation,
-release qualification, and a fresh external dependency/CVE audit were not run.
-The expired review finding below is **not** an assertion of a particular browser
-vulnerability. Existing accepted debt in [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md)
-has not been relabeled as a newly discovered defect.
+The full suite ran against the current application code before this documentation
+recheck. The lock, Ruff, mypy, and focused tests were rerun during the recheck.
+Temporary-directory reproductions reconfirmed the cleanup short-page failure and
+directory-fanout failure. A synthetic capped target still finalized successfully
+with a next link. Transform timing measurements below were refreshed.
 
-The architecture follow-up also passed `poetry run ruff check src tests` and
-120 focused tests covering instance ownership, leases, terminal webhook atomicity,
-worker budgets, the pool, and scrape/schedule/cancellation integration. That pass
-did not rerun live Redis/browser tests or load qualification.
+The current browser adapter does not capture fetch/XHR response bodies. Repeated
+SQLite readiness probes reuse cached connections and execute only `SELECT 1`;
+tracing nine probes found no integrity scans or schema writes. The expired browser
+review policy and validator belong to the unmerged branch and are absent from
+`main` and its CI/Docker build. Their removal from this list does not attest that a
+browser security review was completed.
 
-The Eyebox review used its checkout at commit
-`0cbfd53f133c58e94a80a01154a1e65c2c0f2ce2`. From `../eyebox/ingest`,
-`./.venv/bin/python -m pytest tests/test_scheduled_scrapeyard.py tests/test_scheduler.py tests/test_scrapeyard_source.py tests/test_removal.py --rootdir=. -q`
-passed **120 tests**. Separate synthetic checks reproduced both sides of TD-16
-without network requests or database writes. Config inventory and code references
-describe the checked-in workload, not the active production allow-list or measured
-traffic. No live scraping, production inspection, or new load benchmark was run.
+The local environment uses Python 3.12. The full suite's 15 skips are live Redis
+tests. Real Redis/browser execution, container builds, host firewall installation,
+release qualification, and a fresh external dependency/CVE audit were not run
+for this recheck.
+
+The Eyebox adapter, removal policy, configuration defaults, and deployment runbooks
+were inspected read-only in the checkout at `d2cbb59`. They still support the
+remaining consumer findings, and the joint deployment qualification worksheet is
+still pending. Eyebox tests were not rerun. Config inventory describes checked-in
+workloads, not the active production allow-list or measured traffic.
 
 ## Eyebox consumer assessment
 
@@ -69,9 +75,8 @@ consumer requirement from this review. Existing supported behavior remains intac
 For consumer-facing work, address TD-16's removal-safety contract first and qualify
 TD-17's limits alongside it. TD-12's browser memory protection remains important,
 while the normal scheduler reduces the urgency of a scrape backlog cap. TD-13 is
-the strongest performance candidate after correctness/capacity work. TD-15 remains
-an operational improvement; TD-14 is deferred until persistence maintenance or
-measured contention justifies a migration.
+the strongest performance candidate after correctness/capacity work. TD-14 is
+deferred until persistence maintenance or measured contention justifies a migration.
 
 ## Findings
 
@@ -79,15 +84,11 @@ measured contention justifies a migration.
 | --- | --- | --- |
 | TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
-| TD-05 | P2 | Browser debug capture reads bodies before checking eligibility or capacity |
-| TD-08 | P2 | The required browser security review has expired |
-| TD-09 | P2 | The current source fails the required type-check gate |
 | TD-10 | P3 | Transform pipeline scanning repeatedly copies growing prefixes |
 | TD-11 | P3 | Superseded internal helpers have no runtime callers |
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
-| TD-15 | P2 | Readiness performs database-wide integrity scans on every request |
 | TD-16 | P2 | Successful capped scrapes can authorize incorrect Eyebox listing removals |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 
@@ -168,89 +169,6 @@ and tolerate non-empty/racing directories, never recursive parent deletion.
 and jobs with orphan runs; repeated cleanup passes must eventually visit every run.
 Retain tests that reject oversized individual artifact trees and symlink traversal.
 
-### TD-05 — Browser debug capture reads bodies before checking eligibility or capacity
-
-**Location:** `src/scrapeyard/engine/browser_debug.py:278`, particularly lines 291–303.
-
-With `SCRAPEYARD_BROWSER_DEBUG_ENABLED=true`, `capture_response_bodies()` calls and
-awaits every retained fetch/XHR response's `body()` before checking whether its
-content type is supported or debug space remains. It then decodes/redacts the full
-payload before asking the budget for storage capacity. Even an already-exhausted
-debug budget continues downloading and processing bodies that will be discarded.
-
-**Reproduced:** fully reserve a one-byte debug budget, enqueue a response with
-`content_type='application/octet-stream'`, and let its async `body()` record calls.
-Capture calls `body()` and only afterward reports
-`body_capture_skipped='non-text content type'`. The same ordering is present for
-text bodies rejected by the byte budget.
-
-**Impact:** avoidable IPC, memory allocation, and CPU work for binary/oversized
-responses and after debug capacity is exhausted. A large body is fully materialized
-before its size can cause omission; the debug byte setting bounds stored output,
-not these allocations. These reproduction checks did not attempt to cause OOM.
-
-**Fix direction:** reject unsupported content types and exhausted capacity before
-requesting bodies. Bound capture of eligible bodies before full materialization;
-a `Content-Length` precheck alone cannot establish that bound for missing or
-misleading lengths. If the browser API cannot provide bounded capture, omit such
-optional bodies or capture them through a transport that can enforce the limit.
-Keep supplementary diagnostics from consuming the rest of an otherwise useful run.
-
-**Regression check:** `body()` must not be invoked for binary responses or when
-capacity is exhausted. Include oversized and unknown-length text responses, with
-an explicit assertion about the capture limit rather than just the final file size.
-
-### TD-08 — The required browser security review has expired
-
-**Locations:** `security/browser-policy.json:4`;
-`scripts/audit_browser_security.py:43`;
-`.github/workflows/ci.yml:55`; `Dockerfile:169`.
-
-The committed review expires on **2026-08-15**. On the audit date, the required
-command exits with status 2:
-
-```text
-Browser security review expired on 2026-08-15 (as of 2026-09-07)
-```
-
-CI explicitly runs this check, and an uncached Docker build invokes the same policy
-validator. The review gate currently prevents those paths from completing.
-
-**Fix direction:** perform and record the actual browser/dependency security review,
-refreshing versions, hashes, manifests, and policy dates as its findings require.
-Do not just extend the expiration or disable the check. This audit did not establish
-whether the pinned browser releases have a specific current vulnerability.
-
-**Validation:** run the validator using the real current date, then the existing
-browser security tests, runtime manifest checks, and container qualification for
-any changed browser/runtime inputs.
-
-### TD-09 — The current source fails the required type-check gate
-
-**Locations:** `src/scrapeyard/engine/browser_debug.py:137`, `:307`, `:829`;
-`.github/workflows/ci.yml:57`.
-
-`poetry run mypy src/scrapeyard` reports:
-
-```text
-browser_debug.py:137: Item "None" of "Any | None" has no attribute "items" [union-attr]
-browser_debug.py:307: Argument 1 to "_debug_limit_diagnostic" has incompatible type
-                     "RunBudget | None"; expected "RunBudget" [arg-type]
-browser_debug.py:829: Argument 1 to "_debug_limit_diagnostic" has incompatible type
-                     "RunBudget | None"; expected "RunBudget" [arg-type]
-```
-
-These are verified CI failures, not three additional proven runtime crashes.
-The latter two depend on relationships between `granted`, payload size, and budget
-presence that the type checker cannot infer. The first relies on a `hasattr` check
-that does not narrow this optional value sufficiently.
-
-**Fix direction:** express the narrowing explicitly: validate the header mapping
-type and keep budget-dependent diagnostics within a non-optional budget branch.
-Avoid broad `Any` casts or suppressing type errors across the module.
-
-**Validation:** `poetry run mypy src`, Ruff, and the browser debug unit tests.
-
 ### TD-10 — Transform pipeline scanning repeatedly copies growing prefixes
 
 **Location:** `src/scrapeyard/config/transforms.py:56`.
@@ -261,15 +179,14 @@ growing prefix, making scanning quadratic in the step length. The pipeline-step
 limit is applied only after scanning. Submission validation reaches this code
 before the queued run's duration budget exists.
 
-**Local measurements**, calling `split_transform_pipeline('append("' + 'x' * n + '")')`:
+**Recheck measurements** (median of three scans), calling
+`split_transform_pipeline('append("' + 'x' * n + '")')`:
 
-| Argument length | One observed scan |
+| Argument length | Median scan |
 | --- | --- |
-| 20,000 | 0.0037 seconds |
-| 40,000 | 0.0112 seconds |
-| 80,000 | 0.0364 seconds |
-| 160,000 | 0.1146 seconds |
-| 250,000 | 0.2549 seconds |
+| 40,000 | 0.0118 seconds |
+| 80,000 | 0.0369 seconds |
+| 160,000 | 0.1304 seconds |
 
 These are local diagnostic timings, not production throughput claims. The largest
 example fits within the default request body ceiling with a small YAML envelope;
@@ -334,8 +251,9 @@ does not account for scrape duration or the amount of already-accepted work.
 `_check_memory()` runs only during enqueue and reads `/proc/self/statm`, so it
 excludes browser subprocesses. Already-queued work can continue starting after
 that check. Compose limits Redis to 512 MiB and the application container,
-including its browsers, to 4 GiB; these are final resource ceilings, not admission
-policies.
+including its browsers, to 4 GiB. The Compose enqueue threshold is 3 GiB of
+Python RSS, leaving nominal headroom but still excluding browser memory. These
+settings do not provide a backlog cap or check container usage before execution.
 
 **Impact:** sustained submissions faster than completion can grow Redis and
 SQLite state and queue latency. Browser memory can exhaust the application
@@ -356,7 +274,7 @@ Use container/cgroup memory usage, with a documented fallback outside containers
 and reserve headroom before starting more browser work. Keep the hard container
 limits and existing browser permits. Put any new limits in `ServiceSettings` as
 `SCRAPEYARD_*` settings, and expose admission rejections/headroom in existing
-metrics. This complements TD-05's optional debug-body allocation fix.
+metrics.
 
 **Acceptance checks:** extend `tests/live_redis/test_queue_lifecycle.py` with slow
 workers and concurrent submissions exceeding a small configured cap. Assert the
@@ -371,7 +289,7 @@ idempotent retry path so overload does not create a new remote job per attempt.
 ### TD-13 — Page fetches repeatedly create HTTP clients and browser sessions
 
 **Locations:** `src/scrapeyard/engine/basic_fetch.py:143`;
-`src/scrapeyard/engine/browser_fetchers.py:82`, `:157`;
+`src/scrapeyard/engine/browser_debug.py:699` and the installed Scrapling engines;
 `src/scrapeyard/engine/scraper.py:219`, `:618`;
 `src/scrapeyard/engine/pagination.py`.
 
@@ -385,10 +303,11 @@ allow-list before considering broad pooling. References: `../eyebox/configs/`
 and `../eyebox/configs/brownells-optics.yaml`.
 
 **Observed design:** every basic request creates and closes an `AsyncHTTPTransport`
-and `AsyncClient`, including individual redirect hops. Each Chromium fetch enters
-a newly constructed Scrapling session; Camoufox launches a browser inside each
-fetch. Pagination repeatedly calls these fetch paths, so normal local-browser
-pagination pays session/browser setup for each page and discards session state.
+and `AsyncClient`, including individual redirect hops. Each local Chromium fetch
+launches a browser and context through Scrapling's `PlaywrightEngine`;
+`CamoufoxEngine` enters `AsyncCamoufox` inside each fetch. Pagination repeatedly
+calls these fetch paths, so normal local-browser pagination pays session/browser
+setup for each page and discards session state.
 Externally attached CDP browsers are a separate case; a new session does not
 necessarily launch a new external browser process.
 
@@ -470,52 +389,6 @@ prove that terminal state/result metadata/webhook intent commit together or roll
 back together. Rerun cancellation, retention, recovery, and backup/restore
 qualification. Compare writer contention and API latency under the existing load
 workload before deciding whether consolidation is worth the migration cost.
-
-### TD-15 — Readiness performs database-wide integrity scans on every request
-
-**Locations:** `src/scrapeyard/main.py:674`, `:819`;
-`src/scrapeyard/storage/database.py:573`;
-`src/scrapeyard/runtime/health.py:104`; `docker-compose.yml:98`.
-
-**Eyebox assessment:** still P2, secondary to consumer correctness and browser
-capacity. Its normal polling calls `/jobs/{id}`, not `/health/ready`, so the
-five-second default polling interval does not amplify these integrity scans.
-Measure actual monitoring frequency and retained history before prioritizing
-the optimization; container/operator readiness checks still exercise this path.
-
-**Observed design:** each `/health/ready` request opens fresh connections to all
-three databases, runs `PRAGMA quick_check(1)`, acquires `BEGIN IMMEDIATE`, creates
-a temporary-named table in the main schema, and rolls it back. Compose probes
-every 30 seconds; additional readiness callers repeat the same work. Public
-`/health` and `/health/live` already use the cheap liveness path and are unaffected.
-
-SQLite documents [`quick_check` as O(N)](https://www.sqlite.org/pragma.html#pragma_quick_check)
-in database row count. The `(1)` bounds reported errors, not rows scanned. As
-history grows, healthy databases can require increasing scan time, and concurrent
-probes add read work and compete for the write reservation. This can increase
-latency or cause readiness timeouts under load; that growth effect has not been
-measured locally.
-
-**Fix direction:** keep a small bounded read/write capability check in readiness
-using SQLite's VFS and a rollback-safe operation without per-request schema DDL.
-Move full integrity scans to startup and/or supervised periodic maintenance,
-with a configured interval, last-success time, and a recorded failure that still
-degrades readiness. Define an explicit maximum age for that result so caching
-does not silently hide a stopped checker. Coalesce concurrent probe work and
-ensure timed-out/cancelled SQLite operations release their connections and locks.
-Preserve missing/unwritable database detection, deleted-WAL/SHM diagnostics, and
-the existing result-storage/disk checks. Do not reopen live SQLite files with
-raw filesystem descriptors; see the accepted portability note in
-`docs/TECHNICAL_DEBT.md`.
-
-**Acceptance checks:** populate small and large databases in temporary directories
-and compare repeated/concurrent readiness latency while writes continue. Assert
-that each readiness call does not rescan the database or create schema objects,
-and that concurrent callers do not multiply expensive maintenance scans. Extend
-`tests/unit/test_database.py` and `tests/unit/test_health.py` for stale/failed
-integrity results, corruption detection through maintenance, probe cancellation,
-and missing/unwritable state. Keep the cached-WAL/external-reader regression and
-rerun the readiness failure-injection phase of release qualification.
 
 ### TD-16 — Successful capped scrapes can authorize incorrect Eyebox listing removals
 
