@@ -1101,6 +1101,10 @@ def _target_result_details(
         "status": result.status_value,
         "count": len(result.data) if records_accepted else 0,
         "observed_count": len(result.data),
+        "pagination": {
+            "stop_reason": result.pagination_stop_reason,
+            "exhausted": result.pagination_stop_reason == "exhausted",
+        },
         "debug": debug,
         "error_type": result.error_type.value if result.error_type else None,
         "error_detail": (

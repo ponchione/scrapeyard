@@ -117,12 +117,15 @@ async def paginate_target(
     domain_rate_limit: float = 0,
 ) -> None:
     if target.pagination is None:
+        result.pagination_stop_reason = "not_configured"
         return
 
     current_url = (result.debug.get("final_url") if result.debug else None) or target.url
     seen_urls = {pagination_url_key(current_url)}
     next_selector = target.pagination.next
-    for _ in range(target.pagination.max_pages - 1):
+    # Inspect the last permitted page too: execution success alone does not
+    # establish that pagination exhausted the configured listing scope.
+    for page_number in range(1, target.pagination.max_pages + 1):
         await cancellation_checkpoint(
             cancellation_guard,
             "before_pagination_page",
@@ -137,17 +140,24 @@ async def paginate_target(
             operation="select_pagination_next",
         )
         if not next_links:
+            result.pagination_stop_reason = "exhausted"
             break
         next_url = resolve_href(next_links[0], current_url)
         if not next_url:
+            result.pagination_stop_reason = "invalid_next_link"
+            break
+        if page_number == target.pagination.max_pages:
+            result.pagination_stop_reason = "max_pages"
             break
         if not await _pagination_url_is_safe(
             next_url,
             budget=budget,
             cancellation_guard=cancellation_guard,
         ):
+            result.pagination_stop_reason = "unsafe_next_url"
             break
         if pagination_url_key(next_url) in seen_urls:
+            result.pagination_stop_reason = "repeated_url"
             break
 
         fetch_args = (
@@ -191,6 +201,7 @@ async def paginate_target(
         final_url = next_outcome.debug.get("final_url") or next_url
         final_key = pagination_url_key(final_url)
         if final_key in seen_urls:
+            result.pagination_stop_reason = "repeated_url"
             break
         seen_urls.add(final_key)
         page = next_outcome.page

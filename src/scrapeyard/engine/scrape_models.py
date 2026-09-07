@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from scrapeyard.models.job import ErrorType
 
@@ -28,6 +28,10 @@ class TargetResult:
     http_status: int | None = None
     error_detail: str | None = None
     debug: dict[str, Any] | None = None
+    pagination_stop_reason: Literal[
+        "unknown", "not_configured", "exhausted", "max_pages",
+        "repeated_url", "unsafe_next_url", "invalid_next_link",
+    ] = "unknown"
 
     def __post_init__(self) -> None:
         self.status = TargetStatus(self.status)
