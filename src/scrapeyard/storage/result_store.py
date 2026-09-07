@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ import shutil
 import stat
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -827,106 +828,144 @@ class LocalResultStore:
         after: tuple[str, str, str] | None,
         deadline_reached: Callable[[], bool],
     ) -> tuple[list[_ScannedArtifactEntry], bool]:
-        """Scan at most *limit* run entries after a deterministic cursor."""
+        """Scan at most *limit* runs or empty/malformed namespace entries."""
 
         scanned_entries: list[_ScannedArtifactEntry] = []
-        processed = 0
         root = self._results_dir.resolve(strict=False)
-        try:
-            project_entries = self._directory_entries(root)
-        except FileNotFoundError:
-            return scanned_entries, True
-        except (OSError, ValueError) as exc:
-            state.operation_failures.append(
-                ReconciliationOperationFailure("scan_root", ".", type(exc).__name__)
-            )
-            return scanned_entries, True
 
-        for project_name, project_path, project_stat in project_entries:
-            if after is not None and project_name < after[0]:
-                continue
+        def namespace_leaves(parts: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
+            directory = root.joinpath(*parts)
             try:
-                if not stat.S_ISDIR(project_stat.st_mode) or stat.S_ISLNK(project_stat.st_mode):
+                if deadline_reached():
+                    raise FilesystemDeadlineReached
+                if parts and not stat.S_ISDIR(directory.lstat().st_mode):
                     state.malformed_entries_ignored += 1
-                    continue
-                job_entries = self._directory_entries(project_path)
+                    yield parts
+                    return
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(directory, flags)
+                try:
+                    with os.scandir(descriptor) as entries:
+                        def remaining_names() -> Iterator[str]:
+                            for entry in entries:
+                                if deadline_reached():
+                                    raise FilesystemDeadlineReached
+                                if after is None or (*parts, entry.name) >= after[:len(parts) + 1]:
+                                    yield entry.name
+
+                        # One lookahead plus the parent containing the previous cursor.
+                        # ponytail: paging rescans names; index namespaces if enumeration
+                        # becomes the dominant part of the cleanup deadline.
+                        names = heapq.nsmallest(limit + 2, remaining_names())
+                finally:
+                    os.close(descriptor)
+            except FilesystemDeadlineReached:
+                raise
+            except FileNotFoundError:
+                if parts:
+                    yield parts
+                return
             except (OSError, ValueError) as exc:
                 state.operation_failures.append(
                     ReconciliationOperationFailure(
-                        "scan_project", project_name[:80], type(exc).__name__
+                        ("scan_root", "scan_project", "scan_job")[len(parts)],
+                        "/".join(part[:80] for part in parts) or ".",
+                        type(exc).__name__,
                     )
                 )
-                continue
-            for job_name, job_path, job_stat in job_entries:
-                if after is not None and (project_name, job_name) < after[:2]:
+                if parts:
+                    yield parts
+                return
+            if not names and parts:
+                yield parts
+            for name in names:
+                child = (*parts, name)
+                if len(child) == _RESULT_RUN_DIR_DEPTH:
+                    yield child
                     continue
-                project_job = f"{project_name[:80]}/{job_name[:80]}"
+                yield from namespace_leaves(child)
+
+        try:
+            for parts in namespace_leaves(()):
+                # Empty strings represent parent entries in the existing durable cursor.
+                cursor = cast(tuple[str, str, str], parts + ("",) * (3 - len(parts)))
+                if after is not None and cursor <= after:
+                    continue
+                if deadline_reached() or len(scanned_entries) >= limit:
+                    return scanned_entries, False
+                if len(parts) < _RESULT_RUN_DIR_DEPTH:
+                    scanned_entries.append(_ScannedArtifactEntry(cursor))
+                    state.filesystem_entries_inspected += 1
+                    continue
+                identity = _RunIdentity(*cursor)
                 try:
-                    if not stat.S_ISDIR(job_stat.st_mode) or stat.S_ISLNK(job_stat.st_mode):
+                    run_path = root.joinpath(*parts)
+                    if not stat.S_ISDIR(run_path.lstat().st_mode):
                         state.malformed_entries_ignored += 1
-                        continue
-                    run_entries = self._directory_entries(job_path)
-                except (OSError, ValueError) as exc:
-                    state.operation_failures.append(
-                        ReconciliationOperationFailure("scan_job", project_job, type(exc).__name__)
-                    )
-                    continue
-                for run_name, run_path, run_stat in run_entries:
-                    cursor = (project_name, job_name, run_name)
-                    if after is not None and cursor <= after:
-                        continue
-                    if deadline_reached():
-                        return scanned_entries, False
-                    if processed >= limit:
-                        return scanned_entries, False
-                    processed += 1
-                    identity = _RunIdentity(project_name, job_name, run_name)
-                    try:
-                        if not stat.S_ISDIR(run_stat.st_mode) or stat.S_ISLNK(run_stat.st_mode):
-                            state.malformed_entries_ignored += 1
-                            scanned_entries.append(_ScannedArtifactEntry(cursor))
-                            state.filesystem_entries_inspected += 1
-                            continue
-                        run_dir = self._checked_result_dir(str(run_path))
-                        total_bytes, newest_mtime, temporary_files = self._tree_snapshot(
-                            run_dir,
-                            deadline_reached,
-                        )
-                    except FilesystemDeadlineReached:
-                        return scanned_entries, False
-                    except (OSError, ValueError) as exc:
-                        state.operation_failures.append(
-                            ReconciliationOperationFailure(
-                                "scan_run", identity.identifier, type(exc).__name__
-                            )
-                        )
                         scanned_entries.append(_ScannedArtifactEntry(cursor))
                         state.filesystem_entries_inspected += 1
                         continue
-                    state.filesystem_entries_inspected += 1
-                    state.filesystem_run_directories_inspected += 1
-                    run_is_recent = newest_mtime >= cutoff_timestamp
-                    run_candidate = _RemovalCandidate(
-                        identity,
+                    run_dir = self._checked_result_dir(str(run_path))
+                    total_bytes, newest_mtime, temporary_files = self._tree_snapshot(
                         run_dir,
-                        total_bytes,
-                        recent=run_is_recent,
+                        deadline_reached,
                     )
-                    temp_candidates: list[_RemovalCandidate] = []
-                    for temp_path, temp_size, temp_mtime in temporary_files:
-                        if temp_mtime >= cutoff_timestamp or run_is_recent:
-                            state.recent_candidates_skipped += 1
-                            continue
-                        state.stale_temporary_candidates += 1
-                        temp_candidates.append(_RemovalCandidate(identity, temp_path, temp_size))
-                    scanned_entries.append(
-                        _ScannedArtifactEntry(
-                            cursor,
-                            run_candidate,
-                            tuple(temp_candidates),
+                except FilesystemDeadlineReached:
+                    return scanned_entries, False
+                except (OSError, ValueError) as exc:
+                    state.operation_failures.append(
+                        ReconciliationOperationFailure(
+                            "scan_run", identity.identifier, type(exc).__name__
                         )
                     )
+                    scanned_entries.append(_ScannedArtifactEntry(cursor))
+                    state.filesystem_entries_inspected += 1
+                    continue
+                state.filesystem_entries_inspected += 1
+                state.filesystem_run_directories_inspected += 1
+                run_is_recent = newest_mtime >= cutoff_timestamp
+                run_candidate = _RemovalCandidate(
+                    identity,
+                    run_dir,
+                    total_bytes,
+                    recent=run_is_recent,
+                )
+                temp_candidates: list[_RemovalCandidate] = []
+                for temp_path, temp_size, temp_mtime in temporary_files:
+                    if temp_mtime >= cutoff_timestamp or run_is_recent:
+                        state.recent_candidates_skipped += 1
+                        continue
+                    state.stale_temporary_candidates += 1
+                    temp_candidates.append(_RemovalCandidate(identity, temp_path, temp_size))
+                scanned_entries.append(
+                    _ScannedArtifactEntry(
+                        cursor,
+                        run_candidate,
+                        tuple(temp_candidates),
+                    )
+                )
+        except FilesystemDeadlineReached:
+            return scanned_entries, False
         return scanned_entries, True
+
+    def _prune_empty_namespace(self, parts: tuple[str, ...]) -> None:
+        """Best-effort rmdir of a job/project, without following symlinks."""
+
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            root_fd = os.open(self._results_dir, flags)
+            try:
+                if len(parts) == 2:
+                    project_fd = os.open(parts[0], flags, dir_fd=root_fd)
+                    try:
+                        os.rmdir(parts[1], dir_fd=project_fd)
+                    finally:
+                        os.close(project_fd)
+                os.rmdir(parts[0], dir_fd=root_fd)
+            finally:
+                os.close(root_fd)
+        except OSError:
+            pass  # Nonempty, missing, and racing parents can wait for another scan.
 
     async def _active(self, identity: _RunIdentity) -> bool:
         if self._active_run_lookup is None:
@@ -974,6 +1013,7 @@ class LocalResultStore:
         if not shutil.rmtree.avoids_symlink_attacks:
             raise RuntimeError("recursive removal is not symlink-safe")
         shutil.rmtree(path)
+        self._prune_empty_namespace((candidate.identity.project, candidate.identity.job_name))
         return "removed", size
 
     def _remove_temp_candidate(
@@ -1034,6 +1074,11 @@ class LocalResultStore:
 
         candidate = entry.run_candidate
         if candidate is None:
+            if not dry_run and not entry.cursor[2]:
+                await cleanup_safe_to_thread(
+                    self._prune_empty_namespace,
+                    tuple(part for part in entry.cursor if part),
+                )
             return True
 
         async def active_or_failed(item: _RemovalCandidate, action: str) -> bool:

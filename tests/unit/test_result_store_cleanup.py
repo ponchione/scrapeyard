@@ -840,6 +840,104 @@ async def test_reconciliation_classifies_oversized_result_without_loading(store)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [0, 1, 2], ids=["projects", "jobs", "runs"])
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "remove"])
+async def test_reconciliation_progresses_past_namespace_fanout(store, depth, dry_run):
+    parent = store._results_dir.joinpath(*("project", "job")[:depth])
+    runs = []
+    empty_parents = []
+    for index in reversed(range(7)):
+        if depth < 2:
+            empty = parent / f"empty-{index}"
+            empty.mkdir(parents=True)
+            empty_parents.append(empty)
+        run = (parent / f"entry-{index}").joinpath(*("job", "run")[depth:])
+        run.mkdir(parents=True)
+        (run / "results.json").write_text("[]", encoding="utf-8")
+        _backdate_tree(run)
+        runs.append(run)
+
+    removed = 0
+    candidates = 0
+    for _ in range(20):
+        # Every page must resume from SQLite, including pages of empty parents.
+        limited = LocalResultStore(
+            str(store._results_dir), _lookup, max_artifact_tree_entries=2
+        )
+        report = await limited.reconcile_artifacts(
+            grace_seconds=86400, dry_run=dry_run, now=NOW, batch_size=2
+        )
+        assert not report.operation_failures
+        assert report.filesystem_entries_inspected <= 2
+        candidates += report.directories_would_remove
+        removed += report.directories_removed
+        if report.filesystem_scan_exhausted:
+            break
+    else:
+        pytest.fail("namespace cursor did not exhaust the tree")
+
+    assert candidates == len(runs)
+    assert removed == (0 if dry_run else len(runs))
+    assert all(path.exists() == dry_run for path in runs + empty_parents)
+    assert store._results_dir.is_dir()
+    if not dry_run:
+        assert list(store._results_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_deadline_interrupts_namespace_enumeration(store, monkeypatch):
+    for index in range(10):
+        (store._results_dir / f"project-{index}").mkdir(parents=True)
+    ticks = iter([0.0] * 5)
+    monkeypatch.setattr(
+        result_store_module, "time", SimpleNamespace(monotonic=lambda: next(ticks, 2.0))
+    )
+
+    stopped = await store.reconcile_artifacts(
+        grace_seconds=86400, dry_run=True, metadata_scan_limit=0, deadline=1.0, now=NOW
+    )
+
+    assert not stopped.operation_failures
+    assert stopped.filesystem_entries_inspected == 0
+    assert not stopped.filesystem_scan_exhausted
+    assert await store._load_reconciliation_cursors() == (0, None)
+    resumed = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    assert resumed.filesystem_entries_inspected == 10
+    assert resumed.filesystem_scan_exhausted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["nonempty", "symlink"])
+async def test_reconciliation_parent_pruning_tolerates_races(store, tmp_path, monkeypatch, replacement):
+    job = store._results_dir / "project" / "job"
+    job.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_prune = store._prune_empty_namespace
+
+    def race_with_pruning(parts):
+        if replacement == "nonempty":
+            (job / "new-run").mkdir()
+        else:
+            job.rmdir()
+            job.parent.rmdir()
+            job.parent.symlink_to(outside, target_is_directory=True)
+            (outside / "job").mkdir()
+        real_prune(parts)
+
+    monkeypatch.setattr(store, "_prune_empty_namespace", race_with_pruning)
+
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
+
+    assert not report.operation_failures
+    if replacement == "nonempty":
+        assert (job / "new-run").is_dir()
+    else:
+        assert job.parent.is_symlink()
+        assert (outside / "job").is_dir()
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_bounds_recursive_tree_entries(store):
     limited = LocalResultStore(
         str(store._results_dir),
