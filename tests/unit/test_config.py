@@ -1071,6 +1071,14 @@ class TestParseTransform:
         fn = parse_transform(r"extract:(\d+\.\d+)")
         assert fn("price: 12.99 USD") == "12.99"
 
+    @pytest.mark.parametrize("expression", ['extract("(a)?b")', "extract:(a)?b"])
+    @pytest.mark.parametrize("value,expected", [("ab", "a"), ("b", ""), ("c", "")])
+    def test_extract_optional_capture_group(self, expression, value, expected):
+        assert parse_transform(expression)(value) == expected
+
+        transforms = parse_transform_pipeline(f'{expression}|default("missing")')
+        assert apply_transforms(value, transforms) == (expected or "missing")
+
     def test_default_replaces_blank_values(self):
         fn = parse_transform("default:unknown")
         assert fn("   ") == "unknown"
