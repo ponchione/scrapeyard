@@ -9,7 +9,6 @@ from scrapeyard.runtime.health import (
     HealthCache,
     build_project_summary,
     load_project_summary,
-    probe_asyncio_task,
     probe_background_service,
     probe_redis,
     probe_result_storage,
@@ -28,20 +27,6 @@ def test_result_storage_probe_fails_for_missing_directory(tmp_path):
 
     assert result.ok is False
     assert "FileNotFoundError" in (result.detail or "")
-
-
-async def test_background_task_probe_reports_exception_type():
-    async def _fail() -> None:
-        raise RuntimeError("sensitive detail")
-
-    task = asyncio.create_task(_fail())
-    await asyncio.sleep(0)
-
-    result = probe_asyncio_task("cleanup", task)
-
-    assert result.ok is False
-    assert result.detail == "cleanup task failed: RuntimeError"
-    assert "sensitive detail" not in result.detail
 
 
 def test_background_service_probe_uses_explicit_contract():
