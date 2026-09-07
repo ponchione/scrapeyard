@@ -147,6 +147,16 @@ def test_extract_selectors_page_wide_scalar_and_list() -> None:
     assert result == {"title": "Title", "prices": ["$10", "$20"]}
 
 
+def test_selector_pipeline_preserves_quoted_argument_whitespace() -> None:
+    page = _adaptor("<h1>10 20</h1>")
+    selector = SelectorLong(
+        query="h1",
+        transform='replace(" ", "_") | append(" kg") | replace("_", " / ")',
+    )
+
+    assert extract_selectors_strict(page, {"weight": selector}) == {"weight": "10 / 20 kg"}
+
+
 def test_extract_selectors_reads_descendant_text_when_direct_text_is_empty() -> None:
     page = _Node(css_map={".title": [_NestedTextNode(text="", all_text="Nested Title")]})
 

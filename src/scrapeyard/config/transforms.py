@@ -232,16 +232,19 @@ def _regex_timeout_seconds() -> float:
 
 
 def _parse_args(raw_args: str) -> list[str]:
-    """Parse comma-separated, optionally quoted arguments."""
+    """Parse CSV arguments, preserving literal whitespace inside quotes."""
     if not raw_args:
         return []
     try:
-        return [
-            part.strip()
-            for part in next(csv.reader([raw_args], skipinitialspace=True, strict=True))
-        ]
+        parts = next(csv.reader([raw_args], skipinitialspace=True, strict=True))
     except csv.Error as exc:
         raise ValueError(f"Invalid transform arguments: {exc}") from exc
+    # CSV removes quote markers; inspect raw fields before trimming unquoted values.
+    fields = re.finditer(r'(?:^|,)( *"(?:[^"]|"")*"|[^,]*)', raw_args)
+    return [
+        part if field.group(1).lstrip(" ").startswith('"') else part.strip()
+        for part, field in zip(parts, fields, strict=True)
+    ]
 
 
 _TRANSFORM_ARITY = {

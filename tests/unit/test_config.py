@@ -985,6 +985,22 @@ class TestParseTransform:
         fn = parse_transform('replace("old,value", "new")')
         assert fn("old,value here") == "new here"
 
+    @pytest.mark.parametrize(
+        ("expression", "value", "expected"),
+        [
+            ('replace(" ", "_")', "a b", "a_b"),
+            ('append(" kg")', "10", "10 kg"),
+            ('replace("x", " padded ")', "axb", "a padded b"),
+            ('prepend(  "  ")', "value", "  value"),
+            ('append(" , ""quoted"" ")', "value", 'value , "quoted" '),
+            ("replace( old , new )", "old", "new"),
+            ('replace( old , " new ")', "old value", " new  value"),
+            ('replace(" old ", new )', "an old value", "annewvalue"),
+        ],
+    )
+    def test_function_arguments_preserve_quoted_whitespace(self, expression, value, expected):
+        assert parse_transform(expression)(value) == expected
+
     def test_malformed_function_arguments_raise(self):
         with pytest.raises(ValueError, match="Invalid transform arguments"):
             parse_transform('prepend("unterminated)')

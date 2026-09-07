@@ -80,7 +80,6 @@ measured contention justifies a migration.
 | TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-05 | P2 | Browser debug capture reads bodies before checking eligibility or capacity |
-| TD-06 | P2 | Transform parsing removes meaningful whitespace inside quoted arguments |
 | TD-08 | P2 | The required browser security review has expired |
 | TD-09 | P2 | The current source fails the required type-check gate |
 | TD-10 | P3 | Transform pipeline scanning repeatedly copies growing prefixes |
@@ -200,33 +199,6 @@ Keep supplementary diagnostics from consuming the rest of an otherwise useful ru
 **Regression check:** `body()` must not be invoked for binary responses or when
 capacity is exhausted. Include oversized and unknown-length text responses, with
 an explicit assertion about the capture limit rather than just the final file size.
-
-### TD-06 — Transform parsing removes meaningful whitespace inside quoted arguments
-
-**Location:** `src/scrapeyard/config/transforms.py:234`.
-
-`_parse_args()` uses `csv.reader`, then calls `.strip()` on every decoded argument.
-CSV parsing has already removed the quotes, so the later strip cannot distinguish
-syntactic whitespace from literal whitespace that the caller quoted intentionally.
-
-**Actual results:**
-
-| Expression and input | Current output | Expected literal-string behavior |
-| --- | --- | --- |
-| `replace(" ", "_")` on `a b` | `_a_ _b_` | `a_b` |
-| `append(" kg")` on `10` | `10kg` | `10 kg` |
-
-The first case is particularly damaging: stripping the single-space search argument
-turns it into the empty string, making replacement insert text at every boundary.
-
-**Fix direction:** preserve whitespace inside quoted arguments. Continue accepting
-ordinary separator whitespace in the documented function syntax. Reuse the CSV
-parser where it suffices; avoid introducing another transform language.
-
-**Regression check:** add these two cases alongside
-`test_replace_func_syntax_preserves_quoted_commas` in `tests/unit/test_config.py`,
-including a quoted replacement containing leading/trailing spaces and the complete
-selector pipeline path.
 
 ### TD-08 — The required browser security review has expired
 
