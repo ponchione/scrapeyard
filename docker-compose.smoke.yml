@@ -36,6 +36,8 @@ services:
     extra_hosts:
       - "fixture.public.test=203.66.81.242"
       - "fixture.private.test=10.77.14.2"
+      - "session.public.test=203.66.81.243"
+      - "session-other.public.test=203.66.81.243"
     ports:
       - "127.0.0.1:${SCRAPEYARD_SMOKE_API_PORT:-18420}:8420"
     depends_on:

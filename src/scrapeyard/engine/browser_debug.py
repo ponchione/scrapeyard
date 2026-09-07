@@ -40,7 +40,8 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
 )
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
-from scrapeyard.engine.basic_fetch import fetch_streaming_response
+from scrapeyard.engine.basic_fetch import BasicSession, fetch_streaming_response
+from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -681,7 +682,7 @@ async def fetch_basic_response(
     *,
     budget: RunBudget | None = None,
 ) -> Any:
-    if fetcher_cls is Fetcher:
+    if fetcher_cls is Fetcher or isinstance(fetcher_cls, BasicSession):
         return await fetch_streaming_response(
             fetcher_cls,
             url,
@@ -753,12 +754,16 @@ async def fetch_browser_response(
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
     budget_token = _BROWSER_RUN_BUDGET.set(budget)
     blocked_token = _BROWSER_BLOCKED_REQUESTS.set(blocked_requests)
-    origin_token = _BROWSER_TARGET_ORIGIN.set(canonical_url_origin(url))
+    origin_token = _BROWSER_TARGET_ORIGIN.set(canonical_url_origin(target.url))
     headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
         frozenset(name.lower() for name in browser.extra_headers)
     )
     try:
-        fetch = fetcher_cls.async_fetch(url, **call_kwargs)
+        fetch = (
+            fetcher_cls.fetch(url, call_kwargs, _guarded_async_intercept_route)
+            if isinstance(fetcher_cls, BrowserSession)
+            else fetcher_cls.async_fetch(url, **call_kwargs)
+        )
         try:
             response = await fetch if budget is None else await budget.wait_for_owned(fetch)
         except _BROWSER_TIMEOUT_ERRORS as exc:

@@ -11,12 +11,15 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 
+from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import get_settings
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
+from scrapeyard.engine.basic_fetch import BasicSession
+from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.browser_debug import (
     browser_fetch_kwargs,
     default_debug_blob,
@@ -231,12 +234,12 @@ async def _fetch_basic_with_safe_redirects(
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
     redirects: list[str] = []
-    cookie_jar = httpx.Cookies()
+    cookie_jar = fetcher_cls.cookies if isinstance(fetcher_cls, BasicSession) else httpx.Cookies()
     call_kwargs["follow_redirects"] = False
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
         request_url = current_url
         request_kwargs = dict(call_kwargs)
-        production_stream = fetcher_cls is Fetcher
+        production_stream = fetcher_cls is Fetcher or isinstance(fetcher_cls, BasicSession)
         if production_stream and request_kwargs.get("proxy") is None:
             resolved = await run_thread_work(
                 resolve_public_url,
@@ -510,8 +513,18 @@ async def _fetch_target_page(
     rate_limiter: DomainRateLimiter | None = None,
     domain_rate_limit: float = 0,
 ) -> FetchOutcome:
+    async def attempt(*args: Any) -> FetchOutcome:
+        try:
+            return await _fetch_page(*args)
+        except BaseException:
+            if isinstance(fetcher_cls, (BasicSession, BrowserSession)):
+                # RetryHandler owns retries. A failed attempt loses its session
+                # state before backoff; the next attempt creates fresh resources.
+                await await_cleanup(fetcher_cls.aclose())
+            raise
+
     return await retry_handler.execute(
-        _fetch_page,
+        attempt,
         fetcher_cls,
         url,
         target,
@@ -541,8 +554,13 @@ def _prepare_scrape_context(
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
     Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
+    fetcher = _get_fetcher(target.fetcher)
+    if fetcher is Fetcher:
+        fetcher = BasicSession()
+    elif fetcher in (PlayWrightFetcher, StealthyFetcher):
+        fetcher = BrowserSession(fetcher)
     return ScrapeContext(
-        fetcher_cls=_get_fetcher(target.fetcher),
+        fetcher_cls=fetcher,
         retry_handler=RetryHandler(
             retry,
             budget=budget,
@@ -747,5 +765,8 @@ async def scrape_target(
         _handle_selector_execution_failure(result, target, exc)
     except Exception as exc:
         _handle_scrape_exception(result, target, exc)
+    finally:
+        if isinstance(context.fetcher_cls, (BasicSession, BrowserSession)):
+            await await_cleanup(context.fetcher_cls.aclose())
 
     return result
