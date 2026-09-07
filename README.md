@@ -509,6 +509,8 @@ profile.
 | `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Aggregate extracted JSON growth ceiling plus exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
 | `SCRAPEYARD_RUN_THREAD_MAX_WORKERS` | `4` | Dedicated bounded capacity for run-scoped selector, validation, and DNS thread work |
+| `SCRAPEYARD_WORKERS_MAX_ACCEPTED_RUNS` | `100` | Atomic cap on queued plus running owners; overload returns 503 with Retry-After |
+| `SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB` | `512` | Additional memory headroom reserved per active browser target |
 | `SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS` | `2` | Dedicated bounded capacity for off-loop result response normalization and JSON rendering |
 | `SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS` | `0.1` | Per-operation deadline for selector regex transforms |
 | `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` | `2048` | Maximum UTF-8 size of a selector regex pattern |

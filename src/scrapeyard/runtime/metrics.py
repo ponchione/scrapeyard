@@ -21,6 +21,23 @@ from scrapeyard.storage.types import CleanupBacklogSnapshot
 
 REGISTRY = CollectorRegistry(auto_describe=True)
 ProcessCollector(registry=REGISTRY)
+ADMISSION_REJECTIONS = Counter(
+    "scrapeyard_admission_rejections_total",
+    "New runs rejected by admission policy.",
+    ("reason",),
+    registry=REGISTRY,
+)
+MEMORY_HEADROOM = Gauge(
+    "scrapeyard_memory_headroom_bytes",
+    "Available memory below the service and visible cgroup ceilings; infinity when unmonitored.",
+    registry=REGISTRY,
+)
+MEMORY_DEFERRALS = Counter(
+    "scrapeyard_memory_deferrals_total",
+    "Worker/browser starts deferred by memory checks.",
+    ("stage",),
+    registry=REGISTRY,
+)
 _CLEANUP_BACKLOG_CATEGORIES = (
     "expired_results",
     "excess_results",

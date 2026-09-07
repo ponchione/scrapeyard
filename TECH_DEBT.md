@@ -4,17 +4,16 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The four findings below remain outstanding; resolved findings and observations
+The three findings below remain outstanding; resolved findings and observations
 specific to the other branch have been removed. The original documentation
 recheck did not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. TD-12 through
-TD-14 are architecture follow-ups: their implementation observations are verified,
-but overload consequences and performance gains have not been measured. The
-Eyebox consumer review adds TD-17 (verified default limit differences requiring
+supervision, and build/security configuration. TD-13 and TD-14 are architecture
+follow-ups: their implementation observations are verified, but performance gains
+have not been measured. The Eyebox consumer review adds TD-17 (verified default limit differences requiring
 joint qualification). TD-14 is a
 proposed design simplification, not a reproduced correctness defect. Priorities:
 **P1** = security or service availability; **P2** = functional or operational
@@ -23,7 +22,7 @@ required where the benefit is still a hypothesis.
 
 ## Verification
 
-| Check | Observed result on current `main` |
+| Check | Observed result at the documentation recheck |
 | --- | --- |
 | `poetry check --lock` | Passed |
 | `poetry run ruff check src tests scripts` | Passed |
@@ -72,78 +71,17 @@ webhook expansion, horizontal scaling, and metadata consolidation have no new
 consumer requirement from this review. Existing supported behavior remains intact.
 
 For consumer-facing work, qualify TD-17's limits with the explicit pagination
-coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagination-coverage). TD-12's browser memory protection remains important,
-while the normal scheduler reduces the urgency of a scrape backlog cap. TD-13 is
-the strongest performance candidate after correctness/capacity work. TD-14 is
+coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagination-coverage).
+TD-13 is the strongest performance candidate after correctness/capacity work. TD-14 is
 deferred until persistence maintenance or measured contention justifies a migration.
 
 ## Findings
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-12 — Scrape admission lacks a backlog cap and browser-aware memory headroom
-
-**Locations:** `src/scrapeyard/queue/pool.py:221`, `:319`, `:456`;
-`src/scrapeyard/queue/memory.py:13`;
-`src/scrapeyard/api/scrape_submission.py:59`;
-`src/scrapeyard/scheduler/cron.py:290`; `docker-compose.yml:38`, `:80`.
-
-**Eyebox assessment:** split urgency: browser-aware memory protection remains P1;
-the backlog cap is P2 for this consumer. Eyebox's scheduler defaults to four
-concurrent dispatch workers, each synchronously waiting for its scrape/ingest
-cycle, with durable deduplication and bounded redispatch. That reduces routine
-queue growth. It does not impose a global Scrapeyard cap: admin/smoke submissions
-and remote runs still executing after client timeouts can add work. Size the cap
-from the qualified allow-list and observed queue age, not the total config count.
-Eyebox already retries 429/503 with bounded `Retry-After` handling. References:
-`../eyebox/ingest/scheduler.py:612`, `../eyebox/ingest/config.py:52`, and
-`../eyebox/ingest/scrapeyard_transport.py`.
-
-**Observed design:** worker and browser concurrency are bounded, but accepting a
-new scrape does not enforce a maximum pending backlog. Request rate limiting
-does not account for scrape duration or the amount of already-accepted work.
-`_check_memory()` runs only during enqueue and reads `/proc/self/statm`, so it
-excludes browser subprocesses. Already-queued work can continue starting after
-that check. Compose limits Redis to 512 MiB and the application container,
-including its browsers, to 4 GiB. The Compose enqueue threshold is 3 GiB of
-Python RSS, leaving nominal headroom but still excluding browser memory. These
-settings do not provide a backlog cap or check container usage before execution.
-
-**Impact:** sustained submissions faster than completion can grow Redis and
-SQLite state and queue latency. Browser memory can exhaust the application
-container while Python's RSS remains below its configured threshold, affecting
-the API, scheduler, and maintenance as well as workers. This is an exposure
-identified from the control flow; the audit did not reproduce an OOM.
-
-**Fix direction:** enforce one atomic capacity reservation for new accepted runs
-across ad-hoc, scheduled, and manual submission. Define whether the configured cap
-counts pending runs or all nonterminal runs; a read-then-enqueue depth check alone
-can oversubscribe under concurrent submissions. Preserve idempotent replay and
-avoid stranded job/config/idempotency rows when rejecting admission. Recovery of
-an already-accepted run must not consume a second reservation; cancellation and
-draining existing work must remain possible when full. Return a documented
-retryable overload response and record scheduled admission failures durably.
-
-Use container/cgroup memory usage, with a documented fallback outside containers,
-and reserve headroom before starting more browser work. Keep the hard container
-limits and existing browser permits. Put any new limits in `ServiceSettings` as
-`SCRAPEYARD_*` settings, and expose admission rejections/headroom in existing
-metrics.
-
-**Acceptance checks:** extend `tests/live_redis/test_queue_lifecycle.py` with slow
-workers and concurrent submissions exceeding a small configured cap. Assert the
-cap, retryable rejection, eventual draining, and no duplicate reservation on
-idempotent replay or missing-delivery recovery. Cover scheduled/manual admission
-and cancellation while full. Extend `tests/unit/test_queue_memory.py` and pool
-tests for high container usage with low Python RSS; add a bounded container load
-case in `tests/qualification/run_qualification.py` that verifies admission slows
-before memory exhaustion and resumes after capacity returns. Include Eyebox's
-idempotent retry path so overload does not create a new remote job per attempt.
 
 ### TD-13 — Page fetches repeatedly create HTTP clients and browser sessions
 

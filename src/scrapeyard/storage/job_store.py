@@ -13,7 +13,10 @@ import aiosqlite
 
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.qualification import qualification_checkpoint
+from scrapeyard.common.settings import get_settings
 from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.queue.memory import memory_headroom_mb
+from scrapeyard.runtime.metrics import ADMISSION_REJECTIONS
 from scrapeyard.storage.database import db_transaction, get_db
 from scrapeyard.storage.job_queries import (
     PROJECT_SUMMARY_QUERY,
@@ -75,6 +78,15 @@ class DuplicateJobError(Exception):
         self.project = project
         self.name = name
         super().__init__(f"Job {name!r} already exists in project {project!r}")
+
+
+class AdmissionCapacityError(RuntimeError):
+    """A new run cannot be accepted; retry the same logical submission later."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        ADMISSION_REJECTIONS.labels(reason).inc()
+        super().__init__(f"Scrape admission at capacity ({reason})")
 
 
 def is_duplicate_job_integrity_error(error: str | Exception) -> bool:
@@ -139,6 +151,7 @@ class SQLiteJobStore:
             ),
         )
         if job.status is JobStatus.queued and job.current_run_id is not None:
+            await SQLiteJobStore._check_admission(db)
             trigger = current_trigger or "adhoc"
             queued_at = job.updated_at or job.created_at
             await db.execute(
@@ -160,6 +173,25 @@ class SQLiteJobStore:
                     fmt_dt(queued_at),
                 ),
             )
+
+    @staticmethod
+    async def _check_admission(db: aiosqlite.Connection) -> None:
+        """Check the just-reserved run inside its write transaction.
+
+        The current queued/running owner is the reservation. Terminal changes
+        release it automatically; replay and delivery repair never reacquire it.
+        """
+        settings = get_settings()
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM jobs
+               WHERE status IN ('queued', 'running') AND current_run_id IS NOT NULL"""
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        if row[0] > settings.workers_max_accepted_runs:
+            raise AdmissionCapacityError("backlog")
+        if memory_headroom_mb(settings.workers_memory_limit_mb) <= 0:
+            raise AdmissionCapacityError("memory")
 
     @staticmethod
     async def _get_job_in_db(
@@ -222,7 +254,7 @@ class SQLiteJobStore:
             raise RuntimeError("Terminal webhook reconciliation lost run ownership")
 
     async def save_job(self, job: Job) -> str:
-        async with get_db("jobs.db") as db, db_transaction(db):
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             try:
                 await self._insert_job(db, job)
             except aiosqlite.IntegrityError as exc:
@@ -2092,6 +2124,7 @@ class SQLiteJobStore:
             if cursor.rowcount != 1:
                 await db.rollback()
                 return False
+            await self._check_admission(db)
             row = await (
                 await db.execute(
                     "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",

@@ -15,6 +15,23 @@ That mode preserves the old API-envelope → stored-document → `results` nesti
 It will not be removed without a documented major API version, a migration
 notice, and at least a 90-day overlap. New clients should omit the parameter.
 
+## Admission overload
+
+`POST /scrape` and `POST /jobs/{job_id}/trigger` return `503` with
+`Retry-After: 5` when the accepted-run cap or memory ceiling prevents admission.
+The response uses the normal `service_unavailable` error envelope. Retry the
+same YAML and `Idempotency-Key` after the delay: rejection creates no new job,
+queued snapshot, or idempotency record. An existing idempotent request still
+replays its accepted job/run while the service is full.
+
+The cap counts current queued and running run owners across ad-hoc, manual, and
+scheduled submissions. Idle schedule definitions and terminal jobs do not count.
+Completion, failure, cancellation, deletion, or submission rollback release the
+slot. Delivery recovery keeps the original reservation. Scheduled overload is
+recorded durably as `admission_backlog` or `admission_memory` and retried at the
+next cron fire. Memory pressure can delay already-queued execution; cancellation
+and recovery remain available.
+
 ## Result responses
 
 The v1 terminal sync response and polling response use the same shape:

@@ -675,3 +675,44 @@ Allowed scopes are `development` and `production`. Expired, duplicate,
 incomplete, or malformed entries fail closed before `pip-audit` runs. Remove an
 exception as soon as a compatible fix is available; extending an expiry
 requires a new review with updated evidence.
+
+## Admission overload qualification (TD-12)
+
+Run the isolated container pressure case with:
+
+```bash
+./scripts/run_release_qualification.sh --profile quick --phase admission
+```
+
+The phase temporarily sets the service memory threshold to 768 MiB and restores
+it afterward. A separate process allocates at most 800 MiB for at most 30 seconds,
+only if the visible hard cgroup limits leave at least 256 MiB additional space.
+Four slow requests run while two wait. Verify that admission returns 503, queued
+work stays queued under pressure, and every accepted job drains after pressure
+is released. The phase records the allocation, cgroup usage, queue count, and
+container resource sample. It also runs in the `all` qualification profile.
+
+On 2026-09-07, the production Dockerfile image was exercised in an isolated
+1,536 MiB container against Redis 7.4.5 and the repository's fixture site. A
+663.15 MiB subprocess allocation produced 810.55 MiB observed cgroup usage against
+the 768 MiB service threshold. Admission returned 503, two jobs remained queued,
+all six accepted jobs completed after release, and a new submission completed.
+This was synthetic subprocess pressure, not a retailer/browser memory benchmark.
+
+Eyebox's actual `ingest/scrapeyard_transport.py::retry_http_call` from checkout
+`06171c1` was run against the same container with stable YAML and an idempotency
+key. Its observed responses were `503, 503, 503, 202`, followed by a `202` replay
+with the same job/run IDs. Exactly one remote job existed and completed. Eyebox
+source and its running deployment were unchanged.
+
+The live Redis admission regression also submits 20 concurrent requests at a cap
+of three: three are accepted and 17 rejected with `Retry-After: 5`. It checks
+rollback of rejected rows, unkeyed submission, manual and scheduled rejection
+and resumption, replay and missing-delivery repair while full, cancellation under
+memory pressure, running-job accounting, and eventual draining. Unit coverage
+checks cgroup v1/v2 ancestor limits, process-tree fallback, concurrent browser
+reservations, cancellation cleanup, and populated admission-index upgrades.
+
+Final validation: `poetry run pytest -W error -q` with live Redis enabled passed
+2,091 tests with 89.37% coverage. Ruff (`src tests scripts`), strict mypy over
+all 94 source files, the Poetry lock check, and the Docker build also passed.
