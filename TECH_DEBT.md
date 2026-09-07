@@ -4,18 +4,15 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The two findings below remain outstanding; resolved findings and observations
+The finding below remains outstanding; resolved findings and observations
 specific to the other branch have been removed. The original documentation
 recheck did not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. TD-14 is an architecture
-follow-up: its implementation observations are verified, but performance gains
-have not been measured. The Eyebox consumer review adds TD-17 (verified default limit differences requiring
-joint qualification). TD-14 is a
-proposed design simplification, not a reproduced correctness defect. Priorities:
+supervision, and build/security configuration. The Eyebox consumer review adds
+TD-17 (verified default limit differences requiring joint qualification). Priorities:
 **P1** = security or service availability; **P2** = functional or operational
 correctness; **P3** = efficiency or maintainability improvement, with measurement
 required where the benefit is still a hypothesis.
@@ -72,67 +69,12 @@ consumer requirement from this review. Existing supported behavior remains intac
 
 For consumer-facing work, qualify TD-17's limits with the explicit pagination
 coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagination-coverage).
-TD-14 is deferred until persistence maintenance or measured contention justifies
-a migration.
 
 ## Findings
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-14 — Separate metadata databases expand persistence coordination
-
-**Locations:** `src/scrapeyard/storage/database.py:20`;
-`src/scrapeyard/storage/result_store.py:393`;
-`src/scrapeyard/storage/job_store.py:1557`;
-`src/scrapeyard/queue/worker.py:533`, `:584`;
-`src/scrapeyard/api/job_lifecycle.py:115`;
-`scripts/qualification_backup.py`; `docs/SCALING.md`.
-
-**Eyebox assessment:** deferred, P3. Eyebox consumes HTTP status/results and stores
-its catalog in its own Postgres database; it has no dependency on Scrapeyard's
-internal database layout. Consolidation has little immediate consumer benefit.
-Revisit only when cross-store maintenance is materially costly or measurements
-justify changing persistence. This does not propose sharing Eyebox's database
-with Scrapeyard or migrating Scrapeyard to Postgres.
-
-**Observed design:** jobs/runs/idempotency/webhook intents live in `jobs.db`,
-errors in `errors.db`, and result metadata in `results_meta.db`. The worker writes
-the artifact and result metadata before a separate jobs.db transaction finalizes
-the run and webhook intent. Deletion, retention, recovery, and backups must
-coordinate these separate stores. Existing reconciliation and resumable deletion
-handle many of these gaps; this entry does not assert that they are missing.
-
-**Impact:** the single-process deployment carries additional partial-failure
-states and cross-store orchestration. Consolidation is a maintainability candidate,
-not a promised speedup: one SQLite writer may introduce more contention than
-the current three independently serialized connections.
-
-**Fix direction:** evaluate this at the next planned persistence refactor. Keep
-JSON/browser artifacts on disk, but consider one SQLite database for relational
-state. Make successful run finalization, result metadata publication, and webhook
-intent creation one ownership-checked transaction after the artifact is written.
-Placing tables in one file is insufficient if the existing stores continue to
-commit each phase independently; expose the combined operation through the
-storage interface. Preserve legitimate retained results after job deletion.
-
-Plan a resumable migration of existing databases, including migration ledgers,
-encrypted values and their encryption context, indexes, and retained records.
-Update `sql/*.sql`, stores/protocols, tests, health probes, backup manifests and
-restore/relocation tooling together. Do not rewrite applied migration history.
-Keep Redis delivery and filesystem reconciliation: consolidation cannot make
-those systems part of a SQLite transaction or make horizontal scaling safe.
-
-**Acceptance checks:** migrate populated legacy state containing queued/running
-jobs, terminal runs, pending webhook intents, and results retained after deletion.
-Interrupt migration and verify safe restart without loss or duplication. Use
-fault injection between artifact writing and the combined metadata commit to
-prove that terminal state/result metadata/webhook intent commit together or roll
-back together. Rerun cancellation, retention, recovery, and backup/restore
-qualification. Compare writer contention and API latency under the existing load
-workload before deciding whether consolidation is worth the migration cost.
 
 ### TD-17 — Eyebox and Scrapeyard limits lack a jointly qualified operating envelope
 
