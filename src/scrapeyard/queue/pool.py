@@ -7,10 +7,10 @@ import logging
 import signal
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Awaitable, Protocol, cast
+from typing import Any, Awaitable, Callable, Protocol, cast
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
-from arq.constants import in_progress_key_prefix, job_key_prefix, result_key_prefix
+from arq.constants import abort_jobs_ss, in_progress_key_prefix, job_key_prefix, result_key_prefix
 from arq.jobs import Job, ResultNotFound, serialize_job
 from arq.utils import timestamp_ms
 from arq.worker import Worker, func
@@ -23,7 +23,8 @@ from scrapeyard.queue.cancellation import (
     QueueDeliveryState as QueueDeliveryState,
     RunCancellationResult,
 )
-from scrapeyard.queue.memory import get_process_rss_mb
+from scrapeyard.queue.memory import memory_headroom_mb
+from scrapeyard.runtime.metrics import MEMORY_DEFERRALS
 from scrapeyard.queue.priority import (
     PRIORITIES,
     WeightedPriorityPolicy,
@@ -160,10 +161,14 @@ class _PriorityJobHandle:
 class _PriorityWorker(Worker):
     """Single arq Worker with weighted admission from three intake queues."""
 
-    def __init__(self, *args: Any, priority_queues: dict[str, str], **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, priority_queues: dict[str, str],
+        memory_available: Callable[[], bool], **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.priority_queues = priority_queues
         self.priority_policy = WeightedPriorityPolicy()
+        self.memory_available = memory_available
 
     async def close(self) -> None:
         """Close arq 0.26.x without its deprecated redis-py compatibility call."""
@@ -179,7 +184,10 @@ class _PriorityWorker(Worker):
         self._pool = None
 
     async def _poll_iteration(self) -> None:
-        if self.allow_pick_jobs and self.job_counter < self.max_jobs:
+        memory_available = self.memory_available()
+        if self.allow_pick_jobs and not memory_available:
+            MEMORY_DEFERRALS.labels("worker").inc()
+        if self.allow_pick_jobs and self.job_counter < self.max_jobs and memory_available:
             # arq 0.26.x keeps a running job in the execution queue until
             # finish_job() removes it. These ready members therefore already
             # include job_counter and must only be counted once.
@@ -193,6 +201,17 @@ class _PriorityWorker(Worker):
                 if not await self._admit_one():
                     break
         await super()._poll_iteration()
+
+    async def start_jobs(self, job_ids: list[bytes]) -> None:
+        if job_ids and not self.memory_available():
+            MEMORY_DEFERRALS.labels("worker").inc()
+            # arq acknowledges queued aborts in run_job before calling the
+            # scrape handler. Let those acknowledgements drain under pressure.
+            scores = await self.pool.zmscore(abort_jobs_ss, [job_id.decode() for job_id in job_ids])
+            job_ids = [job_id for job_id, score in zip(job_ids, scores, strict=True) if score is not None]
+            if not job_ids:
+                return
+        await super().start_jobs(job_ids)
 
     async def _admit_one(self) -> bool:
         order = self.priority_policy.selection_order()
@@ -253,6 +272,7 @@ class WorkerPool:
         cancellation_grace_seconds: float = 10.0,
         payload_ttl_seconds: int = 604800,
         job_timeout_seconds: float = 300.0,
+        browser_memory_reserve_mb: int = 512,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._max_browsers = max_browsers
@@ -269,7 +289,11 @@ class WorkerPool:
         self._payload_ttl_ms = payload_ttl_seconds * 1000
         self._job_timeout_seconds = job_timeout_seconds
 
-        self._browser_limiter = BrowserExecutionLimiter(max_browsers)
+        self._browser_limiter = BrowserExecutionLimiter(
+            max_browsers,
+            memory_limit_mb=memory_limit_mb,
+            memory_reserve_mb=browser_memory_reserve_mb,
+        )
         self._redis: ArqRedis | None = None
         self._worker: Worker | None = None
         self._runner_task: asyncio.Task[None] | None = None
@@ -278,13 +302,8 @@ class WorkerPool:
         self._stopping = False
 
     def _check_memory(self) -> bool:
-        """Return True if current RSS is within limits."""
-        if self._memory_limit_mb <= 0:
-            return True
-        rss_mb = get_process_rss_mb()
-        if rss_mb is None:
-            return True
-        return rss_mb < self._memory_limit_mb
+        """Return True if more work may start below the memory ceilings."""
+        return memory_headroom_mb(self._memory_limit_mb) > 0
 
     async def start(self) -> None:
         """Start the Redis connection and embedded arq worker."""
@@ -322,6 +341,7 @@ class WorkerPool:
             redis_pool=self._redis,
             queue_name=self._queue_name,
             priority_queues=self._priority_queues,
+            memory_available=self._check_memory,
             handle_signals=False,
             max_jobs=self._max_concurrent,
             job_timeout=self._job_timeout_seconds,
@@ -425,10 +445,6 @@ class WorkerPool:
         trigger: str = "adhoc",
     ) -> QueueJobHandle:
         """Enqueue a scrape job and return a handle for awaiting completion."""
-        if not self._check_memory():
-            raise MemoryError(
-                f"Process memory exceeds {self._memory_limit_mb}MB limit — rejecting task"
-            )
         if self._stopping:
             raise RuntimeError(
                 "WorkerPool cannot enqueue while a previous shutdown is unresolved"

@@ -24,6 +24,7 @@ from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.pool import QueueDeliveryState, WorkerPool
 from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
+from scrapeyard.storage.database import get_db
 from scrapeyard.webhook.payload import deterministic_delivery_id
 
 
@@ -129,6 +130,114 @@ async def _await_terminal_status(client, job_id: str) -> str:
             return status
         await asyncio.sleep(0.05)
     pytest.fail(f"Timed out waiting for terminal job status for {job_id}")
+
+
+@pytest.mark.live_redis
+async def test_atomic_admission_cap_replay_recovery_cancellation_and_draining(client, monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workers_max_accepted_runs", 3)
+    pool, store = get_worker_pool(), get_job_store()
+    assert pool._worker is not None and pool.redis is not None
+    pool._worker.allow_pick_jobs = False
+    pool._worker.poll_delay_s = 0.01
+    released = asyncio.Event()
+    calls = 0
+
+    async def slow_scrape(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        await released.wait()
+        return TargetResult(url="https://example.com", status="success", data=[{"title": "ok"}], pages_scraped=1)
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", slow_scrape)
+
+    async def submit(key):
+        return await client.post(
+            "/scrape", content=_async_scrape_yaml(),
+            headers={"content-type": "application/x-yaml", "Idempotency-Key": key},
+        )
+
+    try:
+        scheduled = await client.post(
+            "/jobs", content=_scheduled_scrape_yaml(enabled=True),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert scheduled.status_code == 201
+        scheduled_id = scheduled.json()["job_id"]
+        responses = await asyncio.gather(*(submit(f"logical-run-{i}") for i in range(20)))
+        accepted = [(i, response.json()) for i, response in enumerate(responses) if response.status_code == 202]
+        rejected = [i for i, response in enumerate(responses) if response.status_code == 503]
+        assert len(accepted) == 3 and len(rejected) == 17
+        assert all(responses[i].headers["Retry-After"] == "5" for i in rejected)
+        without_key = await client.post(
+            "/scrape", content=_async_scrape_yaml(), headers={"content-type": "application/x-yaml"},
+        )
+        assert without_key.status_code == 503
+        async with get_db("jobs.db") as db:
+            for table, count in (("jobs", 4), ("queued_run_snapshots", 3), ("scrape_idempotency", 3)):
+                assert (await (await db.execute(f"SELECT COUNT(*) FROM {table}")).fetchone())[0] == count
+        manual = await client.post(f"/jobs/{scheduled_id}/trigger")
+        assert manual.status_code == 503 and manual.headers["Retry-After"] == "5"
+        await get_scheduler()._run_scheduled_callback(scheduled_id)
+        failed_schedule = await store.get_job(scheduled_id)
+        assert failed_schedule.schedule_failure_code == "admission_backlog"
+        assert failed_schedule.schedule_consecutive_failures == 1
+
+        # Simulate a browser-heavy cgroup while the Python process stays small.
+        monkeypatch.setattr("scrapeyard.queue.memory._cgroup_memory", lambda _: [(5000, 6000)])
+        first_index, first = accepted[0]
+        replay = await submit(f"logical-run-{first_index}")
+        assert replay.status_code == 202
+        assert replay.json()["job_id"] == first["job_id"]
+        assert replay.json()["run_id"] == first["run_id"]
+
+        await pool.redis.delete(f"{job_key_prefix}{first['run_id']}")
+        await pool.redis.zrem(pool._priority_queues["normal"], first["run_id"])
+        summary = await reconcile_stale_queued_jobs(
+            job_store=store, worker_pool=pool,
+            queued_claim_timeout_seconds=settings.workers_queued_claim_timeout_seconds,
+            now=utc_now() + timedelta(seconds=settings.workers_queued_claim_timeout_seconds + 1),
+        )
+        assert summary.recovered == 1
+        assert (await store.get_job(first["job_id"])).current_run_id == first["run_id"]
+        assert await pool.queue_depths() == {"high": 0, "normal": 3, "low": 0}
+
+        pool._worker.allow_pick_jobs = True
+        cancelled = await client.post(f"/jobs/{accepted[-1][1]['job_id']}/cancel")
+        assert cancelled.status_code == 204
+        assert calls == 0
+        memory_rejection = await submit(f"logical-run-{rejected[0]}")
+        assert memory_rejection.status_code == 503
+        async with get_db("jobs.db") as db:
+            assert (await (await db.execute("SELECT COUNT(*) FROM scrape_idempotency")).fetchone())[0] == 3
+
+        monkeypatch.setattr("scrapeyard.queue.memory._cgroup_memory", lambda _: [(100, 6000)])
+        for _ in range(200):
+            if calls == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert calls == 2  # Accepted work starts again when memory returns.
+        retried = await submit(f"logical-run-{rejected[0]}")
+        assert retried.status_code == 202
+        assert (await submit("one-over-cap-while-running")).status_code == 503
+        retried_replay = await submit(f"logical-run-{rejected[0]}")
+        assert retried_replay.json()["run_id"] == retried.json()["run_id"]
+        released.set()
+        for job_id in (first["job_id"], accepted[1][1]["job_id"], retried.json()["job_id"]):
+            assert await _await_terminal_status(client, job_id) == "complete"
+        assert calls == 3
+        next_job = await submit("next-after-drain")
+        assert next_job.status_code == 202
+        assert await _await_terminal_status(client, next_job.json()["job_id"]) == "complete"
+        manual = await client.post(f"/jobs/{scheduled_id}/trigger")
+        assert manual.status_code == 202
+        assert await _await_terminal_status(client, scheduled_id) == "complete"
+        await get_scheduler()._run_scheduled_callback(scheduled_id)
+        assert await _await_terminal_status(client, scheduled_id) == "complete"
+        assert (await store.get_job(scheduled_id)).schedule_failure_code is None
+    finally:
+        released.set()
+        pool._worker.allow_pick_jobs = True
 
 
 @pytest.mark.asyncio

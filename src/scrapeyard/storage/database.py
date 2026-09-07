@@ -30,6 +30,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "017_add_history_retention_summary.sql",
         "018_add_run_snapshots_and_schedule_health.sql",
         "019_create_queued_run_snapshots.sql",
+        "021_add_admission_index.sql",
     ),
     "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
     "results_meta.db": (

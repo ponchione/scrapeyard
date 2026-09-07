@@ -24,7 +24,9 @@ class ServiceSettings(BaseSettings):
 
     workers_max_concurrent: int = Field(default=4, ge=1)
     workers_max_browsers: int = Field(default=2, ge=1)
+    workers_max_accepted_runs: int = Field(default=100, ge=1)
     workers_memory_limit_mb: int = Field(default=4096, ge=0)
+    workers_browser_memory_reserve_mb: int = Field(default=512, ge=0)
     sync_timeout_seconds: int = Field(default=15, ge=0)
     sync_poll_delay_seconds: float = Field(default=0.5, gt=0)
     basic_fetch_timeout_seconds: float = Field(default=30.0, gt=0)

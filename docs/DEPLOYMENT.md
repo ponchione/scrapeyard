@@ -313,7 +313,9 @@ Set limits to match host capacity:
 
 - `SCRAPEYARD_WORKERS_MAX_CONCURRENT`
 - `SCRAPEYARD_WORKERS_MAX_BROWSERS`
+- `SCRAPEYARD_WORKERS_MAX_ACCEPTED_RUNS` (default `100`, queued plus running owners)
 - `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB`
+- `SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB` (default `512`, per active browser target)
 - `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` (default `30`, shared by worker and webhook shutdown)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
@@ -466,6 +468,38 @@ preempted, so no wall-clock service bound can be tighter than the time needed
 for handler capacity to become available. Size run-duration budgets as the
 outer bound on an individual cooperative handler; external stalls and process
 failure can still extend observed queue delay.
+
+New run admission reserves one current queued/running owner under the same
+SQLite write transaction that saves the job/run snapshot. The partial admission
+index excludes terminal history. `SCRAPEYARD_WORKERS_MAX_ACCEPTED_RUNS` defaults
+to 100; size it using the qualified workload and observed queue age. Lowering it
+below existing occupancy blocks new submissions until existing work drains.
+Idempotent replay, missing-delivery recovery, and cancellation keep working when
+full; [the API overload contract](API.md#admission-overload) describes retries.
+
+Memory admission and worker-start checks use the process's cgroup memory usage,
+including browser subprocesses, file cache, and kernel charges. Both
+[cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) and
+[cgroup v1](https://docs.kernel.org/admin-guide/cgroup-v1/memory.html) are supported.
+The service ceiling applies to the current group; tighter visible ancestor
+limits also constrain headroom. Outside a readable Linux memory cgroup, the
+fallback sums the process and descendant RSS; shared pages may be counted more
+than once. If Linux memory accounting is unavailable, monitoring is disabled.
+Setting `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=0` explicitly disables these checks.
+
+Each browser target waits for its concurrency permit and for memory headroom
+greater than `(active_browser_targets + 1) * SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB`.
+The reservation lasts through that target, including pagination and retries;
+waiting consumes the existing run budget and remains cancellable. The reserve
+is additional to measured usage, intentionally covering concurrent launches
+before their memory becomes visible. Tune it from browser peaks. It cannot stop
+an already-running browser from growing; retain the hard container limits.
+
+`scrapeyard_admission_rejections_total{reason="backlog|memory"}` counts rejected
+new runs. `scrapeyard_memory_headroom_bytes` reports sampled headroom before
+browser reservations (infinity when unmonitored), and
+`scrapeyard_memory_deferrals_total{stage="worker|browser"}` counts blocked start
+checks. Existing active-work and queue-age metrics show occupancy and delay.
 
 There are not three arq workers. One Worker owns the global
 `SCRAPEYARD_WORKERS_MAX_CONCURRENT` counter, one process-wide browser limiter

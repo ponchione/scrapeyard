@@ -32,7 +32,7 @@ Configuration:
   SCRAPEYARD_QUALIFICATION_TASK_GROWTH      threshold (default 4)
   SCRAPEYARD_QUALIFICATION_CPU_PERCENT      threshold (default 400)
 
-Phases: all, recovery, redis_restart, load, soak, backup_restore.
+Phases: all, recovery, redis_restart, admission, load, soak, backup_restore.
 EOF
 }
 
@@ -73,8 +73,8 @@ fail() {
 }
 
 case "$ONLY_PHASE" in
-  all|recovery|redis_restart|load|soak|backup_restore) ;;
-  *) fail "--phase must be all, recovery, redis_restart, load, soak, or backup_restore" ;;
+  all|recovery|redis_restart|admission|load|soak|backup_restore) ;;
+  *) fail "--phase must be all, recovery, redis_restart, admission, load, soak, or backup_restore" ;;
 esac
 
 validate_integer() {

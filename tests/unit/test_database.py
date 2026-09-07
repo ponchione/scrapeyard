@@ -113,6 +113,28 @@ async def test_init_db_idempotent(tmp_path):
     await init_db(str(db_dir))
 
 
+async def test_admission_index_upgrade_preserves_accepted_runs(tmp_path):
+    from scrapeyard.models.job import Job
+
+    db_dir = str(tmp_path / "db")
+    await init_db(db_dir)
+    await SQLiteJobStore().save_job(Job(
+        job_id="accepted", project="test", name="accepted", config_yaml="{}", current_run_id="run",
+    ))
+    async with get_db("jobs.db") as db, db_transaction(db):
+        await db.execute("DROP INDEX idx_jobs_admission")
+        await db.execute("DELETE FROM schema_migrations WHERE migration_id = '021'")
+    await close_db()
+    await init_db(db_dir)
+    await init_db(db_dir)
+    async with get_db("jobs.db") as db:
+        query = "SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running') AND current_run_id IS NOT NULL"
+        assert (await (await db.execute(query)).fetchone())[0] == 1
+        plan = await (await db.execute("EXPLAIN QUERY PLAN " + query)).fetchall()
+        assert any("idx_jobs_admission" in row[3] for row in plan)
+        assert (await (await db.execute("SELECT run_id FROM queued_run_snapshots")).fetchone())[0] == "run"
+
+
 async def test_init_db_records_ordered_migration_history_once(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
@@ -142,6 +164,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
             "017",
             "018",
             "019",
+            "021",
         ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
     assert [row[0] for row in histories["results_meta.db"]] == [

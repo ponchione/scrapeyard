@@ -196,6 +196,7 @@ async def test_priority_worker_refills_slot_without_double_counting_active_jobs(
     redis.zcount = AsyncMock(return_value=3)
     worker = object.__new__(_PriorityWorker)
     worker.allow_pick_jobs = True
+    worker.memory_available = lambda: True
     worker.job_counter = 3
     worker.max_jobs = 4
     worker.queue_name = "test-queue"
@@ -240,6 +241,28 @@ async def test_priority_worker_shutdown_uses_warning_clean_redis_close() -> None
     redis.aclose.assert_awaited_once_with(close_connection_pool=True)
     redis.close.assert_not_called()
     assert worker._pool is None
+
+
+async def test_memory_pressure_defers_worker_starts_but_keeps_maintenance(monkeypatch):
+    worker = object.__new__(_PriorityWorker)
+    worker.allow_pick_jobs = True
+    worker.job_counter = 0
+    worker.max_jobs = 4
+    worker.memory_available = lambda: False
+    worker._pool = MagicMock(zmscore=AsyncMock(return_value=[None]))
+    worker._admit_one = AsyncMock()
+    base_poll, base_start = AsyncMock(), AsyncMock()
+    monkeypatch.setattr("arq.worker.Worker._poll_iteration", base_poll)
+    monkeypatch.setattr("arq.worker.Worker.start_jobs", base_start)
+    await worker._poll_iteration()
+    base_poll.assert_awaited_once()
+    worker._admit_one.assert_not_awaited()
+    await worker.start_jobs([b"accepted-run"])
+    base_start.assert_not_awaited()
+    assert worker.allow_pick_jobs
+    worker.memory_available = lambda: True
+    await worker.start_jobs([b"accepted-run"])
+    base_start.assert_awaited_once_with([b"accepted-run"])
 
 
 @pytest.mark.asyncio
@@ -495,11 +518,13 @@ async def test_stop_cancellation_releases_active_browser_target(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_raises_memory_error_when_pool_cannot_accept():
+async def test_enqueue_repairs_accepted_delivery_even_under_memory_pressure():
     pool = _make_pool(memory_limit_mb=1)
+    pool._started = True
+    pool._redis = MagicMock(eval=AsyncMock(return_value=1), job_serializer=None)
     with patch.object(pool, "_check_memory", return_value=False):
-        with pytest.raises(MemoryError, match="memory exceeds"):
-            await pool.enqueue("job-1", "config: yaml")
+        await pool.enqueue("job-1", "config: yaml", run_id="run-1")
+    pool._redis.eval.assert_awaited_once()
 
 
 @pytest.mark.asyncio

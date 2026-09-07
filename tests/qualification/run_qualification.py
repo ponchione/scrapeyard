@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -406,6 +407,83 @@ class Harness:
             "target_requests": target_requests,
             "final_queue_depths": depths,
         }
+
+    def phase_admission(self) -> None:
+        """Bounded subprocess pressure must stop admission and queued starts."""
+        variable = "SCRAPEYARD_QUALIFICATION_ADMISSION_MEMORY_MB"
+        previous = os.environ.get(variable)
+        os.environ[variable] = "768"
+        marker = "/tmp/scrapeyard-admission-pressure.json"
+        try:
+            self.compose("up", "-d", "--no-deps", "--force-recreate", "scrapeyard")
+            self.wait_health()
+            jobs = [
+                self.submit(basic_config("td12-admission", f"slow-{i}", "/delay?seconds=8"))
+                for i in range(6)
+            ]
+            # At most 800 MiB is allocated for 30 seconds, with at least 256 MiB
+            # left below the hard container ceiling. This is a separate process
+            # so the API's Python RSS cannot observe the pressure on its own.
+            script = textwrap.dedent(f"""\
+                import json, time
+                from pathlib import Path
+                from scrapeyard.queue.memory import _cgroup_memory, memory_headroom_mb
+                samples = _cgroup_memory(Path('/proc/self'))
+                headroom = memory_headroom_mb(768)
+                assert samples and 0 < headroom < 768, (samples, headroom)
+                assert min(limit - usage for usage, limit in samples) > headroom + 288
+                allocation = bytearray(int((headroom + 32) * 1024**2))
+                marker = Path({marker!r})
+                marker.write_text(json.dumps({{'allocated_mib': len(allocation) / 1024**2,
+                    'headroom_mib': memory_headroom_mb(768),
+                    'cgroup_usage_mib': _cgroup_memory(Path('/proc/self'))[0][0]}}))
+                deadline = time.monotonic() + 30
+                while marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                marker.unlink(missing_ok=True)
+            """)
+            self.compose("exec", "-d", "scrapeyard", "python", "-c", script)
+            deadline = time.monotonic() + 10
+            pressure = None
+            while time.monotonic() < deadline:
+                raw = self.compose("exec", "-T", "scrapeyard", "cat", marker, check=False)
+                if raw.strip():
+                    pressure = json.loads(raw)
+                    break
+                time.sleep(0.1)
+            if pressure is None or pressure["headroom_mib"] >= 0:
+                raise QualificationFailure("bounded_memory_pressure_not_established")
+            status, _ = self.request(
+                "/scrape", data=basic_config("td12-admission", "rejected", "/static").encode(),
+                content_type="application/x-yaml",
+            )
+            if status != 503:
+                raise QualificationFailure(f"memory_admission_not_rejected status={status}")
+            sample = self.sample_resources()
+            time.sleep(10)  # Existing eight-second work drains while new starts wait.
+            statuses = [self.request(f"/jobs/{job_id}")[1]["status"] for job_id in jobs]
+            if "queued" not in statuses or any(status not in {"queued", "complete"} for status in statuses):
+                raise QualificationFailure(f"memory_execution_not_deferred statuses={statuses}")
+            self.compose("exec", "-T", "scrapeyard", "rm", "-f", marker)
+            for job_id in jobs:
+                if self.wait_job(job_id)["status"] != "complete":
+                    raise QualificationFailure(f"memory_execution_did_not_resume job_id={job_id}")
+            resumed = self.submit(basic_config("td12-admission", "resumed", "/static"))
+            if self.wait_job(resumed)["status"] != "complete":
+                raise QualificationFailure("memory_admission_did_not_resume")
+            self.report.phases["admission"] = {
+                **pressure, "service_limit_mib": 768, "rejection_status": status,
+                "queued_during_pressure": statuses.count("queued"),
+                "drained_jobs": len(jobs), "resource_sample": sample,
+            }
+        finally:
+            self.compose("exec", "-T", "scrapeyard", "rm", "-f", marker, check=False)
+            if previous is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = previous
+            self.compose("up", "-d", "--no-deps", "--force-recreate", "scrapeyard")
+            self.wait_health()
 
     def phase_load(self) -> None:
         start_growth = self.runtime_growth()
@@ -1016,7 +1094,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--profile", choices=("quick", "full"), required=True)
     parser.add_argument(
         "--only-phase",
-        choices=("all", "recovery", "redis_restart", "load", "soak", "backup_restore"),
+        choices=("all", "recovery", "redis_restart", "admission", "load", "soak", "backup_restore"),
         default="all",
     )
     parser.add_argument("--soak-seconds", type=int, required=True)
@@ -1032,6 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
     phases: tuple[tuple[str, Callable[[], None]], ...] = (
         ("recovery", harness.phase_recovery),
         ("redis_restart", harness.phase_redis_restart),
+        ("admission", harness.phase_admission),
         ("load", harness.phase_load),
         ("soak", harness.phase_soak),
         ("backup_restore", harness.phase_backup_restore),

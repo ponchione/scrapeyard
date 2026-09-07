@@ -288,6 +288,7 @@ def get_worker_pool() -> WorkerPool:
         max_concurrent=settings.workers_max_concurrent,
         max_browsers=settings.workers_max_browsers,
         memory_limit_mb=settings.workers_memory_limit_mb,
+        browser_memory_reserve_mb=settings.workers_browser_memory_reserve_mb,
         redis_settings=RedisSettings.from_dsn(settings.redis_dsn),
         queue_name=settings.queue_name,
         task_handler=_task_handler,

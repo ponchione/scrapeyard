@@ -30,6 +30,7 @@ from scrapeyard.queue.reconciliation import (
 )
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
 from scrapeyard.storage.protocols import JobStore, ResultStore
+from scrapeyard.storage.job_store import AdmissionCapacityError
 from scrapeyard.storage.secret_envelope import (
     SecretDecryptionError,
     SecretKeyConfigurationError,
@@ -185,6 +186,8 @@ class SchedulerService:
 
     @staticmethod
     def _failure_code(exc: Exception) -> str:
+        if isinstance(exc, AdmissionCapacityError):
+            return f"admission_{exc.reason}"
         if isinstance(exc, SchedulerUnavailableError):
             return "queue_state_unavailable"
         if isinstance(exc, MemoryError):

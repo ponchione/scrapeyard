@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 from yaml import YAMLError
 
@@ -78,7 +78,7 @@ from scrapeyard.scheduler.cron import (
     SchedulerService,
     SchedulerUnavailableError,
 )
-from scrapeyard.storage.job_store import DuplicateJobError
+from scrapeyard.storage.job_store import AdmissionCapacityError, DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
 from scrapeyard.storage.types import (
     ResultArtifactReadError,
@@ -326,9 +326,10 @@ async def scrape(
         raise_json_error(409, "Idempotency-Key was already used with different request content")
     except ResultArtifactUnavailableError:
         raise_json_error(404, "Completed result artifact is no longer available")
-    except MemoryError:
-        logger.warning("Rejecting async scrape due to pool memory pressure")
-        raise_json_error(503, "Server at capacity — try again later")
+    except (AdmissionCapacityError, MemoryError):
+        raise HTTPException(
+            503, "Server at capacity — try again later", headers={"Retry-After": "5"},
+        ) from None
 
     if not submission.completed:
         return _queued_scrape_response(
@@ -524,6 +525,10 @@ async def trigger_job(
         run_id, config_hash = await scheduler.trigger_job_now(job_id)
     except KeyError:
         raise_json_error(404, f"Job {job_id!r} not found")
+    except (AdmissionCapacityError, MemoryError):
+        raise HTTPException(
+            503, "Server at capacity — try again later", headers={"Retry-After": "5"},
+        ) from None
     except SchedulerUnavailableError as exc:
         raise_json_error(503, str(exc))
     except (ManualTriggerConflictError, ScheduledJobLifecycleError) as exc:
