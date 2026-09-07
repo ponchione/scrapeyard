@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
+from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.engines.toolbelt.fingerprints import (
     generate_convincing_referer,
@@ -15,8 +17,38 @@ from scrapling.engines.toolbelt.fingerprints import (
 )
 
 from scrapeyard.common.budgets import RunBudget
+from scrapeyard.engine.url_guard import canonical_url_origin
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+
+
+class BasicSession:
+    """One target's cookie jar and at most one origin/endpoint-specific pool."""
+
+    def __init__(self) -> None:
+        self.cookies = httpx.Cookies()
+        self._client: httpx.AsyncClient | None = None
+        self._key: tuple[Any, ...] | None = None
+
+    async def client(self, url: str, logical_url: str, proxy: Any) -> httpx.AsyncClient:
+        key = (canonical_url_origin(logical_url), canonical_url_origin(url), proxy)
+        if self._client is None or key != self._key:
+            if self._client is not None:
+                await self._client.aclose()
+            self._client = httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(proxy=proxy, retries=0, trust_env=False),
+                trust_env=False,
+            )
+            self._key = key
+        # Only the logical-URL jar may route cookies; the client's jar sees IPs.
+        self._client.cookies.clear()
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        self.cookies.clear()
+        if client is not None:
+            await client.aclose()
 
 
 def _request_headers(url: str, supplied: object, *, stealthy: bool) -> dict[str, str]:
@@ -125,31 +157,25 @@ async def fetch_streaming_response(
         else None
     )
     parser_arguments = {
-        **fetcher_cls._generate_parser_arguments(),
+        **(Fetcher if isinstance(fetcher_cls, BasicSession) else fetcher_cls)._generate_parser_arguments(),
         **custom_config,
     }
 
-    transport = httpx.AsyncHTTPTransport(
-        proxy=proxy,
-        # RetryHandler is the sole retry owner so every physical attempt
-        # re-enters rate limiting, cancellation, metrics, and the run budget.
-        retries=0,
-        trust_env=False,
-    )
-
     async def _request() -> Any:
-        async with httpx.AsyncClient(
-            transport=transport,
-            trust_env=False,
-        ) as client, client.stream(
+        async with AsyncExitStack() as stack:
+            session = fetcher_cls if isinstance(fetcher_cls, BasicSession) else BasicSession()
+            if session is not fetcher_cls:
+                stack.push_async_callback(session.aclose)
+            client = await session.client(url, header_url, proxy)
+            response = await stack.enter_async_context(client.stream(
                 "GET",
                 url,
                 headers=headers,
                 follow_redirects=follow_redirects,
                 timeout=timeout,
                 extensions=extensions,
-            **kwargs,
-        ) as response:
+                **kwargs,
+            ))
             if cookie_jar is not None and logical_request is not None:
                 logical_response = httpx.Response(
                     response.status_code,

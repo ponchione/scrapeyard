@@ -4,15 +4,15 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The three findings below remain outstanding; resolved findings and observations
+The two findings below remain outstanding; resolved findings and observations
 specific to the other branch have been removed. The original documentation
 recheck did not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. TD-13 and TD-14 are architecture
-follow-ups: their implementation observations are verified, but performance gains
+supervision, and build/security configuration. TD-14 is an architecture
+follow-up: its implementation observations are verified, but performance gains
 have not been measured. The Eyebox consumer review adds TD-17 (verified default limit differences requiring
 joint qualification). TD-14 is a
 proposed design simplification, not a reproduced correctness defect. Priorities:
@@ -72,68 +72,15 @@ consumer requirement from this review. Existing supported behavior remains intac
 
 For consumer-facing work, qualify TD-17's limits with the explicit pagination
 coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagination-coverage).
-TD-13 is the strongest performance candidate after correctness/capacity work. TD-14 is
-deferred until persistence maintenance or measured contention justifies a migration.
+TD-14 is deferred until persistence maintenance or measured contention justifies
+a migration.
 
 ## Findings
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-13 — Page fetches repeatedly create HTTP clients and browser sessions
-
-**Locations:** `src/scrapeyard/engine/basic_fetch.py:143`;
-`src/scrapeyard/engine/browser_debug.py:699` and the installed Scrapling engines;
-`src/scrapeyard/engine/scraper.py:219`, `:618`;
-`src/scrapeyard/engine/pagination.py`.
-
-**Eyebox assessment:** this is now the strongest performance candidate, still P3
-until measured. Its 46 checked-in configs all select async execution; 205 of 208
-targets use browsers (139 dynamic, 66 stealthy), and 39 configs paginate. For
-example, Brownells configures 11 sequential targets with a combined ceiling of
-41 pages. These are configured ceilings, not observed page counts or active
-production load. Benchmark representative jobs from the qualified launch
-allow-list before considering broad pooling. References: `../eyebox/configs/`
-and `../eyebox/configs/brownells-optics.yaml`.
-
-**Observed design:** every basic request creates and closes an `AsyncHTTPTransport`
-and `AsyncClient`, including individual redirect hops. Each local Chromium fetch
-launches a browser and context through Scrapling's `PlaywrightEngine`;
-`CamoufoxEngine` enters `AsyncCamoufox` inside each fetch. Pagination repeatedly
-calls these fetch paths, so normal local-browser pagination pays session/browser
-setup for each page and discards session state.
-Externally attached CDP browsers are a separate case; a new session does not
-necessarily launch a new external browser process.
-
-**Impact:** avoidable connection establishment and browser startup are likely
-throughput costs, especially for many pages on the same site. Their magnitude
-has not been benchmarked. HTTPX documents the benefits of keeping a
-[client and its connection pool alive](https://www.python-httpx.org/advanced/clients/).
-
-**Fix direction:** first benchmark representative basic and browser pagination
-against a controlled site. If setup is material, keep an HTTP client/transport
-and browser session alive for one target's pagination run, with explicit cleanup
-on success, failure, cancellation, and budget exhaustion. Prefer this bounded
-lifetime before adding a process-wide browser pool. Define retry behavior so a
-damaged session can be discarded and rebuilt.
-
-Preserve all per-request destination checks, pinned-IP/Host/SNI behavior, proxy
-selection, redirect credential scoping, rate limiting, budgets, and browser
-sandbox/network guards. Pooling must respect logical origin as well as the
-validated connection endpoint; distinct hosts can resolve to the same IP. Keep
-cookies and browser state isolated between unrelated targets/runs, and specify
-how state persists between pages and is reset between retry attempts. Reusing a
-session must not leave callbacks bound to an earlier page's diagnostics or budget.
-
-**Acceptance checks:** record before/after elapsed time, physical connection and
-browser-launch counts, and peak container memory for the same multi-page workload.
-Extend basic streaming, pagination, and browser fetcher tests to prove reuse and
-cleanup, including cancellation and a broken-session retry. Run existing live
-browser guards and add a cross-origin/cross-run credential-isolation case. Retain
-the change only if it reduces setup cost without weakening those guarantees.
 
 ### TD-14 — Separate metadata databases expand persistence coordination
 

@@ -11,6 +11,21 @@ from typing import Any, TypeVar
 T = TypeVar("T")
 
 
+async def await_cleanup(awaitable: Awaitable[T]) -> T:
+    """Retain resource ownership until cleanup finishes, even on repeated cancels."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 class AwaitableCancelled(Exception):
     """An inner awaitable ended by cancellation without cancelling its caller."""
 

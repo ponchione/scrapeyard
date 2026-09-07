@@ -313,6 +313,9 @@ python3 tests/smoke/verify_api.py \
 compose exec -T --user scrapeyard scrapeyard python - \
   < tests/smoke/verify_runtime.py > "$DIAGNOSTICS_DIR/runtime-contract.json"
 
+compose exec -T --user scrapeyard scrapeyard python - \
+  < tests/smoke/verify_fetch_sessions.py > "$DIAGNOSTICS_DIR/fetch-session-contract.jsonl"
+
 # Retrieve only the focused smoke project's bounded results/screenshots, never
 # the SQLite databases, profiles, credentials, or the complete /data tree.
 RETRIEVED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrapeyard-smoke-results.XXXXXX")"

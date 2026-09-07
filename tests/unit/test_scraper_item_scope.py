@@ -65,7 +65,8 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
         ),
     )
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
+        mock_fetcher = get_fetcher.return_value
         mock_fetcher.get.return_value = page
         result = await scrape_target(
             target,
@@ -124,7 +125,8 @@ async def test_scrape_target_preserves_legacy_stock_status_selector_as_stock_sig
         ),
     )
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
+        mock_fetcher = get_fetcher.return_value
         mock_fetcher.get.return_value = page
         result = await scrape_target(
             target,
@@ -177,7 +179,8 @@ async def test_scrape_target_item_scoped_extracted_signal_drives_stock_status_wh
         ),
     )
 
-    with patch("scrapeyard.engine.scraper.Fetcher") as mock_fetcher:
+    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
+        mock_fetcher = get_fetcher.return_value
         mock_fetcher.get.return_value = page
         result = await scrape_target(
             target,
