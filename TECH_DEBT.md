@@ -4,15 +4,15 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The seven findings below still apply to `main`; resolved findings and observations
+The six findings below still apply to `main`; resolved findings and observations
 specific to the other branch have been removed. This recheck changes documentation
 only and does not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. Remaining findings TD-03 and TD-04
-have a local reproduction or a directly verifiable reference trace. TD-12 through
+supervision, and build/security configuration. Remaining finding TD-04 has a local
+reproduction and a directly verifiable reference trace. TD-12 through
 TD-14 are architecture follow-ups: their implementation observations are verified,
 but overload consequences and performance gains have not been measured. The
 Eyebox consumer review adds TD-16 (a completeness-contract mismatch) and TD-17
@@ -34,9 +34,8 @@ required where the benefit is still a hypothesis.
 
 The full suite ran against the current application code before this documentation
 recheck. The lock, Ruff, mypy, and focused tests were rerun during the recheck.
-Temporary-directory reproductions reconfirmed the cleanup short-page failure and
-directory-fanout failure. A synthetic capped target still finalized successfully
-with a next link.
+Temporary-directory reproductions reconfirmed the directory-fanout failure.
+A synthetic capped target still finalized successfully with a next link.
 
 The current browser adapter does not capture fetch/XHR response bodies. Repeated
 SQLite readiness probes reuse cached connections and execute only `SELECT 1`;
@@ -82,51 +81,12 @@ deferred until persistence maintenance or measured contention justifies a migrat
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
 | TD-16 | P2 | Successful capped scrapes can authorize incorrect Eyebox listing removals |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-03 — Cleanup treats a normal deadline-limited partial page as a failure
-
-**Locations:** `src/scrapeyard/storage/cleanup.py:88`, `:131`, `:835`;
-`src/scrapeyard/storage/result_store.py:1185`.
-
-Artifact reconciliation intentionally returns a short page with
-`metadata_scan_exhausted=False` or `filesystem_scan_exhausted=False` when its
-deadline expires. `_CleanupCycleBudget.record()` rejects exactly that result:
-if `count < limit` and `has_more` is true, it raises `RuntimeError`.
-
-This turns expected bounded progress into `CleanupIncompleteError`, marks cleanup
-health as failed, and takes the ordinary cleanup delay instead of the successful
-saturated-cycle catch-up delay (defaults: six hours versus five seconds).
-
-**Reproduced:** create three real result artifacts, use batch size three, and
-advance a controlled monotonic clock past the deadline after reading the first
-artifact. Calling `_drain_artifact_reconciliation()` with the real `LocalResultStore`
-raises:
-
-```text
-RuntimeError: Cleanup phase 'artifact_metadata' reported more work after a short page
-```
-
-The existing
-`test_reconciliation_deadline_preserves_unvalidated_metadata_rows` in
-`tests/unit/test_result_store_cleanup.py` already establishes the valid short-page
-store behavior. The cleanup-layer time-ceiling test in `tests/unit/test_cleanup.py`
-uses a full page, so the two contracts are never exercised together.
-
-**Fix direction:** accept partial progress when reconciliation reports remaining
-work and the cycle deadline has been reached; mark the cycle saturated and preserve
-its durable cursor. Keep the safeguards against invalid counts and avoid a busy
-loop on zero-progress pages.
-
-**Regression check:** exercise the cleanup orchestrator and real store together,
-stopping midway through metadata and filesystem pages. Expect a successful,
-saturated outcome and continuation from the saved cursor on the next pass.
 
 ### TD-04 — Directory fanout can permanently prevent artifact reconciliation
 

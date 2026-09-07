@@ -11,6 +11,7 @@ from scrapeyard.storage.cleanup import (
     CleanupCycleOutcome,
     CleanupIncompleteError,
     HistoryRetentionPolicy,
+    _CleanupCycleBudget,
     run_cleanup,
 )
 from scrapeyard.models.job import JobStatus
@@ -213,7 +214,8 @@ async def test_run_cleanup_artifact_item_ceiling_marks_cycle_saturated():
 
 
 @pytest.mark.asyncio
-async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypatch):
+@pytest.mark.parametrize("count", [0, 1, 2])
+async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypatch, count):
     elapsed = 0.0
     result_store = AsyncMock()
     result_store.delete_expired.return_value = 0
@@ -224,8 +226,8 @@ async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypat
         elapsed = 1.0
         return ResultReconciliationReport(
             dry_run=True,
-            metadata_rows_inspected=2,
-            filesystem_entries_inspected=2,
+            metadata_rows_inspected=count,
+            filesystem_entries_inspected=count,
             metadata_scan_exhausted=False,
             filesystem_scan_exhausted=False,
         )
@@ -241,9 +243,24 @@ async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypat
         cycle_max_seconds=0.5,
     )
 
-    assert outcome == CleanupCycleOutcome(saturated=True, processed_items=4)
+    assert outcome == CleanupCycleOutcome(saturated=True, processed_items=2 * count)
     result_store.reconcile_artifacts.assert_awaited_once()
     assert result_store.reconcile_artifacts.await_args.kwargs["deadline"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("count", "elapsed"),
+    [(0, 0.0), (1, 0.0), (-1, 0.0), (3, 0.0), (-1, 1.0), (3, 1.0)],
+)
+def test_cleanup_budget_rejects_invalid_pages(count, elapsed):
+    clock = [0.0]
+    cycle = _CleanupCycleBudget(
+        max_items_per_phase=10, max_seconds=1.0, clock=lambda: clock[0]
+    )
+    clock[0] = elapsed
+
+    with pytest.raises(RuntimeError, match="invalid count|more work after a short page"):
+        cycle.record("artifact_metadata", count, limit=2, has_more=True)
 
 
 @pytest.mark.asyncio

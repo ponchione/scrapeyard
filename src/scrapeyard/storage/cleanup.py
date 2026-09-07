@@ -100,6 +100,9 @@ class _CleanupCycleBudget:
         self._phase_items[phase] = self._phase_items.get(phase, 0) + count
         if count < limit:
             if has_more:
+                if self._clock() >= self.deadline:
+                    self.saturated = True
+                    return False
                 raise RuntimeError(
                     f"Cleanup phase {phase!r} reported more work after a short page"
                 )
