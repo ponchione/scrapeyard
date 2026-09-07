@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import partial
+from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from scrapeyard.runtime.metrics import ACTIVE_WORK, WORK_CAPACITY
@@ -58,7 +58,7 @@ class RunThreadPool:
         loop = asyncio.get_running_loop()
         lingering = False
         try:
-            future = self._executor.submit(partial(function, *args, **kwargs))
+            future = self._executor.submit(copy_context().run, function, *args, **kwargs)
         except BaseException:
             self._slots.release()
             raise
