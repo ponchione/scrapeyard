@@ -355,7 +355,7 @@ def parse_transform(raw: str) -> Callable[[str], str]:
             if match is None:
                 return ""
             if match.groups():
-                return match.group(1)
+                return match.group(1) or ""
             return match.group(0)
 
         transform = _extract

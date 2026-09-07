@@ -82,7 +82,6 @@ measured contention justifies a migration.
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-05 | P2 | Browser debug capture reads bodies before checking eligibility or capacity |
 | TD-06 | P2 | Transform parsing removes meaningful whitespace inside quoted arguments |
-| TD-07 | P2 | An unmatched optional capture group crashes the `extract` transform |
 | TD-08 | P2 | The required browser security review has expired |
 | TD-09 | P2 | The current source fails the required type-check gate |
 | TD-10 | P3 | Transform pipeline scanning repeatedly copies growing prefixes |
@@ -300,31 +299,6 @@ parser where it suffices; avoid introducing another transform language.
 `test_replace_func_syntax_preserves_quoted_commas` in `tests/unit/test_config.py`,
 including a quoted replacement containing leading/trailing spaces and the complete
 selector pipeline path.
-
-### TD-07 — An unmatched optional capture group crashes the `extract` transform
-
-**Location:** `src/scrapeyard/config/transforms.py:347`, especially line 358.
-
-The `extract` transform returns `match.group(1)` whenever the regex has groups.
-A successful overall match may have an optional first group that did not
-participate. In that case `group(1)` is `None`, violating the transform's string
-contract. The bounding wrapper passes it to `len()` and crashes the target.
-
-**Reproduction:**
-
-```python
-from scrapeyard.config.transforms import parse_transform
-parse_transform('extract("(a)?b")')("b")
-# TypeError: object of type 'NoneType' has no len()
-```
-
-**Fix direction:** return an empty string for a nonparticipating selected group,
-consistent with the existing no-match result, so a following `default(...)` can
-work. Preserve first-group extraction when that group does participate.
-
-**Regression check:** cover `"ab"`, `"b"`, no overall match, and
-`extract("(a)?b")|default("missing")` through `parse_transform_pipeline` and
-`apply_transforms`.
 
 ### TD-08 — The required browser security review has expired
 
