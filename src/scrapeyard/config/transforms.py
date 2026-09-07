@@ -138,21 +138,6 @@ def checked_selector_value_size(value: str, *, limit: int | None = None) -> int:
     return size
 
 
-def checked_combined_selector_value_size(
-    values: tuple[str, ...],
-    *,
-    separator_bytes: int = 0,
-) -> int:
-    """Validate a prospective concatenation before allocating the result."""
-
-    limit = selector_value_limit()
-    observed = sum(checked_selector_value_size(value, limit=limit) for value in values)
-    observed += separator_bytes * max(0, len(values) - 1)
-    if observed > limit:
-        _raise_output_limit(observed, limit)
-    return observed
-
-
 def _bounded(transform: Callable[[str], str]) -> Callable[[str], str]:
     def _apply(value: str) -> str:
         checked_selector_value_size(value)

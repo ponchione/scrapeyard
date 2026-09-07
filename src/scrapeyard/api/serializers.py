@@ -210,37 +210,3 @@ def serialize_result_response(
         "budget_error": None,
         "results": artifact,
     }
-
-
-def serialize_scrape_result(
-    job_id: str,
-    *,
-    run_id: str,
-    status: str,
-    results: Any,
-    compatibility: APICompatibility = APICompatibility.v1,
-) -> dict[str, Any]:
-    return serialize_result_response(
-        job_id,
-        run_id=run_id,
-        status=status,
-        artifact=results,
-        compatibility=compatibility,
-    )
-
-
-def serialize_results_payload(
-    job_id: str,
-    *,
-    run_id: str,
-    status: str,
-    results: Any,
-    compatibility: APICompatibility = APICompatibility.v1,
-) -> dict[str, Any]:
-    return serialize_result_response(
-        job_id,
-        run_id=run_id,
-        status=status,
-        artifact=results,
-        compatibility=compatibility,
-    )

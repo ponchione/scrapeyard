@@ -51,16 +51,6 @@ class BackgroundService(Protocol):
     def background_detail(self) -> str | None: ...
 
 
-class BackgroundTask(Protocol):
-    """Asyncio task surface needed by the process-local task probe."""
-
-    def cancelled(self) -> bool: ...
-
-    def done(self) -> bool: ...
-
-    def exception(self) -> BaseException | None: ...
-
-
 @dataclass(frozen=True)
 class ProbeResult:
     ok: bool
@@ -142,21 +132,6 @@ def probe_background_service(
     except Exception as exc:
         return ProbeResult(False, f"{name} state probe failed: {type(exc).__name__}")
     return ProbeResult(ok, None if ok else str(detail or f"{name} stopped"))
-
-
-def probe_asyncio_task(name: str, task: BackgroundTask | None) -> ProbeResult:
-    """Report a missing, stopped, or failed asyncio background task."""
-
-    if task is None:
-        return ProbeResult(False, f"{name} task missing")
-    if task.cancelled():
-        return ProbeResult(False, f"{name} task stopped")
-    if not task.done():
-        return ProbeResult(True)
-    exception = task.exception()
-    if exception is None:
-        return ProbeResult(False, f"{name} task stopped")
-    return ProbeResult(False, f"{name} task failed: {type(exception).__name__}")
 
 
 def probe_disk(path: str, min_free_mb: int) -> ProbeResult:

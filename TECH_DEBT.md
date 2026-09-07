@@ -4,14 +4,14 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The nine findings below still apply to `main`; resolved findings and observations
+The eight findings below still apply to `main`; resolved findings and observations
 specific to the other branch have been removed. This recheck changes documentation
 only and does not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. Remaining findings through TD-11
+supervision, and build/security configuration. Remaining findings through TD-10
 have a local reproduction or a directly verifiable reference trace. TD-12 through
 TD-14 are architecture follow-ups: their implementation observations are verified,
 but overload consequences and performance gains have not been measured. The
@@ -85,7 +85,6 @@ deferred until persistence maintenance or measured contention justifies a migrat
 | TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-10 | P3 | Transform pipeline scanning repeatedly copies growing prefixes |
-| TD-11 | P3 | Superseded internal helpers have no runtime callers |
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
@@ -199,33 +198,6 @@ Do not replace it with an unconditional `split('|')`.
 
 **Validation:** rerun the small benchmark and existing transform parser tests;
 doubling one long argument should no longer approach four times the scan work.
-
-### TD-11 — Superseded internal helpers have no runtime callers
-
-An AST inventory followed by reference searches across `src`, `tests`, `scripts`,
-`security`, and documentation found these conservative deletion candidates:
-
-| Location | Candidate | Evidence and replacement |
-| --- | --- | --- |
-| `src/scrapeyard/api/serializers.py:215` | `serialize_scrape_result`, `serialize_results_payload` | No callers; both only delegate to `serialize_result_response`, which the active response renderer already calls directly. 30 function lines. |
-| `src/scrapeyard/queue/job_state.py:23` | `build_running_job`, `build_completed_job`, `build_failed_job` | Referenced only by their own tests in `tests/unit/test_job_state.py`; durable transitions use the job store's ownership-checked operations. 25 function lines. Keep `run_lease_is_active`. |
-| `src/scrapeyard/config/transforms.py:141` | `checked_combined_selector_value_size` | No callers, including tests. Current DOM extraction and transform paths do not use this prospective concatenation helper. 13 function lines. |
-| `src/scrapeyard/runtime/health.py:148` | `probe_asyncio_task` | Only its own unit test calls it; production uses `probe_background_service` and supervised monitors. 13 function lines. Its now-private-to-this-helper `BackgroundTask` protocol can also be removed after a final reference check. |
-
-**Fix direction:** delete these helpers and tests whose sole purpose is exercising
-the dead helpers. Preserve tests of the active lifecycle, serialization, budget,
-and background-health contracts. A caller search must still be rerun at the time
-of removal in case intervening work adds consumers.
-
-**Validation:** import-contract tests, Ruff, mypy, and the existing unit/integration
-suite. Conservative reduction: **81 production function lines, zero dependencies**,
-before removing associated unused imports, blank lines, protocol, or obsolete tests.
-
-Documented `compatibility=legacy-v0` responses, legacy API credentials, database
-upgrade paths, alternate IPv4 safety parsing, and adapters needed by the pinned
-Scrapling release are reachable behavior. Their names alone do not establish safe
-deletion; this report does not recommend removing them without an explicit support
-or migration decision.
 
 ### TD-12 — Scrape admission lacks a backlog cap and browser-aware memory headroom
 
