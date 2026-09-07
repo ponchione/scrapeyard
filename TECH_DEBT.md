@@ -7,7 +7,7 @@ This is an audit report; application code was not changed.
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. TD-01 through TD-11 have either a
+supervision, and build/security configuration. Findings through TD-11 have either a
 local reproduction or a directly verifiable failing check/reference trace.
 TD-12 through TD-15 are architecture follow-ups from the same audited revision:
 their implementation observations are verified, but overload consequences and
@@ -77,7 +77,6 @@ measured contention justifies a migration.
 
 | ID | Priority | Finding |
 | --- | --- | --- |
-| TD-01 | P1 | Cancellation during transaction entry poisons a cached SQLite connection |
 | TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
 | TD-05 | P2 | Browser debug capture reads bodies before checking eligibility or capacity |
@@ -92,77 +91,6 @@ measured contention justifies a migration.
 | TD-15 | P2 | Readiness performs database-wide integrity scans on every request |
 | TD-16 | P2 | Successful capped scrapes can authorize incorrect Eyebox listing removals |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
-
-### TD-01 — Cancellation during transaction entry poisons a cached SQLite connection
-
-**Locations:** `src/scrapeyard/storage/database.py:431`, especially line 442;
-`src/scrapeyard/storage/job_store.py:91`.
-
-`db_transaction()` awaits `BEGIN`/`BEGIN IMMEDIATE` **before** entering its
-`try`/rollback handling. Cancelling that await does not prevent aiosqlite's worker
-thread from subsequently executing the queued SQL. The context exits without
-rollback, while `DatabaseManager` retains the connection. Subsequent writes fail
-with `OperationalError: cannot start a transaction within a transaction`.
-
-**Reproduced with real SQLite:** one connection held a write reservation, a second
-entered `db_transaction(..., immediate=True)`, and the second task was cancelled
-while waiting. Releasing the first connection left the second inside a transaction;
-its next transaction failed. A separate writer can include the service's own fresh
-readiness connection; this does not require a second application replica.
-
-Run this from the repository root:
-
-```bash
-poetry run python - <<'PY'
-import asyncio
-import tempfile
-from pathlib import Path
-import aiosqlite
-from scrapeyard.storage.database import db_transaction
-
-async def main():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "audit.db"
-        async with aiosqlite.connect(path) as blocker, aiosqlite.connect(path) as db:
-            await blocker.execute("CREATE TABLE sample (value TEXT)")
-            await blocker.commit()
-            await blocker.execute("BEGIN IMMEDIATE")
-
-            async def enter():
-                async with db_transaction(db, immediate=True):
-                    raise AssertionError("Cancelled transaction body must not run")
-
-            task = asyncio.create_task(enter())
-            await asyncio.sleep(0.05)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            await blocker.rollback()
-            await db.execute("SELECT 1")  # Drain previously queued BEGIN.
-            print("in_transaction:", db.in_transaction)  # Currently True.
-            try:
-                async with db_transaction(db):
-                    pass
-            except aiosqlite.OperationalError as exc:
-                print(exc)
-            await db.rollback()
-
-asyncio.run(main())
-PY
-```
-
-**Fix direction:** include transaction entry in cancellation handling and retain
-ownership until the queued entry operation and any required rollback have finished.
-Merely moving `BEGIN` inside `try` and immediately checking `db.in_transaction`
-can still race with the SQLite thread: the queued `BEGIN` may not have run yet.
-Preserve connection serialization throughout cleanup, including repeated cancellation.
-
-**Regression check:** extend `tests/unit/test_database.py` to cancel during a
-blocked `BEGIN IMMEDIATE`, then assert the same connection can immediately perform
-and commit another write. Existing cancellation coverage raises cancellation
-inside an already-entered transaction and misses this boundary.
 
 ### TD-03 — Cleanup treats a normal deadline-limited partial page as a failure
 
@@ -594,8 +522,7 @@ in database row count. The `(1)` bounds reported errors, not rows scanned. As
 history grows, healthy databases can require increasing scan time, and concurrent
 probes add read work and compete for the write reservation. This can increase
 latency or cause readiness timeouts under load; that growth effect has not been
-measured locally. The cancellation defect in TD-01 is related but separately
-actionable.
+measured locally.
 
 **Fix direction:** keep a small bounded read/write capability check in readiness
 using SQLite's VFS and a rollback-safe operation without per-request schema DDL.

@@ -426,6 +426,62 @@ async def test_db_transaction_rolls_back_on_cancellation(tmp_path):
         assert not db.in_transaction
 
 
+@pytest.mark.parametrize("cancellation_count", [1, 3])
+async def test_db_transaction_cancelled_entry_preserves_cached_connection(
+    tmp_path, cancellation_count
+):
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    begin_started = asyncio.Event()
+    connection_reused = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def trace(sql):
+        if sql == "BEGIN IMMEDIATE":
+            loop.call_soon_threadsafe(begin_started.set)
+
+    async with get_db("jobs.db") as cached_db:
+        await cached_db.execute("CREATE TABLE values_table (value TEXT)")
+        await cached_db.commit()
+        await cached_db.set_trace_callback(trace)
+
+    async def cancelled_writer():
+        async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
+            pytest.fail("Cancelled transaction body must not run")
+
+    async def next_writer():
+        async with get_db("jobs.db") as db:
+            assert db is cached_db
+            connection_reused.set()
+            async with db_transaction(db, immediate=True):
+                await db.execute("INSERT INTO values_table VALUES ('reused')")
+
+    async with aiosqlite.connect(db_dir / "jobs.db") as blocker:
+        await blocker.execute("BEGIN IMMEDIATE")
+        writer = asyncio.create_task(cancelled_writer())
+        next_write = None
+        try:
+            await asyncio.wait_for(begin_started.wait(), timeout=2)
+            for _ in range(cancellation_count):
+                writer.cancel()
+                await asyncio.sleep(0)
+            next_write = asyncio.create_task(next_writer())
+            await asyncio.sleep(0)
+            released_before_cleanup = connection_reused.is_set()
+        finally:
+            await blocker.rollback()
+            with pytest.raises(asyncio.CancelledError):
+                await writer
+            if next_write is not None:
+                await next_write
+
+    assert not released_before_cleanup
+    async with get_db("jobs.db") as db:
+        assert not db.in_transaction
+        cursor = await db.execute("SELECT value FROM values_table")
+        assert [row[0] for row in await cursor.fetchall()] == ["reused"]
+
+
 async def test_db_transaction_accepts_explicit_early_rollback(tmp_path):
     async with aiosqlite.connect(tmp_path / "transaction.db") as db:
         await db.execute("CREATE TABLE values_table (value TEXT)")

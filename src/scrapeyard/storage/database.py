@@ -397,21 +397,23 @@ async def db_transaction(
     context. In that case there is no active transaction left to commit.
     """
 
-    await db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     try:
+        await db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         yield
+        if db.in_transaction:
+            await db.commit()
     except BaseException:
-        if db.in_transaction:
-            await db.rollback()
-        raise
-    else:
-        if db.in_transaction:
+        # aiosqlite still executes queued SQL after its awaiter is cancelled.
+        # Always queue rollback behind it, even if BEGIN has not taken effect,
+        # and retain the caller's connection lock until cleanup finishes.
+        rollback = asyncio.create_task(db.rollback())
+        while not rollback.done():
             try:
-                await db.commit()
-            except BaseException:
-                if db.in_transaction:
-                    await db.rollback()
-                raise
+                await asyncio.shield(rollback)
+            except asyncio.CancelledError:
+                continue
+        rollback.result()
+        raise
 
 
 async def _ensure_job_runs_heartbeat_column(db: aiosqlite.Connection) -> None:
