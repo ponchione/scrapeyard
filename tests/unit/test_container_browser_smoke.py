@@ -287,7 +287,7 @@ def test_secure_compose_deployment_installs_policy_before_starting_app() -> None
     path = Path("security/deploy-secure-compose.sh")
     subprocess.run(["bash", "-n", str(path)], check=True)
     text = path.read_text(encoding="utf-8")
-    dependency_start = text.index("docker compose up -d --wait egress-probe redis")
+    dependency_start = text.index('docker compose up -d --wait "${start_options[@]}" egress-probe redis')
     image_build = text.index("docker compose build scrapeyard")
     policy_install = text.index("install-docker-egress-policy.sh install")
     application_stop = text.index("docker compose stop scrapeyard")
