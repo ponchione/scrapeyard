@@ -13,6 +13,7 @@ from scrapeyard.common.settings import get_settings
 
 # Pattern matching spec-style func("arg1", "arg2") syntax.
 _FUNC_RE = re.compile(r"^(\w+)\((.*)\)$")
+_PIPELINE_PREFIX_RE = re.compile(r"\s*(?:(extract:|regex:)|\w+\s*\()")
 _DEFAULT_MAX_PIPELINE_STEPS = 32
 _DEFAULT_MAX_VALUE_BYTES = 1048576
 
@@ -51,11 +52,19 @@ def split_transform_pipeline(raw: str) -> list[str]:
     character_class = False
     index = 0
     while index < len(raw):
+        if index == start:
+            # Classify each step once; never copy a growing argument prefix.
+            prefix = _PIPELINE_PREFIX_RE.match(raw, start)
+            prefix_end = prefix.end() if prefix else -1
+            pattern_end = -1
+            if prefix and prefix[1] == "extract:":
+                pattern_end = len(raw)
+            elif prefix and prefix[1] == "regex:":
+                pattern_end = raw.find(":", prefix_end)
+                if pattern_end == -1:
+                    pattern_end = len(raw)
         character = raw[index]
-        step_prefix = raw[start:index].strip()
-        colon_pattern = step_prefix.startswith("extract:") or (
-            step_prefix.startswith("regex:") and step_prefix.count(":") == 1
-        )
+        colon_pattern = index <= pattern_end
         if quote_open:
             if character == '"':
                 if index + 1 < len(raw) and raw[index + 1] == '"':
@@ -75,7 +84,7 @@ def split_transform_pipeline(raw: str) -> list[str]:
             character_class = False
         elif not character_class:
             if character == "(":
-                if parentheses or colon_pattern or re.fullmatch(r"\w+", step_prefix):
+                if parentheses or colon_pattern or index + 1 == prefix_end:
                     parentheses += 1
             elif character == ")":
                 if parentheses:
