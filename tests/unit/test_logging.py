@@ -7,6 +7,9 @@ import logging
 from scrapling.engines.toolbelt.custom import Response
 
 from scrapeyard.common.logging import _JsonFormatter, setup_logging
+from scrapeyard.common.run_threads import RunThreadPool
+from scrapeyard.config.schema import TargetConfig
+from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
     reset_deployment_secret_redaction,
@@ -109,6 +112,44 @@ def test_formatter_redacts_run_scoped_secret_from_exception_traceback():
         assert "ValueError: <redacted>" in parsed["message"]
     finally:
         reset_deployment_secret_redaction(token)
+
+
+async def test_run_thread_pool_preserves_and_isolates_secret_redaction(monkeypatch, caplog):
+    first, second = "thread-secret-one", "thread-secret-two"
+    target = TargetConfig(
+        url=f"https://example.com/{first}/{second}",
+        selectors={first: "h1", second: "h2"},
+    )
+    message = (
+        f"Adaptive relocation check: url={target.url} "
+        f"missing_selectors={first},{second}"
+    )
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    handler.setFormatter(_JsonFormatter())
+    logger = logging.getLogger("scrapeyard.engine.adaptive_diagnostics")
+    monkeypatch.setattr(logger, "handlers", [handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    pool = RunThreadPool(max_workers=1)
+    expected = []
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            # Reuse the same thread, then submit without any active secrets.
+            for secrets in ((first,), (second,), ()):
+                token = activate_deployment_secret_redaction(secrets)
+                try:
+                    log_adaptive_selector_gap(target, [])
+                    await pool.run(log_adaptive_selector_gap, target, data=[])
+                finally:
+                    reset_deployment_secret_redaction(token)
+                expected.append(message.replace(secrets[0], "<redacted>") if secrets else message)
+    finally:
+        pool.shutdown()
+        handler.close()
+
+    messages = [json.loads(line)["message"] for line in output.getvalue().splitlines()]
+    assert messages[::2] == expected  # Direct calls establish the redaction baseline.
+    assert messages[1::2] == expected  # Threaded calls must have identical isolation.
 
 
 def test_setup_logging_removes_scrapling_plaintext_handler_and_redacts_once(
