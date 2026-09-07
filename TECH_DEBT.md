@@ -4,14 +4,14 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The eight findings below still apply to `main`; resolved findings and observations
+The seven findings below still apply to `main`; resolved findings and observations
 specific to the other branch have been removed. This recheck changes documentation
 only and does not establish that findings on the unmerged branch were fixed.
 
 The sweep covered API authentication and validation, configuration and transforms,
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
-supervision, and build/security configuration. Remaining findings through TD-10
+supervision, and build/security configuration. Remaining findings TD-03 and TD-04
 have a local reproduction or a directly verifiable reference trace. TD-12 through
 TD-14 are architecture follow-ups: their implementation observations are verified,
 but overload consequences and performance gains have not been measured. The
@@ -36,7 +36,7 @@ The full suite ran against the current application code before this documentatio
 recheck. The lock, Ruff, mypy, and focused tests were rerun during the recheck.
 Temporary-directory reproductions reconfirmed the cleanup short-page failure and
 directory-fanout failure. A synthetic capped target still finalized successfully
-with a next link. Transform timing measurements below were refreshed.
+with a next link.
 
 The current browser adapter does not capture fetch/XHR response bodies. Repeated
 SQLite readiness probes reuse cached connections and execute only `SELECT 1`;
@@ -84,7 +84,6 @@ deferred until persistence maintenance or measured contention justifies a migrat
 | --- | --- | --- |
 | TD-03 | P2 | Cleanup treats a normal deadline-limited partial page as a failure |
 | TD-04 | P2 | Directory fanout can permanently prevent artifact reconciliation |
-| TD-10 | P3 | Transform pipeline scanning repeatedly copies growing prefixes |
 | TD-12 | P1 memory / P2 backlog | Scrape admission lacks a backlog cap and browser-aware memory headroom |
 | TD-13 | P3 | Page fetches repeatedly create HTTP clients and browser sessions |
 | TD-14 | P3, deferred | Separate metadata databases expand persistence coordination |
@@ -167,37 +166,6 @@ and tolerate non-empty/racing directories, never recursive parent deletion.
 **Regression check:** exceed the configured fanout using both empty job directories
 and jobs with orphan runs; repeated cleanup passes must eventually visit every run.
 Retain tests that reject oversized individual artifact trees and symlink traversal.
-
-### TD-10 — Transform pipeline scanning repeatedly copies growing prefixes
-
-**Location:** `src/scrapeyard/config/transforms.py:56`.
-
-Every character iteration computes `raw[start:index].strip()` before even handling
-the already-open-quote case. A long single step therefore repeatedly copies its
-growing prefix, making scanning quadratic in the step length. The pipeline-step
-limit is applied only after scanning. Submission validation reaches this code
-before the queued run's duration budget exists.
-
-**Recheck measurements** (median of three scans), calling
-`split_transform_pipeline('append("' + 'x' * n + '")')`:
-
-| Argument length | Median scan |
-| --- | --- |
-| 40,000 | 0.0118 seconds |
-| 80,000 | 0.0369 seconds |
-| 160,000 | 0.1304 seconds |
-
-These are local diagnostic timings, not production throughput claims. The largest
-example fits within the default request body ceiling with a small YAML envelope;
-later argument validation does not undo the scan work.
-
-**Fix direction:** retain the necessary prefix/type state once per step and process
-quoted/escaped characters without rebuilding that prefix. Keep the existing tests
-for regex alternatives, character classes, doubled quotes, and top-level pipes.
-Do not replace it with an unconditional `split('|')`.
-
-**Validation:** rerun the small benchmark and existing transform parser tests;
-doubling one long argument should no longer approach four times the scan work.
 
 ### TD-12 — Scrape admission lacks a backlog cap and browser-aware memory headroom
 

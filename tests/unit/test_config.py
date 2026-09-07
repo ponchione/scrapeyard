@@ -23,6 +23,7 @@ from scrapeyard.config import (
     parse_transform,
     parse_transform_pipeline,
 )
+from scrapeyard.config.transforms import split_transform_pipeline
 from scrapeyard.config.schema import (
     MAX_BROWSER_ACTIONS,
     MAX_BROWSER_ACTION_REPEAT,
@@ -1025,8 +1026,55 @@ class TestParseTransform:
         assert apply_transforms(" a ", transforms) == "["
 
     @pytest.mark.parametrize(
+        "step",
+        [
+            'append("a""|""b")',
+            r"extract:(a\)|b)",
+            "extract:[a:|]",
+            r"regex:a\::[",
+            r"append:\(",
+            'append  ("a|b")',
+        ],
+    )
+    def test_pipeline_splitter_preserves_step_boundaries(self, step):
+        assert split_transform_pipeline(f" trim | \t{step} | lowercase ") == [
+            "trim", step, "lowercase",
+        ]
+
+    @pytest.mark.parametrize(
+        "step",
+        [
+            'append("' + 'x' * 10_000 + '")',
+            "append:" + "(" * 10_000,
+            "extract:" + "[x|]" * 2_500,
+            "regex:" + "[x|]" * 2_500 + ":[",
+        ],
+        ids=["quoted-argument", "literal-parentheses", "extract-pattern", "regex-pattern"],
+    )
+    def test_pipeline_splitter_copies_only_linear_string_volume(self, step):
+        class TrackedString(str):
+            copied_characters = 0
+
+            def __getitem__(self, key):
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    self.copied_characters += len(value)
+                return value
+
+        raw = TrackedString(f" trim | {step} | lowercase ")
+        assert split_transform_pipeline(raw) == ["trim", step, "lowercase"]
+        # Count copying work instead of asserting machine-dependent wall time.
+        assert raw.copied_characters <= 2 * len(raw)
+
+    @pytest.mark.parametrize(
         "pipeline",
-        ['append("unterminated)|trim', "trim|", "trim||lowercase"],
+        [
+            'append("unterminated)|trim',
+            "extract:(a|b",
+            "extract:[a|b",
+            "trim|",
+            "trim||lowercase",
+        ],
     )
     def test_pipeline_parser_rejects_malformed_or_blank_steps(self, pipeline):
         with pytest.raises(ValueError):
