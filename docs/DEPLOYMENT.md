@@ -175,6 +175,85 @@ Kubernetes deployments should express the same allow-before-deny policy with a
 CNI that supports egress CIDR rules; default Kubernetes `NetworkPolicy` cannot
 select arbitrary public destinations while excluding every rebinding target.
 
+## Retained release artifacts and rollback
+
+Prepare a release on a build/qualification host with Docker, Python 3.10+, and
+at least 15 GiB free disk. Use an isolated host or ensure the qualification
+lane's fixed subnets and ports are unused. This builds the selected **committed**
+revision, runs the existing security scans and complete quick qualification,
+and publishes the directory only after both pass:
+
+```bash
+python3 scripts/release_artifact.py create /srv/scrapeyard-releases/candidate --revision HEAD
+python3 scripts/release_artifact.py verify /srv/scrapeyard-releases/candidate
+```
+
+The directory contains the source revision's files (including Compose, SQL,
+entrypoint and security policy), bounded scan/qualification reports, the
+application/Redis/probe image archive, and a SHA-256/permission manifest. The
+Compose overlay selects all three images by their immutable local image IDs.
+Image archives use Docker's native [save](https://docs.docker.com/reference/cli/docker/image/save/)
+and [load](https://docs.docker.com/reference/cli/docker/image/load/) commands.
+Checksums detect corruption; obtain the manifest and bundle through a trusted
+channel. They are not a publisher signature. Preserve file modes when copying.
+Never add `.env`, credentials, databases, or backup sets to the bundle.
+
+Retain the current and previous known-good directories on the deployment host
+and in protected off-host storage. Keep enough disk for both archives, loaded
+images, runtime growth and the coordinated pre-release backup. An incomplete
+or failed preparation never replaces a retained release. Local archives do not
+expire automatically; prune only releases outside the agreed rollback window.
+
+Before promotion, pause new ingress/dispatch, complete the
+[quiesced backup procedure](TESTING.md#quiesced-backup-and-fresh-restore), and
+verify access to the separate [encryption key recovery material](SECRET_STORAGE.md#rotation-backup-restore-and-key-loss).
+Record the current/candidate manifest identifiers and the backup location.
+Export the existing deployment settings and credentials through the normal
+protected environment. For a protected external Compose env file, use an
+absolute `COMPOSE_ENV_FILES` path; the wrapper still requires the operator
+`SCRAPEYARD_PROXY_URL` in its environment. Use the **same existing Compose
+project name** so application and Redis volumes retain their owners:
+
+```bash
+export COMPOSE_PROJECT_NAME=scrapeyard
+# Run as root with the deployment environment already supplied securely.
+security/deploy-secure-compose.sh --release /srv/scrapeyard-releases/candidate
+```
+
+The wrapper verifies and loads the bundle, checks all images before stopping
+the app, starts dependencies, installs the retained egress/AppArmor policies,
+then starts the app with `--no-build --pull never`. The source and `images.json`
+paths in the bundle are the only Compose files selected in release mode. A
+failure before stopping leaves the current app running; a policy failure
+leaves it stopped. Do not resume ingress until authenticated `/health/ready`,
+a known `/results/{id}` read, effective host/security policy, and exactly one
+application container/process have been verified. Compose health alone tests
+liveness. Retain redacted evidence of those checks after each transition.
+
+Rollback uses the identical command with the **previous known-good bundle**;
+no build, registry, dependency or browser downloads are needed. Keep its source
+directory in place while deployed because Compose mounts its probe/security
+files. If candidate readiness or result verification fails, keep ingress
+paused and follow the compatible-binary or data-restore decision below.
+
+SQLite migrations are forward-only and validated against a checksummed ledger.
+An older binary may reject a newer schema. Before selecting binary rollback,
+compare both bundles' SQL files and qualify the older binary against an
+isolated copy of the candidate's data. Identical SQL alone is not proof of
+application data compatibility. This release-tooling change adds no migration.
+When compatibility is unproven, keep the app stopped and either forward-repair
+or restore the coordinated pre-release application **and corresponding Redis**
+state with its keys into fresh volumes. Validate the backup using its matching
+release's helper/SQL, rehearse known jobs/results/decryption and queue recovery
+in isolation, then switch the deployment to the recovered volumes. Never try
+to downgrade by editing the migration ledger or restore over live writers.
+
+The artifact's fixture qualification does not qualify production proxy,
+capacity, ingress, monitoring or off-host backup installation. TD-22 remains
+open until candidate deployment, failed-candidate rejection and compatible
+rollback pass under the intended deployment controls without build-network
+access. Keep this operator evidence separately from automated fixture reports.
+
 ## Container privilege and filesystem boundary
 
 The image is built for Linux `amd64` and runs directly as UID/GID `10001`.

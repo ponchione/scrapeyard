@@ -4,7 +4,7 @@ Originally audited on **2026-09-07**, against commit
 `e8b505cb205272231a9810e86ec3ea33bddf2e9c` on the unmerged
 `agent/production-readiness` branch. All outstanding entries were rechecked on
 **2026-09-07** against `main` at `5be6e476c8fc378be7baffc05c19371de97b863c`.
-The finding below remains outstanding; resolved findings and observations
+The findings below remain outstanding; resolved findings and observations
 specific to the other branch have been removed. The original documentation
 recheck did not establish that findings on the unmerged branch were fixed.
 
@@ -75,6 +75,7 @@ coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagi
 | ID | Priority | Finding |
 | --- | --- | --- |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
+| TD-22 | P2 | Deployment and rollback lack retained, qualified release artifacts |
 
 ### TD-17 — Eyebox and Scrapeyard limits lack a jointly qualified operating envelope
 
@@ -121,3 +122,54 @@ and no unsafe removal on rejected data. Record elapsed time and peak memory for
 the qualified retailer set. Extend Eyebox's scheduled-client/source tests and the
 existing cross-provider restart/network-interruption qualification; mocked unit
 tests alone do not establish the deployed envelope.
+
+### TD-22 — Deployment and rollback lack retained, qualified release artifacts
+
+**Priority/ownership:** P2; Scrapeyard release delivery. Integrates with TD-20;
+coordinate joint release IDs with Eyebox item G.
+
+**Implementation update (2026-09-07):**
+[`scripts/release_artifact.py`](scripts/release_artifact.py) now builds a
+committed revision, gates publication on the existing scan/quick qualification,
+and retains source/security files, reports, and all three runtime images in a
+checksummed bundle. The secure wrapper's `--release DIRECTORY` path verifies
+and loads it before stopping the app, preserves policy/attestation ordering,
+and disables builds/pulls. The [rollback procedure](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
+covers previous-release retention, key/backup prerequisites and schema
+compatibility. Local validation: Ruff and mypy passed; the full suite passed
+2,084 tests with 16 live Redis skips (88.51% coverage), and the expanded release,
+wrapper and CI checks passed 22 tests with warnings treated as errors.
+Artifact creation was attempted locally and correctly refused before building
+because `scrapeyard_backend` already owns the qualification lane's fixed
+`172.30.0.0/24` subnet. No qualified candidate was published and no running
+deployment was changed. **Still open:** prepare the current and previous
+artifacts on an isolated Docker host, then complete the deployed acceptance
+checks below and record their evidence before removing this entry.
+
+**Problem:** the secure wrapper rebuilds Scrapeyard from the checkout on every
+deployment. CI builds/scans images, but the checked-in workflow does not provide
+a retained production image and tested rollback path independent of a new
+dependency/browser download. Rebuilding an older revision is not proof that
+the previously qualified artifact is available during an incident.
+
+**Start here:** [Dockerfile](Dockerfile),
+[container-security workflow](.github/workflows/container-security.yml),
+[security scan](scripts/run_container_security_scan.sh),
+[deploy wrapper](security/deploy-secure-compose.sh), and
+[qualification runner](scripts/run_release_qualification.sh).
+
+**Work:** retain the built/scanned/qualified image by immutable digest or verified
+archive, plus its source revision and matching Compose/security configuration.
+Add the smallest explicit promotion/rollback path that consumes that artifact
+without rebuilding and preserves stop/dependency/policy/attestation ordering.
+Keep a previous known-good artifact and enough local disk to restore it. Record
+the pre-release backup/key requirements and SQLite migration compatibility;
+choose data restore or forward repair when an older binary cannot use the new
+schema. Preserve the existing local build workflow where useful.
+
+**Done when:** deploy the retained candidate, reject a failed qualification,
+then restore the previous compatible release without build-network access.
+Verify readiness, known result reads, effective security policy, and one
+application instance after both transitions. Exercise the documented data
+restore branch in isolation if schema rollback requires it; record image/config
+identifiers and commands so another operator can repeat the rollback.
