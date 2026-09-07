@@ -5,11 +5,13 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
 import scrapeyard.storage.result_store as result_store_module
+from scrapeyard.storage.cleanup import CleanupCycleOutcome, run_cleanup
 from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.storage.types import ResultArtifactReadError
@@ -589,6 +591,67 @@ async def test_reconciliation_paginates_metadata_and_filesystem_work(store):
     assert second.metadata_scan_exhausted is True
     assert second.filesystem_scan_exhausted is True
     assert second.has_more is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "first_processed"),
+    [("_validate_metadata_row", 1), ("_tree_snapshot", 4)],
+    ids=["metadata", "filesystem"],
+)
+async def test_cleanup_deadline_resumes_partial_artifact_page(
+    store, monkeypatch, method, first_processed
+):
+    run_ids = [f"run-deadline-{index}" for index in range(3)]
+    for run_id in run_ids:
+        await store.save_result("job-deadline", {"run": run_id}, run_id=run_id)
+
+    elapsed = 0.0
+    inspected = []
+    real_inspect = getattr(store, method)
+
+    def slow_first_inspection(item, *args, **kwargs):
+        nonlocal elapsed
+        result = real_inspect(item, *args, **kwargs)
+        inspected.append(item["run_id"] if method == "_validate_metadata_row" else item.name)
+        if len(inspected) == 1:
+            elapsed = 1.0
+        return result
+
+    clock = SimpleNamespace(monotonic=lambda: elapsed)
+    monkeypatch.setattr("scrapeyard.storage.cleanup.time", clock)
+    monkeypatch.setattr(result_store_module, "time", clock)
+    monkeypatch.setattr(store, method, slow_first_inspection)
+
+    first = await run_cleanup(
+        store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=3,
+        cycle_max_seconds=1.0,
+    )
+
+    assert first == CleanupCycleOutcome(saturated=True, processed_items=first_processed)
+    assert inspected == run_ids[:1]
+    metadata_cursor, filesystem_cursor = await store._load_reconciliation_cursors()
+    if method == "_validate_metadata_row":
+        assert metadata_cursor > 0
+        assert filesystem_cursor is None
+    else:
+        assert metadata_cursor == 0
+        assert filesystem_cursor == ("test-project", "test-job", run_ids[0])
+
+    second = await run_cleanup(
+        store,
+        retention_days=30,
+        max_results_per_job=100,
+        result_cleanup_batch_size=3,
+        cycle_max_seconds=1.0,
+    )
+
+    assert second == CleanupCycleOutcome(saturated=False, processed_items=5)
+    assert inspected == run_ids
+    assert await store._load_reconciliation_cursors() == (0, None)
 
 
 @pytest.mark.asyncio
