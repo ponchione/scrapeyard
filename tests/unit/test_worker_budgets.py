@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime, timedelta, timezone
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from scrapeyard.common.settings import ServiceSettings
-from scrapeyard.config.schema import FailStrategy
+from scrapeyard.config.schema import ExecutionConfig, FailStrategy
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
@@ -115,6 +118,10 @@ webhook:
     terminal_data = result_store.save_result.await_args.args[1]
     assert terminal_data["status"] == "failed"
     assert terminal_data["results"] == {}
+    assert terminal_data["run_id"] == run_id
+    assert terminal_data["config_hash"] == hashlib.sha256(config.encode()).hexdigest()
+    delivery = job_store.finalize_owned_run.await_args.kwargs["webhook_delivery"]
+    assert delivery.payload["config_hash"] == terminal_data["config_hash"]
     finalization = job_store.finalize_owned_run.await_args.args
     assert finalization[:5] == (
         "job-budget",
@@ -202,7 +209,7 @@ execution:
 
     with patch("scrapeyard.queue.worker.scrape_target", block_target), patch(
         "scrapeyard.queue.worker.get_settings",
-        return_value=_settings(tmp_path, run_max_duration_seconds=0.02),
+        return_value=_settings(tmp_path, run_max_duration_seconds=0.2),
     ):
         await scrape_task(
             "job-budget",
@@ -228,3 +235,85 @@ execution:
         0,
         1,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining", [-60, 0.25, 86_400])
+async def test_submitted_deadline_counts_queue_wait_and_cannot_restart_clock(tmp_path, remaining):
+    now = datetime.now(timezone.utc)
+    job_store, result_store, error_store = _stores("run-expiring")
+    target_started = asyncio.Event()
+    config = f"""
+project: test
+name: budget-job
+target:
+  url: https://one.example.com
+  selectors:
+    title: h1
+execution:
+  deadline_at: {(now + timedelta(seconds=remaining)).isoformat()}
+"""
+
+    async def block_target(*_args, budget, **_kwargs):
+        assert budget.max_duration_seconds <= min(0.5, max(0, remaining))
+        target_started.set()
+        await asyncio.Event().wait()
+
+    with patch("scrapeyard.queue.worker.scrape_target", block_target), patch(
+        "scrapeyard.queue.worker.get_settings", return_value=_settings(tmp_path, run_max_duration_seconds=0.5),
+    ), patch("scrapeyard.queue.worker.utc_now", return_value=now):
+        await scrape_task(
+            "job-budget", config, run_id="run-expiring", job_store=job_store,
+            result_store=result_store, error_store=error_store,
+            circuit_breaker=MagicMock(), rate_limiter=LocalDomainRateLimiter(),
+        )
+    assert target_started.is_set() == (remaining > 0)
+    assert error_store.log_error.await_args.args[0].budget.limit_name == "run_duration_seconds"
+    assert result_store.save_result.await_args.args[1]["status"] == "failed"
+    assert job_store.finalize_owned_run.await_args.args[:3] == ("job-budget", "run-expiring", "failed")
+
+
+def test_submission_deadline_requires_an_explicit_timezone():
+    with pytest.raises(ValueError, match="timezone"):
+        ExecutionConfig(deadline_at="2026-09-08T12:00:00")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_requests", [1, 2])
+async def test_submitted_request_cap_is_enforced_and_retained(tmp_path, max_requests):
+    job_store, result_store, error_store = _stores("run-requests")
+    config = f"""
+project: test
+name: budget-job
+target:
+  url: https://one.example.com
+  selectors:
+    title: h1
+execution:
+  max_requests: {max_requests}
+  max_fetched_bytes: 500
+"""
+    dispatched = []
+
+    async def fetch(*_args, budget, **_kwargs):
+        for n in range(2):
+            await budget.reserve_requests()
+            dispatched.append(n)
+            await budget.consume_fetched_bytes(10)
+        return TargetResult(url="https://one.example.com", status="success", data=[{"n": 1}], pages_scraped=1)
+
+    with patch("scrapeyard.queue.worker.scrape_target", fetch), patch(
+        "scrapeyard.queue.worker.get_settings", return_value=_settings(tmp_path),
+    ):
+        await scrape_task(
+            "job-budget", config, run_id="run-requests", job_store=job_store,
+            result_store=result_store, error_store=error_store,
+            circuit_breaker=MagicMock(), rate_limiter=LocalDomainRateLimiter(),
+        )
+    assert dispatched == list(range(max_requests))
+    artifact = result_store.save_result.await_args.args[1]
+    assert artifact["status"] == ("failed" if max_requests == 1 else "complete")
+    assert artifact["run_budget"]["requests"] == max_requests
+    assert artifact["run_budget"]["fetched_bytes"] == max_requests * 10
+    assert artifact["run_budget"]["limits"]["max_requests"] == max_requests
+    assert artifact["run_budget"]["limits"]["max_fetched_bytes"] == 500

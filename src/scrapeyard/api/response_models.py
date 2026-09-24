@@ -54,10 +54,14 @@ class ResultResponse(APIResponseModel):
     job_id: str
     run_id: str
     status: str
+    project: str | None = None
+    name: str | None = None
+    config_hash: str | None = None
     completed_at: datetime | None = None
     errors: list[str] = Field(default_factory=list)
     targets: list[ResultTargetSummary] = Field(default_factory=list)
     budget_error: dict[str, Any] | None = None
+    run_budget: dict[str, Any] | None = None
     results: list[Any] | dict[str, Any]
 
 
@@ -78,6 +82,27 @@ class JobRunResponse(APIResponseModel):
     completed_at: datetime | None
     record_count: int | None
     error_count: int
+    failure_code: str | None
+
+
+class SubmissionReceiptResponse(APIResponseModel):
+    job_id: str
+    run_id: str
+    config_hash: str
+    project: str
+    created_at: datetime
+    expires_at: datetime
+
+
+class ExactRunResponse(APIResponseModel):
+    job_id: str
+    project: str
+    name: str
+    run_id: str
+    config_hash: str
+    status: str
+    started_at: datetime | None
+    completed_at: datetime | None
     failure_code: str | None
 
 

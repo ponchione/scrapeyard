@@ -208,3 +208,30 @@ async def test_cancelled_state_cannot_be_requeued_or_reconciled(store):
         NOW + timedelta(days=1),
         NOW + timedelta(days=1),
     ) == []
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_expected_run_guard_preserves_newer_delivery_and_schedule(store, claimed):
+    await (_claim(store, "run-new") if claimed else _save_queued(store, "run-new"))
+    before = await store.get_job("job-1")
+    outcome = await store.cancel_job("job-1", NOW, expected_run_id="run-old")
+    assert outcome.action is CancellationAction.run_conflict
+    assert not outcome.queue_quiescence_required
+    assert await store.get_job("job-1") == before
+    if claimed:
+        assert (await store.get_job_run("job-1", "run-new")).status is JobStatus.running
+
+
+async def test_exact_queued_cancel_keeps_accepted_hash_without_fake_execution(store):
+    await _save_queued(store)
+    before = await store.get_job_run_state("job-1", "run-1")
+    assert before["status"] == "queued"
+    assert before["config_hash"] == hashlib.sha256(YAML.encode()).hexdigest()
+    assert before["started_at"] is None
+    await store.cancel_job("job-1", NOW, expected_run_id="run-1")
+    after = await store.get_job_run_state("job-1", "run-1")
+    assert after["status"] == "cancelled"
+    assert after["config_hash"] == before["config_hash"]
+    assert after["started_at"] is None
+    assert await store.get_job_run("job-1", "run-1") is None
+    assert await store.get_job_run_state("job-1", "wrong-run") is None

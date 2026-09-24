@@ -48,6 +48,14 @@ class TestRetryHandler:
         assert result == "ok"
         assert fn.call_count == 1
 
+    @pytest.mark.parametrize("status", [401, 403, 407])
+    async def test_access_denial_is_not_retried(self, status):
+        handler = RetryHandler(self._config(max_attempts=2, backoff_max=0))
+        fn = AsyncMock(side_effect=[RetryableError(status), "must not retry"])
+        with pytest.raises(RetryableError):
+            await handler.execute(fn)
+        assert fn.await_count == 1
+
     async def test_retries_on_retryable_error(self):
         handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.fixed))
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])

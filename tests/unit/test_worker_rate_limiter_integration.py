@@ -44,6 +44,7 @@ async def test_scrape_task_passes_rate_limiter_to_request_boundary():
             ),
         ]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 3
         cfg.execution.fail_strategy = MagicMock(value="partial")
@@ -117,6 +118,7 @@ async def test_browser_permit_is_acquired_before_request_rate_limit():
             ),
         ]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 3
         cfg.execution.fail_strategy = MagicMock(value="partial")

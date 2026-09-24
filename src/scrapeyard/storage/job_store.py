@@ -14,6 +14,7 @@ import aiosqlite
 from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.models.job import Job, JobRun, JobStatus
 from scrapeyard.queue.memory import memory_headroom_mb
 from scrapeyard.runtime.metrics import ADMISSION_REJECTIONS
@@ -340,6 +341,21 @@ class SQLiteJobStore:
                 run_id=job.current_run_id,
                 response_mode=response_mode,
             )
+
+    async def get_submission_receipt(
+        self, caller_scope: str, key_digest: str, observed_at: datetime,
+    ) -> dict[str, object] | None:
+        """Look up existing acceptance without creating/enqueueing or refreshing retention."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT i.job_id, i.run_id, i.request_hash AS config_hash, j.project,
+                          i.created_at, i.expires_at
+                   FROM scrape_idempotency i JOIN jobs j ON j.job_id = i.job_id
+                   WHERE i.caller_scope = ? AND i.key_digest = ? AND i.expires_at > ?""",
+                (caller_scope, key_digest, fmt_dt(observed_at)),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
 
     async def delete_expired_idempotency_records(
         self,
@@ -832,6 +848,8 @@ class SQLiteJobStore:
         self,
         job_id: str,
         cancelled_at: datetime,
+        *,
+        expected_run_id: str | None = None,
     ) -> CancellationOutcome:
         """Cancel the exact accepted delivery under one immediate transaction."""
 
@@ -854,6 +872,11 @@ class SQLiteJobStore:
 
             prior_status = JobStatus(str(row["status"]))
             run_id = cast(str | None, row["current_run_id"])
+            if expected_run_id is not None and run_id != expected_run_id:
+                await db.rollback()
+                return CancellationOutcome(
+                    CancellationAction.run_conflict, job_id, run_id, prior_status, prior_status,
+                )
             if prior_status is JobStatus.cancelled:
                 await db.rollback()
                 return CancellationOutcome(
@@ -886,11 +909,8 @@ class SQLiteJobStore:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Running job cancellation could not update its exact run")
-            elif run_id is not None:
-                await db.execute(
-                    "DELETE FROM queued_run_snapshots WHERE job_id = ? AND run_id = ?",
-                    (job_id, run_id),
-                )
+            # Keep an unstarted delivery's immutable snapshot for exact-run recovery.
+            # Job deletion/retention cascades it; it does not become a fake execution.
 
             cursor = await db.execute(
                 """UPDATE jobs
@@ -1177,6 +1197,39 @@ class SQLiteJobStore:
         if row is None:
             return None
         return row_to_job_run(cast(Mapping[str, object], row))
+
+    async def get_job_run_state(self, job_id: str, run_id: str) -> dict[str, object] | None:
+        """Read one accepted identity atomically, including unstarted cancellation."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                """SELECT j.job_id, j.project, j.name,
+                          COALESCE(r.run_id, q.run_id) AS run_id,
+                          COALESCE(r.config_hash, q.config_hash) AS config_hash,
+                          COALESCE(r.status, j.status) AS status,
+                          r.started_at, r.completed_at, r.failure_code,
+                          COALESCE(r.config_yaml, q.config_yaml) AS config_yaml,
+                          CASE WHEN r.run_id IS NOT NULL THEN 'job_runs' ELSE 'queued_run_snapshots' END AS origin
+                   FROM jobs j
+                   LEFT JOIN job_runs r ON r.job_id = j.job_id AND r.run_id = ?
+                   LEFT JOIN queued_run_snapshots q
+                     ON q.job_id = j.job_id AND q.run_id = ? AND q.run_id = j.current_run_id
+                   WHERE j.job_id = ? AND (r.run_id IS NOT NULL OR q.run_id IS NOT NULL)""",
+                (run_id, run_id, job_id),
+            )
+            row = await cursor.fetchone()
+        if row is None or row["config_yaml"] is None:
+            return None  # Historical missing snapshots remain unavailable evidence.
+        state = dict(row)
+        config_yaml = reveal_text(
+            str(state.pop("config_yaml")), purpose=f"{state.pop('origin')}.config_yaml:{run_id}",
+        )
+        if hashlib.sha256(config_yaml.encode()).hexdigest() != state["config_hash"]:
+            raise ValueError("Exact run configuration hash mismatch")
+        config = load_yaml_mapping(config_yaml)
+        if config.get("project") != state["project"] or not isinstance(config.get("name"), str):
+            raise ValueError("Exact run configuration identity mismatch")
+        state["name"] = config["name"]
+        return state
 
     async def get_job_run_stats(
         self,

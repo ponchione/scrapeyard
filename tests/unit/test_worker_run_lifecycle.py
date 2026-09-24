@@ -181,6 +181,7 @@ class TestRunCreation:
 
         yaml_text = "project: test\nname: hash-check\ntarget:\n  url: http://x\n  selectors:\n    t: h1"
         expected_hash = hashlib.sha256(yaml_text.encode()).hexdigest()
+        result_store = AsyncMock()
 
         job = make_job(current_run_id="run-hash", config_yaml=yaml_text)
         job_store = SQLiteJobStore()
@@ -202,7 +203,7 @@ class TestRunCreation:
                 "job-1", yaml_text,
                 run_id="run-hash",
                 job_store=job_store,
-                result_store=AsyncMock(),
+                result_store=result_store,
                 error_store=SQLiteErrorStore(),
                 circuit_breaker=MagicMock(),
                 rate_limiter=LocalDomainRateLimiter(),
@@ -217,6 +218,9 @@ class TestRunCreation:
 
         assert row is not None
         assert row[0] == expected_hash
+        stored = result_store.save_result.call_args.args[1]
+        assert stored["run_id"] == "run-hash"
+        assert stored["config_hash"] == expected_hash
 
         await close_db()
 

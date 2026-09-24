@@ -40,6 +40,7 @@ class JobLifecycleRequestError(RuntimeError):
 async def cancel_current_job(
     job_id: str,
     *,
+    expected_run_id: str | None = None,
     job_store: JobStore,
     worker_pool: WorkerPool,
     scheduler: SchedulerService,
@@ -52,7 +53,7 @@ async def cancel_current_job(
         job_id,
     )
     try:
-        outcome = await job_store.cancel_job(job_id, requested_at)
+        outcome = await job_store.cancel_job(job_id, requested_at, expected_run_id=expected_run_id)
     except Exception as exc:
         logger.error(
             "Job cancellation CAS failed job_id=%s cancellation_phase=durable_cas "
@@ -74,6 +75,8 @@ async def cancel_current_job(
         None if outcome.resulting_status is None else outcome.resulting_status.value,
         outcome.action.value,
     )
+    if outcome.action is CancellationAction.run_conflict:
+        raise JobLifecycleRequestError(409, "The requested run no longer owns this job; no cancellation applied.")
     if outcome.action is CancellationAction.missing:
         raise JobLifecycleRequestError(404, f"Job {job_id!r} not found")
     if outcome.action is CancellationAction.conflict:

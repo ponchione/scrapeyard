@@ -11,6 +11,7 @@ from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.config.schema import OnEmptyAction, ScrapeConfig, TargetConfig
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
+from scrapeyard.engine.fetch_classifier import ACCESS_DENIAL_TYPES
 from scrapeyard.engine.resilience import ResultValidator, ValidationResult
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.engine.url_guard import redact_userinfo_in_url
@@ -68,6 +69,14 @@ async def apply_validation(
     validation = await _validate_result(validator, result.data, budget)
     if validation.passed:
         return result
+
+    # A challenge is an access decision, not an empty selector to retry.
+    if validation_error_type(result) in ACCESS_DENIAL_TYPES:
+        _record_validation_failure(
+            recorder=recorder, target_cfg=target_cfg, attempt=attempt,
+            result=result, action=ActionTaken.fail, message=validation.message,
+        )
+        return _build_validation_failed_result(target_cfg, result, validation.message)
 
     retry_error = _record_validation_failure(
         recorder=recorder,

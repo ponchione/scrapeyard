@@ -160,3 +160,22 @@ async def test_retry_response_bodies_are_counted_aggregate(monkeypatch):
     assert calls == 2
     assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
     assert exc_info.value.observed_amount == 6
+
+
+@pytest.mark.asyncio
+async def test_request_cap_stops_redirects_before_another_transport_call(monkeypatch):
+    calls = []
+    class Fetcher:
+        @staticmethod
+        def get(url, **kwargs):
+            calls.append(url)
+            return SimpleNamespace(status=302 if len(calls) < 3 else 200,
+                                   headers={"location": f"/hop-{len(calls)}"}, body=b"", url=url)
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    budget = _budget(10000)
+    budget.max_requests = 2
+    with pytest.raises(BudgetExceeded) as failure:
+        await _fetch_basic_with_safe_redirects(Fetcher, "https://example.com/start", {}, {}, budget=budget)
+    assert failure.value.limit_name.value == "requests"
+    assert calls == ["https://example.com/start", "https://example.com/hop-1"]
+    assert budget.requests == 2

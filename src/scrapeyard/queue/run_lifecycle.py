@@ -38,6 +38,7 @@ async def save_run_result(
     *,
     job_id: str,
     run_id: str | None,
+    config_hash: str,
     result_store: ResultStore,
     output_data: dict[str, Any],
     final_status: JobStatus,
@@ -47,7 +48,7 @@ async def save_run_result(
 ) -> SaveResultMeta:
     return await result_store.save_result(
         job_id,
-        output_data,
+        {**output_data, "job_id": job_id, "run_id": run_id, "config_hash": config_hash},
         run_id=run_id,
         status=final_status.value,
         record_count=record_count,

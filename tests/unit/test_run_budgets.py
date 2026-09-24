@@ -244,3 +244,39 @@ async def test_debug_budget_supports_partial_excerpt_but_not_partial_screenshot(
     assert await budget.reserve_browser_debug_bytes(4) == 0
     assert await budget.reserve_browser_debug_bytes(4, allow_partial=True) == 2
     assert budget.browser_debug_bytes == 5
+
+
+@pytest.mark.asyncio
+async def test_request_reservations_are_shared_and_settle_only_unused_redirect_capacity():
+    budget = _budget(max_requests=44)
+    await asyncio.gather(budget.reserve_requests(21), budget.reserve_requests(21), budget.reserve_requests(2))
+    assert budget.requests == 44
+    await budget.settle_requests(21, 3)
+    assert budget.requests == 26
+    await budget.reserve_requests(18)
+    with pytest.raises(BudgetExceeded) as failure:
+        await budget.reserve_requests()
+    assert failure.value.limit_name is BudgetLimitName.requests
+    assert budget.requests == 44
+    await budget.settle_requests(21, 1)
+    # A failed capacity gate cannot be made successful by later cleanup refunds.
+    with pytest.raises(BudgetExceeded):
+        budget.check_deadline()
+
+
+def test_submitted_caps_can_only_shorten_service_limits():
+    from types import SimpleNamespace
+    from scrapeyard.config.schema import ExecutionConfig
+    budget = RunBudget.from_settings(SimpleNamespace(run_max_requests=200), execution=ExecutionConfig(
+        max_requests=20, max_fetched_bytes=1024, max_extracted_records=5, max_serialized_result_bytes=4096))
+    assert (budget.max_requests, budget.max_fetched_bytes, budget.max_extracted_records, budget.max_serialized_result_bytes) == (20,1024,5,4096)
+    assert RunBudget.from_settings(SimpleNamespace(run_max_requests=200), execution=ExecutionConfig(max_requests=201)).max_requests == 200
+
+
+@pytest.mark.parametrize("field", ["max_requests", "max_fetched_bytes", "max_extracted_records", "max_serialized_result_bytes"])
+@pytest.mark.parametrize("value", [True, 0, -1, 1.5, "10000"])
+def test_submitted_budget_caps_reject_ambiguous_or_unbounded_values(field, value):
+    from pydantic import ValidationError
+    from scrapeyard.config.schema import ExecutionConfig
+    with pytest.raises(ValidationError):
+        ExecutionConfig(**{field: value})

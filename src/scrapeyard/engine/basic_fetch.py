@@ -9,6 +9,7 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
+from tldextract import TLDExtract, tldextract
 from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.engines.toolbelt.fingerprints import (
@@ -20,6 +21,10 @@ from scrapeyard.common.budgets import RunBudget
 from scrapeyard.engine.url_guard import canonical_url_origin
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+
+# Scrapling's referer and adaptive-storage helpers share this default extractor.
+# Use the dependency's bundled snapshot, never an unbudgeted runtime download.
+tldextract.TLD_EXTRACTOR = TLDExtract(cache_dir=None, suffix_list_urls=())
 
 
 class BasicSession:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 
@@ -80,6 +81,16 @@ async def test_get_result_not_found(store):
 async def test_get_result_specific_run_not_found(store):
     with pytest.raises(KeyError, match="No results found"):
         await store.get_result("j-1", "nonexistent-run")
+
+
+@pytest.mark.parametrize("field", ["job_id", "run_id", "project"])
+async def test_get_result_rejects_wrong_artifact_identity(store, field):
+    # Synthetic corrupted file: metadata still refers to the accepted run.
+    data = {"job_id": "j-1", "run_id": "run-1", "project": "acme", "results": []}
+    meta = await store.save_result("j-1", data, run_id="run-1")
+    (Path(meta.file_path) / "results.json").write_text(json.dumps({**data, field: "other"}))
+    with pytest.raises(ResultArtifactReadError, match="identity"):
+        await store.get_result("j-1", "run-1")
 
 
 async def test_save_result_returns_meta(store):

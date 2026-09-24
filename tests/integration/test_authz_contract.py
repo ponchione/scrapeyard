@@ -497,3 +497,24 @@ async def test_audit_logs_name_caller_without_logging_secret(
     assert "caller_id=reader" in caplog.text
     assert "credential_name=reader" in caplog.text
     assert SECRETS["reader"] not in caplog.text
+
+
+async def test_acceptance_lookup_keeps_caller_submit_scope_and_exact_run_keeps_read_scope(authorized_client, monkeypatch):
+    import asyncio
+
+    async def blocked(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", blocked)
+    headers = {**_headers("submitter"), "Idempotency-Key": "owned-receipt", "content-type": "application/x-yaml"}
+    accepted = await authorized_client.post("/scrape", content=_scrape_yaml("alpha"), headers=headers)
+    assert accepted.status_code == 202
+    recovered = await authorized_client.get("/scrape/acceptance", headers=headers)
+    assert recovered.status_code == 200
+    assert recovered.json()["job_id"] == accepted.json()["job_id"]
+    forbidden = await authorized_client.get("/scrape/acceptance", headers={**_headers("global-reader"), "Idempotency-Key": "owned-receipt"})
+    assert forbidden.status_code == 403
+    path = f"/jobs/{accepted.json()['job_id']}/runs/{accepted.json()['run_id']}"
+    assert (await authorized_client.get(path, headers=_headers("reader"))).status_code == 200
+    assert (await authorized_client.get(path, headers=_headers("beta-reader"))).status_code == 403
+    assert (await authorized_client.get(path, headers=_headers("submitter"))).status_code == 403

@@ -12,7 +12,11 @@ The sweep covered API authentication and validation, configuration and transform
 HTTP/browser fetching, execution budgets, queue and scheduler lifecycle,
 SQLite transactions, result persistence and cleanup, webhook delivery, runtime
 supervision, and build/security configuration. The Eyebox consumer review adds
-TD-17 (verified default limit differences requiring joint qualification). Priorities:
+TD-17 (verified default limit differences requiring joint qualification). The
+[2026-09-07 deployment assessment](docs/deployment-assessment-2026-09-07.md)
+extends TD-17 and adds TD-18 through TD-22. Those additions are source and
+provider-documentation findings, not results of the earlier test run or a live
+deployment audit. Priorities:
 **P1** = security or service availability; **P2** = functional or operational
 correctness; **P3** = efficiency or maintainability improvement, with measurement
 required where the benefit is still a hypothesis.
@@ -75,7 +79,18 @@ coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagi
 | ID | Priority | Finding |
 | --- | --- | --- |
 | TD-17 | P2 | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
+| TD-18 | P1 | Production forward-proxy selection and egress qualification are incomplete |
+| TD-19 | P1 | Restricted Hetzner HTTPS ingress and Railway credential handoff are incomplete |
+| TD-20 | P1 | Secure startup after host/Docker restart and runtime monitoring are unqualified |
+| TD-21 | P1 | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | Deployment and rollback lack retained, qualified release artifacts |
+
+For TD-17 through TD-22, read the deployment assessment and the linked source
+before implementation. Reuse existing scripts and settings. Record local
+implementation checks separately from operator/environment-dependent evidence;
+keep an entry open until its deployed acceptance checks pass. Eyebox's
+[go-live checklist](../eyebox/GO-LIVE-TESTING-CHECKLIST.md) owns launch gate
+closure. Repository edits alone do not provision infrastructure or activate jobs.
 
 ### TD-17 — Eyebox and Scrapeyard limits lack a jointly qualified operating envelope
 
@@ -122,6 +137,159 @@ and no unsafe removal on rejected data. Record elapsed time and peak memory for
 the qualified retailer set. Extend Eyebox's scheduled-client/source tests and the
 existing cross-provider restart/network-interruption qualification; mocked unit
 tests alone do not establish the deployed envelope.
+
+**Deployment extension (2026-09-07):** include the actual production resource
+and egress configuration. `docker-compose.yml` currently caps Scrapeyard at
+4 GiB with a 3,072 MiB admission threshold; `docker-compose.qualification.yml`
+allows 8 GiB and disables untrusted-submission mode for fixtures. Fixture
+qualification therefore does not establish production browser capacity or proxy
+compatibility. Measure the frozen launch set on the chosen x86-64 host, with
+TD-18's forward proxy, the intended browser concurrency, and headroom for Redis,
+OS, images, artifacts, AOF rewrites, and temporary backups. Record p95/p99 job
+and queue timing, cgroup memory/CPU, disk/inode growth, and failure recovery.
+Coordinate Eyebox load/soak targets with [item E](../eyebox/TECH-DEBT.md#e-product-outcomes-capacity-and-recovery-qualification)
+and transport tests with item D. Record the measured supported settings and
+ongoing cost estimate, including proxy bandwidth and retention; the assessment's
+4-vCPU/8-GB host suggestion and published prices are hypotheses to recheck,
+not a purchasing or capacity guarantee.
+
+### TD-18 — Production forward-proxy selection and egress qualification are incomplete
+
+**Priority/ownership:** P1; Scrapeyard deployment/security. Depends on the
+operator's proxy endpoint and intended retailer set; supplies TD-17's egress path.
+
+**Problem:** production Compose enables untrusted submissions, and startup
+requires a nonempty, non-`direct` `SCRAPEYARD_PROXY_URL`. The stack supplies
+Redis and an egress probe but no filtering forward proxy. The HTTPS ingress
+proxy in TD-19 does not satisfy this requirement. A commercial scraping proxy
+is not automatically evidence of safe destination filtering.
+
+**Start here:** [egress contract](docs/DEPLOYMENT.md#egress),
+[Compose](docker-compose.yml), [deploy wrapper](security/deploy-secure-compose.sh),
+[IP policy](src/scrapeyard/engine/ip_policy.py),
+[transport authorization](src/scrapeyard/api/transport_policy.py), and
+[egress tests](tests/unit/test_egress_policy.py).
+
+**Work:** select the smallest suitable existing proxy/service; document its
+address resolution and connected-destination filtering for HTTP and CONNECT,
+authentication, availability, and secret delivery. Wire it through the existing
+settings and narrowly reviewed host-policy exceptions. Preserve host egress
+filtering, startup attestation, and the browser sandbox. Ordinary Eyebox
+credentials retain `submit`/`read` only. Supply a repeatable controlled test for
+public fetch success, private/loopback/link-local/metadata denial, redirects,
+DNS rebinding, and proxy failure; use controlled destinations for security tests.
+
+**Done when:** the production startup path becomes ready with the selected proxy,
+fails closed when proxy/attestation prerequisites are absent, and the denial
+matrix passes from the real container across the enabled HTTP/browser
+transports. Qualify retailer yield and timing through that same proxy under
+TD-17 before activation. Record redacted configuration/version evidence and
+update the deployment runbook; trusted local/fixture mode cannot close this item.
+
+### TD-19 — Restricted Hetzner HTTPS ingress and Railway credential handoff are incomplete
+
+**Priority/ownership:** P1; Scrapeyard ingress/security. Coordinate Railway's
+outbound-address inventory with [Eyebox item G](../eyebox/TECH-DEBT.md#g-railway-service-configuration-and-ordered-releases).
+
+**Problem:** production Compose exposes no host API port, and the deployment
+plan does not supply a production reverse-proxy configuration. Railway's
+documented static egress now assigns three IPv4 addresses, requires Pro, may
+share addresses between customers, and changes addresses on a region move.
+The older single-IP handoff wording needs replacement with the actual assigned
+set; API credentials remain essential.
+
+**Start here:** [ingress and credentials](docs/DEPLOYMENT.md),
+[API routes](src/scrapeyard/api/routes.py),
+[monitoring authentication](docs/MONITORING.md),
+[Hetzner runbook](../eyebox/docs/hetzner-scrapeyard-deployment-runbook.md),
+[Railway outbound contract](https://docs.railway.com/networking/static-outbound-ips),
+and [Caddy certificate challenges](https://caddyserver.com/docs/automatic-https).
+
+**Work:** provide a reproducible Caddy/Nginx deployment connected to the private
+Compose network or a loopback-only production binding. Allow the adapter's
+`POST /scrape`, `GET /jobs/{id}`, and `GET /results/{id}` methods/paths and
+necessary query parameters. Preserve API/idempotency headers and bound request
+and transfer limits using TD-17. Apply the full verified Railway address set
+at the network boundary, with a named credential restricted to project `eyebox`
+and `submit`/`read`. Keep readiness/metrics on a private monitoring path with
+separate `health-detail` credentials. Choose DNS-01 or a deliberately reachable
+HTTP-01 challenge path so restrictions do not break certificate renewal.
+Document secret rotation and address-set changes without printing secrets.
+
+**Done when:** deployed ingest can submit/poll/download, and disallowed sources,
+wrong credentials/projects, administrative paths, Redis, Docker, and internal
+monitoring endpoints are denied externally. Verify idempotency survives the
+proxy, oversized requests fail predictably, logs omit secrets, and certificate
+issuance/renewal succeeds under the final firewall policy. Update both handoff
+runbooks and record evidence in Eyebox checklist sections 15-17.
+
+### TD-20 — Secure startup after host/Docker restart and runtime monitoring are unqualified
+
+**Priority/ownership:** P1; Scrapeyard host supervision. Coordinate with TD-19's
+ingress and TD-22's release artifact selection.
+
+**Problem:** `security/deploy-secure-compose.sh` installs policy during a deploy,
+but no checked-in installed boot service restores it after host/Docker restart.
+`restart: unless-stopped` neither orders policy restoration nor establishes
+authenticated readiness. The current container healthcheck is process liveness.
+
+**Start here:** [deploy wrapper](security/deploy-secure-compose.sh),
+[egress installer](security/install-docker-egress-policy.sh),
+[AppArmor installer](security/install-chromium-apparmor-profile.sh),
+[runtime health](src/scrapeyard/main.py), [monitoring](docs/MONITORING.md), and
+[installer tests](tests/unit/test_egress_policy_installer.py).
+
+**Work:** add minimal host supervision, normally systemd plus existing Compose
+scripts, that discovers the current bridge, starts required peers, installs
+AppArmor and the compatible `DOCKER-USER` policy, and admits work only after
+startup attestation/readiness. Handle Docker restart/network recreation and
+bound failed-start retries. Retain one application process, non-root execution,
+seccomp, capabilities, and filesystem limits. Wire private authenticated
+readiness/metrics collection and alerts for failed background work, queue age,
+browser failure/saturation, disk/inodes, and host/container restart loops. Reuse
+the documented metric names and the chosen monitoring service; coordinate
+backup-age alerts with TD-21 and Eyebox freshness alerts with item E.
+
+**Done when:** a cold boot, Docker restart, and Compose network recreation
+restore the intended controls and exactly one instance automatically. Inject
+policy/probe/Redis failure and show no unprotected work starts and retry behavior
+is bounded. Verify an actual readiness/queue/disk alert and a no-data condition
+reach the operator and recover. Retain redacted effective-policy, resource,
+readiness, and reboot evidence; a plain `docker compose up` is insufficient.
+
+### TD-21 — Unattended coordinated off-host backup and restoration are incomplete
+
+**Priority/ownership:** P1; Scrapeyard recovery. Eyebox owns its PostgreSQL
+recovery in [item I](../eyebox/TECH-DEBT.md#i-railway-postgresql-recovery-and-scheduled-maintenance).
+
+**Problem:** the repository has a tested quiesced backup-set helper, but no
+complete unattended production backup/upload/retention/alert installation.
+The helper excludes Redis and encryption key material. Independent snapshots
+of live SQLite files, artifacts, and Redis are not a coordinated recovery set.
+
+**Start here:** [backup helper](scripts/qualification_backup.py),
+[required quiescing order](docs/TESTING.md#quiesced-backup-and-fresh-restore),
+[encryption recovery](docs/SECRET_STORAGE.md#rotation-backup-restore-and-key-loss),
+and [release qualification](scripts/run_release_qualification.sh).
+
+**Work:** wrap the existing helper in a scheduled operation: pause ingress/new
+dispatch, quiesce application writers, follow the documented Redis persistence
+steps, capture all three databases and result/adaptive files, validate the
+manifest, encrypt and upload off-host, then resume safely. Define retention,
+failure cleanup, disk headroom, backup age, and operator notification. Store
+keyring recovery material separately with tested access. State whether queued
+work is preserved or recovered/reconciled and package the corresponding Redis
+state explicitly. Hetzner server backups are supplemental; attached provider
+Volumes are excluded, while Docker volumes on the root disk belong to that disk.
+
+**Done when:** an unattended scheduled backup succeeds, upload/storage failure
+and stale-backup alerts reach the operator, and the service recovers safely from
+an interrupted backup. Restore off-host data, keys, and the chosen Redis recovery
+state into an isolated deployment. Verify known successful/failed jobs, readable
+results, decrypted configuration, and queued-work recovery without unintended
+external submissions or webhooks. Record measured RPO/RTO, object checksums,
+retention, and an operator-executable recovery procedure. A manifest-only check
+or provider disk snapshot does not close this item.
 
 ### TD-22 — Deployment and rollback lack retained, qualified release artifacts
 

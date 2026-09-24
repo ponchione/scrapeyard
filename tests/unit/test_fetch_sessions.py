@@ -2,15 +2,18 @@
 
 import asyncio
 from contextlib import suppress
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit
 
 import pytest
+import httpx
+from scrapling import PlayWrightFetcher
 
 from scrapeyard.common.async_tools import await_cleanup
-from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine.basic_fetch import BasicSession
+from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import ResolvedPublicURL
 
@@ -172,3 +175,51 @@ async def test_cleanup_retains_ownership_through_repeated_cancellation():
     with pytest.raises(asyncio.CancelledError):
         await owner
     assert cleanup.done()
+
+
+@pytest.mark.parametrize("ending", ["disconnect", "crash", "budget_disconnect", "cancel"])
+async def test_browser_cleanup_preserves_failure_and_settles_requests(ending):
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+    page = MagicMock(frames=[])
+    page.close = AsyncMock()
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.unroute = AsyncMock(side_effect=RuntimeError("closed context"))
+
+    async def offline(value):
+        if value:
+            raise RuntimeError("Target crashed")
+
+    context.set_offline = AsyncMock(side_effect=offline)
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
+    stop_driver = AsyncMock()
+    session._stack.push_async_callback(stop_driver)
+    budget = RunBudget(max_duration_seconds=10, max_requests=100,
+        max_fetched_bytes=1000, max_extracted_records=100,
+        max_serialized_result_bytes=1000, max_browser_debug_bytes=1000)
+
+    async def guard(route):
+        await route.continue_()
+
+    async def navigate(*args, **kwargs):
+        route = MagicMock(request=MagicMock(redirected_from=None), continue_=AsyncMock())
+        await context.route.call_args.args[1](route)
+        browser.is_connected.return_value = "disconnect" not in ending
+        if ending == "disconnect":
+            raise RuntimeError("Disconnected navigation")
+        if ending == "cancel":
+            raise asyncio.CancelledError()
+        raise BudgetExceeded(BudgetLimitName.fetched_bytes, 1000, 1001)
+
+    page.goto = AsyncMock(side_effect=navigate)
+    expected = httpx.NetworkError if ending == "disconnect" else BudgetExceeded
+    if ending == "cancel":
+        expected = asyncio.CancelledError
+    with pytest.raises(expected):
+        await session.fetch("https://fixture.example/", {}, guard, budget=budget)
+    stop_driver.assert_awaited_once()
+    assert session._context is None
+    assert budget.snapshot()["requests"] == 1

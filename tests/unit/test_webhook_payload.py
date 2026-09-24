@@ -98,7 +98,7 @@ class TestBuildWebhookPayload:
         assert payload["status"] == "complete"
         assert payload["run_id"] == "20260316-120000-abcd1234"
         assert payload["result_path"] == "/results/acme/scrape-prices/20260316-120000-abcd1234"
-        assert payload["results_url"] == "/results/job-123?run_id=20260316-120000-abcd1234"
+        assert payload["results_url"] == "/results/job-123?run_id=20260316-120000-abcd1234&latest=false"
         assert payload["result_count"] == 42
         assert payload["error_count"] == 0
         assert payload["started_at"] == "2026-03-16T12:00:00+00:00"

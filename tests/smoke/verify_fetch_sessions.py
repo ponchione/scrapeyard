@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import httpx
 from scrapling import PlayWrightFetcher, StealthyFetcher
 
-from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine import browser_debug
 from scrapeyard.engine.browser_session import BrowserSession
@@ -176,6 +178,52 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             driver = launched[0]._impl_obj._connection._transport._proc
             assert driver.returncode is not None
             assert session._context is None
+
+            # Fail during a live fetch, while redirect capacity is reserved.
+            # Cleanup must retain the failure, refund unused slots and stop the
+            # driver even when page/context RPCs reject a crashed renderer.
+            for ending in ("disconnect", "budget_disconnect", "crash"):
+                if ending == "crash" and fetcher is not PlayWrightFetcher:
+                    continue  # Page.crash is a Chromium CDP operation.
+                run_budget = budget()
+                Fixture.requests.clear()
+                drivers = []
+                failure = BudgetExceeded(BudgetLimitName.fetched_bytes, 1, 2)
+
+                async def fail_action(page, ending=ending, drivers=drivers, failure=failure):
+                    owned = page.context.browser
+                    drivers.append(owned._impl_obj._connection._transport._proc)
+                    if ending == "crash":
+                        crashed = asyncio.Event()
+                        page.on("crash", lambda _: crashed.set())
+                        cdp = await page.context.new_cdp_session(page)
+                        crash = asyncio.create_task(cdp.send("Page.crash"))
+                        try:
+                            await asyncio.wait_for(crashed.wait(), 10)
+                        finally:
+                            crash.cancel()
+                            with suppress(Exception, asyncio.CancelledError):
+                                await crash
+                    else:
+                        await owned.close()
+                    if ending == "disconnect":
+                        raise RuntimeError("Disconnected during fetch")
+                    raise failure
+
+                try:
+                    await session.fetch(
+                        ORIGIN + "/failure", {"headless": True, "page_action": fail_action,
+                            **({"stealth": stealth} if fetcher is PlayWrightFetcher else {})},
+                        guard, budget=run_budget,
+                    )
+                    raise AssertionError("failed browser returned content")
+                except (BudgetExceeded, httpx.NetworkError) as exc:
+                    if ending != "disconnect":
+                        assert exc is failure
+                finally:
+                    await session.aclose()
+                assert run_budget.requests == len(Fixture.requests) == 1
+                assert drivers[0].returncode is not None
     finally:
         await session.aclose()
 

@@ -36,6 +36,8 @@ from scrapeyard.api.response_models import (
     ErrorRecordResponse,
     JobCreatedResponse,
     JobDetailResponse,
+    ExactRunResponse,
+    SubmissionReceiptResponse,
     JobSummaryResponse,
     LegacyResultResponse,
     ManualTriggerResponse,
@@ -284,6 +286,23 @@ def _idempotency_context(
         caller_scope=caller_scope,
         key_digest=hashlib.sha256(raw_key).hexdigest(),
     )
+
+
+@router.get("/scrape/acceptance", response_model=SubmissionReceiptResponse)
+async def get_submission_acceptance(
+    request: Request,
+    job_store: JobStore = Depends(get_job_store),
+) -> Any:
+    """Recover this caller's acceptance without resubmitting an uncertain request."""
+    authorize_request(request, AuthScope.submit)
+    context = _idempotency_context(request, max_bytes=get_settings().idempotency_key_max_bytes)
+    if context is None:
+        raise_json_error(400, "Idempotency-Key is required for acceptance lookup")
+    receipt = await job_store.get_submission_receipt(context.caller_scope, context.key_digest, utc_now())
+    if receipt is None:
+        raise_json_error(404, "Submission acceptance is unavailable; this does not authorize resubmission")
+    authorize_request(request, AuthScope.submit, project=str(receipt["project"]))
+    return receipt
 
 
 @router.post(
@@ -595,6 +614,22 @@ async def get_job(
     )
 
 
+@router.get("/jobs/{job_id}/runs/{run_id}", response_model=ExactRunResponse)
+async def get_exact_run(
+    job_id: str,
+    run_id: str,
+    request: Request,
+    job_store: JobStore = Depends(get_job_store),
+) -> Any:
+    """Read one immutable accepted run; unavailable history returns 404."""
+    job = await _get_job_or_404(job_store, job_id)
+    authorize_request(request, AuthScope.read, project=job.project)
+    state = await job_store.get_job_run_state(job_id, run_id)
+    if state is None:
+        raise_json_error(404, "Exact run identity is unavailable")
+    return state
+
+
 @router.delete("/jobs/{job_id}", status_code=204)
 async def delete_job(
     job_id: str,
@@ -633,6 +668,7 @@ async def delete_job(
 async def cancel_job(
     job_id: str,
     request: Request,
+    run_id: str | None = Query(None, min_length=1, max_length=256),
     job_store: JobStore = Depends(get_job_store),
     worker_pool: WorkerPool = Depends(get_worker_pool),
     scheduler: SchedulerService = Depends(get_scheduler),
@@ -643,6 +679,7 @@ async def cancel_job(
     try:
         await cancel_current_job(
             job_id,
+            expected_run_id=run_id,
             job_store=job_store,
             worker_pool=worker_pool,
             scheduler=scheduler,

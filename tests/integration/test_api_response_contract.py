@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -115,8 +116,20 @@ async def test_v1_result_has_one_record_location_for_each_grouping_mode(
         "errors",
         "targets",
         "budget_error",
+        "run_budget",
         "results",
+        "project",
+        "name",
+        "config_hash",
     }
+    assert payload["project"] == "api-contract"
+    assert payload["name"] == "response-contract"
+    assert payload["run_id"] == submitted.json()["run_id"]
+    assert payload["config_hash"] == hashlib.sha256(_yaml(group_by=group_by).encode()).hexdigest()
+    stored = await get_result_store().get_result(payload["job_id"], run_id=payload["run_id"])
+    assert payload["run_budget"] == stored.data["run_budget"]
+    for key in ("project", "name", "job_id", "run_id", "config_hash"):
+        assert stored.data[key] == payload[key]
     assert payload["targets"][0]["status"] == "success"
     assert "job_id" not in payload["results"] if isinstance(payload["results"], dict) else True
     if group_by == "target":

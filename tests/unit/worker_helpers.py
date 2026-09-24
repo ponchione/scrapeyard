@@ -77,7 +77,9 @@ def make_config_mock(
     cfg.name = "test-job"
     cfg.resolved_targets.return_value = targets
     cfg.execution.concurrency = 1
+    cfg.execution.deadline_at = None
     cfg.execution.delay_between = 0
+    cfg.execution.post_target_delay = 0
     cfg.execution.domain_rate_limit = 0
     cfg.execution.fail_strategy = fail_strategy
     cfg.adaptive = False

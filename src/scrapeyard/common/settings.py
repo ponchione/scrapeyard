@@ -43,6 +43,7 @@ class ServiceSettings(BaseSettings):
     workers_redis_connect_timeout_seconds: float = Field(default=10.0, gt=0)
 
     run_max_duration_seconds: float = Field(default=900.0, gt=0)
+    run_max_requests: int = Field(default=10000, ge=1)
     run_max_fetched_bytes: int = Field(default=104857600, ge=1)
     run_max_extracted_records: int = Field(default=100000, ge=1)
     run_max_serialized_result_bytes: int = Field(default=52428800, ge=4096)

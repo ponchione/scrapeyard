@@ -29,6 +29,8 @@ from scrapeyard.engine.browser_debug import (
 )
 from scrapeyard.engine.detection import enrich_item_detection
 from scrapeyard.engine.fetch_classifier import (
+    ACCESS_DENIAL_TYPES,
+    classify_page_signals,
     classify_fetch_exception,
     classify_rendered_outcome,
 )
@@ -266,6 +268,8 @@ async def _fetch_basic_with_safe_redirects(
             budget=budget,
             cancellation_guard=cancellation_guard,
         )
+        if budget is not None:
+            await budget.reserve_requests()
         if production_stream:
             request_kwargs["cookie_jar"] = cookie_jar
             request_kwargs["cookie_url"] = current_url
@@ -494,6 +498,13 @@ async def _fetch_page(
         if response.status in retryable_status:
             raise RetryableError(response.status)
         raise FetchError(response.status, debug=debug)
+    # Check every fetched page before pagination or empty-result retries. A
+    # normal catalogue can contain account/consent text alongside valid cards.
+    if classify_page_signals(debug) in ACCESS_DENIAL_TYPES:
+        counts = await run_thread_work(_selector_debug, response, target, run_budget=budget)
+        if counts["item_selector_count"] == 0 or not any(counts["selector_counts"].values()):
+            debug.update(counts)
+            raise FetchError(response.status, debug=debug)
     return FetchOutcome(page=response, debug=debug)
 
 

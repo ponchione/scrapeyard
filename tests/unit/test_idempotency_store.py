@@ -151,3 +151,18 @@ async def test_enqueue_rollback_cascades_idempotency_record(store):
             await db.execute("SELECT COUNT(*) FROM scrape_idempotency")
         ).fetchone()
     assert count[0] == 0
+
+
+async def test_receipt_lookup_is_caller_scoped_read_only_and_never_refreshes_expiry(store):
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    await _create(store, 1, created_at=now)
+    digest = hashlib.sha256(b"sentinel-client-key").hexdigest()
+    first = await store.get_submission_receipt("caller-a", digest, now)
+    assert first["job_id"] == "job-1"
+    assert await store.get_submission_receipt("caller-b", digest, now) is None
+    assert await store.get_submission_receipt("caller-a", "wrong", now) is None
+    assert await store.get_submission_receipt("caller-a", digest, now + timedelta(hours=23)) == first
+    assert await store.get_submission_receipt("caller-a", digest, now + timedelta(hours=24)) is None
+    async with get_db("jobs.db") as db:
+        assert (await (await db.execute("SELECT count(*) FROM jobs")).fetchone())[0] == 1
+        assert (await (await db.execute("SELECT count(*) FROM scrape_idempotency")).fetchone())[0] == 1

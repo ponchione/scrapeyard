@@ -17,6 +17,7 @@ from scrapeyard.common.async_tools import cancel_task_nowait
 T = TypeVar("T")
 NumericLimit = int | float
 _DEFAULT_MAX_DURATION_SECONDS = 900.0
+_DEFAULT_MAX_REQUESTS = 10000
 _DEFAULT_MAX_FETCHED_BYTES = 104857600
 _DEFAULT_MAX_EXTRACTED_RECORDS = 100000
 _DEFAULT_MAX_SERIALIZED_RESULT_BYTES = 52428800
@@ -34,6 +35,7 @@ class BudgetLimitName(str, Enum):
     """Stable names used in structured budget diagnostics."""
 
     run_duration_seconds = "run_duration_seconds"
+    requests = "requests"
     fetched_bytes = "fetched_bytes"
     extracted_records = "extracted_records"
     serialized_result_bytes = "serialized_result_bytes"
@@ -74,9 +76,11 @@ class RunBudget:
         max_extracted_records: int,
         max_serialized_result_bytes: int,
         max_browser_debug_bytes: int,
+        max_requests: int = _DEFAULT_MAX_REQUESTS,
         clock: Any = time.monotonic,
     ) -> None:
         self.max_duration_seconds = max_duration_seconds
+        self.max_requests = max_requests
         self.max_fetched_bytes = max_fetched_bytes
         self.max_extracted_records = max_extracted_records
         self.max_serialized_result_bytes = max_serialized_result_bytes
@@ -85,6 +89,7 @@ class RunBudget:
         self.started_monotonic = float(clock())
         self.deadline_monotonic = self.started_monotonic + max_duration_seconds
         self._fetched_bytes = 0
+        self._requests = 0
         self._extracted_records = 0
         self._browser_debug_bytes = 0
         self._estimated_result_bytes = 0
@@ -94,9 +99,10 @@ class RunBudget:
         self._exhausted: BudgetExceeded | None = None
 
     @classmethod
-    def from_settings(cls, settings: Any, *, clock: Any = time.monotonic) -> RunBudget:
+    def from_settings(cls, settings: Any, *, execution: Any = None, clock: Any = time.monotonic) -> RunBudget:
         """Create a budget from the central service settings object."""
-        return cls(
+        budget = cls(
+            max_requests=int(_numeric_setting(settings, "run_max_requests", _DEFAULT_MAX_REQUESTS)),
             max_duration_seconds=float(
                 _numeric_setting(
                     settings,
@@ -130,6 +136,48 @@ class RunBudget:
             ),
             clock=clock,
         )
+        for name in ("max_requests", "max_fetched_bytes", "max_extracted_records", "max_serialized_result_bytes"):
+            value = getattr(execution, name, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                setattr(budget, name, min(getattr(budget, name), value))
+        return budget
+
+    @property
+    def requests(self) -> int:
+        return self._requests
+
+    async def reserve_requests(self, amount: int = 1) -> None:
+        """Reserve dispatch capacity before allowing any transport attempt."""
+        if amount < 1:
+            raise ValueError("Request reservation must be positive")
+        async with self._counter_lock:
+            self.check_deadline()
+            observed = self._requests + amount
+            if observed > self.max_requests:
+                self._exhausted = BudgetExceeded(BudgetLimitName.requests, self.max_requests, observed)
+                raise self._exhausted
+            self._requests = observed
+
+    async def settle_requests(self, reserved: int, issued: int) -> None:
+        """Release unused native-redirect capacity after browser pages close."""
+        if not 0 <= issued <= reserved:
+            raise ValueError("Invalid settled request reservation")
+        async with self._counter_lock:
+            self._requests -= reserved - issued
+
+    def snapshot(self) -> dict[str, Any]:
+        """Retain effective limits and counters with the exact run's artifact."""
+        return {
+            "limits": {name: getattr(self, name) for name in (
+                "max_duration_seconds", "max_requests", "max_fetched_bytes",
+                "max_extracted_records", "max_serialized_result_bytes", "max_browser_debug_bytes",
+            )},
+            "requests": self.requests,
+            "fetched_bytes": self.fetched_bytes,
+            "extracted_records": self.extracted_records,
+            "browser_debug_bytes": self.browser_debug_bytes,
+            "elapsed_seconds": self.elapsed_seconds,
+        }
 
     @property
     def elapsed_seconds(self) -> float:
@@ -282,7 +330,7 @@ class RunBudget:
         await self.wait_for(asyncio.sleep(delay_seconds))
 
     async def consume_fetched_bytes(self, amount: int) -> None:
-        """Atomically account a reliably measured basic-fetch response body."""
+        """Account decoded basic bodies or rendered browser HTML, not wire bytes."""
         if amount < 0:
             raise ValueError("Fetched byte amount cannot be negative")
         self.check_deadline()

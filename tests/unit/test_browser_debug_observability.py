@@ -124,7 +124,7 @@ async def test_capture_browser_state_collects_bounded_console_and_request_failur
     page = MagicMock()
     page.url = "https://example.com/final"
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.evaluate = AsyncMock(return_value="<html>ok</html>")
     page.on = MagicMock()
 
     registered_handlers: dict[str, Callable[[object], None]] = {}
@@ -181,7 +181,7 @@ async def test_capture_browser_state_redacts_observability_urls() -> None:
     page = MagicMock()
     page.url = "https://example.com/final"
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.evaluate = AsyncMock(return_value="<html>ok</html>")
     page.on = MagicMock()
     registered_handlers: dict[str, Callable[[object], None]] = {}
     page.on.side_effect = lambda event_name, handler: registered_handlers.setdefault(
@@ -287,7 +287,7 @@ async def test_capture_browser_state_runs_configured_browser_actions() -> None:
     page = MagicMock()
     page.url = "https://example.com/final"
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.evaluate = AsyncMock(return_value="<html>ok</html>")
     page.locator.return_value.click = AsyncMock(return_value=None)
     page.wait_for_selector = AsyncMock(return_value=None)
     page.wait_for_timeout = AsyncMock(return_value=None)
@@ -324,7 +324,7 @@ async def test_click_selector_omits_timeout_when_configured_as_none() -> None:
     page = MagicMock()
     page.url = target.url
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="<html>ok</html>")
+    page.evaluate = AsyncMock(return_value="<html>ok</html>")
     page.locator.return_value.click = AsyncMock(return_value=None)
 
     await capture_browser_state(
@@ -756,7 +756,7 @@ async def test_capture_browser_state_rejects_non_public_final_url_before_content
     page = MagicMock()
     page.url = "http://127.0.0.1/private"
     page.title = AsyncMock(return_value="Private")
-    page.content = AsyncMock(return_value="<html>private</html>")
+    page.evaluate = AsyncMock(return_value="<html>private</html>")
 
     with pytest.raises(UnsafeURLError, match="non-public"):
         await capture_browser_state(
@@ -768,7 +768,7 @@ async def test_capture_browser_state_rejects_non_public_final_url_before_content
         )
 
     page.title.assert_not_awaited()
-    page.content.assert_not_awaited()
+    page.evaluate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -782,7 +782,7 @@ async def test_browser_debug_budget_omits_screenshot_that_does_not_fit(tmp_path)
     page = MagicMock()
     page.url = target.url
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="abc")
+    page.evaluate = AsyncMock(return_value="abc")
     page.screenshot = AsyncMock(return_value=b"1234")
     budget = _debug_budget(5)
 
@@ -822,7 +822,7 @@ async def test_browser_debug_budget_truncates_excerpt_at_utf8_boundary() -> None
     page = MagicMock()
     page.url = target.url
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="cafés")
+    page.evaluate = AsyncMock(return_value="cafés")
     budget = _debug_budget(4)
 
     await capture_browser_state(
@@ -852,7 +852,7 @@ async def test_browser_screenshot_exact_boundary_is_written_atomically(tmp_path)
     page = MagicMock()
     page.url = target.url
     page.title = AsyncMock(return_value="Example")
-    page.content = AsyncMock(return_value="")
+    page.evaluate = AsyncMock(return_value="")
     page.screenshot = AsyncMock(return_value=b"1234")
     budget = _debug_budget(4)
 
@@ -998,3 +998,21 @@ async def test_browser_limiter_survives_repeated_outer_cancellation() -> None:
         await first
     await second
     assert limiter.active == 0
+
+
+def test_scrapling_response_debug_reads_document_instead_of_root_node_text():
+    from scrapling.engines.toolbelt.custom import Response
+    from scrapeyard.engine.browser_debug import populate_fetch_debug
+    from scrapeyard.engine.fetch_classifier import classify_page_signals
+    from scrapeyard.models.job import ErrorType
+
+    html = '<html><title>Verify you are human</title><h1>Security check</h1></html>'
+    response = Response(
+        url="https://example.com", text=html, body=html.encode(), status=200,
+        reason="OK", encoding="utf-8", cookies={}, headers={}, request_headers={},
+        method="GET", history=[],
+    )
+    debug = {}
+    populate_fetch_debug(debug, response, response.url)
+    assert debug["page_title"] == "Verify you are human"
+    assert classify_page_signals(debug) == ErrorType.challenge_page

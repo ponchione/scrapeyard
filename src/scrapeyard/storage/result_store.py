@@ -552,6 +552,10 @@ class LocalResultStore:
                 type(exc).__name__,
             )
             raise ResultArtifactReadError("Result artifact is unavailable") from exc
+        if isinstance(data, dict):
+            for field in ("job_id", "run_id", "project"):
+                if field in data and data[field] != row[field]:
+                    raise ResultArtifactReadError(f"Result artifact identity mismatch: {field}")
         return ResultPayload(run_id=result_run_id, data=data, status=status)
 
     async def get_result_metadata(

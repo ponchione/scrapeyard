@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -985,6 +986,15 @@ class ValidationConfig(StrictConfigModel):
 class ExecutionConfig(StrictConfigModel):
     """Concurrency and orchestration settings."""
 
+    max_requests: int | None = Field(default=None, ge=1, strict=True)
+    max_fetched_bytes: int | None = Field(default=None, ge=1, strict=True)
+    max_extracted_records: int | None = Field(default=None, ge=1, strict=True)
+    max_serialized_result_bytes: int | None = Field(default=None, ge=4096, strict=True)
+
+    deadline_at: AwareDatetime | None = Field(
+        default=None,
+        description="Absolute submission deadline, including queue wait; can only shorten the service run budget",
+    )
     concurrency: int = Field(
         default=2,
         ge=1,
@@ -996,6 +1006,12 @@ class ExecutionConfig(StrictConfigModel):
         ge=0,
         le=MAX_EXECUTION_DELAY_SECONDS,
         description="Seconds between starting concurrent targets",
+    )
+    post_target_delay: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_EXECUTION_DELAY_SECONDS,
+        description="Seconds after a sequential target finishes before starting the next target",
     )
     domain_rate_limit: int = Field(
         default=3,
@@ -1011,6 +1027,12 @@ class ExecutionConfig(StrictConfigModel):
     fail_strategy: FailStrategy = Field(
         default=FailStrategy.partial, description="How to handle target failures"
     )
+
+    @model_validator(mode="after")
+    def _validate_post_target_delay(self) -> ExecutionConfig:
+        if self.post_target_delay > 0 and self.concurrency != 1:
+            raise ValueError("execution.post_target_delay requires execution.concurrency=1")
+        return self
 
 
 class ScheduleConfig(StrictConfigModel):

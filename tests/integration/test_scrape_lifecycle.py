@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -49,6 +50,36 @@ target:
   selectors:
     title: h1
 """
+
+
+@pytest.mark.asyncio
+async def test_expired_submission_retains_exact_identity_and_fails_without_fetch(client, monkeypatch):
+    calls = []
+
+    async def unexpected_fetch(*args, **kwargs):
+        calls.append(True)
+        return TargetResult(url="https://example.com", status="success", data=[])
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", unexpected_fetch)
+    body = _async_scrape_yaml().replace("execution:\n", "execution:\n  deadline_at: 2000-01-01T00:00:00Z\n")
+    headers = {"content-type": "application/x-yaml", "Idempotency-Key": "expired-intent"}
+    accepted = await client.post("/scrape", content=body, headers=headers)
+    assert accepted.status_code == 202
+    job, run = accepted.json()["job_id"], accepted.json()["run_id"]
+    terminal = await poll_until_ready(
+        lambda: client.get(f"/jobs/{job}/runs/{run}"),
+        lambda response: response.status_code == 200 and response.json()["status"] == "failed",
+        failure_message="Expired submission did not become an exact terminal failure",
+    )
+    receipt = await client.get("/scrape/acceptance", headers=headers)
+    result = await client.get(f"/results/{job}?run_id={run}&latest=false")
+    assert receipt.status_code == result.status_code == 200
+    for evidence in (terminal.json(), receipt.json(), result.json()):
+        assert evidence["job_id"] == job and evidence["run_id"] == run
+        assert evidence["config_hash"] == hashlib.sha256(body.encode()).hexdigest()
+    assert terminal.json()["name"] == "async-scrape"
+    assert result.json()["status"] == "failed"
+    assert not calls
 
 
 @pytest.mark.asyncio

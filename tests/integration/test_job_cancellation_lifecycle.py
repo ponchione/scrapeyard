@@ -452,3 +452,74 @@ async def test_deleting_resumes_after_final_jobs_db_fault(client, monkeypatch):
     assert (
         await client.delete(f"/jobs/{job_id}?delete_results=false")
     ).status_code == 204
+
+
+async def test_expected_run_cancellation_rejects_wrong_owner_before_side_effects(client, monkeypatch):
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def blocked(*_args, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", blocked)
+    accepted = (await _submit(client, _yaml(name="owned-cancel"))).json()
+    job_id, run_id = accepted["job_id"], accepted["run_id"]
+    await asyncio.wait_for(started.wait(), timeout=2)
+    before = await get_job_store().get_job(job_id)
+    wrong = await client.post(f"/jobs/{job_id}/cancel?run_id=foreign")
+    assert wrong.status_code == 409
+    assert not stopped.is_set()
+    assert await get_job_store().get_job(job_id) == before
+    assert (await client.post(f"/jobs/{job_id}/cancel?run_id={run_id}")).status_code == 204
+    assert stopped.is_set(), "204 must follow worker cancellation acknowledgement"
+    repeated = await client.post(f"/jobs/{job_id}/cancel?run_id={run_id}")
+    assert repeated.status_code == 204
+    exact = await client.get(f"/jobs/{job_id}/runs/{run_id}")
+    assert exact.status_code == 200
+    assert exact.json()["status"] == "cancelled"
+    assert exact.json()["run_id"] == run_id
+    assert exact.json()["name"] == "owned-cancel"
+
+
+async def test_exact_run_lookup_reads_old_run_beyond_latest_ten_and_never_substitutes(client, monkeypatch):
+    import hashlib
+    from datetime import timedelta
+    from scrapeyard.storage.secret_envelope import protect_text
+
+    store = get_job_store()
+    config = _yaml(name="exact-run")
+    await store.save_job(Job(job_id="exact-job", project="integ", name="exact-run",
+                             config_yaml=config, current_run_id="queued-later"))
+    now = datetime.now(timezone.utc)
+    async with get_db("jobs.db") as db:
+        for index in range(12):
+            await db.execute(
+                """INSERT INTO job_runs
+                   (job_id, run_id, trigger, status, config_hash, config_yaml, started_at, heartbeat_at, completed_at)
+                   VALUES (?, ?, 'adhoc', 'complete', ?, ?, ?, ?, ?)""",
+                ("exact-job", f"old-{index}", hashlib.sha256(config.encode()).hexdigest(),
+                 protect_text(config, purpose=f"job_runs.config_yaml:old-{index}"),
+                 (now + timedelta(seconds=index)).isoformat(), now.isoformat(),
+                 (now + timedelta(seconds=index + 1)).isoformat()),
+            )
+        await db.commit()
+    detail = (await client.get("/jobs/exact-job")).json()
+    assert "old-0" not in [run["run_id"] for run in detail["runs"]]
+    exact = await client.get("/jobs/exact-job/runs/old-0")
+    assert exact.status_code == 200
+    assert exact.json()["run_id"] == "old-0"
+    assert exact.json()["status"] == "complete"
+    assert exact.json()["project"] == "integ"
+    assert exact.json()["config_hash"] == hashlib.sha256(config.encode()).hexdigest()
+    queued = (await client.get("/jobs/exact-job/runs/queued-later")).json()
+    assert queued["status"] == "queued"
+    assert queued["started_at"] is None
+    async with get_db("jobs.db") as db:
+        await db.execute("DELETE FROM job_runs WHERE run_id = 'old-0'")
+        await db.commit()
+    assert (await client.get("/jobs/exact-job/runs/old-0")).status_code == 404
+    assert (await client.get("/jobs/wrong-job/runs/old-1")).status_code == 404

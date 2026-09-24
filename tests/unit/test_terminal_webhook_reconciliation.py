@@ -167,6 +167,7 @@ async def test_startup_repairs_missing_intent_and_is_idempotent(
     assert delivery is not None
     assert delivery.payload["delivery_id"] == delivery_id
     assert delivery.payload["result_path"] == metadata.file_path
+    assert delivery.payload["config_hash"] == hashlib.sha256(config_yaml.encode()).hexdigest()
     async with get_db("jobs.db") as db:
         row = await (await db.execute("SELECT COUNT(*) FROM webhook_deliveries")).fetchone()
     assert row is not None and row[0] == 1

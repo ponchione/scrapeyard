@@ -195,9 +195,11 @@ def serialize_result_response(
             "run_id": run_id,
             "status": status,
             "completed_at": _contract_datetime(artifact.get("completed_at")),
+            **{key: artifact[key] for key in ("project", "name", "config_hash") if key in artifact},
             "errors": artifact.get("errors") or [],
             "targets": targets,
             "budget_error": artifact.get("budget_error"),
+            "run_budget": artifact.get("run_budget"),
             "results": artifact["results"],
         }
     return {
@@ -208,5 +210,6 @@ def serialize_result_response(
         "errors": [],
         "targets": [],
         "budget_error": None,
+        "run_budget": None,
         "results": artifact,
     }

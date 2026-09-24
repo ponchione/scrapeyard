@@ -91,6 +91,8 @@ class RetryHandler:
                 URLResolutionError,
                 *_TRANSIENT_TRANSPORT_ERRORS,
             ) as exc:
+                if isinstance(exc, RetryableError) and exc.status in {401, 403, 407}:
+                    raise
                 last_exc = exc
                 if attempt < self._max_attempts - 1:
                     RETRIES.labels("scrape", "scheduled").inc()

@@ -51,6 +51,12 @@ class JobStore(Protocol):
         """Atomically create or match one caller-scoped ad-hoc submission."""
         ...
 
+    async def get_submission_receipt(
+        self, caller_scope: str, key_digest: str, observed_at: datetime,
+    ) -> dict[str, object] | None:
+        """Return existing unexpired acceptance, without any submission mutation."""
+        ...
+
     async def delete_expired_idempotency_records(
         self,
         expired_before: datetime,
@@ -139,7 +145,9 @@ class JobStore(Protocol):
         """Remove only a never-accepted queued submission after enqueue failure."""
         ...
 
-    async def cancel_job(self, job_id: str, cancelled_at: datetime) -> CancellationOutcome:
+    async def cancel_job(
+        self, job_id: str, cancelled_at: datetime, *, expected_run_id: str | None = None,
+    ) -> CancellationOutcome:
         """Atomically cancel the exact current queued or running delivery."""
         ...
 
@@ -181,6 +189,10 @@ class JobStore(Protocol):
         job_id: str,
         limit: int = 10,
     ) -> list[JobRun]: ...
+
+    async def get_job_run_state(self, job_id: str, run_id: str) -> dict[str, object] | None:
+        """Read exact queued/running/terminal identity without a recent-history limit."""
+        ...
 
     async def get_job_run_stats(
         self,

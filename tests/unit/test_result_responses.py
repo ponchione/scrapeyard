@@ -40,6 +40,15 @@ def _artifact(*, grouped: bool = True) -> dict:
     }
 
 
+def test_result_response_preserves_stored_source_identity():
+    artifact = _artifact() | {
+        "project": "eyebox", "name": "bereli-optics", "run_id": "run-1", "config_hash": "a" * 64,
+    }
+    payload = serialize_result_response("job-1", run_id="run-1", status="complete", artifact=artifact)
+    for key in ("project", "name", "job_id", "run_id", "config_hash"):
+        assert payload[key] == artifact[key]
+
+
 @pytest.mark.parametrize(
     "compatibility",
     [APICompatibility.v1, APICompatibility.legacy_v0],

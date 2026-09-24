@@ -349,3 +349,42 @@ async def test_scrape_target_distinguishes_selector_engine_failures_from_empty_r
         "selector_type": "css",
         "exception_type": "RuntimeError",
     }
+
+
+@pytest.mark.parametrize("challenge_page", [1, 2, None])
+async def test_access_interstitial_stops_before_following_pagination(monkeypatch, tmp_path, challenge_page):
+    from scrapling.engines.toolbelt.custom import Response
+
+    requested = []
+
+    async def fetch(_fetcher, url, *_args, **_kwargs):
+        requested.append(url)
+        page_number = len(requested)
+        text = ('<title>Verify you are human</title><h1>Security check</h1>'
+                if page_number == challenge_page else
+                '<title>Products</title><nav>My account</nav><div class="product"><h1>Offer</h1></div>')
+        if page_number < 3:
+            text += f'<a class="next" href="https://example.com/{page_number + 1}">Next</a>'
+        html = f'<html><body>{text}</body></html>'
+        return Response(
+            url=url, text=html, body=html.encode(), status=200, reason="OK", encoding="utf-8",
+            cookies={}, headers={}, request_headers={}, method="GET", history=[],
+        )
+
+    monkeypatch.setattr("scrapeyard.engine.scraper._fetch_basic_with_safe_redirects", fetch)
+    monkeypatch.setattr("scrapeyard.engine.scraper.assert_public_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr("scrapeyard.engine.pagination.assert_public_url", lambda *_a, **_kw: None)
+    result = await scrape_target(
+        _target(url="https://example.com/1", item_selector=".product", selectors={"title": "h1"},
+                pagination={"next": ".next", "max_pages": 3}),
+        adaptive=False, retry=RetryConfig(max_attempts=2), adaptive_dir=str(tmp_path),
+    )
+    if challenge_page is not None:
+        assert len(requested) == challenge_page
+        assert result.status == "failed"
+        assert result.error_type == ErrorType.challenge_page
+        assert result.http_status == 200
+    else:
+        assert len(requested) == 3
+        assert result.status == "success"
+        assert len(result.data) == 3

@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.config.schema import FailStrategy, WebhookConfig, WebhookStatus
+from scrapeyard.config.schema import FailStrategy, OnEmptyAction, WebhookConfig, WebhookStatus
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import JobStatus
+from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.types import SaveResultMeta
 from tests.unit.worker_helpers import (
@@ -15,7 +15,43 @@ from tests.unit.worker_helpers import (
     make_job,
     make_settings_mock,
     make_target,
+    make_config_mock,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", [ErrorType.blocked_response, ErrorType.challenge_page])
+@pytest.mark.parametrize("outcome", ["failure", "warn", "retry"])
+async def test_access_denial_stops_remaining_host_targets_in_partial_job(mock_stores, denial, outcome):
+    """Kenzie capture: one 403 must not cause a second request to the source."""
+    job_store, result_store, error_store, circuit_breaker = mock_stores
+    job_store.get_job = AsyncMock(return_value=make_job())
+    first = "https://www.example.com:8443/first"
+    skipped = "https://example.com/second"
+    independent = "https://other.example/third"
+    config = make_config_mock(targets=[make_target(url) for url in (first, skipped, independent)])
+    config.validation.min_results = 1
+    config.validation.on_empty = OnEmptyAction(outcome if outcome != "failure" else "warn")
+
+    async def scrape(target, *_args, **_kwargs):
+        if target.url == first:
+            if outcome != "failure":
+                return TargetResult(url=first, status="success", data=[],
+                                    debug={"classification": denial.value})
+            return TargetResult(url=first, status="failed", error_type=denial,
+                                http_status=403 if denial == ErrorType.blocked_response else 200,
+                                errors=["retained access-denial pattern"])
+        return TargetResult(url=target.url, status="success", data=[{"title": "Independent"}])
+
+    with patch("scrapeyard.queue.worker.load_config", return_value=config), \
+         patch("scrapeyard.queue.worker.get_settings", return_value=make_settings_mock()), \
+         patch("scrapeyard.queue.worker.scrape_target", side_effect=scrape) as fetch:
+        await scrape_task("job-1", "yaml", job_store=job_store, result_store=result_store,
+                         error_store=error_store, circuit_breaker=circuit_breaker,
+                         rate_limiter=LocalDomainRateLimiter())
+
+    assert [call.args[0].url for call in fetch.await_args_list] == [first, independent]
+    assert finalized_status(job_store) == JobStatus.partial
 
 
 @pytest.mark.asyncio
@@ -37,7 +73,9 @@ async def test_partial_returns_partial_on_mixed(mock_stores):
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.partial
         cfg.adaptive = False
@@ -92,7 +130,9 @@ async def test_all_or_nothing_fails_atomically_in_both_grouping_modes(
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.all_or_nothing
         cfg.adaptive = False
@@ -162,7 +202,9 @@ async def test_fully_successful_all_or_nothing_publishes_all_records(
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.all_or_nothing
         cfg.adaptive = False
@@ -217,7 +259,9 @@ async def test_continue_completes_even_with_failures(mock_stores):
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.continue_
         cfg.adaptive = False
@@ -263,7 +307,9 @@ async def test_worker_passes_record_count_to_save_result(mock_stores):
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.partial
         cfg.adaptive = False
@@ -306,7 +352,9 @@ async def test_worker_passes_final_status_to_save_result(mock_stores):
         cfg.name = "test-job"
         cfg.resolved_targets.return_value = [make_target("http://a.com"), make_target("http://b.com")]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
+        cfg.execution.post_target_delay = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = FailStrategy.partial
         cfg.adaptive = False

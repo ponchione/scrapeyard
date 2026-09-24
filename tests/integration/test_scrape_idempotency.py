@@ -152,3 +152,47 @@ async def test_invalid_key_is_rejected(client, key):
         "/scrape", content=_yaml(), headers=_headers(key)
     )
     assert response.status_code == 400
+
+
+async def test_read_only_acceptance_lookup_survives_lost_response_and_expires_without_submit(client, monkeypatch):
+    import hashlib
+
+    calls = []
+    pool = get_worker_pool()
+    enqueue = pool.enqueue
+
+    async def counted(*args, **kwargs):
+        calls.append(kwargs["run_id"])
+        return await enqueue(*args, **kwargs)
+
+    async def blocked(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pool, "enqueue", counted)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", blocked)
+    config = _yaml(name="acceptance-recovery")
+    accepted = await client.post("/scrape", content=config, headers=_headers("receipt-key"))
+    for _ in range(2):
+        recovered = await client.get("/scrape/acceptance", headers=_headers("receipt-key"))
+        assert recovered.status_code == 200
+        assert recovered.json()["job_id"] == accepted.json()["job_id"]
+        assert recovered.json()["run_id"] == accepted.json()["run_id"]
+        assert recovered.json()["config_hash"] == hashlib.sha256(config.encode()).hexdigest()
+        assert recovered.json()["expires_at"] > recovered.json()["created_at"]
+    assert len(calls) == 1
+    identity = accepted.json()
+    exact = await client.get(f"/jobs/{identity['job_id']}/runs/{identity['run_id']}")
+    assert exact.status_code == 200
+    assert exact.json()["name"] == "acceptance-recovery", "Use config name, not generated ad-hoc display name"
+    async with get_db("jobs.db") as db:
+        await db.execute("UPDATE scrape_idempotency SET expires_at = '2000-01-01T00:00:00+00:00'")
+        await db.commit()
+    expired = await client.get("/scrape/acceptance", headers=_headers("receipt-key"))
+    assert expired.status_code == 404
+    assert (await client.get("/scrape/acceptance", headers=_headers("unknown-key"))).status_code == 404
+    assert len(calls) == 1
+
+
+async def test_acceptance_lookup_requires_exactly_one_valid_header(client):
+    for headers in ({}, [("Idempotency-Key", "a"), ("Idempotency-Key", "b")], _headers("")):
+        assert (await client.get("/scrape/acceptance", headers=headers)).status_code == 400

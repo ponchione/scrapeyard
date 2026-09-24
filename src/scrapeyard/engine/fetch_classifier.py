@@ -13,6 +13,13 @@ from scrapeyard.engine.resilience import RetryableError
 from scrapeyard.engine.scrape_models import FetchError
 from scrapeyard.models.job import ErrorType
 
+ACCESS_DENIAL_TYPES = frozenset({
+    ErrorType.blocked_response,
+    ErrorType.challenge_page,
+    ErrorType.consent_gate,
+    ErrorType.login_gate,
+})
+
 _CHALLENGE_MARKERS = (
     "captcha",
     "cf-challenge",
@@ -161,6 +168,10 @@ def classify_fetch_exception(
             return ErrorType.blocked_response, exc.status, debug
         return ErrorType.http_error, exc.status, debug
     if isinstance(exc, FetchError):
+        if exc.status == 200 and exc.debug:
+            signal = classify_page_signals(exc.debug)
+            if signal in ACCESS_DENIAL_TYPES:
+                return signal, exc.status, exc.debug
         if exc.status == 404:
             return ErrorType.http_not_found, exc.status, exc.debug
         if exc.status in {401, 403, 429}:

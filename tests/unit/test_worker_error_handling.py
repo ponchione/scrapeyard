@@ -189,7 +189,7 @@ async def test_scrape_task_discards_result_when_finalization_loses_ownership():
             project="test",
             name="crash-test",
             resolved_targets=MagicMock(return_value=[MagicMock(url="http://example.com", fetcher=MagicMock(value="basic"), proxy=None)]),
-            execution=MagicMock(concurrency=1, delay_between=0, domain_rate_limit=0, fail_strategy=MagicMock(value="partial")),
+            execution=MagicMock(deadline_at=None, concurrency=1, delay_between=0, post_target_delay=0, domain_rate_limit=0, fail_strategy=MagicMock(value="partial")),
             adaptive=False,
             schedule=None,
             retry=MagicMock(),
@@ -279,6 +279,7 @@ async def test_scrape_task_batches_multiple_target_errors():
         cfg.name = "crash-test"
         cfg.resolved_targets.return_value = [MagicMock(url="http://example.com", fetcher=MagicMock(value="basic"), proxy=None)]
         cfg.execution.concurrency = 1
+        cfg.execution.deadline_at = None
         cfg.execution.delay_between = 0
         cfg.execution.domain_rate_limit = 0
         cfg.execution.fail_strategy = MagicMock(value="partial")

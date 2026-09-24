@@ -462,7 +462,7 @@ def truncate_text(value: str, limit: int = _HTML_EXCERPT_CHARS) -> str:
 
 
 def response_text(page: Any) -> str:
-    text = coerce_to_text(getattr(page, "text", None) or getattr(page, "body", None))
+    text = coerce_to_text(getattr(page, "body", None) or getattr(page, "text", None))
     if text:
         return text
     return coerce_to_text(page)
@@ -502,7 +502,12 @@ async def _capture_html_excerpt(
     capture: dict[str, Any],
     budget: RunBudget | None,
 ) -> None:
-    content_awaitable = page.content()
+    # Diagnostics need only a prefix. Slice inside the browser so a huge DOM
+    # cannot become a huge Python/driver message merely to retain 2,000 chars.
+    content_awaitable = page.evaluate(
+        "limit => document.documentElement ? document.documentElement.outerHTML.slice(0, limit) : ''",
+        _HTML_EXCERPT_CHARS * 4,
+    )
     content = (
         await content_awaitable if budget is None else await budget.wait_for(content_awaitable)
     )
@@ -728,7 +733,8 @@ async def fetch_browser_response(
             )
         except BudgetExceeded as exc:
             capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
-            await _close_page_safely(page)
+            if not isinstance(fetcher_cls, BrowserSession):
+                await _close_page_safely(page)
             raise
         except Exception as exc:
             message = truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS)
@@ -738,7 +744,8 @@ async def fetch_browser_response(
             }
             if isinstance(exc, UnsafeURLError):
                 capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
-                await _close_page_safely(page)
+                if not isinstance(fetcher_cls, BrowserSession):
+                    await _close_page_safely(page)
                 raise
             action_exc = BrowserPageActionError(
                 f"Browser page action failed: {message}",
@@ -760,7 +767,7 @@ async def fetch_browser_response(
     )
     try:
         fetch = (
-            fetcher_cls.fetch(url, call_kwargs, _guarded_async_intercept_route)
+            fetcher_cls.fetch(url, call_kwargs, _guarded_async_intercept_route, budget=budget)
             if isinstance(fetcher_cls, BrowserSession)
             else fetcher_cls.async_fetch(url, **call_kwargs)
         )

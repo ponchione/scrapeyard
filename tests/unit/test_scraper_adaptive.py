@@ -272,7 +272,7 @@ async def test_browser_click_selector_runs_in_page_action(tmp_path):
         page = MagicMock()
         page.url = "http://example.com"
         page.title = AsyncMock(return_value="Example")
-        page.content = AsyncMock(return_value="<html><body>Products</body></html>")
+        page.evaluate = AsyncMock(return_value="<html><body>Products</body></html>")
         page.locator.return_value.click = AsyncMock(return_value=None)
         page.wait_for_timeout = AsyncMock(return_value=None)
 
@@ -314,7 +314,7 @@ async def test_browser_click_selector_fails_open_when_absent(tmp_path):
         page = MagicMock()
         page.url = "http://example.com"
         page.title = AsyncMock(return_value="Example")
-        page.content = AsyncMock(return_value="<html><body>Products</body></html>")
+        page.evaluate = AsyncMock(return_value="<html><body>Products</body></html>")
         page.locator.return_value.click = AsyncMock(side_effect=TimeoutError())
         page.wait_for_timeout = AsyncMock(return_value=None)
 

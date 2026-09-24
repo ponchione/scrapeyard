@@ -198,6 +198,7 @@ async def reconcile_terminal_webhook_intents(
                 completed_at = candidate.completed_at or candidate.heartbeat_at
                 delivery = build_terminal_webhook_delivery(
                     config=config,
+                    config_hash=candidate.config_hash,
                     job_id=candidate.job_id,
                     status=candidate.status,
                     run_id=candidate.run_id,

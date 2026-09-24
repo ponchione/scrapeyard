@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from contextvars import copy_context
 from typing import Any, cast
 
@@ -15,9 +15,33 @@ from scrapling import PlayWrightFetcher
 from scrapling.engines.camo import CamoufoxEngine
 from scrapling.engines.pw import PlaywrightEngine
 from scrapling.engines.toolbelt.custom import Response, StatusText
-from scrapling.engines.toolbelt.fingerprints import generate_convincing_referer
+
+from scrapeyard.common.async_tools import await_cleanup
+from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.engine.basic_fetch import generate_convincing_referer
+from scrapeyard.engine.url_guard import UnsafeURLError
 
 logger = logging.getLogger(__name__)
+
+# Both pinned Chromium builds stop after 20 redirects. Pin Firefox to that same
+# ceiling; reserve the entire chain before releasing an intercepted request.
+_MAX_REDIRECTS = 20
+
+
+class _BudgetedRoute:
+    """Apply the run budget at the existing guard's actual continue boundary."""
+
+    def __init__(self, route: Any, reserve: Callable[[Any], Awaitable[None]]) -> None:
+        self._route = route
+        self._reserve = reserve
+        self.request = route.request
+
+    async def abort(self, *args: Any, **kwargs: Any) -> None:
+        await self._route.abort(*args, **kwargs)
+
+    async def continue_(self, **kwargs: Any) -> None:
+        await self._reserve(self.request)
+        await self._route.continue_(**kwargs)
 
 
 async def _close_resource(resource: Any, browser: Any) -> None:
@@ -28,6 +52,24 @@ async def _close_resource(resource: Any, browser: Any) -> None:
         # The remaining stack must still stop the driver before a retry.
         if browser.is_connected():
             raise
+
+
+async def _close_page(page: Any, browser: Any) -> None:
+    try:
+        # Native keepalive can escape offline routing during pagehide. Deny new
+        # document requests before firing unload handlers, including in frames.
+        if browser.is_connected() and not page.is_closed():
+            for frame in page.frames:
+                if not frame.is_detached():
+                    await asyncio.wait_for(frame.evaluate("""() => {
+                        if (!document.head) return;
+                        const meta = document.createElement('meta');
+                        meta.httpEquiv = 'Content-Security-Policy';
+                        meta.content = "default-src 'none'";
+                        document.head.prepend(meta);
+                    }"""), timeout=1)
+    finally:
+        await _close_resource(page, browser)
 
 
 class BrowserSession:
@@ -63,12 +105,47 @@ class BrowserSession:
                 self._stack.push_async_callback(_close_resource, browser, browser)
             options = engine._PlaywrightEngine__context_kwargs()
         else:
-            manager = cast(Any, AsyncCamoufox)(**engine._get_camoufox_options())
+            firefox_options = engine._get_camoufox_options()
+            firefox_options["firefox_user_prefs"] = {
+                **firefox_options.get("firefox_user_prefs", {}),
+                "network.http.redirection-limit": _MAX_REDIRECTS,
+                "network.websocket.max-connections": 0,
+                "dom.fetchKeepalive.enabled": False,
+            }
+            manager = cast(Any, AsyncCamoufox)(**firefox_options)
             self._stack.push_async_exit(manager)
             browser = await manager.__aenter__()
             options = {}
-        context = await browser.new_context(**options)
+        context = await browser.new_context(**{**options, "service_workers": "block"})
         self._stack.push_async_callback(_close_resource, context, browser)
+        # No scrape requires a live socket. Omitting connect_to_server prevents
+        # the handshake as well as messages, including sockets opened in frames.
+        await context.route_web_socket("**/*", lambda socket: socket.close())
+        # Camoufox evaluates init scripts in an isolated realm. CSP changes the
+        # shared document's native policy, so page/worker code cannot bypass it
+        # by using the main realm's original constructors. Firefox's script event
+        # covers parser execution before the document-start observer runs.
+        await context.add_init_script("""
+            (() => {
+                const install = () => {
+                    if (!document.head) return false;
+                    const meta = document.createElement('meta');
+                    meta.httpEquiv = 'Content-Security-Policy';
+                    meta.content = "worker-src 'none'; connect-src http: https:";
+                    document.head.prepend(meta);
+                    return true;
+                };
+                if (!install()) {
+                    const observer = new MutationObserver(() => {
+                        if (install()) observer.disconnect();
+                    });
+                    observer.observe(document, {childList: true, subtree: true});
+                    document.addEventListener('beforescriptexecute', () => {
+                        if (install()) observer.disconnect();
+                    }, {once: true, capture: true});
+                }
+            })();
+        """)
         self._context = context
 
     async def fetch(
@@ -76,6 +153,8 @@ class BrowserSession:
         url: str,
         call_kwargs: dict[str, Any],
         route_handler: Callable[[Any], Awaitable[None]],
+        *,
+        budget: RunBudget | None = None,
     ) -> Any:
         kwargs = dict(call_kwargs)
         custom_config = kwargs.pop("custom_config", None) or {}
@@ -89,17 +168,55 @@ class BrowserSession:
         if self._context is None:
             await self._open(engine)
 
+        context = self._context
         # Playwright's dispatcher survives page fetches and inherits the context
         # of its creation. Bind each route to THIS page's budget/diagnostics.
         route_context = copy_context()
+        chains: dict[Any, int] = {}
+        route_error: BaseException | None = None
+
+        async def reserve(request: Any) -> None:
+            if budget is not None:
+                await budget.reserve_requests(_MAX_REDIRECTS + 1)
+                chains[request] = 1
+
+        def observe_request(request: Any) -> None:
+            if request.redirected_from is None:
+                return
+            root = request.redirected_from
+            while root.redirected_from is not None:
+                root = root.redirected_from
+            if root in chains:
+                chains[root] += 1
 
         async def guard(route: Any) -> None:
-            await route_context.run(asyncio.ensure_future, route_handler(route))
+            nonlocal route_error
+            try:
+                wrapped = _BudgetedRoute(route, reserve) if budget is not None else route
+                await route_context.run(asyncio.ensure_future, route_handler(wrapped))
+            except UnsafeURLError:
+                # The existing guard has aborted and recorded this subrequest.
+                # Preserve its contract: safe content can still be inspected.
+                return
+            except BaseException as exc:
+                route_error = exc
+                # Closing a page can release a browser-native request whose
+                # frame disappeared before interception. Disable networking
+                # before aborting/closing, including unload beacons and icons.
+                await context.set_offline(True)
+                with suppress(Exception):
+                    await route.abort()
+                if page is not None:
+                    await _close_page(page, browser)
 
-        browser = self._context.browser
+        browser = context.browser
         page = None
+        fetch_error: BaseException | None = None
         try:
-            page = await self._context.new_page()
+            context.on("request", observe_request)
+            await context.route("**/*", guard)
+            await context.set_offline(False)
+            page = await context.new_page()
             page.set_default_navigation_timeout(engine.timeout)
             page.set_default_timeout(engine.timeout)
             final_response = None
@@ -112,7 +229,6 @@ class BrowserSession:
             page.on("response", handle_response)
             if engine.extra_headers:
                 await page.set_extra_http_headers(engine.extra_headers)
-            await page.route("**/*", guard)
             if self.fetcher_cls is PlayWrightFetcher and engine.stealth:
                 for script in engine._PlaywrightEngine__stealth_scripts():
                     await page.add_init_script(path=script)
@@ -136,25 +252,68 @@ class BrowserSession:
                 except Exception:
                     logger.info("Optional browser selector wait did not complete")
             await page.wait_for_timeout(engine.wait)
+            if route_error is not None:
+                raise route_error
             final_response = final_response or first_response
             if final_response is None:
                 raise ValueError("Failed to get a response from the page")
-            content = await page.content()
+            if budget is None:
+                content = await page.content()
+            else:
+                # Bound the browser-to-Python HTML message before constructing
+                # the parser. This counts rendered UTF-8 HTML, not wire bytes;
+                # browsers have already received and rendered the document.
+                captured = await page.evaluate("""limit => {
+                    let html = document.doctype
+                        ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '';
+                    if (document.documentElement) html += document.documentElement.outerHTML;
+                    const bytes = new TextEncoder().encode(html).byteLength;
+                    return {bytes, html: bytes <= limit ? html : null};
+                }""", budget.remaining_fetched_bytes)
+                content = captured["html"]
+                await budget.consume_fetched_bytes(
+                    len(content.encode("utf-8")) if content is not None else captured["bytes"],
+                )
+                assert content is not None
             return Response(
                 url=page.url, text=content, body=content.encode("utf-8"),
                 status=final_response.status,
                 reason=final_response.status_text or StatusText.get(final_response.status),
                 encoding=final_response.headers.get("content-type", "") or "utf-8",
-                cookies={cookie["name"]: cookie["value"] for cookie in await self._context.cookies()},
+                cookies={cookie["name"]: cookie["value"] for cookie in await context.cookies()},
                 headers=await first_response.all_headers(),
                 request_headers=await first_response.request.all_headers(),
                 history=await engine._async_process_response_history(first_response),
                 **engine.adaptor_arguments,
             )
-        except Exception as exc:
+        except BaseException as exc:
+            fetch_error = exc
+            if isinstance(exc, (BudgetExceeded, asyncio.CancelledError)):
+                raise
+            if route_error is not None:
+                raise route_error from exc
             if not browser.is_connected():
                 raise httpx.NetworkError("Browser session disconnected") from exc
             raise
         finally:
-            if page is not None:
-                await _close_resource(page, browser)
+            stopped = False
+            try:
+                if browser.is_connected():
+                    await context.set_offline(True)
+                # Popups belong to this context and must not outlive a page fetch.
+                for owned_page in list(context.pages):
+                    await _close_page(owned_page, browser)
+                await context.unroute("**/*", guard)
+                context.remove_listener("request", observe_request)
+                stopped = True
+            except BaseException:
+                # A crashed page/context can reject cleanup RPCs while its driver
+                # is still connected. Stop the whole session before releasing
+                # reservations, and preserve the original fetch/budget failure.
+                await await_cleanup(self.aclose())
+                stopped = True
+                if fetch_error is None:
+                    raise
+            finally:
+                if budget is not None and stopped:
+                    await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))

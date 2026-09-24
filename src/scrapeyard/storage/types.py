@@ -80,6 +80,7 @@ class CancellationAction(str, Enum):
     already_cancelled = "already_cancelled"
     missing = "missing"
     conflict = "conflict"
+    run_conflict = "run_conflict"
 
 
 @dataclass(frozen=True, slots=True)

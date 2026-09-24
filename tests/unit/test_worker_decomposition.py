@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.common.budgets import RunBudget
+from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.config.schema import (
+    ExecutionConfig,
     FailStrategy,
     FetcherType,
     GroupBy,
@@ -46,6 +49,7 @@ def _job_execution_context(
     config.resolved_targets.return_value = targets
     config.execution.concurrency = concurrency or len(targets)
     config.execution.delay_between = 0
+    config.execution.post_target_delay = 0
     config.execution.domain_rate_limit = 0
     config.adaptive = False
     config.schedule = None
@@ -56,6 +60,7 @@ def _job_execution_context(
     config.validation.on_empty = OnEmptyAction.warn
     return JobExecutionContext(
         config=config,
+        config_hash="a" * 64,
         job=MagicMock(),
         settings=MagicMock(proxy_url=""),
         started_at=datetime.now(timezone.utc),
@@ -222,6 +227,52 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
     assert [call.args[0] for call in context.budget.sleep.await_args_list] == pytest.approx(
         [0.02, 0.02, 0.02]
     )
+
+
+@pytest.mark.asyncio
+async def test_post_target_delay_keeps_sequential_permit_until_completion_gap():
+    targets = [_concurrent_target(f"https://shop.example/{i}", FetcherType.basic) for i in range(3)]
+    context = _job_execution_context(targets, concurrency=1)
+    context.config.execution.post_target_delay = 15
+    events = []
+
+    async def scrape(target, *_args, **_kwargs):
+        events.append(target.url)
+        await asyncio.sleep(0)
+        events.append("finished")
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    async def sleep(seconds):
+        events.append(seconds)
+        await asyncio.sleep(0)
+
+    context.budget.sleep = AsyncMock(side_effect=sleep)
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=scrape):
+        results = await _run_targets(context, BrowserExecutionLimiter(1), job_id="post-delay")
+    assert len(results) == 3
+    assert events == [targets[0].url, "finished", 15, targets[1].url, "finished", 15, targets[2].url, "finished"]
+
+
+def test_post_target_delay_schema_requires_sequential_execution():
+    assert ExecutionConfig(concurrency=1, post_target_delay=15).post_target_delay == 15
+    for invalid in ({"concurrency": 2, "post_target_delay": 15}, {"concurrency": 1, "post_target_delay": -1}):
+        with pytest.raises(ValueError):
+            ExecutionConfig(**invalid)
+
+
+@pytest.mark.asyncio
+async def test_post_target_delay_cannot_outlive_run_budget_or_start_next_target():
+    targets = [_concurrent_target(f"https://shop.example/{i}", FetcherType.basic) for i in range(2)]
+    context = replace(_job_execution_context(targets, concurrency=1),
+                      budget=RunBudget.from_settings(SimpleNamespace(run_max_duration_seconds=0.03)))
+    context.config.execution.post_target_delay = 15
+    limiter = BrowserExecutionLimiter(1)
+    with patch("scrapeyard.queue.worker.scrape_target", new_callable=AsyncMock) as scrape:
+        scrape.return_value = TargetResult(url=targets[0].url, status=TargetStatus.success)
+        with pytest.raises(BudgetExceeded):
+            await _run_targets(context, limiter, job_id="post-delay-budget")
+    assert scrape.await_count == 1
+    assert limiter.active == 0
 
 
 @pytest.mark.asyncio

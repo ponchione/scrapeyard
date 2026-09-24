@@ -54,6 +54,7 @@ def build_webhook_payload(
     error_count: int,
     started_at: str,
     completed_at: str,
+    config_hash: str | None = None,
 ) -> dict[str, Any]:
     """Construct the webhook POST body from job and run metadata.
 
@@ -74,11 +75,12 @@ def build_webhook_payload(
         "status": status.value,
         "run_id": run_id,
         "result_path": result_path,
-        "results_url": f"/results/{job_id}?run_id={run_id}" if run_id else None,
+        "results_url": f"/results/{job_id}?run_id={run_id}&latest=false" if run_id else None,
         "result_count": result_count,
         "error_count": error_count,
         "started_at": started_at,
         "completed_at": completed_at,
+        **({"config_hash": config_hash} if config_hash is not None else {}),
     }
 
 
@@ -124,6 +126,7 @@ def build_terminal_webhook_delivery(
     error_count: int,
     started_at: datetime,
     completed_at: datetime,
+    config_hash: str | None = None,
 ) -> WebhookDeliveryCreate | None:
     """Build required terminal intent from a persisted scrape configuration."""
 
@@ -142,6 +145,7 @@ def build_terminal_webhook_delivery(
             error_count=error_count,
             started_at=started_at.isoformat(),
             completed_at=completed_at.isoformat(),
+            config_hash=config_hash,
         ),
         secret_values=config.resolved_secret_values,
     )

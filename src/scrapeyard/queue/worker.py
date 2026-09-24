@@ -19,12 +19,13 @@ from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, ScrapeConfig, TargetConfig
-from scrapeyard.engine.fetch_classifier import classify_fetch_exception
+from scrapeyard.engine.fetch_classifier import ACCESS_DENIAL_TYPES, classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import CircuitBreaker, ResultValidator
+from scrapeyard.engine.resilience import CircuitBreaker, CircuitState, ResultValidator
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
+    canonical_url_origin,
     redact_deployment_secrets_with_count,
     redact_deployment_secrets_in_value_with_count,
     redact_sensitive_mapping,
@@ -77,6 +78,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class JobExecutionContext:
     config: ScrapeConfig
+    config_hash: str
     job: Job
     settings: ServiceSettings
     started_at: datetime
@@ -156,7 +158,6 @@ async def scrape_task(
             job_id,
             context.run_id,
             trigger,
-            config_yaml,
             job_store,
         )
         if not claimed:
@@ -372,6 +373,7 @@ def _failed_webhook_delivery(
         return None
     return build_terminal_webhook_delivery(
         config=context.config,
+        config_hash=context.config_hash,
         job_id=job_id,
         status=JobStatus.failed,
         run_id=run_id,
@@ -475,14 +477,20 @@ async def _load_job_execution_context(
         )
         return None
     started_at = utc_now()
+    budget = RunBudget.from_settings(settings, execution=config.execution)
+    if config.execution.deadline_at is not None:
+        remaining = max(0, (config.execution.deadline_at - started_at).total_seconds())
+        budget.max_duration_seconds = min(budget.max_duration_seconds, remaining)
+        budget.deadline_monotonic = budget.started_monotonic + budget.max_duration_seconds
     return JobExecutionContext(
         config=config,
+        config_hash=hashlib.sha256(config_yaml.encode()).hexdigest(),
         job=job,
         settings=settings,
         started_at=started_at,
         adaptive_dir=adaptive_dir,
         run_artifacts_dir=run_artifacts_dir,
-        budget=RunBudget.from_settings(settings),
+        budget=budget,
         run_id=effective_run_id,
         activity=RunActivityGuard(
             job_store=job_store,
@@ -497,7 +505,6 @@ async def _mark_run_started(
     job_id: str,
     run_id: str,
     trigger: str,
-    config_yaml: str,
     job_store: JobStore,
 ) -> bool:
     if context.job.current_run_id is None:
@@ -511,12 +518,11 @@ async def _mark_run_started(
         )
         if not queued:
             return False
-    config_hash = hashlib.sha256(config_yaml.encode()).hexdigest()
     claimed = await job_store.claim_run(
         run_id,
         job_id,
         trigger,
-        config_hash,
+        context.config_hash,
         context.started_at,
     )
     if not claimed:
@@ -561,9 +567,11 @@ async def _persist_job_results(
         run_budget=context.budget,
     )
     context.budget.check_deadline()
+    output_data["run_budget"] = context.budget.snapshot()
     save_meta = await save_run_result(
         job_id=job_id,
         run_id=run_id,
+        config_hash=context.config_hash,
         result_store=result_store,
         output_data=output_data,
         final_status=final_status,
@@ -596,6 +604,7 @@ async def _finalize_job_execution(
     error_count = await error_store.count_errors_for_run(run_id)
     webhook_delivery = build_terminal_webhook_delivery(
         config=context.config,
+        config_hash=context.config_hash,
         job_id=job_id,
         status=persisted.final_status,
         run_id=run_id,
@@ -705,6 +714,7 @@ async def _handle_budget_exhaustion(
         "errors": [message],
         "targets": [],
         "budget_error": details.model_dump(mode="json"),
+        "run_budget": context.budget.snapshot(),
         "results": [] if context.config.output.group_by == GroupBy.merge else {},
     }
     save_meta: SaveResultMeta | None = None
@@ -713,6 +723,7 @@ async def _handle_budget_exhaustion(
         save_meta = await save_run_result(
             job_id=job_id,
             run_id=run_id,
+            config_hash=context.config_hash,
             result_store=result_store,
             output_data=output_data,
             final_status=JobStatus.failed,
@@ -748,6 +759,7 @@ async def _handle_budget_exhaustion(
     )
     webhook_delivery = build_terminal_webhook_delivery(
         config=context.config,
+        config_hash=context.config_hash,
         job_id=job_id,
         status=JobStatus.failed,
         run_id=run_id,
@@ -821,6 +833,7 @@ async def _process_all_targets(
     sem = asyncio.Semaphore(config.execution.concurrency)
     start_lock = asyncio.Lock()
     next_start_at = 0.0
+    denied_hosts: set[str] = set()
     target_context = TargetProcessingContext(
         config=config,
         job_id=job_id,
@@ -857,6 +870,14 @@ async def _process_all_targets(
                             time.monotonic() + config.execution.delay_between
                         )
                 context.budget.check_deadline()
+                origin = canonical_url_origin(target_cfg.url)
+                host = (origin[1] if origin else url_host_label(target_cfg.url)).removeprefix("www.")
+                if host in denied_hosts:
+                    detail = "Not attempted: an earlier target on this host was denied or challenged"
+                    return TargetResult(
+                        url=target_cfg.url, status=TargetStatus.failed,
+                        errors=[detail], error_detail=detail,
+                    )
                 target_started = time.monotonic()
                 with active_target():
                     target_result = await _fetch_and_validate_target(
@@ -865,6 +886,16 @@ async def _process_all_targets(
                         context=target_context,
                         pending_errors=pending_errors,
                     )
+                if (target_result.error_type in ACCESS_DENIAL_TYPES
+                        or target_result.http_status in {401, 403, 407}):
+                    denied_hosts.add(host)
+                if (
+                    config.execution.post_target_delay > 0
+                    and target_index < len(targets) - 1
+                    and circuit_breaker.state(url_host_label(target_cfg.url)) is not CircuitState.open
+                ):
+                    await context.budget.sleep(config.execution.post_target_delay)
+                    await context.activity.checkpoint("after_post_target_delay")
                 return target_result
         except asyncio.CancelledError:
             cancelled = True

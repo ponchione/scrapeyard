@@ -402,8 +402,13 @@ fetch/navigation attempts to the same canonical host. It applies to initial
 fetches, retries, redirect hops, pagination, and validation retries. Browser
 subresources are not throttled by this setting.
 
+`execution.post_target_delay` adds a gap after a target finishes and before the
+next target starts. It requires `concurrency: 1`, defaults to zero, and uses the
+remaining run deadline. No gap follows the last target or an open domain circuit.
+
 `retry.max_attempts` is the total number of attempts per request, including the
-initial attempt. Connection and timeout failures follow the same backoff,
+initial attempt. HTTP 401, 403 and 407 stop immediately even when listed as
+retryable. Connection and timeout failures follow the same backoff,
 cancellation, rate-limit, metric, and run-budget policy as retryable HTTP statuses.
 
 Terminal webhook intent is durable before a run is reported complete. Each
@@ -504,7 +509,8 @@ profile.
 | `SCRAPEYARD_WORKERS_RUNNING_RECONCILIATION_BATCH_SIZE` | `100` | Maximum stale-running and terminal-intent rows processed per repair pass |
 | `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
-| `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate encoded basic-response body bytes, checked after each response |
+| `SCRAPEYARD_RUN_MAX_REQUESTS` | `10000` | Aggregate admitted source HTTP requests, including redirects and retries |
+| `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate decoded basic bodies and rendered browser UTF-8 HTML; not browser wire bytes |
 | `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
 | `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Aggregate extracted JSON growth ceiling plus exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
@@ -540,20 +546,45 @@ affect shared domain availability. After cooldown, one half-open probe is
 admitted; its transient failure starts a fresh cooldown and its successful
 upstream response closes the circuit.
 
-Run duration, fetched-byte, record, and serialized-result budget violations
+Within one run, a denied host (including its `www` spelling and other ports)
+prevents pending targets on that host from starting. Detected access interstitials
+without matching content stop before pagination or validation retries. Independent
+hosts still run. Targets already fetching concurrently are not cancelled; use
+`concurrency: 1` when acquisition must stop at the first denial.
+
+Run duration, request, fetched-byte, record, and serialized-result budget violations
 always finish the run as `failed`, regardless of `execution.fail_strategy`.
 The job, run, compact failure result, and a `budget_exceeded` error remain
 queryable. Structured error details include `limit_name`, `configured_limit`,
 and `observed_amount`. Exact-boundary payloads are accepted; the first
 over-limit reservation stops remaining target work.
 
-Fetched bytes are measured from actual response-body bytes on the `basic`
-fetch path, including redirects and retry responses. Scrapling's browser APIs
-do not expose reliable aggregate network-transfer totals, so `dynamic` and
-`stealthy` traffic is not included in this counter. Browser diagnostics have a
-separate budget: excerpts are truncated or omitted and screenshots are omitted
-before writing when they do not fit. These diagnostic omissions do not fail an
-otherwise successful run.
+Optional `execution.max_requests`, `max_fetched_bytes`, `max_extracted_records`
+and `max_serialized_result_bytes` are positive integer caps that can only shorten
+the service limits. Success and failure artifacts retain effective limits and
+counters in `run_budget`.
+
+Basic fetches reserve before each redirect or retry dispatch. Browser context
+routes cover documents, subresources and popups. Each admitted browser request
+reserves 21 slots for the pinned native redirect ceiling; unused slots are
+refunded only after pages close. A run can therefore stop conservatively with
+fewer actual requests than its cap. Workers and sockets are blocked, and the
+context goes offline before page cleanup, including cancellation. Before closing
+pages, document policies deny new loads from unload handlers; Firefox's native
+fetch-keepalive transport is disabled. Cookies and
+storage survive successful page fetches within the same target. Domain metadata
+uses the dependency's bundled public-suffix snapshot without runtime downloads.
+Native transport retries/background traffic, event races, remote CDP and other
+browser builds do not have an independently enforced all-wire request guarantee.
+
+Basic bodies are counted while streaming, including redirects/retries. Browser
+rendered HTML is measured inside the browser before transfer to Python. That
+limit does not bound browser network bytes, downloaded subresources or browser
+memory already used. Use separate container memory/process limits; a strict wire
+byte ceiling would require an independently metered transport. Browser diagnostics
+have a separate budget: HTML is sliced inside the browser, excerpts are truncated
+or omitted, and screenshots are omitted before writing when they do not fit.
+These diagnostic omissions do not fail an otherwise successful run.
 
 Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
 Retries stop at the configured total-attempt or persisted-age boundary, honor
@@ -599,3 +630,34 @@ See [docs/TESTING.md](docs/TESTING.md) for the testing lanes.
 - Store secrets in environment variables or an orchestrator secret store.
 - Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before promoting a runtime
   environment.
+
+
+Exact source-run recovery uses `GET /jobs/{job_id}/runs/{run_id}`. It returns the
+accepted config's project/name/hash and that run's state, including queued or
+unstarted cancelled deliveries. It does not substitute a newer run or limit the
+lookup to the latest ten runs. Missing historical config snapshots or pruned
+history return404; corrupt snapshots fail closed. The generated ad-hoc job name
+is a display identity, distinct from the submitted config name.
+
+Use `POST /jobs/{job_id}/cancel?run_id={run_id}` for owned-run cancellation. The
+store checks the expected run inside the cancellation transaction; a different
+current run returns409 without disabling its schedule or cancelling its worker.
+204 still requires queue/worker quiescence;503/504 requires reconciliation and a
+retry of the same exact cancellation. The endpoint retains its existing `delete`
+scope; callers without it cannot claim acknowledged cancellation.
+
+`GET /scrape/acceptance` with the original `Idempotency-Key` and caller credential
+recovers an unexpired submission receipt without POSTing or enqueueing. It uses
+`submit` scope for that caller/project and returns job/run/config hash plus receipt
+creation/expiry.404 means unavailable, and never authorizes a replacement POST.
+Existing retention and explicit key-reuse behavior of POST remain unchanged;
+clients must persist their intent/deadline and stop when recovery is uncertain.
+
+`execution.deadline_at` accepts an explicitly timezone-aware absolute deadline.
+The worker subtracts queue wait when it loads the immutable submitted config and
+uses the smaller of that remaining time and the service run-duration budget.
+Expired deliveries fail through the existing budget/terminal-result path before
+starting a target. Worker restart cannot grant another full duration. Cross-host
+absolute deadlines require synchronized UTC clocks; the loaded worker budget
+itself uses a monotonic clock. A queued run still needs an available worker or
+acknowledged cancellation to become terminal.
