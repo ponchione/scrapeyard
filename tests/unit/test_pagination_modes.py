@@ -546,3 +546,54 @@ async def test_browser_session_fetch_attaches_click_pagination_snapshots():
     assert [page.css("li.card::text").get() for page in click_result.pages] == ["p2", "p3"]
     assert click_result.stop_reason == "exhausted"
     context.set_offline.assert_awaited_with(True)
+
+
+# --- click activation fallback ----------------------------------------------
+
+
+class _InterceptedControl:
+    def __init__(self, *, intercepted: bool) -> None:
+        self.intercepted = intercepted
+        self.clicks: list[float] = []
+        self.dispatched: list[str] = []
+
+    async def click(self, *, timeout: float) -> None:
+        self.clicks.append(timeout)
+        if self.intercepted:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+            raise PlaywrightTimeoutError("element is covered by another element")
+
+    async def dispatch_event(self, event: str) -> None:
+        self.dispatched.append(event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intercepted,dispatched", [(False, []), (True, ["click"])])
+async def test_click_activation_dispatches_when_an_overlay_intercepts(intercepted, dispatched):
+    from scrapeyard.engine.browser_session import BrowserSession
+
+    control = _InterceptedControl(intercepted=intercepted)
+
+    await BrowserSession._activate_control(control, 90_000)
+
+    assert control.clicks == [10_000]
+    assert control.dispatched == dispatched
+
+
+@pytest.mark.asyncio
+async def test_click_activation_matches_timeouts_from_other_playwright_builds():
+    from scrapeyard.engine.browser_session import BrowserSession
+
+    class TimeoutError(Exception):  # noqa: A001 - mirrors a vendored Playwright build
+        pass
+
+    class _Control(_InterceptedControl):
+        async def click(self, *, timeout: float) -> None:
+            self.clicks.append(timeout)
+            raise TimeoutError("covered")
+
+    control = _Control(intercepted=True)
+    await BrowserSession._activate_control(control, 5_000)
+    assert control.clicks == [5_000]
+    assert control.dispatched == ["click"]

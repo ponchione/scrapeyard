@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Poll interval while waiting for a clicked page to render different items.
 _CLICK_CHANGE_POLL_MS = 250
+# Bound the actionability wait before falling back to dispatching the click.
+_CLICK_ACTIONABLE_TIMEOUT_MS = 10_000
 
 # Hash the current page items (or the body when no item selector is set) in the
 # page, so change detection never transfers the rendered document to Python.
@@ -276,6 +278,19 @@ class BrowserSession:
             if loop.time() >= deadline:
                 return None
 
+    @staticmethod
+    async def _activate_control(control: Any, timeout_ms: float) -> None:
+        """Click like a user; if an overlay intercepts it, dispatch the click on the control."""
+        try:
+            await control.click(timeout=min(timeout_ms, _CLICK_ACTIONABLE_TIMEOUT_MS))
+        except Exception as exc:
+            # Stealth Chromium ships its own Playwright build, so match by name.
+            if type(exc).__name__ != "TimeoutError":
+                raise
+            # Sticky banners and signup overlays commonly cover footer pagination.
+            # Client-side routers handle the element's click event either way.
+            await control.dispatch_event("click")
+
     async def _click_through_pages(
         self,
         page: Any,
@@ -297,7 +312,7 @@ class BrowserSession:
                 return ClickPaginationResult(pages=pages, stop_reason="exhausted")
             try:
                 control = page.locator(self._locator_query(spec.next_query, spec.next_type)).first
-                await control.click(timeout=timeout_ms)
+                await self._activate_control(control, timeout_ms)
                 changed = await self._wait_for_changed_items(
                     page, spec, previous, timeout_ms, budget,
                 )
