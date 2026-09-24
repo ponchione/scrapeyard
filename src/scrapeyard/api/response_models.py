@@ -43,6 +43,7 @@ class ResultTargetSummary(APIResponseModel):
     status: str
     count: int
     observed_count: int
+    recorded_at: str | None = None
     debug: dict[str, Any] | None = None
     error_type: str | None = None
     error_detail: str | None = None
@@ -62,7 +63,19 @@ class ResultResponse(APIResponseModel):
     targets: list[ResultTargetSummary] = Field(default_factory=list)
     budget_error: dict[str, Any] | None = None
     run_budget: dict[str, Any] | None = None
+    page_cache: str | None = None
     results: list[Any] | dict[str, Any]
+
+
+class DomainGuardResponse(APIResponseModel):
+    host: str
+    day: str
+    pages_today: int
+    daily_page_limit: int
+    cooldown_seconds: int
+    cooldown_active: bool
+    cooldown_remaining_seconds: float
+    cooldown_until: str | None = None
 
 
 class LegacyResultResponse(APIResponseModel):

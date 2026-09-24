@@ -160,6 +160,14 @@ class GroupBy(str, Enum):
     merge = "merge"
 
 
+class PageCacheMode(str, Enum):
+    """Development page cache: record rendered pages, or replay them offline."""
+
+    off = "off"
+    record = "record"
+    replay = "replay"
+
+
 class FailStrategy(str, Enum):
     """How to handle target failures within a job."""
 
@@ -1100,6 +1108,23 @@ class ExecutionConfig(StrictConfigModel):
     priority: Priority = Field(default=Priority.normal, description="Queue priority")
     fail_strategy: FailStrategy = Field(
         default=FailStrategy.partial, description="How to handle target failures"
+    )
+    page_cache: PageCacheMode = Field(
+        default=PageCacheMode.off,
+        description=(
+            "Development aid: 'record' stores rendered top-level pages; 'replay' serves "
+            "them without network access. Replayed output is not a live observation. "
+            "Requires SCRAPEYARD_PAGE_CACHE_DIR"
+        ),
+    )
+    domain_daily_page_limit: int | None = Field(
+        default=None,
+        ge=1,
+        strict=True,
+        description=(
+            "Per-host cap on top-level page attempts per UTC day, shared across runs; "
+            "can only lower a nonzero SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT"
+        ),
     )
 
     @model_validator(mode="after")

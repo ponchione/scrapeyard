@@ -156,6 +156,27 @@ class TargetErrorRecorder:
             # half-open probe, so it closes the availability circuit.
             self.circuit_breaker.record_success(domain, probe)
 
+    def record_uncounted_failure(
+        self,
+        *,
+        target_url: str,
+        fetcher_used: str,
+        result: TargetResult,
+    ) -> None:
+        """Record a stop that never reached the site; circuit state is untouched."""
+        self.pending_errors.extend(
+            build_target_result_error_records(
+                job_id=self.job_id,
+                run_id=self.run_id,
+                project=self.project,
+                target_url=target_url,
+                attempt=1,
+                fetcher_used=fetcher_used,
+                action=ActionTaken.skip,
+                result=result,
+            )
+        )
+
     def record_validation_failure(
         self,
         *,

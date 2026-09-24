@@ -10,13 +10,20 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
+from scrapling.engines.toolbelt.custom import Response, StatusText
 
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import get_settings
-from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.config.schema import (
+    FetcherType,
+    PageCacheMode,
+    PaginationMode,
+    RetryConfig,
+    TargetConfig,
+)
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
 from scrapeyard.engine.basic_fetch import BasicSession
 from scrapeyard.engine.browser_session import BrowserSession
@@ -28,16 +35,25 @@ from scrapeyard.engine.browser_debug import (
     populate_fetch_debug,
 )
 from scrapeyard.engine.detection import enrich_item_detection
+from scrapeyard.engine.domain_guard import admit_page
 from scrapeyard.engine.fetch_classifier import (
     ACCESS_DENIAL_TYPES,
     classify_page_signals,
     classify_fetch_exception,
     classify_rendered_outcome,
 )
+from scrapeyard.engine.page_cache import (
+    CachedPage,
+    PageCache,
+    PageCacheMiss,
+    current_page_cache,
+)
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
 from scrapeyard.engine.scrape_models import (
+    CLICK_PAGINATION_ATTRIBUTE,
+    ClickPaginationResult,
     FetchError,
     FetchOutcome,
     TargetResult as TargetResult,
@@ -393,6 +409,139 @@ def _selector_debug(page: Any, target: TargetConfig) -> dict[str, Any]:
     }
 
 
+def _replay_parser_arguments(
+    target: TargetConfig,
+    *,
+    adaptive: bool,
+    adaptive_dir: str,
+) -> dict[str, Any]:
+    parser_arguments = dict(_get_fetcher(target.fetcher)._generate_parser_arguments())
+    custom_config = _adaptive_fetch_kwargs(
+        target, adaptive=adaptive, adaptive_dir=adaptive_dir,
+    ).get("custom_config") or {}
+    parser_arguments.update(custom_config)
+    return parser_arguments
+
+
+def _build_replayed_response(cached: CachedPage, parser_arguments: dict[str, Any]) -> Response:
+    return Response(
+        url=cached.final_url,
+        text=cached.html,
+        body=cached.html.encode("utf-8"),
+        status=cached.status,
+        reason=StatusText.get(cached.status) or "",
+        cookies={},
+        headers={"content-type": cached.content_type},
+        request_headers={},
+        encoding=cached.content_type or "utf-8",
+        **parser_arguments,
+    )
+
+
+async def _replayed_response(
+    cached: CachedPage,
+    parser_arguments: dict[str, Any],
+    budget: RunBudget | None,
+) -> Response:
+    if budget is not None:
+        await budget.consume_fetched_bytes(len(cached.html.encode("utf-8")))
+    return await run_thread_work(
+        _build_replayed_response,
+        cached,
+        parser_arguments,
+        run_budget=budget,
+    )
+
+
+async def _replay_cached_page(
+    cache: PageCache,
+    url: str,
+    target: TargetConfig,
+    fetcher_type: FetcherType,
+    *,
+    adaptive: bool,
+    adaptive_dir: str,
+    budget: RunBudget | None,
+) -> FetchOutcome:
+    """Serve a recorded page (and click snapshots) without any network access."""
+    cached = await run_thread_work(cache.load, url, fetcher_type.value, run_budget=budget)
+    if cached is None:
+        raise PageCacheMiss(url)
+    parser_arguments = _replay_parser_arguments(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
+    response = await _replayed_response(cached, parser_arguments, budget)
+    if (
+        cached.click_pagination is not None
+        and target.pagination is not None
+        and target.pagination.mode is PaginationMode.click
+    ):
+        snapshots: list[object] = []
+        stop_reason = str(cached.click_pagination.get("stop_reason") or "unknown")
+        stop_detail: str | None = None
+        for index in range(1, int(cached.click_pagination.get("pages") or 0) + 1):
+            snapshot = await run_thread_work(
+                cache.load, url, fetcher_type.value, click_index=index, run_budget=budget,
+            )
+            if snapshot is None:
+                stop_reason = "cache_miss"
+                stop_detail = str(PageCacheMiss(url, click_index=index))
+                break
+            snapshots.append(await _replayed_response(snapshot, parser_arguments, budget))
+        setattr(
+            response,
+            CLICK_PAGINATION_ATTRIBUTE,
+            ClickPaginationResult(pages=snapshots, stop_reason=stop_reason, stop_detail=stop_detail),
+        )
+    debug = default_debug_blob(fetcher_type, target, url)
+    populate_fetch_debug(debug, response, url)
+    debug["page_cache"] = {"mode": PageCacheMode.replay.value, "recorded_at": cached.recorded_at}
+    return FetchOutcome(page=response, debug=debug)
+
+
+def _response_html(response: Any) -> str:
+    html = getattr(response, "html_content", None)
+    if isinstance(html, str) and html:
+        return str(html)
+    body = getattr(response, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        return bytes(body).decode("utf-8", errors="replace")
+    return str(body or "")
+
+
+def _record_fetched_page(
+    cache: PageCache,
+    url: str,
+    fetcher_type: FetcherType,
+    response: Any,
+    final_url: str,
+) -> None:
+    """Store one successful page and any click-pagination snapshots it carries."""
+    click_meta: dict[str, Any] | None = None
+    click_result = getattr(response, CLICK_PAGINATION_ATTRIBUTE, None)
+    if isinstance(click_result, ClickPaginationResult):
+        # Snapshots first, so a recorded first page never names missing snapshots.
+        for index, snapshot in enumerate(click_result.pages, start=1):
+            snapshot_url = getattr(snapshot, "url", None)
+            cache.store(
+                url,
+                fetcher_type.value,
+                html=_response_html(snapshot),
+                final_url=snapshot_url if isinstance(snapshot_url, str) and snapshot_url else final_url,
+                status=int(getattr(snapshot, "status", None) or 200),
+                content_type=_response_header(snapshot, "content-type") or "text/html",
+                click_index=index,
+            )
+        click_meta = {"pages": len(click_result.pages), "stop_reason": click_result.stop_reason}
+    cache.store(
+        url,
+        fetcher_type.value,
+        html=_response_html(response),
+        final_url=final_url,
+        status=int(getattr(response, "status", None) or 200),
+        content_type=_response_header(response, "content-type") or "text/html",
+        click_pagination=click_meta,
+    )
+
+
 async def _fetch_page(
     fetcher_cls: Any,
     url: str,
@@ -419,6 +568,21 @@ async def _fetch_page(
         response_observed = True
         if response_observer is not None:
             response_observer()
+
+    page_cache = current_page_cache(url)
+    if page_cache is not None and page_cache.mode is PageCacheMode.replay:
+        return await _replay_cached_page(
+            page_cache,
+            url,
+            target,
+            fetcher_type,
+            adaptive=adaptive,
+            adaptive_dir=adaptive_dir,
+            budget=budget,
+        )
+    # Counts every top-level attempt (retries and pagination included) before
+    # any request, and refuses hosts over budget or cooling down after a denial.
+    await admit_page(url)
 
     call_kwargs = _adaptive_fetch_kwargs(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
     debug = default_debug_blob(fetcher_type, target, url)
@@ -505,6 +669,17 @@ async def _fetch_page(
         if counts["item_selector_count"] == 0 or not any(counts["selector_counts"].values()):
             debug.update(counts)
             raise FetchError(response.status, debug=debug)
+    if page_cache is not None and page_cache.mode is PageCacheMode.record:
+        await run_thread_work(
+            _record_fetched_page,
+            page_cache,
+            url,
+            fetcher_type,
+            response,
+            str(debug.get("final_url") or url),
+            run_budget=budget,
+        )
+        debug["page_cache"] = {"mode": PageCacheMode.record.value}
     return FetchOutcome(page=response, debug=debug)
 
 
@@ -617,6 +792,7 @@ async def _scrape_first_page(
         "after_first_page_fetch",
     )
     result.debug = outcome.debug
+    result.recorded_at = (outcome.debug.get("page_cache") or {}).get("recorded_at")
     selector_debug = await _run_page_cpu_work(
         context,
         _selector_debug,

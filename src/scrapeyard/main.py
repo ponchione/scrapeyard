@@ -27,6 +27,7 @@ from scrapeyard.api.dependencies import (
     get_result_store,
     get_run_thread_pool,
     get_worker_pool,
+    init_domain_guard,
     init_rate_limiter,
 )
 from scrapeyard.api.middleware import (
@@ -167,6 +168,7 @@ async def _startup_runtime_services(app: FastAPI) -> None:
     await services.webhook_dispatcher.startup()
     await services.worker_pool.start()
     init_rate_limiter(redis=services.worker_pool.redis)
+    init_domain_guard(redis=services.worker_pool.redis)
     running_monitor = BackgroundLoopMonitor(
         "running_reconciliation",
         interval_seconds=settings.workers_running_reconciliation_interval_seconds,

@@ -10,7 +10,7 @@ import httpx
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.engine.adaptive_diagnostics import has_extracted_value
 from scrapeyard.engine.resilience import RetryableError
-from scrapeyard.engine.scrape_models import FetchError
+from scrapeyard.engine.scrape_models import FetchError, ScrapeStop
 from scrapeyard.models.job import ErrorType
 
 ACCESS_DENIAL_TYPES = frozenset({
@@ -161,6 +161,9 @@ def classify_fetch_exception(
 ) -> tuple[ErrorType, int | None, dict[str, Any] | None]:
     """Map low-level fetch exceptions to structured Scrapeyard error types."""
     debug = getattr(exc, "debug", None)
+    if isinstance(exc, ScrapeStop):
+        # Scrapeyard stopped itself; no request reached the site.
+        return exc.error_type, None, debug
     if isinstance(exc, RetryableError):
         if exc.status == 404:
             return ErrorType.http_not_found, exc.status, debug

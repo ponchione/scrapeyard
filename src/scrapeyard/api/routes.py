@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from yaml import YAMLError
 
 from scrapeyard.api.dependencies import (
+    get_domain_guard,
     get_error_store,
     get_job_store,
     get_result_response_thread_pool,
@@ -33,6 +34,7 @@ from scrapeyard.api.response_models import (
     APICompatibility,
     ERROR_RESPONSES,
     PAGINATION_HEADERS,
+    DomainGuardResponse,
     ErrorRecordResponse,
     JobCreatedResponse,
     JobDetailResponse,
@@ -65,12 +67,16 @@ from scrapeyard.api.serializers import (
     serialize_schedule_state,
     serialize_scrape_queued,
 )
-from scrapeyard.api.transport_policy import enforce_submission_transport_policy
+from scrapeyard.api.transport_policy import (
+    enforce_submission_page_cache_policy,
+    enforce_submission_transport_policy,
+)
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.common.yaml import MAX_YAML_NESTING
 from scrapeyard.config.loader import load_config, load_config_project
 from scrapeyard.config.schema import ScrapeConfig
+from scrapeyard.engine.domain_guard import DomainGuard, normalize_guard_host
 from scrapeyard.engine.url_guard import redact_userinfo_in_text
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.pool import WorkerPool
@@ -208,6 +214,7 @@ async def _read_valid_yaml_config(
             caller=caller,
             settings=get_settings(),
         )
+        enforce_submission_page_cache_policy(config, settings=get_settings())
     except RecursionError:
         raise_json_error(
             422,
@@ -790,3 +797,48 @@ async def get_errors(
     errors = await error_store.query_errors(filters, limit=resolved_limit + 1, offset=offset)
     errors = apply_paginated_list_response(response, rows=errors, limit=resolved_limit, offset=offset)
     return [serialize_error_record(error) for error in errors]
+
+
+def _authorize_domain_guard_admin(request: Request, host: str) -> str:
+    caller = authorize_request(request, AuthScope.transport_admin)
+    if caller.projects is not None:
+        raise_json_error(403, "Domain guard state is global; project-scoped callers cannot manage it")
+    try:
+        return normalize_guard_host(host)
+    except ValueError as exc:
+        raise_json_error(400, str(exc))
+
+
+async def _domain_guard_response(guard: DomainGuard, host: str) -> dict[str, Any]:
+    settings = get_settings()
+    status = await guard.status(host)
+    return status.as_dict(
+        daily_page_limit=settings.domain_daily_page_limit,
+        cooldown_seconds=settings.domain_denial_cooldown_seconds,
+    )
+
+
+@router.get("/domains/{host}/guard", response_model=DomainGuardResponse)
+async def get_domain_guard_state(
+    host: str,
+    request: Request,
+    guard: DomainGuard = Depends(get_domain_guard),
+) -> dict[str, Any]:
+    """Show a host's page count for the current UTC day and any denial cooldown."""
+
+    normalized = _authorize_domain_guard_admin(request, host)
+    return await _domain_guard_response(guard, normalized)
+
+
+@router.delete("/domains/{host}/guard", response_model=DomainGuardResponse)
+async def clear_domain_guard_state(
+    host: str,
+    request: Request,
+    guard: DomainGuard = Depends(get_domain_guard),
+) -> dict[str, Any]:
+    """Clear a host's denial cooldown and today's page count."""
+
+    normalized = _authorize_domain_guard_admin(request, host)
+    await guard.clear(normalized)
+    logger.info("Domain guard cleared for host=%s", normalized)
+    return await _domain_guard_response(guard, normalized)

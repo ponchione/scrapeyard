@@ -23,7 +23,9 @@ from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
     ClickPaginationSpec,
+    ScrapeStop,
 )
+from scrapeyard.engine.domain_guard import admit_page
 from scrapeyard.engine.url_guard import UnsafeURLError
 
 logger = logging.getLogger(__name__)
@@ -310,6 +312,13 @@ class BrowserSession:
                 budget.check_deadline()
             if not await self._next_is_available(page, spec):
                 return ClickPaginationResult(pages=pages, stop_reason="exhausted")
+            try:
+                # Each clicked page is a top-level page for the domain guard.
+                await admit_page(page.url)
+            except ScrapeStop as stop:
+                return ClickPaginationResult(
+                    pages=pages, stop_reason=stop.pagination_stop_reason, stop_detail=str(stop),
+                )
             try:
                 control = page.locator(self._locator_query(spec.next_query, spec.next_type)).first
                 await self._activate_control(control, timeout_ms)

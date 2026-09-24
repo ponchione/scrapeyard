@@ -100,6 +100,13 @@ execution:
   mode: auto
   priority: normal
   fail_strategy: partial
+  # Per-host cap on top-level page attempts per UTC day, shared across runs.
+  # Can only lower a nonzero SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT.
+  # domain_daily_page_limit: 200
+  # Development aid (requires SCRAPEYARD_PAGE_CACHE_DIR): "record" stores
+  # rendered pages; "replay" re-runs extraction on them with no requests.
+  # Replayed output is not a live observation of the site.
+  # page_cache: "off"
 
 # Uncomment for recurring jobs.
 # schedule:

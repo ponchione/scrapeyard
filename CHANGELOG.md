@@ -25,6 +25,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   with environment and Compose wiring.
 - Added a deny-by-default, project-scoped allowlist for deployment secret
   references in submitted YAML.
+- Added a record/replay page cache (`execution.page_cache: off | record |
+  replay`, `SCRAPEYARD_PAGE_CACHE_DIR`) for iterating on selectors offline.
+  Replay makes no requests and launches no browser; unrecorded pages fail with
+  the `cache_miss` error type and stop reason. Results carry `page_cache` and
+  per-target `recorded_at`.
+- Added a per-host daily top-level page budget
+  (`SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT`, `execution.domain_daily_page_limit`)
+  and an access-denial cooldown (`SCRAPEYARD_DOMAIN_DENIAL_COOLDOWN_SECONDS`),
+  shared across runs and workers through Redis. Stops report the
+  `domain_daily_limit` / `domain_cooldown` error types, the `domain_guard`
+  stop reason, and `run_budget.domain_guard`; `GET`/`DELETE
+  /domains/{host}/guard` inspect and clear a host.
 
 ### Changed
 - Browser configuration is now rejected for `fetcher: basic`, action fields

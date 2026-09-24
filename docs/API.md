@@ -86,6 +86,8 @@ samples. Each target summary (and target-group result) includes `pagination`:
 | `repeated_page` | A page-parameter or click-mode page returned exactly the records of an earlier page, or a click left the items unchanged. |
 | `unsafe_next_url` | Destination validation rejected the next link. |
 | `invalid_next_link` | A selected next-page element has no usable href. |
+| `domain_guard` | Scrapeyard stopped before requesting the next page: the host's daily page budget is used or it is cooling down after an access denial. The reason is appended to the target's `errors`. |
+| `cache_miss` | Page-cache replay has no recording for the next page (or click page); no request was made. |
 | `not_configured` | No pagination configuration; coverage is unknown. |
 | `unknown` | No conclusive pagination evidence, including interrupted/failed extraction. |
 
@@ -117,6 +119,38 @@ durable run must have a result-bearing terminal status before the API reads its
 artifact or returns `200`. The configured wait is a hard monotonic deadline;
 polling sleep and queue-state reads do not extend it or select a state first
 observed after it expired.
+
+### Page cache and domain guard outcomes
+
+When a job sets `execution.page_cache` to `record` or `replay`, the result has a
+top-level `page_cache` field with that mode; the field is absent otherwise. In
+replay, each `targets[]` entry carries `recorded_at`, the earliest recording
+time of the pages it was built from. Replayed results are reconstructed from
+stored HTML and are not a live observation of the site; do not treat them as
+current prices, availability, or listing coverage.
+
+Stops that Scrapeyard imposes on itself before any request have their own
+`targets[].error_type` values and are not retried or counted against the
+domain circuit breaker:
+
+| Error type | Meaning |
+| --- | --- |
+| `domain_daily_limit` | The host used its daily top-level page budget (UTC day). |
+| `domain_cooldown` | The host denied access recently and is cooling down. |
+| `cache_miss` | Replay has no recording for the page, or the service has no page cache directory. |
+
+Runs executed with a domain guard report `run_budget.domain_guard`:
+
+```json
+{
+  "daily_page_limit": 200,
+  "cooldown_seconds": 21600,
+  "pages_admitted": {"shop.example.test": 12},
+  "daily_limit_stops": {},
+  "cooldown_stops": {"other.example.test": 1},
+  "cooldowns_started": []
+}
+```
 
 ## Error envelope
 
@@ -180,3 +214,31 @@ proxies and `browser.cdp_url` require the separate `transport-admin` scope in
 addition to the route's normal `submit` or `schedule-admin` scope. Ordinary
 callers use the operator-configured service proxy. This authorization check
 does not replace the mandatory connected-IP deployment policy.
+
+### Domain guard state
+
+`GET /domains/{host}/guard` shows a host's top-level page count for the current
+UTC day and any active access-denial cooldown. `DELETE /domains/{host}/guard`
+clears both and returns the resulting state. `{host}` is a bare hostname
+(a leading `www.` and any port are ignored, matching how target URLs are
+counted); anything else returns `400`. Guard state is global, so both routes
+require the `transport-admin` scope on a credential without a project
+restriction; project-scoped callers receive `403`.
+
+```json
+{
+  "host": "shop.example.test",
+  "day": "20260101",
+  "pages_today": 12,
+  "daily_page_limit": 200,
+  "cooldown_seconds": 21600,
+  "cooldown_active": true,
+  "cooldown_remaining_seconds": 5021.4,
+  "cooldown_until": "2026-01-01T14:03:11+00:00"
+}
+```
+
+`daily_page_limit` is the service limit (`0` = unlimited); a job's
+`execution.domain_daily_page_limit` can only lower it for that job's runs.
+Submitting `execution.page_cache: record` or `replay` returns `422` when
+`SCRAPEYARD_PAGE_CACHE_DIR` is not configured.

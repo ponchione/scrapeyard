@@ -449,6 +449,31 @@ subresources are not throttled by this setting.
 next target starts. It requires `concurrency: 1`, defaults to zero, and uses the
 remaining run deadline. No gap follows the last target or an open domain circuit.
 
+`execution.domain_daily_page_limit` caps top-level page attempts per host per
+UTC day, shared across runs and workers (through Redis when shared domain pacing
+is enabled). Every initial fetch, retry, pagination page, and click-pagination
+page counts before it is sent; browser subresources do not. A job value can only
+lower a nonzero `SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT` and applies alone when the
+service limit is `0`. An exhausted budget stops the target without a request
+(`domain_daily_limit`, not retried); pages already extracted are kept with the
+`domain_guard` stop reason. When a target is classified as an access denial
+(blocked response, challenge, consent or login gate, HTTP 401/403), the host
+cools down for `SCRAPEYARD_DOMAIN_DENIAL_COOLDOWN_SECONDS`; later targets and
+runs on that host fail fast with `domain_cooldown` and make no request. Each
+run reports these outcomes in `run_budget.domain_guard`. Operators inspect or
+clear a host with `GET`/`DELETE /domains/{host}/guard`.
+
+`execution.page_cache` is a development aid for iterating on selectors without
+contacting the site. `record` stores the rendered HTML and minimal metadata of
+every successful top-level page (initial, pagination, and click-pagination
+snapshots) under `SCRAPEYARD_PAGE_CACHE_DIR`, keyed by canonical URL and
+fetcher. `replay` serves those pages with no network access and no browser
+launch; extraction and pagination run unchanged, and a page that was never
+recorded fails the target (or stops pagination) with `cache_miss`. Results
+carry a top-level `page_cache` field and, in replay, each target's
+`recorded_at`. Replayed output is not a live observation of the site. Jobs that
+set `record` or `replay` are rejected when the service has no cache directory.
+
 `retry.max_attempts` is the total number of attempts per request, including the
 initial attempt. HTTP 401, 403 and 407 stop immediately even when listed as
 retryable. Connection and timeout failures follow the same backoff,
@@ -531,6 +556,9 @@ profile.
 | `SCRAPEYARD_RATE_LIMIT_MAX_KEYS` | `10000` | Maximum live API-key/client-IP rate-limit buckets; new identities are refused at saturation |
 | `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED` | `true` | Use Redis for cross-job domain pacing when the queue connection is available |
 | `SCRAPEYARD_DOMAIN_RATE_LIMIT_MAX_DOMAINS` | `10000` | Maximum process-local domain pacing entries when shared pacing is disabled |
+| `SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT` | `0` | Top-level page attempts per host per UTC day across all runs; `0` is unlimited (pages are still counted) |
+| `SCRAPEYARD_DOMAIN_DENIAL_COOLDOWN_SECONDS` | `21600` | Cooldown after a host denies access; later targets on that host fail fast without a request; `0` disables |
+| `SCRAPEYARD_PAGE_CACHE_DIR` | empty | Directory for `execution.page_cache` record/replay; empty makes the page cache unavailable |
 | `SCRAPEYARD_HISTORY_ADHOC_JOB_RETENTION_DAYS` | `30` | Terminal ad-hoc job history window before resumable metadata deletion |
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_DAYS` | `30` | Scheduled run history age window |
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_RETENTION_COUNT` | `100` | Maximum newest scheduled runs retained per job; age expiry may retain fewer |

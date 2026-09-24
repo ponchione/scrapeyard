@@ -5,7 +5,20 @@ from __future__ import annotations
 from scrapeyard.api.auth import AuthScope, AuthenticatedCaller
 from scrapeyard.api.response_utils import raise_json_error
 from scrapeyard.common.settings import ServiceSettings
-from scrapeyard.config.schema import ScrapeConfig
+from scrapeyard.config.schema import PageCacheMode, ScrapeConfig
+
+
+def enforce_submission_page_cache_policy(
+    config: ScrapeConfig,
+    *,
+    settings: ServiceSettings,
+) -> None:
+    """Reject page-cache modes the service cannot honor."""
+
+    if config.execution.page_cache is not PageCacheMode.off and not settings.page_cache_dir:
+        raise ValueError(
+            "execution.page_cache requires SCRAPEYARD_PAGE_CACHE_DIR to be configured"
+        )
 
 
 def enforce_submission_transport_policy(

@@ -119,6 +119,9 @@ class ServiceSettings(BaseSettings):
     log_level: str = "INFO"
     domain_rate_limit_shared: bool = True
     domain_rate_limit_max_domains: int = Field(default=10000, ge=1)
+    domain_daily_page_limit: int = Field(default=0, ge=0)
+    domain_denial_cooldown_seconds: int = Field(default=21600, ge=0)
+    page_cache_dir: str = ""
 
     api_keys: str = ""
     api_credentials: str = ""

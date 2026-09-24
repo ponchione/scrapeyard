@@ -18,14 +18,29 @@ from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import ServiceSettings, get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
-from scrapeyard.config.schema import FailStrategy, FetcherType, GroupBy, ScrapeConfig, TargetConfig
+from scrapeyard.config.schema import (
+    FailStrategy,
+    FetcherType,
+    GroupBy,
+    PageCacheMode,
+    ScrapeConfig,
+    TargetConfig,
+)
+from scrapeyard.engine.domain_guard import (
+    DomainGuard,
+    RunDomainPolicy,
+    activate_domain_policy,
+    domain_guard_host,
+    effective_daily_page_limit,
+)
+from scrapeyard.engine.page_cache import PageCache, activate_page_cache
 from scrapeyard.engine.fetch_classifier import ACCESS_DENIAL_TYPES, classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitState, ResultValidator
+from scrapeyard.engine.scrape_models import SELF_IMPOSED_ERROR_TYPES
 from scrapeyard.engine.scraper import TargetResult, TargetStatus, scrape_target
 from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
-    canonical_url_origin,
     redact_deployment_secrets_with_count,
     redact_deployment_secrets_in_value_with_count,
     redact_sensitive_mapping,
@@ -88,6 +103,14 @@ class JobExecutionContext:
     budget: RunBudget
     run_id: str
     activity: RunActivityGuard
+    domain_policy: RunDomainPolicy | None = None
+    page_cache: PageCache | None = None
+    # The job asked for the page cache but the service has no cache directory.
+    page_cache_unavailable: bool = False
+
+    @property
+    def replaying(self) -> bool:
+        return self.config.execution.page_cache is PageCacheMode.replay
 
 
 @dataclass(frozen=True)
@@ -112,6 +135,8 @@ class TargetProcessingContext:
     browser_limiter: BrowserExecutionLimiter | None
     budget: RunBudget
     activity: RunActivityGuard
+    # Replay serves recorded pages: no browser slots, pacing or circuit updates.
+    replay: bool = False
     # One sticky proxy session per run: every target and page shares the token.
     proxy_session: str = field(default_factory=new_proxy_session_token, repr=False)
 
@@ -138,6 +163,7 @@ async def scrape_task(
     rate_limiter: DomainRateLimiter,
     browser_limiter: BrowserExecutionLimiter | None = None,
     webhook_dispatcher: WebhookNotifier | None = None,
+    domain_guard: DomainGuard | None = None,
 ) -> None:
     """Execute a complete scrape job."""
     context: JobExecutionContext | None = None
@@ -148,7 +174,13 @@ async def scrape_task(
     metric_started = time.monotonic()
     redaction_token = None
     try:
-        context = await _load_job_execution_context(job_id, config_yaml, run_id, job_store)
+        context = await _load_job_execution_context(
+            job_id,
+            config_yaml,
+            run_id,
+            job_store,
+            domain_guard=domain_guard,
+        )
         if context is None:
             return
         redaction_token = activate_deployment_secret_redaction(
@@ -458,6 +490,8 @@ async def _load_job_execution_context(
     config_yaml: str,
     run_id: str | None,
     job_store: JobStore,
+    *,
+    domain_guard: DomainGuard | None = None,
 ) -> JobExecutionContext | None:
     config = await asyncio.to_thread(load_config, config_yaml)
     job = await job_store.get_job(job_id)
@@ -485,6 +519,20 @@ async def _load_job_execution_context(
         remaining = max(0, (config.execution.deadline_at - started_at).total_seconds())
         budget.max_duration_seconds = min(budget.max_duration_seconds, remaining)
         budget.deadline_monotonic = budget.started_monotonic + budget.max_duration_seconds
+    domain_policy = None
+    if domain_guard is not None:
+        domain_policy = RunDomainPolicy(
+            guard=domain_guard,
+            daily_page_limit=effective_daily_page_limit(
+                settings.domain_daily_page_limit,
+                config.execution.domain_daily_page_limit,
+            ),
+            cooldown_seconds=settings.domain_denial_cooldown_seconds,
+        )
+    page_cache = None
+    page_cache_mode = config.execution.page_cache
+    if page_cache_mode is not PageCacheMode.off and settings.page_cache_dir:
+        page_cache = PageCache.for_project(page_cache_mode, settings.page_cache_dir, config.project)
     return JobExecutionContext(
         config=config,
         config_hash=hashlib.sha256(config_yaml.encode()).hexdigest(),
@@ -500,7 +548,18 @@ async def _load_job_execution_context(
             job_id=job_id,
             run_id=effective_run_id,
         ),
+        domain_policy=domain_policy,
+        page_cache=page_cache,
+        page_cache_unavailable=page_cache_mode is not PageCacheMode.off and page_cache is None,
     )
+
+
+def _annotate_run_output(output_data: dict[str, Any], context: JobExecutionContext) -> None:
+    """Report cache mode and domain-guard outcomes alongside the run budget."""
+    if context.domain_policy is not None and isinstance(output_data.get("run_budget"), dict):
+        output_data["run_budget"]["domain_guard"] = context.domain_policy.snapshot()
+    if context.config.execution.page_cache is not PageCacheMode.off:
+        output_data["page_cache"] = context.config.execution.page_cache.value
 
 
 async def _mark_run_started(
@@ -571,6 +630,7 @@ async def _persist_job_results(
     )
     context.budget.check_deadline()
     output_data["run_budget"] = context.budget.snapshot()
+    _annotate_run_output(output_data, context)
     save_meta = await save_run_result(
         job_id=job_id,
         run_id=run_id,
@@ -720,6 +780,7 @@ async def _handle_budget_exhaustion(
         "run_budget": context.budget.snapshot(),
         "results": [] if context.config.output.group_by == GroupBy.merge else {},
     }
+    _annotate_run_output(output_data, context)
     save_meta: SaveResultMeta | None = None
     try:
         await context.activity.checkpoint("before_budget_result_persistence")
@@ -850,7 +911,9 @@ async def _process_all_targets(
         browser_limiter=browser_limiter,
         budget=context.budget,
         activity=context.activity,
+        replay=context.replaying,
     )
+    pacing = not context.replaying
 
     async def _process_one(target_index: int, target_cfg: TargetConfig) -> TargetResult:
         nonlocal next_start_at
@@ -862,7 +925,7 @@ async def _process_all_targets(
             await context.activity.checkpoint("before_target_start")
             async with sem:
                 await context.activity.checkpoint("before_target_fetch")
-                if config.execution.delay_between > 0:
+                if pacing and config.execution.delay_between > 0:
                     async with start_lock:
                         wait_seconds = max(0.0, next_start_at - time.monotonic())
                         if wait_seconds > 0:
@@ -873,8 +936,7 @@ async def _process_all_targets(
                             time.monotonic() + config.execution.delay_between
                         )
                 context.budget.check_deadline()
-                origin = canonical_url_origin(target_cfg.url)
-                host = (origin[1] if origin else url_host_label(target_cfg.url)).removeprefix("www.")
+                host = domain_guard_host(target_cfg.url)
                 if host in denied_hosts:
                     detail = "Not attempted: an earlier target on this host was denied or challenged"
                     return TargetResult(
@@ -892,8 +954,16 @@ async def _process_all_targets(
                 if (target_result.error_type in ACCESS_DENIAL_TYPES
                         or target_result.http_status in {401, 403, 407}):
                     denied_hosts.add(host)
+                    # 407 is a proxy credential failure, not the site denying access.
+                    if (
+                        context.domain_policy is not None
+                        and not context.replaying
+                        and target_result.http_status != 407
+                    ):
+                        await context.domain_policy.record_denial(target_cfg.url)
                 if (
-                    config.execution.post_target_delay > 0
+                    pacing
+                    and config.execution.post_target_delay > 0
                     and target_index < len(targets) - 1
                     and circuit_breaker.state(url_host_label(target_cfg.url)) is not CircuitState.open
                 ):
@@ -927,19 +997,24 @@ async def _process_all_targets(
                     activity=context.activity,
                 )
 
-    tasks = [
-        asyncio.create_task(_process_one(target_index, target_cfg))
-        for target_index, target_cfg in enumerate(targets)
-    ]
-    try:
-        outcomes = await context.budget.wait_for(asyncio.gather(*tasks))
-        return list(outcomes)
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    # Target tasks inherit the run's domain policy and page cache.
+    with (
+        activate_domain_policy(context.domain_policy),
+        activate_page_cache(context.page_cache, unavailable=context.page_cache_unavailable),
+    ):
+        tasks = [
+            asyncio.create_task(_process_one(target_index, target_cfg))
+            for target_index, target_cfg in enumerate(targets)
+        ]
+        try:
+            outcomes = await context.budget.wait_for(asyncio.gather(*tasks))
+            return list(outcomes)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _fetch_and_validate_target(
@@ -959,7 +1034,7 @@ async def _fetch_and_validate_target(
         target_index=target_index,
         proxy_session=context.proxy_session,
     )
-    circuit_open = await guard_target_execution(
+    circuit_open = None if context.replay else await guard_target_execution(
         runtime=runtime,
         target_cfg=target_cfg,
         circuit_breaker=context.circuit_breaker,
@@ -971,7 +1046,7 @@ async def _fetch_and_validate_target(
     log_target_fetch(target_cfg, runtime)
     try:
         qualification_checkpoint("during_target_execution")
-        if target_cfg.fetcher in (FetcherType.dynamic, FetcherType.stealthy):
+        if target_cfg.fetcher in (FetcherType.dynamic, FetcherType.stealthy) and not context.replay:
             if context.browser_limiter is None:
                 return await _scrape_and_validate_target(
                     target_cfg,
@@ -1045,6 +1120,16 @@ async def _scrape_and_validate_target(
     )
     await context.activity.checkpoint("after_target_fetch")
     if not result.is_success:
+        if context.replay or result.error_type in SELF_IMPOSED_ERROR_TYPES:
+            # Nothing reached the site: keep the error record, not a circuit failure.
+            context.circuit_breaker.abort_probe(runtime.domain, runtime.circuit_probe)
+            runtime.circuit_probe = None
+            recorder.record_uncounted_failure(
+                target_url=target_cfg.url,
+                fetcher_used=target_cfg.fetcher.value,
+                result=result,
+            )
+            return result
         record_failed_target(
             runtime=runtime,
             result=result,
@@ -1053,7 +1138,8 @@ async def _scrape_and_validate_target(
         )
         return result
 
-    recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
+    if not context.replay:
+        recorder.record_success(runtime.domain, probe=runtime.circuit_probe)
     runtime.circuit_probe = None
     return await apply_validation(
         target_cfg=target_cfg,
@@ -1140,6 +1226,7 @@ def _target_result_details(
             "stop_reason": result.pagination_stop_reason,
             "exhausted": result.pagination_stop_reason == "exhausted",
         },
+        **({"recorded_at": result.recorded_at} if result.recorded_at else {}),
         "debug": debug,
         "error_type": result.error_type.value if result.error_type else None,
         "error_detail": (

@@ -15,8 +15,10 @@ from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
     FetchOutcome,
+    ScrapeStop,
     TargetResult,
 )
+from scrapeyard.engine.page_cache import earliest_recorded_at, replay_active
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
 from scrapeyard.engine.selectors import select_elements_strict
 from scrapeyard.engine.url_guard import (
@@ -75,6 +77,9 @@ async def _pagination_url_is_safe(
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
 ) -> bool:
+    if replay_active():
+        # Replay never fetches, so there is no destination to resolve or guard.
+        return True
     await cancellation_checkpoint(
         cancellation_guard,
         "before_pagination_dns_validation",
@@ -126,6 +131,17 @@ def with_query_param(url: str, name: str, value: int) -> str:
     if not replaced:
         rebuilt.append(replacement)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(rebuilt), ""))
+
+
+def _record_self_imposed_stop(result: TargetResult, stop: ScrapeStop) -> None:
+    """Keep pages already extracted; report why Scrapeyard stopped paginating."""
+    result.pagination_stop_reason = cast(Any, stop.pagination_stop_reason)
+    result.errors.append(str(stop))
+
+
+def _note_recorded_at(result: TargetResult, outcome: FetchOutcome) -> None:
+    recorded_at = (outcome.debug.get("page_cache") or {}).get("recorded_at")
+    result.recorded_at = earliest_recorded_at(result.recorded_at, recorded_at)
 
 
 def page_data_fingerprint(page_data: list[dict[str, Any]]) -> str:
@@ -292,7 +308,12 @@ async def paginate_target(
             result.pagination_stop_reason = "repeated_url"
             break
 
-        next_outcome = await _fetch_follow_on_page(next_url, **fetch_kwargs)
+        try:
+            next_outcome = await _fetch_follow_on_page(next_url, **fetch_kwargs)
+        except ScrapeStop as stop:
+            _record_self_imposed_stop(result, stop)
+            break
+        _note_recorded_at(result, next_outcome)
         final_url = next_outcome.debug.get("final_url") or next_url
         final_key = pagination_url_key(final_url)
         if final_key in seen_urls:
@@ -370,7 +391,12 @@ async def _paginate_by_page_param(
             result.pagination_stop_reason = "repeated_url"
             break
 
-        next_outcome = await _fetch_follow_on_page(next_url, **fetch_kwargs)
+        try:
+            next_outcome = await _fetch_follow_on_page(next_url, **fetch_kwargs)
+        except ScrapeStop as stop:
+            _record_self_imposed_stop(result, stop)
+            break
+        _note_recorded_at(result, next_outcome)
         final_url = next_outcome.debug.get("final_url") or next_url
         final_key = pagination_url_key(final_url)
         if final_key in seen_urls:
@@ -435,3 +461,5 @@ async def _extract_click_pages(
             "after_pagination_page",
         )
     result.pagination_stop_reason = cast(Any, click_result.stop_reason)
+    if click_result.stop_detail:
+        result.errors.append(click_result.stop_detail)

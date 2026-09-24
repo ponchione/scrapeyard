@@ -42,6 +42,10 @@ class ErrorType(str, Enum):
     browser_error = "browser_error"
     timeout = "timeout"
     budget_exceeded = "budget_exceeded"
+    # Scrapeyard stopped itself before making a request.
+    cache_miss = "cache_miss"
+    domain_daily_limit = "domain_daily_limit"
+    domain_cooldown = "domain_cooldown"
 
 
 class ActionTaken(str, Enum):

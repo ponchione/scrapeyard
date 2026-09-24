@@ -12,6 +12,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.common.run_threads import RunThreadPool
 from scrapeyard.api.result_responses import ResultResponseThreadPool
 from scrapeyard.common.time import utc_now
+from scrapeyard.engine.domain_guard import DomainGuard, LocalDomainGuard, RedisDomainGuard
 from scrapeyard.engine.rate_limiter import (
     DomainRateLimiter,
     LocalDomainRateLimiter,
@@ -190,6 +191,41 @@ def reset_rate_limiter() -> None:
     _rate_limiter_holder.reset()
 
 
+class _DomainGuardHolder:
+    """Holds the domain guard singleton (Redis-backed once Redis is available)."""
+
+    def __init__(self) -> None:
+        self._instance: DomainGuard | None = None
+
+    def init(self, redis: ArqRedis | None = None) -> DomainGuard:
+        if get_settings().domain_rate_limit_shared and redis is not None:
+            self._instance = RedisDomainGuard(redis)
+        else:
+            self._instance = LocalDomainGuard()
+        return self._instance
+
+    def get(self) -> DomainGuard:
+        if self._instance is None:
+            return self.init()
+        return self._instance
+
+    def reset(self) -> None:
+        self._instance = None
+
+
+_domain_guard_holder = _DomainGuardHolder()
+
+
+def init_domain_guard(redis: ArqRedis | None = None) -> DomainGuard:
+    """Create and store the domain guard singleton."""
+    return _domain_guard_holder.init(redis)
+
+
+def get_domain_guard() -> DomainGuard:
+    """Return the per-domain page budget and denial cooldown guard."""
+    return _domain_guard_holder.get()
+
+
 def reset_cached_dependencies() -> None:
     """Clear cached dependency singletons and reset non-cached runtime holders."""
     if get_run_thread_pool.cache_info().currsize:
@@ -210,6 +246,7 @@ def reset_cached_dependencies() -> None:
     ):
         cached_fn.cache_clear()
     reset_rate_limiter()
+    _domain_guard_holder.reset()
 
 
 @lru_cache(maxsize=1)
@@ -282,6 +319,7 @@ def get_worker_pool() -> WorkerPool:
             rate_limiter=get_rate_limiter(),
             browser_limiter=browser_limiter,
             webhook_dispatcher=webhook_dispatcher,
+            domain_guard=get_domain_guard(),
         )
 
     return WorkerPool(
