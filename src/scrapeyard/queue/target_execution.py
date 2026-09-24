@@ -9,7 +9,7 @@ from pathlib import Path
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import ScrapeConfig, TargetConfig
-from scrapeyard.engine.proxy import redact_proxy_url, resolve_proxy
+from scrapeyard.engine.proxy import apply_proxy_session, redact_proxy_url, resolve_proxy
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
 from scrapeyard.engine.resilience import CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
@@ -42,10 +42,13 @@ def resolve_target_runtime_context(
     settings: ServiceSettings,
     run_artifacts_dir: str | None,
     target_index: int = 0,
+    proxy_session: str | None = None,
 ) -> TargetRuntimeContext:
     domain = url_host_label(target_cfg.url)
     adaptive = config.adaptive if config.adaptive is not None else config.schedule is not None
     proxy_url = resolve_proxy(target_cfg, config.proxy, settings.proxy_url)
+    if proxy_session is not None:
+        proxy_url = apply_proxy_session(proxy_url, proxy_session)
     artifacts_dir = (
         None
         if run_artifacts_dir is None

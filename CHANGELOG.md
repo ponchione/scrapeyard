@@ -14,6 +14,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ## Unreleased
 
 ### Added
+- Added page-parameter pagination (`pagination.page_param`, `page_first`,
+  `page_step`) for listings whose pages are addressable by a query parameter.
+- Added click pagination (`pagination.mode: click`) for client-rendered
+  listings: browser fetchers click the next control in the live page and
+  extract each rendered page. Adds the `repeated_page` stop reason.
+- Proxy URLs accept a `{session}` placeholder in their credentials, replaced
+  by one random token per run for sticky rotating-proxy sessions.
 - Added configurable transform pipeline-step and intermediate-value byte caps,
   with environment and Compose wiring.
 - Added a deny-by-default, project-scoped allowlist for deployment secret

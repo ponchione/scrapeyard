@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -52,6 +52,7 @@ from scrapeyard.queue.run_lifecycle import (
     handle_crash,
     save_run_result,
 )
+from scrapeyard.engine.proxy import new_proxy_session_token
 from scrapeyard.queue.target_execution import (
     TargetRuntimeContext,
     guard_target_execution,
@@ -111,6 +112,8 @@ class TargetProcessingContext:
     browser_limiter: BrowserExecutionLimiter | None
     budget: RunBudget
     activity: RunActivityGuard
+    # One sticky proxy session per run: every target and page shares the token.
+    proxy_session: str = field(default_factory=new_proxy_session_token, repr=False)
 
     def recorder(self, pending_errors: list[ErrorRecord]) -> TargetErrorRecorder:
         return TargetErrorRecorder(
@@ -954,6 +957,7 @@ async def _fetch_and_validate_target(
         settings=context.settings,
         run_artifacts_dir=context.run_artifacts_dir,
         target_index=target_index,
+        proxy_session=context.proxy_session,
     )
     circuit_open = await guard_target_execution(
         runtime=runtime,

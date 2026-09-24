@@ -80,9 +80,10 @@ samples. Each target summary (and target-group result) includes `pagination`:
 
 | Stop reason | Evidence |
 | --- | --- |
-| `exhausted` | The configured next-page selector matched no links on the last scraped page; `exhausted` is `true`. |
-| `max_pages` | A next link remains at the page cap. Its destination is not fetched or DNS-validated. |
+| `exhausted` | The configured next-page selector matched nothing on the last scraped page, a page-parameter page extracted no records, or a click-mode next control was missing, hidden or disabled; `exhausted` is `true`. |
+| `max_pages` | A next link (page-parameter: a further page; click mode: an enabled next control) remains at the page cap. Its destination is not fetched or DNS-validated. |
 | `repeated_url` | The next URL, or its redirect destination, was already visited. |
+| `repeated_page` | A page-parameter or click-mode page returned exactly the records of an earlier page, or a click left the items unchanged. |
 | `unsafe_next_url` | Destination validation rejected the next link. |
 | `invalid_next_link` | A selected next-page element has no usable href. |
 | `not_configured` | No pagination configuration; coverage is unknown. |

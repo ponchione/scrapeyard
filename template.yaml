@@ -69,14 +69,18 @@ target:
       query: ".pagination-next"
       type: css
     max_pages: 5
+    # Alternatives: `page_param: page` (optionally `page_first`/`page_step`) when
+    # pages are addressed by a query parameter, or `mode: click` to click `next`
+    # in the live page for dynamic/stealthy client-rendered listings.
 
 # Optional override. If omitted, adaptive defaults to false for on-demand jobs
 # and true for scheduled jobs.
 adaptive: true
 
 # Optional job-level proxy (applies to all targets unless overridden).
+# `{session}` in the credentials becomes one random token per run.
 # proxy:
-#   url: "http://user:pass@gate.provider.com:7777"
+#   url: "http://user-session-{session}:pass@gate.provider.com:7777"
 
 retry:
   max_attempts: 3

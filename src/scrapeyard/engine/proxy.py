@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -15,6 +16,33 @@ _DIRECT_PROXY = "direct"
 # browser transports.  In particular, httpx rejects SOCKS4/4a while browser
 # engines do not consistently accept the remote-DNS ``socks5h`` spelling.
 _ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks5"})
+# Rotating proxy gateways choose a sticky exit IP from a session token in the
+# credentials. Each run replaces this placeholder with one fresh token.
+PROXY_SESSION_PLACEHOLDER = "{session}"
+
+
+def new_proxy_session_token() -> str:
+    """Return a random token that is safe inside proxy credentials."""
+    return secrets.token_hex(8)
+
+
+def apply_proxy_session(proxy_url: str | None, token: str) -> str | None:
+    """Substitute the run's session token into a proxy URL placeholder."""
+    if proxy_url is None or PROXY_SESSION_PLACEHOLDER not in proxy_url:
+        return proxy_url
+    return proxy_url.replace(PROXY_SESSION_PLACEHOLDER, token)
+
+
+def _validate_session_placeholder(proxy_url: str) -> None:
+    if "{" not in proxy_url and "}" not in proxy_url:
+        return
+    remainder = proxy_url.replace(PROXY_SESSION_PLACEHOLDER, "")
+    if "{" in remainder or "}" in remainder:
+        raise ValueError("Proxy URL braces are only allowed in the {session} placeholder")
+    netloc = urlparse(proxy_url).netloc
+    userinfo = netloc.rpartition("@")[0] if "@" in netloc else ""
+    if userinfo.count(PROXY_SESSION_PLACEHOLDER) != proxy_url.count(PROXY_SESSION_PLACEHOLDER):
+        raise ValueError("The {session} placeholder is only supported in proxy credentials")
 
 
 def normalize_proxy_url(value: str) -> str:
@@ -28,6 +56,7 @@ def normalize_proxy_url(value: str) -> str:
         raise ValueError("Proxy URL must not contain whitespace")
     if any(ord(char) < 32 or ord(char) == 127 for char in proxy_url):
         raise ValueError("Proxy URL must not contain control characters")
+    _validate_session_placeholder(proxy_url)
 
     parsed = urlparse(proxy_url)
     scheme = parsed.scheme.lower()

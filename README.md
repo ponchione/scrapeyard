@@ -286,9 +286,9 @@ Common target fields:
 | `fetcher` | `basic`, `stealthy`, or `dynamic` |
 | `selectors` | Output fields mapped to CSS or XPath selectors |
 | `item_selector` | Optional repeated-item container selector |
-| `pagination` | Optional next-page selector and total page limit (`max_pages` is at least 1) |
+| `pagination` | Optional next-page selector or page parameter, pagination mode, and total page limit (`max_pages` is at least 1) |
 | `browser` | Optional browser runtime controls and pre-extraction actions for `dynamic` or `stealthy` fetches; rejected for `basic` |
-| `proxy` | Optional per-target proxy override |
+| `proxy` | Optional per-target proxy override; `{session}` in the credentials becomes one random token per run |
 | `map_detection` | Optional pricing visibility detection rules |
 | `stock_detection` | Optional stock status detection rules |
 
@@ -341,6 +341,49 @@ pagination:
     type: xpath
   max_pages: 5
 ```
+
+When the next control has no usable link but pages are addressable by a query
+parameter, set `page_param`. Page *k* is the first page's final URL with that
+parameter set to `page_first + (k - 1) * page_step` (defaults 1 and 1); other
+query parameters are kept as they are. Use `page_first: 0` and `page_step: 24`
+for offset-style listings. A configured `next` selector then only signals that
+another page exists; its absence stops with `exhausted`. Page-parameter
+pagination also stops with `exhausted` when a page extracts no records, and
+with `repeated_page` when a page returns exactly the records of an earlier page.
+
+```yaml
+pagination:
+  page_param: page
+  next: "button.pagination-next:not([disabled])"
+  max_pages: 20
+```
+
+Client-rendered listings that change pages only in the browser can use
+`mode: click` with `dynamic` or `stealthy` fetchers. After the first page is
+captured, Scrapeyard clicks the first visible, enabled `next` element in the
+live page, waits until the `item_selector` matches (or, without one, the page
+body) change, applies `browser.wait_for_selector`/`wait_ms` again, and extracts
+each rendered page like a fetched page. It stops at `max_pages`, with
+`exhausted` when the control is missing, hidden, disabled or `aria-disabled`,
+with `repeated_page` when a click leaves the items unchanged or returns an
+earlier page, and with `unknown` when a click fails. Each snapshot counts
+against the fetched-byte budget; requests triggered by clicks pass through the
+same browser guards and request budget.
+
+```yaml
+pagination:
+  mode: click
+  next: "nav[aria-label='pagination'] a[aria-label='Next page']"
+  max_pages: 10
+```
+
+Rotating proxy gateways usually pick a sticky exit IP from a session name in the
+proxy credentials. Put `{session}` in the proxy username or password (for
+example `http://customer-session-{session}:secret@gate.example.test:7000`) and
+each run substitutes one random 16-character hex token: every target and page
+in that run shares the exit session, and the next run gets a new one. The
+placeholder is rejected outside the credentials, and logs report only the proxy
+host and port.
 
 Browser-backed targets may define an ordered `browser.actions` list with
 `click`, `wait_for_selector`, `wait_ms`, `scroll`, and `repeat_click` actions.
@@ -460,7 +503,7 @@ profile.
 | `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Required key ID used for new writes and startup rotation |
 | `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
 | `SCRAPEYARD_UNTRUSTED_SUBMISSIONS` | `false` (`true` in production Compose) | Require the operator proxy and policy probe; restrict submitted proxy/CDP overrides to `transport-admin` callers |
-| `SCRAPEYARD_PROXY_URL` | empty | Operator-controlled default proxy; required and cannot be `direct` in untrusted-submission mode |
+| `SCRAPEYARD_PROXY_URL` | empty | Operator-controlled default proxy; required and cannot be `direct` in untrusted-submission mode. `{session}` in the credentials becomes one random token per run |
 | `SCRAPEYARD_EGRESS_POLICY_PROBE_HOST` | empty (`172.30.0.248` in production Compose) | Controlled non-public numeric address hosting the two-channel policy probe |
 | `SCRAPEYARD_EGRESS_POLICY_PROBE_PORT` | `0` (`8080` in production Compose) | Challenge port that must be denied while the helper is live |
 | `SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT` | `0` (`8081` in production Compose) | Narrowly allowed protocol port proving the helper and challenge listener remain live |

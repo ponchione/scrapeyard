@@ -30,7 +30,7 @@ class TargetResult:
     debug: dict[str, Any] | None = None
     pagination_stop_reason: Literal[
         "unknown", "not_configured", "exhausted", "max_pages",
-        "repeated_url", "unsafe_next_url", "invalid_next_link",
+        "repeated_url", "repeated_page", "unsafe_next_url", "invalid_next_link",
     ] = "unknown"
 
     def __post_init__(self) -> None:
@@ -53,6 +53,29 @@ class TargetResult:
 class FetchOutcome:
     page: object
     debug: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ClickPaginationSpec:
+    """Click-pagination instructions for one live browser fetch."""
+
+    next_query: str
+    next_type: str
+    item_query: str | None
+    item_type: str | None
+    max_pages: int
+
+
+@dataclass(frozen=True)
+class ClickPaginationResult:
+    """Rendered follow-on pages captured by clicking the next element."""
+
+    pages: list[object] = field(default_factory=list)
+    stop_reason: str = "unknown"
+
+
+# The live browser fetch attaches click-pagination snapshots to the first page.
+CLICK_PAGINATION_ATTRIBUTE = "scrapeyard_click_pagination"
 
 
 class FetchError(Exception):

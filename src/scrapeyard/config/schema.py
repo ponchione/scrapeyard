@@ -28,6 +28,7 @@ from scrapeyard.engine.proxy import normalize_public_proxy_url
 from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
 
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_PAGE_PARAM_RE = re.compile(r"[A-Za-z0-9._\[\]-]+")
 _FORBIDDEN_CUSTOM_HEADERS = frozenset(
     {
         "connection",
@@ -71,6 +72,8 @@ MAX_DOMAIN_RATE_LIMIT_SECONDS = 3_600
 MAX_EXECUTION_CONCURRENCY = 50
 MAX_EXECUTION_DELAY_SECONDS = 3_600
 MAX_PAGINATION_PAGES = 100
+MAX_PAGE_PARAM_CHARS = 64
+MAX_PAGE_PARAM_VALUE = 1_000_000
 MAX_RETRY_ATTEMPTS = 10
 MAX_RETRY_BACKOFF_SECONDS = 300
 MAX_RETRYABLE_STATUSES = 32
@@ -108,6 +111,13 @@ class SelectorType(str, Enum):
 
     css = "css"
     xpath = "xpath"
+
+
+class PaginationMode(str, Enum):
+    """How follow-on listing pages are reached."""
+
+    link = "link"
+    click = "click"
 
 
 class BackoffStrategy(str, Enum):
@@ -449,7 +459,41 @@ class ProxyConfig(StrictConfigModel):
 class PaginationConfig(StrictConfigModel):
     """Pagination rules for a target."""
 
-    next: SelectorValue = Field(..., description="CSS/XPath selector for the next-page element")
+    mode: PaginationMode = Field(
+        default=PaginationMode.link,
+        description=(
+            "link: fetch each page by URL; click: click the next element in the "
+            "live browser page and extract each rendered page (browser fetchers only)"
+        ),
+    )
+    next: Optional[SelectorValue] = Field(
+        default=None,
+        description=(
+            "CSS/XPath selector for the next-page element. Link mode follows its "
+            "href unless page_param is set; click mode clicks it"
+        ),
+    )
+    page_param: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_PAGE_PARAM_CHARS,
+        description=(
+            "Query parameter that selects the page number (link mode). Page k is "
+            "the first page URL with this parameter set to page_first + (k-1) * page_step"
+        ),
+    )
+    page_first: int = Field(
+        default=1,
+        ge=0,
+        le=MAX_PAGE_PARAM_VALUE,
+        description="page_param value of the first page",
+    )
+    page_step: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PAGE_PARAM_VALUE,
+        description="Increment of page_param between pages (for example, a page size for offsets)",
+    )
     max_pages: int = Field(
         default=10,
         ge=1,
@@ -459,10 +503,30 @@ class PaginationConfig(StrictConfigModel):
 
     @field_validator("next")
     @classmethod
-    def _validate_next_selector(cls, value: SelectorValue) -> SelectorValue:
+    def _validate_next_selector(cls, value: SelectorValue | None) -> SelectorValue | None:
         if isinstance(value, str):
             _validate_short_selector_query(value)
         return value
+
+    @field_validator("page_param")
+    @classmethod
+    def _validate_page_param(cls, value: str | None) -> str | None:
+        if value is not None and not _PAGE_PARAM_RE.fullmatch(value):
+            raise ValueError(
+                "page_param must contain only letters, digits and . _ - [ ] characters"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_page_source(self) -> PaginationConfig:
+        if self.mode is PaginationMode.click:
+            if self.next is None:
+                raise ValueError("click pagination requires a next selector")
+            if self.page_param is not None:
+                raise ValueError("page_param is only supported in link pagination mode")
+        elif self.next is None and self.page_param is None:
+            raise ValueError("pagination requires a next selector or page_param")
+        return self
 
 
 class BrowserActionConfig(StrictConfigModel):
@@ -923,6 +987,16 @@ class TargetConfig(StrictConfigModel):
     def _reject_browser_config_for_basic_fetcher(self) -> TargetConfig:
         if self.fetcher is FetcherType.basic and self.browser is not None:
             raise ValueError("browser configuration requires a dynamic or stealthy fetcher")
+        return self
+
+    @model_validator(mode="after")
+    def _require_browser_for_click_pagination(self) -> TargetConfig:
+        if (
+            self.pagination is not None
+            and self.pagination.mode is PaginationMode.click
+            and self.fetcher is FetcherType.basic
+        ):
+            raise ValueError("click pagination requires a dynamic or stealthy fetcher")
         return self
 
 

@@ -19,9 +19,46 @@ from scrapling.engines.toolbelt.custom import Response, StatusText
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.engine.basic_fetch import generate_convincing_referer
+from scrapeyard.engine.scrape_models import (
+    CLICK_PAGINATION_ATTRIBUTE,
+    ClickPaginationResult,
+    ClickPaginationSpec,
+)
 from scrapeyard.engine.url_guard import UnsafeURLError
 
 logger = logging.getLogger(__name__)
+
+# Poll interval while waiting for a clicked page to render different items.
+_CLICK_CHANGE_POLL_MS = 250
+
+# Hash the current page items (or the body when no item selector is set) in the
+# page, so change detection never transfers the rendered document to Python.
+_ITEM_FINGERPRINT_SCRIPT = """([query, type]) => {
+    let nodes = [];
+    try {
+        if (!query) {
+            nodes = document.body ? [document.body] : [];
+        } else if (type === 'xpath') {
+            const found = document.evaluate(
+                query, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            for (let i = 0; i < found.snapshotLength; i++) nodes.push(found.snapshotItem(i));
+        } else {
+            nodes = Array.from(document.querySelectorAll(query));
+        }
+    } catch (error) {
+        nodes = document.body ? [document.body] : [];
+    }
+    let hash = 2166136261 >>> 0;
+    for (const node of nodes) {
+        const href = node.getAttribute ? (node.getAttribute('href') || '') : '';
+        const text = (node.textContent || '') + '\\u0001' + href + '\\u0002';
+        for (let i = 0; i < text.length; i++) {
+            hash ^= text.charCodeAt(i);
+            hash = Math.imul(hash, 16777619) >>> 0;
+        }
+    }
+    return {count: nodes.length, hash: hash.toString(16)};
+}"""
 
 # Both pinned Chromium builds stop after 20 redirects. Pin Firefox to that same
 # ceiling; reserve the entire chain before releasing an intercepted request.
@@ -148,6 +185,152 @@ class BrowserSession:
         """)
         self._context = context
 
+    @staticmethod
+    async def _capture_html(page: Any, budget: RunBudget | None) -> str:
+        if budget is None:
+            return cast(str, await page.content())
+        # Bound the browser-to-Python HTML message before constructing the
+        # parser. This counts rendered UTF-8 HTML, not wire bytes; browsers
+        # have already received and rendered the document.
+        captured = await page.evaluate("""limit => {
+            let html = document.doctype
+                ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '';
+            if (document.documentElement) html += document.documentElement.outerHTML;
+            const bytes = new TextEncoder().encode(html).byteLength;
+            return {bytes, html: bytes <= limit ? html : null};
+        }""", budget.remaining_fetched_bytes)
+        content = captured["html"]
+        await budget.consume_fetched_bytes(
+            len(content.encode("utf-8")) if content is not None else captured["bytes"],
+        )
+        assert content is not None
+        return cast(str, content)
+
+    async def _snapshot_response(
+        self,
+        page: Any,
+        context: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        budget: RunBudget | None,
+        *,
+        history: list[Any],
+    ) -> Response:
+        content = await self._capture_html(page, budget)
+        return Response(
+            url=page.url, text=content, body=content.encode("utf-8"),
+            status=final_response.status,
+            reason=final_response.status_text or StatusText.get(final_response.status),
+            encoding=final_response.headers.get("content-type", "") or "utf-8",
+            cookies={cookie["name"]: cookie["value"] for cookie in await context.cookies()},
+            headers=await first_response.all_headers(),
+            request_headers=await first_response.request.all_headers(),
+            history=history,
+            **engine.adaptor_arguments,
+        )
+
+    @staticmethod
+    def _locator_query(query: str, selector_type: str) -> str:
+        return f"xpath={query}" if selector_type == "xpath" else query
+
+    async def _next_is_available(self, page: Any, spec: ClickPaginationSpec) -> bool:
+        candidates = page.locator(self._locator_query(spec.next_query, spec.next_type))
+        if await candidates.count() == 0:
+            return False
+        control = candidates.first
+        if not await control.is_visible() or not await control.is_enabled():
+            return False
+        return await control.get_attribute("aria-disabled") != "true"
+
+    @staticmethod
+    async def _item_fingerprint(page: Any, spec: ClickPaginationSpec) -> tuple[int, str]:
+        value = await page.evaluate(
+            _ITEM_FINGERPRINT_SCRIPT, [spec.item_query, spec.item_type or "css"],
+        )
+        return int(value["count"]), str(value["hash"])
+
+    async def _wait_for_changed_items(
+        self,
+        page: Any,
+        spec: ClickPaginationSpec,
+        previous: tuple[int, str],
+        timeout_ms: float,
+        budget: RunBudget | None,
+    ) -> tuple[int, str] | None:
+        """Return the new item fingerprint, or None when the page never changed."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(timeout_ms, _CLICK_CHANGE_POLL_MS) / 1000
+        while True:
+            if budget is not None:
+                budget.check_deadline()
+            await page.wait_for_timeout(_CLICK_CHANGE_POLL_MS)
+            try:
+                current = await self._item_fingerprint(page, spec)
+            except Exception:
+                # A click can navigate; the old execution context disappears
+                # until the next document is ready.
+                current = None
+            if current is not None and current != previous:
+                return current
+            if loop.time() >= deadline:
+                return None
+
+    async def _click_through_pages(
+        self,
+        page: Any,
+        context: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        budget: RunBudget | None,
+        spec: ClickPaginationSpec,
+    ) -> ClickPaginationResult:
+        pages: list[object] = []
+        previous = await self._item_fingerprint(page, spec)
+        seen = {previous}
+        timeout_ms = float(engine.timeout)
+        for _ in range(spec.max_pages - 1):
+            if budget is not None:
+                budget.check_deadline()
+            if not await self._next_is_available(page, spec):
+                return ClickPaginationResult(pages=pages, stop_reason="exhausted")
+            try:
+                control = page.locator(self._locator_query(spec.next_query, spec.next_type)).first
+                await control.click(timeout=timeout_ms)
+                changed = await self._wait_for_changed_items(
+                    page, spec, previous, timeout_ms, budget,
+                )
+                if changed is None:
+                    return ClickPaginationResult(pages=pages, stop_reason="repeated_page")
+                with suppress(Exception):
+                    await page.wait_for_load_state("domcontentloaded")
+                if engine.wait_selector:
+                    with suppress(Exception):
+                        await page.locator(engine.wait_selector).first.wait_for(
+                            state=engine.wait_selector_state,
+                        )
+                await page.wait_for_timeout(engine.wait)
+                current = await self._item_fingerprint(page, spec)
+            except (BudgetExceeded, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                logger.info("Click pagination stopped: %s", type(exc).__name__)
+                return ClickPaginationResult(pages=pages, stop_reason="unknown")
+            if spec.item_query is not None and current[0] == 0:
+                return ClickPaginationResult(pages=pages, stop_reason="exhausted")
+            if current in seen:
+                return ClickPaginationResult(pages=pages, stop_reason="repeated_page")
+            seen.add(current)
+            previous = current
+            pages.append(
+                await self._snapshot_response(
+                    page, context, engine, first_response, final_response, budget, history=[],
+                )
+            )
+        stop_reason = "max_pages" if await self._next_is_available(page, spec) else "exhausted"
+        return ClickPaginationResult(pages=pages, stop_reason=stop_reason)
+
     async def fetch(
         self,
         url: str,
@@ -158,6 +341,7 @@ class BrowserSession:
     ) -> Any:
         kwargs = dict(call_kwargs)
         custom_config = kwargs.pop("custom_config", None) or {}
+        click_spec: ClickPaginationSpec | None = kwargs.pop("click_pagination", None)
         engine_cls = PlaywrightEngine if self.fetcher_cls is PlayWrightFetcher else CamoufoxEngine
         engine: Any = engine_cls(
             **kwargs,
@@ -257,35 +441,18 @@ class BrowserSession:
             final_response = final_response or first_response
             if final_response is None:
                 raise ValueError("Failed to get a response from the page")
-            if budget is None:
-                content = await page.content()
-            else:
-                # Bound the browser-to-Python HTML message before constructing
-                # the parser. This counts rendered UTF-8 HTML, not wire bytes;
-                # browsers have already received and rendered the document.
-                captured = await page.evaluate("""limit => {
-                    let html = document.doctype
-                        ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '';
-                    if (document.documentElement) html += document.documentElement.outerHTML;
-                    const bytes = new TextEncoder().encode(html).byteLength;
-                    return {bytes, html: bytes <= limit ? html : null};
-                }""", budget.remaining_fetched_bytes)
-                content = captured["html"]
-                await budget.consume_fetched_bytes(
-                    len(content.encode("utf-8")) if content is not None else captured["bytes"],
-                )
-                assert content is not None
-            return Response(
-                url=page.url, text=content, body=content.encode("utf-8"),
-                status=final_response.status,
-                reason=final_response.status_text or StatusText.get(final_response.status),
-                encoding=final_response.headers.get("content-type", "") or "utf-8",
-                cookies={cookie["name"]: cookie["value"] for cookie in await context.cookies()},
-                headers=await first_response.all_headers(),
-                request_headers=await first_response.request.all_headers(),
+            response = await self._snapshot_response(
+                page, context, engine, first_response, final_response, budget,
                 history=await engine._async_process_response_history(first_response),
-                **engine.adaptor_arguments,
             )
+            if click_spec is not None:
+                click_result = await self._click_through_pages(
+                    page, context, engine, first_response, final_response, budget, click_spec,
+                )
+                if route_error is not None:
+                    raise route_error
+                setattr(response, CLICK_PAGINATION_ATTRIBUTE, click_result)
+            return response
         except BaseException as exc:
             fetch_error = exc
             if isinstance(exc, (BudgetExceeded, asyncio.CancelledError)):

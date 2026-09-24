@@ -30,6 +30,9 @@ from scrapeyard.config.schema import (
     BrowserActionType,
     BrowserConfig,
     FetcherType,
+    PaginationMode,
+    SelectorType,
+    SelectorValue,
     TargetConfig,
 )
 from scrapeyard.engine.url_guard import (
@@ -42,6 +45,7 @@ from scrapeyard.engine.url_guard import (
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 from scrapeyard.engine.basic_fetch import BasicSession, fetch_streaming_response
 from scrapeyard.engine.browser_session import BrowserSession
+from scrapeyard.engine.scrape_models import ClickPaginationSpec
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -306,6 +310,32 @@ def default_debug_blob(fetcher_type: FetcherType, target: TargetConfig, url: str
 
 def target_browser_config(target: TargetConfig) -> BrowserConfig:
     return target.browser or BrowserConfig()
+
+
+def _selector_parts(selector: SelectorValue) -> tuple[str, str]:
+    if isinstance(selector, str):
+        return selector, SelectorType.css.value
+    return selector.query, selector.type.value
+
+
+def click_pagination_spec(target: TargetConfig) -> ClickPaginationSpec | None:
+    """Return live-page click pagination instructions for a click-mode target."""
+    pagination = target.pagination
+    if pagination is None or pagination.mode is not PaginationMode.click:
+        return None
+    assert pagination.next is not None  # Enforced by PaginationConfig validation.
+    next_query, next_type = _selector_parts(pagination.next)
+    item_query: str | None = None
+    item_type: str | None = None
+    if target.item_selector is not None:
+        item_query, item_type = _selector_parts(target.item_selector)
+    return ClickPaginationSpec(
+        next_query=next_query,
+        next_type=next_type,
+        item_query=item_query,
+        item_type=item_type,
+        max_pages=pagination.max_pages,
+    )
 
 
 @cache
@@ -756,6 +786,11 @@ async def fetch_browser_response(
 
     call_kwargs["page_action"] = _page_action
     call_kwargs["disable_resources"] = True
+    click_spec = click_pagination_spec(target)
+    if click_spec is not None:
+        if not isinstance(fetcher_cls, BrowserSession):
+            raise ValueError("click pagination requires a browser session fetch")
+        call_kwargs["click_pagination"] = click_spec
     blocked_requests: list[dict[str, str]] = []
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
     dns_token = _BROWSER_REQUIRE_RESOLVED_DNS.set(require_resolved_dns)
