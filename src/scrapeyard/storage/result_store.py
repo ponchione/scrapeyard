@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -136,32 +136,14 @@ class _ReconciliationState:
         metadata_scan_exhausted: bool,
         filesystem_scan_exhausted: bool,
     ) -> ResultReconciliationReport:
+        counts = {item.name: getattr(self, item.name) for item in fields(self)}
+        counts["artifact_failures"] = tuple(self.artifact_failures)
+        counts["operation_failures"] = tuple(self.operation_failures)
         return ResultReconciliationReport(
             dry_run=dry_run,
-            metadata_rows_inspected=self.metadata_rows_inspected,
-            valid_artifacts=self.valid_artifacts,
-            missing_result_files=self.missing_result_files,
-            corrupt_result_files=self.corrupt_result_files,
-            unreadable_result_files=self.unreadable_result_files,
-            unsafe_metadata_paths=self.unsafe_metadata_paths,
-            filesystem_entries_inspected=self.filesystem_entries_inspected,
-            filesystem_run_directories_inspected=(self.filesystem_run_directories_inspected),
-            malformed_entries_ignored=self.malformed_entries_ignored,
-            orphan_candidates=self.orphan_candidates,
-            recent_candidates_skipped=self.recent_candidates_skipped,
-            active_run_candidates_skipped=self.active_run_candidates_skipped,
-            metadata_race_candidates_skipped=self.metadata_race_candidates_skipped,
-            active_run_race_candidates_skipped=(self.active_run_race_candidates_skipped),
-            stale_temporary_candidates=self.stale_temporary_candidates,
-            directories_would_remove=self.directories_would_remove,
-            files_would_remove=self.files_would_remove,
-            directories_removed=self.directories_removed,
-            files_removed=self.files_removed,
-            removed_bytes=self.removed_bytes,
-            artifact_failures=tuple(self.artifact_failures),
-            operation_failures=tuple(self.operation_failures),
             metadata_scan_exhausted=metadata_scan_exhausted,
             filesystem_scan_exhausted=filesystem_scan_exhausted,
+            **counts,
         )
 
 

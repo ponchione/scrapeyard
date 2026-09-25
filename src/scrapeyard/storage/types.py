@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -335,31 +335,9 @@ class ResultReconciliationReport:
 
         if self.dry_run != page.dry_run:
             raise ValueError("Cannot merge reconciliation reports with different modes")
-        count_fields = (
-            "metadata_rows_inspected",
-            "valid_artifacts",
-            "missing_result_files",
-            "corrupt_result_files",
-            "unreadable_result_files",
-            "unsafe_metadata_paths",
-            "filesystem_entries_inspected",
-            "filesystem_run_directories_inspected",
-            "malformed_entries_ignored",
-            "orphan_candidates",
-            "recent_candidates_skipped",
-            "active_run_candidates_skipped",
-            "metadata_race_candidates_skipped",
-            "active_run_race_candidates_skipped",
-            "stale_temporary_candidates",
-            "directories_would_remove",
-            "files_would_remove",
-            "directories_removed",
-            "files_removed",
-            "removed_bytes",
-        )
         updates = {
             field_name: getattr(self, field_name) + getattr(page, field_name)
-            for field_name in count_fields
+            for field_name in _RECONCILIATION_COUNT_FIELDS
         }
         updates.update(
             artifact_failures=self.artifact_failures + page.artifact_failures,
@@ -376,3 +354,9 @@ class ResultReconciliationReport:
             ),
         )
         return replace(self, **updates)
+
+
+# Every integer counter of the report; merged pages add them.
+_RECONCILIATION_COUNT_FIELDS = tuple(
+    item.name for item in fields(ResultReconciliationReport) if item.type == "int"
+)
