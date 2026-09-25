@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import uuid
 from collections.abc import AsyncIterator
+from functools import cache
 
 import pytest
 from arq.connections import RedisSettings, create_pool
@@ -69,6 +71,20 @@ def _live_redis_env(monkeypatch, tmp_path):
     _clear_singletons()
 
 
+@cache
+def _unreachable_redis(dsn: str) -> str | None:
+    """Probe the live Redis endpoint once per session; return why it is unreachable.
+
+    create_pool retries for about five seconds, which every skipped test paid.
+    """
+    settings = RedisSettings.from_dsn(dsn)
+    try:
+        with socket.create_connection((settings.host, settings.port), timeout=1):
+            return None
+    except OSError as exc:
+        return str(exc) or type(exc).__name__
+
+
 @pytest.fixture()
 async def live_app() -> AsyncIterator:
     """Return a fully initialized app using the real WorkerPool and Redis."""
@@ -77,6 +93,9 @@ async def live_app() -> AsyncIterator:
     pool = None
     scheduler = None
 
+    unreachable = _unreachable_redis(settings.redis_dsn)
+    if unreachable is not None:
+        pytest.skip(f"Live Redis unavailable at {settings.redis_dsn}: {unreachable}")
     try:
         redis = await create_pool(RedisSettings.from_dsn(settings.redis_dsn))
     except (OSError, RedisConnectionError) as exc:
