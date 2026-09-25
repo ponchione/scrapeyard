@@ -9,7 +9,7 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
-from tldextract import TLDExtract, tldextract
+from tldextract import tldextract
 from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.engines.toolbelt.fingerprints import (
@@ -18,13 +18,16 @@ from scrapling.engines.toolbelt.fingerprints import (
 )
 
 from scrapeyard.common.budgets import RunBudget
+from scrapeyard.common.traffic import OFFLINE_TLD_EXTRACTOR
 from scrapeyard.engine.url_guard import canonical_url_origin
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+# Response attribute carrying the encoded body bytes received for the traffic report.
+RECEIVED_BYTES_ATTRIBUTE = "_scrapeyard_received_bytes"
 
 # Scrapling's referer and adaptive-storage helpers share this default extractor.
 # Use the dependency's bundled snapshot, never an unbudgeted runtime download.
-tldextract.TLD_EXTRACTOR = TLDExtract(cache_dir=None, suffix_list_urls=())
+tldextract.TLD_EXTRACTOR = OFFLINE_TLD_EXTRACTOR
 
 
 class BasicSession:
@@ -199,7 +202,7 @@ async def fetch_streaming_response(
                 body.extend(chunk)
             body_bytes = bytes(body)
             encoding = response.encoding or "utf-8"
-            return Response(
+            result = Response(
                 url=str(response.url),
                 text=_decode_body(body_bytes, encoding),
                 body=body_bytes,
@@ -213,6 +216,8 @@ async def fetch_streaming_response(
                 history=[],
                 **parser_arguments,
             )
+            setattr(result, RECEIVED_BYTES_ATTRIBUTE, response.num_bytes_downloaded)
+            return result
 
     if budget is None:
         return await _request()

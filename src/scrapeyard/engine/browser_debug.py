@@ -24,6 +24,7 @@ from scrapling.engines.toolbelt.navigation import (
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.run_threads import run_thread_work
+from scrapeyard.common.traffic import url_site
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
     BrowserActionConfig,
@@ -802,7 +803,10 @@ async def fetch_browser_response(
     )
     try:
         fetch = (
-            fetcher_cls.fetch(url, call_kwargs, _guarded_async_intercept_route, budget=budget)
+            fetcher_cls.fetch(
+                url, call_kwargs, _guarded_async_intercept_route,
+                budget=budget, site=url_site(target.url),
+            )
             if isinstance(fetcher_cls, BrowserSession)
             else fetcher_cls.async_fetch(url, **call_kwargs)
         )

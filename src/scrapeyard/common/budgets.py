@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Awaitable, NoReturn, TypeVar
 
 from scrapeyard.common.async_tools import cancel_task_nowait
+from scrapeyard.common.traffic import HostTraffic
 
 
 T = TypeVar("T")
@@ -97,6 +98,7 @@ class RunBudget:
         self._record_counter_lock = threading.Lock()
         self._result_counter_lock = threading.Lock()
         self._exhausted: BudgetExceeded | None = None
+        self.traffic = HostTraffic()
 
     @classmethod
     def from_settings(cls, settings: Any, *, execution: Any = None, clock: Any = time.monotonic) -> RunBudget:
@@ -177,6 +179,7 @@ class RunBudget:
             "extracted_records": self.extracted_records,
             "browser_debug_bytes": self.browser_debug_bytes,
             "elapsed_seconds": self.elapsed_seconds,
+            "traffic": self.traffic.snapshot(),
         }
 
     @property

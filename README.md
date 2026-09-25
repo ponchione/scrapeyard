@@ -635,6 +635,14 @@ and `max_serialized_result_bytes` are positive integer caps that can only shorte
 the service limits. Success and failure artifacts retain effective limits and
 counters in `run_budget`.
 
+`run_budget.traffic` breaks the run's requests down by host so a config author
+can see what a browser target loads and what to block: totals for first-party
+hosts (the target URL's registrable domain) and third-party hosts, and the 25
+hosts with the most requests, each with requests sent, requests blocked before
+sending, and response bytes received (browser: headers plus encoded body; basic:
+encoded body). Only hostnames are kept, never paths or query strings. See
+[docs/API.md](docs/API.md#traffic-by-host).
+
 Basic fetches reserve before each redirect or retry dispatch. Browser context
 routes cover documents, subresources and popups. Each admitted browser request
 reserves 21 slots for the pinned native redirect ceiling; unused slots are

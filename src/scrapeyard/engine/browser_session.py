@@ -18,6 +18,7 @@ from scrapling.engines.toolbelt.custom import Response, StatusText
 
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.traffic import url_site
 from scrapeyard.engine.basic_fetch import generate_convincing_referer
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
@@ -69,20 +70,39 @@ _ITEM_FINGERPRINT_SCRIPT = """([query, type]) => {
 _MAX_REDIRECTS = 20
 
 
+# Bound the wait for byte counts of already-finished requests before closing.
+_SIZES_SETTLE_SECONDS = 0.5
+
+
 class _BudgetedRoute:
     """Apply the run budget at the existing guard's actual continue boundary."""
 
-    def __init__(self, route: Any, reserve: Callable[[Any], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        route: Any,
+        reserve: Callable[[Any], Awaitable[None]],
+        on_abort: Callable[[Any], None],
+    ) -> None:
         self._route = route
         self._reserve = reserve
+        self._on_abort = on_abort
         self.request = route.request
 
     async def abort(self, *args: Any, **kwargs: Any) -> None:
+        self._on_abort(self.request)
         await self._route.abort(*args, **kwargs)
 
     async def continue_(self, **kwargs: Any) -> None:
         await self._reserve(self.request)
         await self._route.continue_(**kwargs)
+
+
+async def _received_bytes(request: Any) -> int:
+    """Response header and encoded body bytes the browser received for *request*."""
+    sizes = await request.sizes()
+    return sum(max(0, int(sizes.get(name) or 0)) for name in (
+        "responseHeadersSize", "responseBodySize",
+    ))
 
 
 async def _close_resource(resource: Any, browser: Any) -> None:
@@ -362,6 +382,7 @@ class BrowserSession:
         route_handler: Callable[[Any], Awaitable[None]],
         *,
         budget: RunBudget | None = None,
+        site: str | None = None,
     ) -> Any:
         kwargs = dict(call_kwargs)
         custom_config = kwargs.pop("custom_config", None) or {}
@@ -382,11 +403,20 @@ class BrowserSession:
         route_context = copy_context()
         chains: dict[Any, int] = {}
         route_error: BaseException | None = None
+        traffic = budget.traffic if budget is not None else None
+        if site is None:
+            site = url_site(url)
+        sizing: set[asyncio.Future[int]] = set()
 
         async def reserve(request: Any) -> None:
             if budget is not None:
                 await budget.reserve_requests(_MAX_REDIRECTS + 1)
                 chains[request] = 1
+                budget.traffic.request(request.url, site)
+
+        def observe_abort(request: Any) -> None:
+            if traffic is not None:
+                traffic.blocked(request.url, site)
 
         def observe_request(request: Any) -> None:
             if request.redirected_from is None:
@@ -396,11 +426,27 @@ class BrowserSession:
                 root = root.redirected_from
             if root in chains:
                 chains[root] += 1
+                if traffic is not None:
+                    traffic.request(request.url, site)
+
+        def record_received(request: Any, sized: asyncio.Future[int]) -> None:
+            sizing.discard(sized)
+            if traffic is not None and not sized.cancelled() and sized.exception() is None:
+                traffic.received(request.url, site, sized.result())
+
+        def observe_finished(request: Any) -> None:
+            if traffic is None:
+                return
+            sized = asyncio.ensure_future(_received_bytes(request))
+            sizing.add(sized)
+            sized.add_done_callback(lambda done: record_received(request, done))
 
         async def guard(route: Any) -> None:
             nonlocal route_error
             try:
-                wrapped = _BudgetedRoute(route, reserve) if budget is not None else route
+                wrapped = (
+                    _BudgetedRoute(route, reserve, observe_abort) if budget is not None else route
+                )
                 await route_context.run(asyncio.ensure_future, route_handler(wrapped))
             except UnsafeURLError:
                 # The existing guard has aborted and recorded this subrequest.
@@ -422,6 +468,7 @@ class BrowserSession:
         fetch_error: BaseException | None = None
         try:
             context.on("request", observe_request)
+            context.on("requestfinished", observe_finished)
             await context.route("**/*", guard)
             await context.set_offline(False)
             page = await context.new_page()
@@ -476,6 +523,8 @@ class BrowserSession:
                 if route_error is not None:
                     raise route_error
                 setattr(response, CLICK_PAGINATION_ATTRIBUTE, click_result)
+            if sizing:
+                await asyncio.wait(set(sizing), timeout=_SIZES_SETTLE_SECONDS)
             return response
         except BaseException as exc:
             fetch_error = exc
@@ -496,6 +545,7 @@ class BrowserSession:
                     await _close_page(owned_page, browser)
                 await context.unroute("**/*", guard)
                 context.remove_listener("request", observe_request)
+                context.remove_listener("requestfinished", observe_finished)
                 stopped = True
             except BaseException:
                 # A crashed page/context can reject cleanup RPCs while its driver
@@ -506,5 +556,7 @@ class BrowserSession:
                 if fetch_error is None:
                     raise
             finally:
+                for sized in list(sizing):
+                    sized.cancel()
                 if budget is not None and stopped:
                     await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))

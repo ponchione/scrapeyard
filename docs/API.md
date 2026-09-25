@@ -152,6 +152,44 @@ Runs executed with a domain guard report `run_budget.domain_guard`:
 }
 ```
 
+### Traffic by host
+
+Every run reports `run_budget.traffic`, the requests it sent grouped by host:
+
+```json
+{
+  "requests": 812,
+  "blocked": 3401,
+  "bytes": 5210044,
+  "first_party": {"hosts": 2, "requests": 640, "blocked": 3100, "bytes": 4900312},
+  "third_party": {"hosts": 14, "requests": 172, "blocked": 301, "bytes": 309732},
+  "hosts": [
+    {"host": "www.example.test", "third_party": false, "requests": 610,
+     "blocked": 3050, "bytes": 4700120},
+    {"host": "tags.example-ads.test", "third_party": true, "requests": 96,
+     "blocked": 0, "bytes": 180211}
+  ],
+  "hosts_omitted": 3
+}
+```
+
+- `requests` are requests released to the network, including native redirect
+  hops and basic-fetch retries; the total matches `run_budget.requests`.
+- `blocked` are browser requests aborted before sending: resource types dropped
+  by `browser.disable_resources` and URL-guard rejections.
+- `bytes` are response bytes the transport received: response headers plus the
+  encoded (compressed) body for browser requests, the encoded body for basic
+  fetches. Requests still in flight when a page closes may be missing.
+- A host is `third_party` when its registrable domain (public suffix plus one
+  label, from the bundled suffix list; the last two labels for unlisted suffixes
+  such as `.test`) differs from the requesting target URL's. A host that is
+  first-party for any target of the run is first-party.
+- `hosts` lists at most 25 hosts, ordered by requests, then bytes, then blocked;
+  `hosts_omitted` counts the rest, which the totals still include. A run tracks
+  at most 1,000 distinct hosts; later hosts are pooled as `(other first-party
+  hosts)` or `(other third-party hosts)`.
+- Only hostnames are recorded, never paths or query strings.
+
 ## Error envelope
 
 Routes, FastAPI request validation, authentication, body-size enforcement, and

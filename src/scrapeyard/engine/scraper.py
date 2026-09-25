@@ -17,6 +17,7 @@ from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.settings import get_settings
+from scrapeyard.common.traffic import url_site
 from scrapeyard.config.schema import (
     FetcherType,
     PageCacheMode,
@@ -25,7 +26,7 @@ from scrapeyard.config.schema import (
     TargetConfig,
 )
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
-from scrapeyard.engine.basic_fetch import BasicSession
+from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE, BasicSession
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.browser_debug import (
     browser_fetch_kwargs,
@@ -248,6 +249,7 @@ async def _fetch_basic_with_safe_redirects(
     response_observer: Callable[[], None] | None = None,
     rate_limiter: DomainRateLimiter | None = None,
     domain_rate_limit: float = 0,
+    site: str | None = None,
 ) -> Any:
     """Follow basic-fetch redirects only after validating each destination."""
     current_url = url
@@ -286,6 +288,7 @@ async def _fetch_basic_with_safe_redirects(
         )
         if budget is not None:
             await budget.reserve_requests()
+            budget.traffic.request(current_url, site)
         if production_stream:
             request_kwargs["cookie_jar"] = cookie_jar
             request_kwargs["cookie_url"] = current_url
@@ -312,8 +315,13 @@ async def _fetch_basic_with_safe_redirects(
             measured_bytes = _measured_response_body_bytes(response)
             if measured_bytes is not None:
                 await budget.consume_fetched_bytes(measured_bytes)
+                budget.traffic.received(current_url, site, measured_bytes)
             else:
                 budget.check_deadline()
+        elif budget is not None:
+            received = getattr(response, RECEIVED_BYTES_ATTRIBUTE, None)
+            if isinstance(received, int):
+                budget.traffic.received(current_url, site, received)
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
             if redirects:
                 debug["redirects"] = redirects
@@ -619,6 +627,7 @@ async def _fetch_page(
             response_observer=observe_response_once,
             rate_limiter=rate_limiter,
             domain_rate_limit=domain_rate_limit,
+            site=url_site(target.url),
         )
     else:
         await _assert_fetch_url(

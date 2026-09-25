@@ -37,6 +37,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `domain_daily_limit` / `domain_cooldown` error types, the `domain_guard`
   stop reason, and `run_budget.domain_guard`; `GET`/`DELETE
   /domains/{host}/guard` inspect and clear a host.
+- Added `run_budget.traffic`: requests sent, requests blocked before sending,
+  and response bytes received per host (top 25, first- vs third-party totals),
+  hostnames only.
 
 ### Changed
 - Browser configuration is now rejected for `fetcher: basic`, action fields
