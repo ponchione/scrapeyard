@@ -360,11 +360,33 @@ class _Listing:
     async def wait_for_timeout(self, _ms: float) -> None:
         return None
 
+    async def wait_for_function(
+        self, _script: str, *, arg: list[Any], polling: float, timeout: float,
+    ) -> _Handle:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        query, selector_type, count, fingerprint = arg
+        current = await self.evaluate(_script, [query, selector_type])
+        if (current["count"], current["hash"]) == (count, fingerprint):
+            raise PlaywrightTimeoutError(f"items unchanged after {timeout}ms")
+        return _Handle(current)
+
     async def wait_for_load_state(self, _state: str) -> None:
         return None
 
     async def content(self) -> str:
         return f"<html><body><li class='card'>{self.pages[self.index]}</li></body></html>"
+
+
+class _Handle:
+    def __init__(self, value: dict[str, Any]) -> None:
+        self.value = value
+
+    async def json_value(self) -> dict[str, Any]:
+        return self.value
+
+    async def dispose(self) -> None:
+        return None
 
 
 class _Locator:
@@ -468,6 +490,27 @@ async def test_click_through_keeps_captured_pages_when_a_click_fails():
 
     assert _titles(result) == ["p2"]
     assert result.stop_reason == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_click_change_wait_rearms_after_a_navigation_replaces_the_document():
+    listing = _Listing(["p1", "p2"])
+    wait_for_function = listing.wait_for_function
+    calls = 0
+
+    async def navigating(script: str, **kwargs: Any) -> _Handle:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("Execution context was destroyed by a navigation")
+        return await wait_for_function(script, **kwargs)
+
+    listing.wait_for_function = navigating  # type: ignore[method-assign]
+
+    result = await _click_through(listing, max_pages=10)
+
+    assert _titles(result) == ["p2"]
+    assert calls == 2
 
 
 @pytest.mark.asyncio

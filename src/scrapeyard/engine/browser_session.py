@@ -31,8 +31,10 @@ from scrapeyard.engine.url_guard import UnsafeURLError
 
 logger = logging.getLogger(__name__)
 
-# Poll interval while waiting for a clicked page to render different items.
-_CLICK_CHANGE_POLL_MS = 250
+# In-page check interval while waiting for a clicked page to render different items.
+_CLICK_CHANGE_POLL_MS = 50
+# Pause before re-arming the wait when a click navigation replaced the document.
+_CLICK_NAVIGATION_RETRY_MS = 250
 # Bound the actionability wait before falling back to dispatching the click.
 _CLICK_ACTIONABLE_TIMEOUT_MS = 10_000
 
@@ -64,6 +66,12 @@ _ITEM_FINGERPRINT_SCRIPT = """([query, type]) => {
     }
     return {count: nodes.length, hash: hash.toString(16)};
 }"""
+
+# Resolve with the new fingerprint once it differs from the previous one.
+_ITEMS_CHANGED_SCRIPT = f"""([query, type, count, hash]) => {{
+    const current = ({_ITEM_FINGERPRINT_SCRIPT})([query, type]);
+    return current.count !== count || current.hash !== hash ? current : null;
+}}"""
 
 # Both pinned Chromium builds stop after 20 redirects. Pin Firefox to that same
 # ceiling; reserve the entire chain before releasing an intercepted request.
@@ -288,17 +296,30 @@ class BrowserSession:
         while True:
             if budget is not None:
                 budget.check_deadline()
-            await page.wait_for_timeout(_CLICK_CHANGE_POLL_MS)
+            wait_ms = (deadline - loop.time()) * 1000
+            if budget is not None:
+                wait_ms = min(wait_ms, budget.remaining_seconds * 1000)
             try:
-                current = await self._item_fingerprint(page, spec)
-            except Exception:
+                changed = await page.wait_for_function(
+                    _ITEMS_CHANGED_SCRIPT,
+                    arg=[spec.item_query, spec.item_type or "css", *previous],
+                    polling=_CLICK_CHANGE_POLL_MS,
+                    timeout=max(wait_ms, 1),
+                )
+                value = await changed.json_value()
+                await changed.dispose()
+                return int(value["count"]), str(value["hash"])
+            except Exception as exc:
+                # Stealth Chromium ships its own Playwright build, so match by name.
+                if type(exc).__name__ == "TimeoutError":
+                    if budget is not None:
+                        budget.check_deadline()
+                    return None
                 # A click can navigate; the old execution context disappears
                 # until the next document is ready.
-                current = None
-            if current is not None and current != previous:
-                return current
-            if loop.time() >= deadline:
-                return None
+                if loop.time() >= deadline:
+                    return None
+                await page.wait_for_timeout(_CLICK_NAVIGATION_RETRY_MS)
 
     @staticmethod
     async def _activate_control(control: Any, timeout_ms: float) -> None:

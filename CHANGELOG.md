@@ -46,6 +46,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   subrequests matching `*` patterns. Top-level navigations are never blocked.
 
 ### Changed
+- Click pagination now waits in the page for the items to change (checked every
+  50 ms) instead of sleeping in 250 ms steps, so each click resolves as soon
+  as the next page renders.
 - When the last running job finishes, the worker collects garbage and returns
   freed heap memory to the operating system (glibc `malloc_trim`), so idle
   memory returns near its startup level between jobs.
