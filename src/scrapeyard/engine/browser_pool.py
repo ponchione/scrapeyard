@@ -11,6 +11,7 @@ from typing import Any
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.traffic import url_site
 from scrapeyard.config.schema import BrowserConfig, TargetConfig
+from scrapeyard.engine.asset_cache import AssetCache
 from scrapeyard.engine.browser_session import BrowserSession
 
 # Targets with equal keys may share a browser: registrable domain, fetcher,
@@ -18,10 +19,11 @@ from scrapeyard.engine.browser_session import BrowserSession
 BrowserGroupKey = tuple[str | None, str, str | None, str]
 
 # A long-lived Playwright driver's heap grows as it serves requests (V8 enlarges
-# its young generation, then its old space), up to 50-80 MB above a fresh driver.
-# Replacing the session after this many routed requests keeps a run's peak memory
-# within a few percent of one browser per target.
-RECYCLE_AFTER_REQUESTS = 500
+# its young generation, then its old space), up to 50-80 MB above a fresh driver,
+# and cached bodies cross the driver as base64 when fulfilled. Replacing the
+# session after this many routed requests keeps a run's peak memory within about
+# 5% of one browser per target.
+RECYCLE_AFTER_REQUESTS = 250
 
 
 def browser_group_key(target: TargetConfig, proxy_url: str | None) -> BrowserGroupKey:
@@ -38,10 +40,13 @@ class BrowserPool:
     keeps at most *capacity* sessions: before adding one, it closes an idle
     session of another group. A session that has routed
     :data:`RECYCLE_AFTER_REQUESTS` requests closes when its target finishes.
+    All sessions share the run's :class:`AssetCache`, which outlives them.
     """
 
     def __init__(self, capacity: int) -> None:
         self._capacity = capacity
+        # One byte-bounded cache for the run, partitioned by target site.
+        self._assets = AssetCache()
         self._groups: dict[BrowserSession, BrowserGroupKey] = {}
         # Idle sessions in release order; the dict keeps insertion order.
         self._idle: dict[BrowserSession, None] = {}
@@ -66,7 +71,7 @@ class BrowserPool:
             evicted = next(iter(self._idle))
             del self._idle[evicted]
             del self._groups[evicted]
-        session = BrowserSession(fetcher_cls)
+        session = BrowserSession(fetcher_cls, assets=self._assets)
         self._groups[session] = group
         if evicted is not None:
             try:
@@ -90,6 +95,7 @@ class BrowserPool:
         sessions = list(self._groups)
         self._groups.clear()
         self._idle.clear()
+        self._assets.clear()
         # One shielded wait: cancellation cannot leave later browsers open.
         outcomes = await await_cleanup(asyncio.gather(
             *(session.aclose() for session in sessions), return_exceptions=True,

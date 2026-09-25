@@ -52,6 +52,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   context (cookies and storage included) instead of launching one each; every
   fetch still opens a fresh page. With `concurrency` above 1 a group keeps up to
   `concurrency` browsers, one per running target.
+- With `execution.reuse_browser`, fresh script and stylesheet responses are
+  cached for the run and answered from memory for later pages of the same site
+  (after every guard), since Playwright disables the browser's HTTP cache while
+  requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
 - Click pagination now waits in the page for the items to change (checked every

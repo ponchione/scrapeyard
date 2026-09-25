@@ -19,6 +19,7 @@ from scrapling.engines.toolbelt.custom import Response, StatusText
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.traffic import url_site
+from scrapeyard.engine.asset_cache import AssetCache, CachedAsset
 from scrapeyard.engine.basic_fetch import generate_convincing_referer
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
@@ -78,22 +79,24 @@ _ITEMS_CHANGED_SCRIPT = f"""([query, type, count, hash]) => {{
 _MAX_REDIRECTS = 20
 
 
-# Bound the wait for byte counts of already-finished requests before closing.
+# Bound the wait for byte counts and asset-cache stores of finished requests.
 _SIZES_SETTLE_SECONDS = 0.5
 
 
-class _BudgetedRoute:
-    """Apply the run budget at the existing guard's actual continue boundary."""
+class _ReleasedRoute:
+    """Apply the run budget and asset cache at the existing guard's continue boundary."""
 
     def __init__(
         self,
         route: Any,
         reserve: Callable[[Any], Awaitable[None]],
         on_abort: Callable[[Any], None],
+        cached: Callable[[Any], CachedAsset | None],
     ) -> None:
         self._route = route
         self._reserve = reserve
         self._on_abort = on_abort
+        self._cached = cached
         self.request = route.request
 
     async def abort(self, *args: Any, **kwargs: Any) -> None:
@@ -101,6 +104,11 @@ class _BudgetedRoute:
         await self._route.abort(*args, **kwargs)
 
     async def continue_(self, **kwargs: Any) -> None:
+        asset = self._cached(self.request)
+        if asset is not None:
+            # Every guard admitted the request; answer it without the network.
+            await self._route.fulfill(status=asset.status, headers=asset.headers, body=asset.body)
+            return
         await self._reserve(self.request)
         await self._route.continue_(**kwargs)
 
@@ -164,10 +172,11 @@ async def _close_page(page: Any, browser: Any) -> None:
 class BrowserSession:
     """Reuse a context, but create a fresh page and callbacks for every fetch."""
 
-    def __init__(self, fetcher_cls: Any) -> None:
+    def __init__(self, fetcher_cls: Any, *, assets: AssetCache | None = None) -> None:
         self.fetcher_cls = fetcher_cls
         self._stack = AsyncExitStack()
         self._context: Any = None
+        self._assets = assets
         # Requests the route guard handled since the browser opened.
         self.routed_requests = 0
 
@@ -457,6 +466,10 @@ class BrowserSession:
             site = url_site(url)
         sizing: set[asyncio.Future[int]] = set()
         unsized: set[Any] = set()
+        assets = self._assets
+        storing: set[asyncio.Future[None]] = set()
+        # Requests answered from the asset cache: nothing was sent or received.
+        served: set[Any] = set()
 
         async def reserve(request: Any) -> None:
             if budget is not None:
@@ -467,6 +480,14 @@ class BrowserSession:
         def observe_abort(request: Any) -> None:
             if traffic is not None:
                 traffic.blocked(request.url, site, request.resource_type)
+
+        def cached_asset(request: Any) -> CachedAsset | None:
+            asset = assets.lookup(site, request) if assets is not None else None
+            if asset is not None:
+                served.add(request)
+                if traffic is not None:
+                    traffic.cached(request.url, site, request.resource_type)
+            return asset
 
         def observe_request(request: Any) -> None:
             if request.redirected_from is None:
@@ -485,6 +506,12 @@ class BrowserSession:
                 traffic.received(request.url, site, sized.result(), request.resource_type)
 
         def observe_response(response: Any) -> None:
+            if response.request in served:
+                return
+            if assets is not None and assets.wants(site, response):
+                stored = asyncio.ensure_future(assets.store(site, response))
+                storing.add(stored)
+                stored.add_done_callback(storing.discard)
             if traffic is None:
                 return
             declared = _declared_response_bytes(response)
@@ -507,7 +534,9 @@ class BrowserSession:
             self.routed_requests += 1
             try:
                 wrapped = (
-                    _BudgetedRoute(route, reserve, observe_abort) if budget is not None else route
+                    _ReleasedRoute(route, reserve, observe_abort, cached_asset)
+                    if budget is not None or assets is not None
+                    else route
                 )
                 await route_context.run(asyncio.ensure_future, route_handler(wrapped))
             except UnsafeURLError:
@@ -586,8 +615,8 @@ class BrowserSession:
                 if route_error is not None:
                     raise route_error
                 setattr(response, CLICK_PAGINATION_ATTRIBUTE, click_result)
-            if sizing:
-                await asyncio.wait(set(sizing), timeout=_SIZES_SETTLE_SECONDS)
+            if sizing or storing:
+                await asyncio.wait(sizing | storing, timeout=_SIZES_SETTLE_SECONDS)
             return response
         except BaseException as exc:
             fetch_error = exc
@@ -620,7 +649,8 @@ class BrowserSession:
                 if fetch_error is None:
                     raise
             finally:
-                for sized in list(sizing):
-                    sized.cancel()
+                unsettled: list[asyncio.Future[Any]] = [*sizing, *storing]
+                for pending in unsettled:
+                    pending.cancel()
                 if budget is not None and stopped:
                     await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))

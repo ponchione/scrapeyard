@@ -63,10 +63,16 @@ def url_site(url: str) -> str | None:
 class _Counts:
     requests: int = 0
     blocked: int = 0
+    cached: int = 0
     bytes: int = 0
 
     def report(self) -> dict[str, int]:
-        return {"requests": self.requests, "blocked": self.blocked, "bytes": self.bytes}
+        return {
+            "requests": self.requests,
+            "blocked": self.blocked,
+            "cached": self.cached,
+            "bytes": self.bytes,
+        }
 
 
 @dataclass
@@ -86,11 +92,13 @@ class HostTraffic:
     """Bounded per-host counters for one run; only hostnames are retained.
 
     ``requests`` are requests released to the network (including native
-    redirect hops), ``blocked`` are browser requests aborted before sending, and
-    ``bytes`` are response bytes the transport reported receiving. Each count is
-    also kept per resource type (:data:`RESOURCE_TYPES`). A host is third-party
-    when its registrable domain differs from the requesting target's; a host
-    that is first-party for any target stays first-party.
+    redirect hops), ``blocked`` are browser requests aborted before sending,
+    ``cached`` are browser requests served from the run's asset cache instead of
+    the network, and ``bytes`` are response bytes the transport reported
+    receiving. Each count is also kept per resource type (:data:`RESOURCE_TYPES`).
+    A host is third-party when its registrable domain differs from the
+    requesting target's; a host that is first-party for any target stays
+    first-party.
     """
 
     def __init__(self, *, max_hosts: int = MAX_TRACKED_HOSTS) -> None:
@@ -121,6 +129,11 @@ class HostTraffic:
         counts.blocked += 1
         counts.of_type(resource_type).blocked += 1
 
+    def cached(self, url: str, site: str | None, resource_type: str = "other") -> None:
+        counts = self._counts(url, site)
+        counts.cached += 1
+        counts.of_type(resource_type).cached += 1
+
     def received(
         self, url: str, site: str | None, amount: int, resource_type: str = "other",
     ) -> None:
@@ -132,7 +145,9 @@ class HostTraffic:
     def snapshot(self, *, reported_hosts: int = REPORTED_HOSTS) -> dict[str, Any]:
         ranked = sorted(
             self._hosts.items(),
-            key=lambda item: (-item[1].requests, -item[1].bytes, -item[1].blocked, item[0]),
+            key=lambda item: (
+                -item[1].requests, -item[1].bytes, -item[1].blocked, -item[1].cached, item[0],
+            ),
         )
 
         def totals(third_party: bool) -> dict[str, int]:
@@ -141,6 +156,7 @@ class HostTraffic:
                 "hosts": len(group),
                 "requests": sum(counts.requests for counts in group),
                 "blocked": sum(counts.blocked for counts in group),
+                "cached": sum(counts.cached for counts in group),
                 "bytes": sum(counts.bytes for counts in group),
             }
 
@@ -150,12 +166,14 @@ class HostTraffic:
                 total = by_type[name]
                 total.requests += typed.requests
                 total.blocked += typed.blocked
+                total.cached += typed.cached
                 total.bytes += typed.bytes
 
         first, third = totals(False), totals(True)
         return {
             "requests": first["requests"] + third["requests"],
             "blocked": first["blocked"] + third["blocked"],
+            "cached": first["cached"] + third["cached"],
             "bytes": first["bytes"] + third["bytes"],
             "first_party": first,
             "third_party": third,

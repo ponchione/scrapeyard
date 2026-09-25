@@ -1180,7 +1180,8 @@ class ExecutionConfig(StrictConfigModel):
         description=(
             "Browser targets of the run with the same registrable domain, fetcher, proxy "
             "and browser settings share one browser and context, including cookies and "
-            "storage; every fetch still opens a fresh page"
+            "storage, and fresh scripts are served from a run cache; every fetch still "
+            "opens a fresh page"
         ),
     )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")

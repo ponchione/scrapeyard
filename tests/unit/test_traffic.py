@@ -41,8 +41,10 @@ def test_registrable_domain_uses_the_bundled_suffix_list(host: str, expected: st
     assert registrable_domain(host) == expected
 
 
-def _counts(requests: int = 0, blocked: int = 0, bytes: int = 0) -> dict[str, int]:
-    return {"requests": requests, "blocked": blocked, "bytes": bytes}
+def _counts(
+    requests: int = 0, blocked: int = 0, bytes: int = 0, cached: int = 0,
+) -> dict[str, int]:
+    return {"requests": requests, "blocked": blocked, "cached": cached, "bytes": bytes}
 
 
 def test_report_keeps_hosts_only_and_splits_first_and_third_party() -> None:
@@ -61,8 +63,8 @@ def test_report_keeps_hosts_only_and_splits_first_and_third_party() -> None:
     assert report["requests"] == 4
     assert report["blocked"] == 1
     assert report["bytes"] == 1500
-    assert report["first_party"] == {"hosts": 2, "requests": 2, "blocked": 0, "bytes": 1200}
-    assert report["third_party"] == {"hosts": 2, "requests": 2, "blocked": 1, "bytes": 300}
+    assert report["first_party"] == {"hosts": 2, **_counts(2, 0, 1200)}
+    assert report["third_party"] == {"hosts": 2, **_counts(2, 1, 300)}
     assert report["hosts"] == [
         {"host": "tags.example-ads.test", "third_party": True, **_counts(2, 0, 300),
          "resource_types": {"script": _counts(2, 0, 300)}},
@@ -83,13 +85,16 @@ def test_report_totals_every_resource_type_and_pools_the_rest_as_other() -> None
         traffic.request("https://www.example.test/x", "example.test", resource_type)
     traffic.blocked("https://www.example.test/p.png", "example.test", "image")
     traffic.received("https://www.example.test/app.js", "example.test", 500, "script")
+    traffic.cached("https://www.example.test/app.js", "example.test", "script")
     traffic.request("https://www.example.test/unknown", "example.test")
 
     report = traffic.snapshot()
 
+    assert (report["requests"], report["cached"]) == (8, 1)
+    assert report["first_party"]["cached"] == 1
     assert report["resource_types"] == {
         "document": _counts(1),
-        "script": _counts(2, 0, 500),
+        "script": _counts(2, 0, 500, cached=1),
         "xhr": _counts(1),
         "fetch": _counts(1),
         "other": _counts(3, 1),

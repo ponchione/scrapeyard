@@ -1,4 +1,4 @@
-"""Real-browser fixture runs: per-host traffic report and subrequest blocking.
+"""Real-browser fixture runs: traffic report, browser reuse and subrequest blocking.
 
 A local HTTP server answers for every ``*.test`` host; Chromium resolves those
 names to it, so first- and third-party requests are observable without network
@@ -99,6 +99,8 @@ class FixtureSite:
                 payload = body.encode()
                 self.send_response(200 if (host, path) in PAGES else 404)
                 self.send_header("Content-Type", content_type)
+                if path.endswith(".js"):
+                    self.send_header("Cache-Control", "public, max-age=600")
                 # One length-less (close-delimited) body exercises measured sizes.
                 if (host, path) != ("collect.example-metrics.test", "/b"):
                     self.send_header("Content-Length", str(len(payload)))
@@ -159,10 +161,26 @@ async def scrape_fixture(
     return result, budget.snapshot()["traffic"], budget
 
 
-async def test_report_lists_hosts_and_blocking_removes_them_without_changing_records(
-    fixture_site, tmp_path,
+async def test_report_lists_hosts_and_reuse_and_blocking_keep_the_records(
+    fixture_site, tmp_path, monkeypatch,
 ) -> None:
-    baseline, traffic, budget = await scrape_fixture(tmp_path)
+    launch_kwargs = PlaywrightEngine._PlaywrightEngine__launch_kwargs  # type: ignore[attr-defined]
+    launches: list[object] = []
+
+    def counted_launch_kwargs(engine: Any) -> dict[str, Any]:
+        launches.append(engine)
+        return launch_kwargs(engine)
+
+    monkeypatch.setattr(PlaywrightEngine, "_PlaywrightEngine__launch_kwargs", counted_launch_kwargs)
+    pool = BrowserPool(1)
+    try:
+        with activate_browser_pool(pool):
+            baseline, traffic, budget = await scrape_fixture(tmp_path)
+            first_hits = dict(fixture_site.hits)
+            # A second target of the same site reuses the browser and its scripts.
+            reused, reused_traffic, _ = await scrape_fixture(tmp_path)
+    finally:
+        await pool.aclose()
 
     assert len(baseline.data) == PRODUCTS
     hosts = {row["host"]: row for row in traffic["hosts"]}
@@ -178,10 +196,21 @@ async def test_report_lists_hosts_and_blocking_removes_them_without_changing_rec
     assert first["bytes"] > len(PAGES["www.example.test", "/catalog"][1])
     for host in THIRD_PARTY:
         assert hosts[host]["third_party"] is True
-        assert hosts[host]["requests"] == fixture_site.hits[host] == 1
+        assert hosts[host]["requests"] == first_hits[host] == 1
         assert hosts[host]["bytes"] > 0
-    assert traffic["third_party"]["requests"] == 3
-    assert traffic["requests"] == budget.requests == sum(fixture_site.hits.values())
+    assert (traffic["third_party"]["requests"], traffic["cached"]) == (3, 0)
+    assert traffic["requests"] == budget.requests == sum(first_hits.values())
+
+    assert len(launches) == 1
+    assert reused.data == baseline.data
+    # app.js and the third-party tag come from the run's cache and still run:
+    # both beacons they send are requested again.
+    assert reused_traffic["cached"] == 2
+    assert reused_traffic["resource_types"]["script"]["requests"] == 0
+    assert reused_traffic["requests"] == traffic["requests"] - 2
+    assert fixture_site.hits["tags.example-ads.test"] == 1
+    assert fixture_site.hits["collect.example-metrics.test"] == 2
+    assert fixture_site.hits["www.example.test"] == 3 + 2
 
     fixture_site.hits.clear()
     blocked, traffic, _ = await scrape_fixture(
@@ -213,27 +242,3 @@ async def test_allow_listed_cdn_still_renders_the_items(fixture_site, tmp_path, 
     assert fixture_site.hits["static.example-cdn.test"] == int(allow)
     assert fixture_site.hits["tags.example-ads.test"] == 0
     assert traffic["third_party"]["requests"] == int(allow)
-
-
-async def test_same_site_targets_share_one_browser_launch(
-    fixture_site, tmp_path, monkeypatch,
-) -> None:
-    launch_kwargs = PlaywrightEngine._PlaywrightEngine__launch_kwargs  # type: ignore[attr-defined]
-    launches: list[object] = []
-
-    def counted_launch_kwargs(engine: Any) -> dict[str, Any]:
-        launches.append(engine)
-        return launch_kwargs(engine)
-
-    monkeypatch.setattr(PlaywrightEngine, "_PlaywrightEngine__launch_kwargs", counted_launch_kwargs)
-    pool = BrowserPool(1)
-    try:
-        with activate_browser_pool(pool):
-            first, first_traffic, _ = await scrape_fixture(tmp_path)
-            second, second_traffic, _ = await scrape_fixture(tmp_path)
-    finally:
-        await pool.aclose()
-
-    assert len(launches) == 1
-    assert second.data == first.data and len(first.data) == PRODUCTS
-    assert second_traffic["requests"] == first_traffic["requests"]

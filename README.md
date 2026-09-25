@@ -498,10 +498,26 @@ running target uses one of them alone; the run never holds more than
 `concurrency` browsers, closing an idle browser of another group before opening
 one. Between targets an idle shared browser stays open: it holds no
 `SCRAPEYARD_WORKERS_MAX_BROWSERS` slot but its memory counts in the memory
-headroom check. A shared browser is replaced once it has handled 500 requests
-(sent, blocked or otherwise routed), because the Playwright driver's heap grows
-while one browser lives long, and all of the run's browsers close when its
-targets finish. Default `false`.
+headroom check. A shared browser is replaced by a fresh one (new context, no
+cookies) once it has handled 250 requests (sent, blocked or cached), because the
+Playwright driver's heap grows while one browser lives long; on pages with
+hundreds of requests that means one browser per target again. All of the run's
+browsers close when its targets finish. Default `false`.
+
+Playwright turns the browser's HTTP cache off while requests are routed, and
+Scrapeyard routes every browser request through its URL guard, so without this
+option every page downloads its scripts again. With `reuse_browser`, the run
+also keeps a script cache: a script or stylesheet response that a private HTTP
+cache could reuse (`GET`, status 200, a positive `max-age` or `Expires`, no
+`no-store`, `no-cache`, `private` or `Set-Cookie`, `Vary` at most
+`Accept-Encoding`) is stored once, and later requests for the same URL from the
+same site's targets are answered from memory while fresh. The request still
+passes every guard and block rule first; it is counted as `cached` in
+`run_budget.traffic` instead of as a request, and it uses no request budget. The
+cache holds up to 32 MiB per run (8 MiB per response), outlives replaced
+browsers and is dropped when the run's targets finish. Cached bodies reach the
+browser through the Playwright driver, which adds roughly 20 MB to its peak
+memory per running browser.
 
 `execution.page_cache` is a development aid for iterating on selectors without
 contacting the site. `record` stores the rendered HTML and minimal metadata of
@@ -680,9 +696,10 @@ can see what a browser target loads and what to block: totals for first-party
 hosts (the target URL's registrable domain) and third-party hosts, and the 25
 hosts with the most requests, each with requests sent, requests blocked before
 sending, and response bytes received (browser: headers plus encoded body; basic:
-encoded body). The same counts are split by resource type (`document`,
-`script`, `xhr`, `fetch`, `other`) for the run and for each listed host. Only
-hostnames are kept, never paths or query strings. See
+encoded body), plus requests answered from the run's script cache (`cached`).
+The same counts are split by resource type (`document`, `script`, `xhr`,
+`fetch`, `other`) for the run and for each listed host. Only hostnames are kept,
+never paths or query strings. See
 [docs/API.md](docs/API.md#traffic-by-host).
 
 Basic fetches reserve before each redirect or retry dispatch. Browser context
