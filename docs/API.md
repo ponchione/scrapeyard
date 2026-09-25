@@ -176,7 +176,9 @@ Every run reports `run_budget.traffic`, the requests it sent grouped by host:
 - `requests` are requests released to the network, including native redirect
   hops and basic-fetch retries; the total matches `run_budget.requests`.
 - `blocked` are browser requests aborted before sending: resource types dropped
-  by `browser.disable_resources` and URL-guard rejections.
+  by `browser.disable_resources`, subrequests dropped by
+  `browser.block_third_party` or `browser.block_url_patterns`, and URL-guard
+  rejections.
 - `bytes` are response bytes the transport received: response headers plus the
   encoded (compressed) body for browser requests, the encoded body for basic
   fetches. Requests still in flight when a page closes may be missing.

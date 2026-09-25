@@ -40,6 +40,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - Added `run_budget.traffic`: requests sent, requests blocked before sending,
   and response bytes received per host (top 25, first- vs third-party totals),
   hostnames only.
+- Added opt-in browser subrequest blocking: `browser.block_third_party` aborts
+  subrequests outside the target's registrable domain except
+  `browser.third_party_allow_hosts`, and `browser.block_url_patterns` aborts
+  subrequests matching `*` patterns. Top-level navigations are never blocked.
 
 ### Changed
 - Browser configuration is now rejected for `fetcher: basic`, action fields

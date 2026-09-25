@@ -24,7 +24,7 @@ from scrapling.engines.toolbelt.navigation import (
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.run_threads import run_thread_work
-from scrapeyard.common.traffic import url_site
+from scrapeyard.common.traffic import url_hostname, url_site
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
     BrowserActionConfig,
@@ -47,6 +47,7 @@ from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo
 from scrapeyard.engine.basic_fetch import BasicSession, fetch_streaming_response
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.scrape_models import ClickPaginationSpec
+from scrapeyard.engine.subrequest_filter import SubrequestFilter
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -87,6 +88,10 @@ _BROWSER_ORIGIN_SCOPED_HEADERS: ContextVar[frozenset[str]] = ContextVar(
     "scrapeyard_browser_origin_scoped_headers",
     default=frozenset(),
 )
+_BROWSER_SUBREQUEST_FILTER: ContextVar[SubrequestFilter | None] = ContextVar(
+    "scrapeyard_browser_subrequest_filter",
+    default=None,
+)
 
 
 class BrowserPageActionError(RuntimeError):
@@ -121,6 +126,14 @@ async def _request_header_mapping(request: Any) -> dict[str, str] | None:
     return {str(name): str(value) for name, value in headers.items()}
 
 
+def _is_top_level_navigation(request: Any) -> bool:
+    try:
+        return bool(request.is_navigation_request()) and request.frame.parent_frame is None
+    except Exception:
+        # Service-worker requests have no frame; treat them as subrequests.
+        return False
+
+
 def _exception_text(exc: Exception) -> str:
     return redact_userinfo_in_text(str(exc)) or type(exc).__name__
 
@@ -144,6 +157,17 @@ async def _guarded_async_intercept_route(route: Any) -> None:
             redact_userinfo_in_url(str(request_url)),
             resource_type,
         )
+        await route.abort()
+        return
+
+    subrequest_filter = _BROWSER_SUBREQUEST_FILTER.get()
+    if (
+        subrequest_filter is not None
+        and isinstance(request_url, str)
+        and subrequest_filter.blocks(request_url)
+        and not _is_top_level_navigation(request)
+    ):
+        logger.debug("Blocking configured subrequest to host %s", url_hostname(request_url))
         await route.abort()
         return
 
@@ -801,6 +825,7 @@ async def fetch_browser_response(
     headers_token = _BROWSER_ORIGIN_SCOPED_HEADERS.set(
         frozenset(name.lower() for name in browser.extra_headers)
     )
+    filter_token = _BROWSER_SUBREQUEST_FILTER.set(SubrequestFilter.for_target(browser, target.url))
     try:
         fetch = (
             fetcher_cls.fetch(
@@ -828,6 +853,7 @@ async def fetch_browser_response(
                     pass
             raise
     finally:
+        _BROWSER_SUBREQUEST_FILTER.reset(filter_token)
         _BROWSER_RUN_BUDGET.reset(budget_token)
         _BROWSER_ORIGIN_SCOPED_HEADERS.reset(headers_token)
         _BROWSER_TARGET_ORIGIN.reset(origin_token)

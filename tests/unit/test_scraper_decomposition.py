@@ -577,6 +577,9 @@ def test_default_debug_blob_uses_browser_config_defaults_when_missing():
     assert debug["browser_settings"] == {
         "timeout_ms": 60000,
         "disable_resources": True,
+        "block_third_party": False,
+        "third_party_allow_hosts": [],
+        "block_url_patterns": [],
         "network_idle": False,
         "stealth": False,
         "hide_canvas": False,

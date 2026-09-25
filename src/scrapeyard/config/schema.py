@@ -54,6 +54,10 @@ _ALLOWED_BROWSER_ADDITIONAL_ARGUMENTS = frozenset(
     }
 )
 _BROWSER_LOCALE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+_BLOCK_ALLOW_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+_MAX_BLOCK_URL_PATTERN_CHARS = 2048
 _MAX_BROWSER_FONTS = 64
 _MAX_BROWSER_FONT_NAME_CHARS = 128
 _MAX_BROWSER_LOCALES = 16
@@ -61,6 +65,7 @@ _MAX_BROWSER_LOCALE_CHARS = 64
 _MAX_BROWSER_WINDOW_DIMENSION = 16_384
 
 MAX_BROWSER_ACTIONS = 50
+MAX_BROWSER_BLOCK_RULES = 100
 MAX_BROWSER_ACTION_REPEAT = 50
 MAX_BROWSER_HUMANIZE_SECONDS = 60.0
 MAX_BROWSER_TIMEOUT_MS = 300_000
@@ -663,6 +668,30 @@ class BrowserConfig(StrictConfigModel):
         default=True,
         description="Whether to block non-essential resources during browser fetches",
     )
+    block_third_party: bool = Field(
+        default=False,
+        description=(
+            "Abort browser subrequests to hosts outside the target URL's registrable "
+            "domain unless listed in third_party_allow_hosts; top-level page "
+            "navigations are never blocked"
+        ),
+    )
+    third_party_allow_hosts: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_BROWSER_BLOCK_RULES,
+        description=(
+            "Hosts still requested when block_third_party is on, such as CDNs serving "
+            "product HTML or data; an entry also allows its subdomains"
+        ),
+    )
+    block_url_patterns: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_BROWSER_BLOCK_RULES,
+        description=(
+            "Abort browser subrequests whose full URL matches one of these patterns; "
+            "'*' matches any characters and everything else is literal"
+        ),
+    )
     network_idle: bool = Field(
         default=False,
         description="Whether browser fetches should wait for network idle",
@@ -785,6 +814,48 @@ class BrowserConfig(StrictConfigModel):
     @classmethod
     def _reject_invalid_extra_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return _validate_http_headers(value)
+
+    @field_validator("third_party_allow_hosts")
+    @classmethod
+    def _validate_third_party_allow_hosts(cls, value: list[str]) -> list[str]:
+        hosts: list[str] = []
+        for entry in _validate_pattern_list(
+            value,
+            label="browser.third_party_allow_hosts",
+            max_item_chars=253,
+            case_insensitive=True,
+        ):
+            try:
+                host = entry.removeprefix("*.").rstrip(".").encode("idna").decode("ascii")
+            except UnicodeError:
+                host = ""
+            if not _BLOCK_ALLOW_HOST_RE.fullmatch(host):
+                raise ValueError(
+                    "browser.third_party_allow_hosts entries must be host names such as "
+                    "cdn.example.test, without a scheme, port or path"
+                )
+            if host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    @field_validator("block_url_patterns")
+    @classmethod
+    def _validate_block_url_patterns(cls, value: list[str]) -> list[str]:
+        patterns = _validate_pattern_list(
+            value,
+            label="browser.block_url_patterns",
+            max_item_chars=_MAX_BLOCK_URL_PATTERN_CHARS,
+            case_insensitive=False,
+        )
+        if any(char.isspace() for pattern in patterns for char in pattern):
+            raise ValueError("browser.block_url_patterns values must not contain whitespace")
+        return patterns
+
+    @model_validator(mode="after")
+    def _require_blocking_for_allow_hosts(self) -> BrowserConfig:
+        if self.third_party_allow_hosts and not self.block_third_party:
+            raise ValueError("browser.third_party_allow_hosts requires block_third_party: true")
+        return self
 
     @field_validator("click_selector", "wait_for_selector")
     @classmethod

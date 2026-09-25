@@ -15,6 +15,10 @@ target:
     timeout_ms: 90000
     disable_resources: true
     network_idle: false
+    # Optional: abort subrequests the extraction does not need (see run_budget.traffic).
+    # block_third_party: true
+    # third_party_allow_hosts: [static.example-cdn.com]
+    # block_url_patterns: ["*/collect?*"]
     # Optional ordered browser actions before extraction.
     # actions:
     #   - type: click

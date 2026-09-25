@@ -385,6 +385,30 @@ in that run shares the exit session, and the next run gets a new one. The
 placeholder is rejected outside the credentials, and logs report only the proxy
 host and port.
 
+Browser targets load many subrequests the extraction never needs: scripts, XHR
+and beacons, often from third-party hosts. Each one costs proxy bytes and is
+another chance to trip bot defenses. `run_budget.traffic` shows where a run's
+requests go; three opt-in `browser` options abort requests before they are sent:
+
+| Option | Effect |
+| --- | --- |
+| `block_third_party` | Abort subrequests to hosts outside the target URL's registrable domain (`www.example.test` and `img.example.test` share `example.test`). Default `false`. |
+| `third_party_allow_hosts` | Hosts still requested with `block_third_party`, such as a CDN that serves product HTML or data. An entry also allows its subdomains. Requires `block_third_party: true`. |
+| `block_url_patterns` | Abort subrequests whose full URL, query string included, matches a pattern. Only `*` is a wildcard (any characters); everything else is literal. Applies to first-party and allowed hosts too. |
+
+Top-level page navigations (the target, its redirects, pagination and clicked
+pages) are never blocked. Blocked requests are counted as `blocked` for their
+host in `run_budget.traffic`. Start with `block_third_party: true`, compare the
+extracted records with an unblocked run, and allow-list the hosts the page
+needs if items go missing:
+
+```yaml
+browser:
+  block_third_party: true
+  third_party_allow_hosts: [static.example-cdn.test]
+  block_url_patterns: ["*/api/beacon?*", "*/collect?*"]
+```
+
 Browser-backed targets may define an ordered `browser.actions` list with
 `click`, `wait_for_selector`, `wait_ms`, `scroll`, and `repeat_click` actions.
 Use hard limits such as `times` or `max_times` on repeating actions.
