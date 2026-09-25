@@ -62,6 +62,7 @@ from scrapeyard.engine.scrape_models import (
 )
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
+    TransformCache,
     count_selector_matches_strict,
     extract_selectors_strict,
     select_items_strict,
@@ -133,6 +134,7 @@ def _extract_page_data(
         budget.reserve_extracted_records(len(items))
 
     data: list[dict[str, Any]] = []
+    transform_cache: TransformCache = {}
     for element in items:
         reserved_bytes = 0
 
@@ -146,6 +148,7 @@ def _extract_page_data(
             element,
             target.selectors,
             reserve_output_bytes=reserve_output_bytes if budget is not None else None,
+            transform_cache=transform_cache,
         )
         enrich_item_detection(
             item_data,

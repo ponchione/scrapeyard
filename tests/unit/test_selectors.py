@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import random
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -477,3 +477,34 @@ def test_target_selector_schema_limits_count_names_and_queries() -> None:
     for selectors in invalid_values:
         with pytest.raises(ValidationError):
             TargetConfig.model_validate({**base, "selectors": selectors})
+
+
+def test_page_extraction_parses_each_transform_pipeline_once(monkeypatch) -> None:
+    from scrapeyard.config import transforms
+    from scrapeyard.config.schema import TargetConfig
+    from scrapeyard.engine import selectors
+    from scrapeyard.engine.scraper import _extract_page_data
+
+    html = "".join(
+        f"<li class='card'><b class='t'>  Item {n} </b><i class='p'>${n},000</i></li>"
+        for n in range(4)
+    )
+    page = Adaptor(f"<html><body><ul>{html}</ul></body></html>")
+    target = TargetConfig.model_validate({
+        "url": "https://www.example.test/",
+        "item_selector": "li.card",
+        "selectors": {
+            "title": {"query": ".t::text", "transform": "trim"},
+            "price": {"query": ".p::text", "transform": 'strip_prefix("$")|remove(",")'},
+            "raw": ".t::text",
+        },
+    })
+    parse = MagicMock(side_effect=transforms.parse_transform_pipeline)
+    monkeypatch.setattr(selectors, "parse_transform_pipeline", parse)
+
+    records = _extract_page_data(page, target)
+
+    assert parse.call_count == 2
+    assert [(r["title"], r["price"], r["raw"]) for r in records] == [
+        (f"Item {n}", f"{n}000", f"  Item {n} ") for n in range(4)
+    ]

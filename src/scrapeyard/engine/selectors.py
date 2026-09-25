@@ -15,6 +15,8 @@ from scrapeyard.config.transforms import (
 from scrapeyard.engine.dom_text import element_text_content
 
 OutputByteReserver = Callable[[int], None]
+# Parsed transform pipelines keyed by their source, shared by one page's items.
+TransformCache = dict[str, list[Callable[[str], str]]]
 
 
 class SelectorExecutionError(Exception):
@@ -98,6 +100,7 @@ def extract_selectors_strict(
     selectors: dict[str, SelectorValue],
     *,
     reserve_output_bytes: OutputByteReserver | None = None,
+    transform_cache: TransformCache | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     _reserve_json_structure(reserve_output_bytes, 2)
@@ -111,6 +114,7 @@ def extract_selectors_strict(
             selector,
             field_name=name,
             reserve_output_bytes=reserve_output_bytes,
+            transform_cache=transform_cache,
         )
     return result
 
@@ -121,6 +125,7 @@ def _extract_selector_value(
     *,
     field_name: str,
     reserve_output_bytes: OutputByteReserver | None,
+    transform_cache: TransformCache | None = None,
 ) -> Any:
     query, sel_type, transform_str = _unpack_selector(selector)
     elements = _select_elements(
@@ -130,7 +135,7 @@ def _extract_selector_value(
         operation="extract_selectors",
         field_name=field_name,
     )
-    transforms = parse_transform_pipeline(transform_str) if transform_str else []
+    transforms = _transform_pipeline(transform_str, transform_cache) if transform_str else []
     texts: list[str] = []
     for element in elements:
         text = _element_text(element)
@@ -145,6 +150,18 @@ def _extract_selector_value(
     if len(texts) > 1:
         _reserve_json_structure(reserve_output_bytes, len(texts) + 1)
     return _collapse_selector_values(texts)
+
+
+def _transform_pipeline(
+    transform_str: str,
+    transform_cache: TransformCache | None,
+) -> list[Callable[[str], str]]:
+    if transform_cache is None:
+        return parse_transform_pipeline(transform_str)
+    transforms = transform_cache.get(transform_str)
+    if transforms is None:
+        transforms = transform_cache[transform_str] = parse_transform_pipeline(transform_str)
+    return transforms
 
 
 def _reserve_json_structure(
