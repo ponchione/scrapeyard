@@ -179,9 +179,11 @@ Every run reports `run_budget.traffic`, the requests it sent grouped by host:
   by `browser.disable_resources`, subrequests dropped by
   `browser.block_third_party` or `browser.block_url_patterns`, and URL-guard
   rejections.
-- `bytes` are response bytes the transport received: response headers plus the
-  encoded (compressed) body for browser requests, the encoded body for basic
-  fetches. Requests still in flight when a page closes may be missing.
+- `bytes` are response bytes received. For browser requests: the response
+  header block (estimated from its lines) plus the encoded (compressed) body,
+  taken from `Content-Length`, or measured by the browser once the response
+  finishes when it declares no length. For basic fetches: the encoded body.
+  Responses still in flight when a page closes may be missing.
 - A host is `third_party` when its registrable domain (public suffix plus one
   label, from the bundled suffix list; the last two labels for unlisted suffixes
   such as `.test`) differs from the requesting target URL's. A host that is

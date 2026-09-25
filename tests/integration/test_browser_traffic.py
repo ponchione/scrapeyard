@@ -98,7 +98,9 @@ class FixtureSite:
                 payload = body.encode()
                 self.send_response(200 if (host, path) in PAGES else 404)
                 self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(payload)))
+                # One length-less (close-delimited) body exercises measured sizes.
+                if (host, path) != ("collect.example-metrics.test", "/b"):
+                    self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(payload)

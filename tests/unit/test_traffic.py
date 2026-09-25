@@ -181,3 +181,25 @@ async def test_streamed_basic_fetch_reports_encoded_bytes_received(monkeypatch, 
         "bytes": len(encoded),
     }]
     assert budget.fetched_bytes == len(response.body) > len(encoded)
+
+
+@pytest.mark.parametrize(
+    ("status", "method", "headers", "expected_body"),
+    [
+        (200, "GET", {"content-type": "text/html", "content-length": "1200"}, 1200),
+        (304, "GET", {"content-length": "1200"}, 0),
+        (200, "HEAD", {"content-length": "1200"}, 0),
+        (200, "GET", {"content-type": "text/html", "transfer-encoding": "chunked"}, None),
+    ],
+)
+def test_browser_response_bytes_come_from_headers_when_declared(
+    status: int, method: str, headers: dict[str, str], expected_body: int | None,
+) -> None:
+    from scrapeyard.engine.browser_session import _declared_response_bytes
+
+    response = SimpleNamespace(status=status, headers=headers, request=SimpleNamespace(method=method))
+    header_bytes = 19 + sum(len(name) + len(value) + 4 for name, value in headers.items())
+
+    declared = _declared_response_bytes(response)
+
+    assert declared == (None if expected_body is None else header_bytes + expected_body)

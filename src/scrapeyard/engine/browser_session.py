@@ -105,8 +105,28 @@ class _BudgetedRoute:
         await self._route.continue_(**kwargs)
 
 
+# Responses that carry no body even when they declare a Content-Length.
+_BODYLESS_STATUSES = frozenset({204, 304})
+
+
+def _declared_response_bytes(response: Any) -> int | None:
+    """Estimate received bytes from a response's headers, or None without a length.
+
+    The header block is estimated from its lines; the body is the declared,
+    encoded Content-Length. Reading both from the response event needs no
+    driver round trip, unlike ``request.sizes()`` (about 0.4 ms each).
+    """
+    headers = response.headers
+    # Status line and blank line, then one "name: value" line per header.
+    header_bytes = 19 + sum(len(name) + len(value) + 4 for name, value in headers.items())
+    if response.status in _BODYLESS_STATUSES or response.request.method == "HEAD":
+        return header_bytes
+    length = headers.get("content-length", "")
+    return header_bytes + int(length) if length.isdigit() else None
+
+
 async def _received_bytes(request: Any) -> int:
-    """Response header and encoded body bytes the browser received for *request*."""
+    """Response header and encoded body bytes the browser reports for *request*."""
     sizes = await request.sizes()
     return sum(max(0, int(sizes.get(name) or 0)) for name in (
         "responseHeadersSize", "responseBodySize",
@@ -428,6 +448,7 @@ class BrowserSession:
         if site is None:
             site = url_site(url)
         sizing: set[asyncio.Future[int]] = set()
+        unsized: set[Any] = set()
 
         async def reserve(request: Any) -> None:
             if budget is not None:
@@ -455,9 +476,20 @@ class BrowserSession:
             if traffic is not None and not sized.cancelled() and sized.exception() is None:
                 traffic.received(request.url, site, sized.result())
 
-        def observe_finished(request: Any) -> None:
+        def observe_response(response: Any) -> None:
             if traffic is None:
                 return
+            declared = _declared_response_bytes(response)
+            if declared is not None:
+                traffic.received(response.url, site, declared)
+            else:
+                # Chunked bodies declare no length; ask the browser once they finish.
+                unsized.add(response.request)
+
+        def observe_finished(request: Any) -> None:
+            if request not in unsized:
+                return
+            unsized.discard(request)
             sized = asyncio.ensure_future(_received_bytes(request))
             sizing.add(sized)
             sized.add_done_callback(lambda done: record_received(request, done))
@@ -489,6 +521,7 @@ class BrowserSession:
         fetch_error: BaseException | None = None
         try:
             context.on("request", observe_request)
+            context.on("response", observe_response)
             context.on("requestfinished", observe_finished)
             await context.route("**/*", guard)
             await context.set_offline(False)
@@ -566,6 +599,7 @@ class BrowserSession:
                     await _close_page(owned_page, browser)
                 await context.unroute("**/*", guard)
                 context.remove_listener("request", observe_request)
+                context.remove_listener("response", observe_response)
                 context.remove_listener("requestfinished", observe_finished)
                 stopped = True
             except BaseException:
