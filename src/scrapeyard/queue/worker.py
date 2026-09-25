@@ -1474,14 +1474,15 @@ def _redact_result_records(
     redaction_count = 0
     for result in all_results:
         for index, item in enumerate(result.data):
-            original_size = compact_json_size(item)
             redacted_item, item_count = redact_deployment_secrets_in_value_with_count(
                 item,
                 secret_values=config.resolved_secret_values,
             )
-            redacted_size = compact_json_size(redacted_item)
-            if redacted_size > original_size:
-                budget.reserve_estimated_result_bytes(redacted_size - original_size)
+            # Only a replacement can change a record's serialized size.
+            if item_count:
+                growth = compact_json_size(redacted_item) - compact_json_size(item)
+                if growth > 0:
+                    budget.reserve_estimated_result_bytes(growth)
             result.data[index] = redacted_item
             redaction_count += item_count
     return redaction_count
