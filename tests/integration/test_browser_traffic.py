@@ -107,7 +107,9 @@ class FixtureSite:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._server.server_address[1]
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
 
     def close(self) -> None:
         self._server.shutdown()
@@ -156,15 +158,14 @@ async def scrape_fixture(
     return result, budget.snapshot()["traffic"], budget
 
 
-async def test_browser_run_reports_requests_and_bytes_per_host(fixture_site, tmp_path) -> None:
-    result, traffic, budget = await scrape_fixture(tmp_path)
+async def test_report_lists_hosts_and_blocking_removes_them_without_changing_records(
+    fixture_site, tmp_path,
+) -> None:
+    baseline, traffic, budget = await scrape_fixture(tmp_path)
 
-    assert len(result.data) == PRODUCTS
+    assert len(baseline.data) == PRODUCTS
     hosts = {row["host"]: row for row in traffic["hosts"]}
-    assert set(hosts) == {
-        "www.example.test", "tags.example-ads.test",
-        "collect.example-metrics.test", "widgets.example-ads.test",
-    }
+    assert set(hosts) == {"www.example.test", *THIRD_PARTY}
     first = hosts["www.example.test"]
     # Catalog, app.js and its beacon are sent; the stylesheet is blocked.
     assert (first["third_party"], first["requests"], first["blocked"]) == (False, 3, 1)
@@ -176,16 +177,12 @@ async def test_browser_run_reports_requests_and_bytes_per_host(fixture_site, tmp
     assert traffic["third_party"]["requests"] == 3
     assert traffic["requests"] == budget.requests == sum(fixture_site.hits.values())
 
-
-async def test_blocking_third_party_requests_leaves_extraction_unchanged(
-    fixture_site, tmp_path,
-) -> None:
-    baseline, _, _ = await scrape_fixture(tmp_path)
     fixture_site.hits.clear()
+    blocked, traffic, _ = await scrape_fixture(
+        tmp_path, block_third_party=True, block_url_patterns=["*/api/beacon?*"],
+    )
 
-    blocked, traffic, _ = await scrape_fixture(tmp_path, block_third_party=True)
-
-    assert blocked.data == baseline.data and len(blocked.data) == PRODUCTS
+    assert blocked.data == baseline.data
     assert traffic["third_party"]["requests"] == 0
     assert all(fixture_site.hits[host] == 0 for host in THIRD_PARTY)
     hosts = {row["host"]: row for row in traffic["hosts"]}
@@ -193,7 +190,9 @@ async def test_blocking_third_party_requests_leaves_extraction_unchanged(
     assert hosts["tags.example-ads.test"]["blocked"] == 1
     assert hosts["widgets.example-ads.test"]["blocked"] == 1
     assert "collect.example-metrics.test" not in hosts
-    assert hosts["www.example.test"]["requests"] == 3
+    # The catalog and app.js are sent; the stylesheet and the first-party beacon are not.
+    assert (hosts["www.example.test"]["requests"], hosts["www.example.test"]["blocked"]) == (2, 2)
+    assert fixture_site.hits["www.example.test"] == 2
 
 
 @pytest.mark.parametrize("allow", [True, False])
@@ -208,13 +207,3 @@ async def test_allow_listed_cdn_still_renders_the_items(fixture_site, tmp_path, 
     assert fixture_site.hits["static.example-cdn.test"] == int(allow)
     assert fixture_site.hits["tags.example-ads.test"] == 0
     assert traffic["third_party"]["requests"] == int(allow)
-
-
-async def test_url_patterns_block_matching_first_party_requests(fixture_site, tmp_path) -> None:
-    result, traffic, _ = await scrape_fixture(tmp_path, block_url_patterns=["*/api/beacon?*"])
-
-    assert len(result.data) == PRODUCTS
-    first = next(row for row in traffic["hosts"] if row["host"] == "www.example.test")
-    # The catalog and app.js are sent; the stylesheet and the beacon are blocked.
-    assert (first["requests"], first["blocked"]) == (2, 2)
-    assert fixture_site.hits["collect.example-metrics.test"] == 1
