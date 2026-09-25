@@ -15,7 +15,7 @@ from tldextract import tldextract
 from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.engines.toolbelt.fingerprints import (
-    generate_convincing_referer,
+    generate_convincing_referer as generate_convincing_referer,
     generate_headers,
 )
 

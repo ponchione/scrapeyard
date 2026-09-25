@@ -24,6 +24,8 @@ from scrapeyard.runtime.metrics import RETRIES
 T = TypeVar("T")
 
 _TRANSIENT_TRANSPORT_ERRORS = (
+    # Distinct classes before Python 3.11; BrowserTransportTimeout is a TimeoutError.
+    TimeoutError,
     asyncio.TimeoutError,
     httpx.NetworkError,
     httpx.RemoteProtocolError,

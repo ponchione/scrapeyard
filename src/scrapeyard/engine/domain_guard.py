@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from arq.connections import ArqRedis
@@ -45,7 +45,7 @@ def normalize_guard_host(value: str) -> str:
 
 
 def utc_day(now: datetime | None = None) -> str:
-    return (now or datetime.now(UTC)).strftime("%Y%m%d")
+    return (now or datetime.now(timezone.utc)).strftime("%Y%m%d")
 
 
 class DomainDailyLimitReached(ScrapeStop):
@@ -89,7 +89,7 @@ class DomainGuardStatus:
         cooldown_until = None
         if self.cooldown_remaining_seconds > 0:
             cooldown_until = (
-                datetime.now(UTC) + timedelta(seconds=self.cooldown_remaining_seconds)
+                datetime.now(timezone.utc) + timedelta(seconds=self.cooldown_remaining_seconds)
             ).isoformat()
         return {
             "host": self.host,

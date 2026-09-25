@@ -293,7 +293,7 @@ class BrowserSession:
         control = candidates.first
         if not await control.is_visible() or not await control.is_enabled():
             return False
-        return await control.get_attribute("aria-disabled") != "true"
+        return bool(await control.get_attribute("aria-disabled") != "true")
 
     @staticmethod
     async def _item_fingerprint(page: Any, spec: ClickPaginationSpec) -> tuple[int, str]:

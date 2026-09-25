@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -125,7 +125,7 @@ class PageCache:
             "content_type": content_type,
             "fetcher": fetcher,
             "click_index": click_index,
-            "recorded_at": datetime.now(UTC).isoformat(),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         if click_pagination is not None:
             meta["click_pagination"] = click_pagination
