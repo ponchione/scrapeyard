@@ -231,6 +231,37 @@ class SQLiteJobStore:
             raise ValueError("Terminal webhook delivery does not match the owned job/run/status")
 
     @staticmethod
+    async def _commit_terminal_intent(
+        db: aiosqlite.Connection,
+        delivery: WebhookDeliveryCreate | None,
+        *,
+        job_id: str,
+        run_id: str,
+        status: str,
+        created_at: datetime,
+        checkpoint: str | None = None,
+    ) -> None:
+        """Insert the optional terminal webhook intent, then commit the transaction."""
+        intent_created = False
+        if delivery is not None:
+            intent_created = await insert_webhook_delivery(db, delivery, created_at=created_at)
+            if checkpoint is not None:
+                qualification_checkpoint(checkpoint)
+        await db.commit()
+        if delivery is not None:
+            logger.info(
+                "Terminal webhook intent persisted atomically "
+                "job_id=%s run_id=%s event=%s delivery_id=%s "
+                "terminal_status=%s recovery_action=%s",
+                job_id,
+                run_id,
+                delivery.event,
+                delivery.delivery_id,
+                status,
+                ("atomic_intent_created" if intent_created else "existing_intent_noop"),
+            )
+
+    @staticmethod
     async def _mark_terminal_webhook_reconciled(
         db: aiosqlite.Connection,
         candidate: TerminalWebhookCandidate,
@@ -1677,27 +1708,15 @@ class SQLiteJobStore:
             if cursor.rowcount != 1:
                 await db.rollback()
                 self._raise_ownership("finalize", job_id, run_id)
-            intent_created = False
-            if webhook_delivery is not None:
-                intent_created = await insert_webhook_delivery(
-                    db,
-                    webhook_delivery,
-                    created_at=completed_at,
-                )
-                qualification_checkpoint("during_webhook_intent_transaction")
-            await db.commit()
-            if webhook_delivery is not None:
-                logger.info(
-                    "Terminal webhook intent persisted atomically "
-                    "job_id=%s run_id=%s event=%s delivery_id=%s "
-                    "terminal_status=%s recovery_action=%s",
-                    job_id,
-                    run_id,
-                    webhook_delivery.event,
-                    webhook_delivery.delivery_id,
-                    status,
-                    ("atomic_intent_created" if intent_created else "existing_intent_noop"),
-                )
+            await self._commit_terminal_intent(
+                db,
+                webhook_delivery,
+                job_id=job_id,
+                run_id=run_id,
+                status=status,
+                created_at=completed_at,
+                checkpoint="during_webhook_intent_transaction",
+            )
 
     async def fail_owned_run(
         self,
@@ -1748,30 +1767,14 @@ class SQLiteJobStore:
                 if cursor.rowcount != 1:
                     await db.rollback()
                     self._raise_ownership("fail", job_id, run_id)
-                intent_created = False
-                if webhook_delivery is not None:
-                    intent_created = await insert_webhook_delivery(
-                        db,
-                        webhook_delivery,
-                        created_at=failed_at,
-                    )
-                await db.commit()
-                if webhook_delivery is not None:
-                    logger.info(
-                        "Terminal webhook intent persisted atomically "
-                        "job_id=%s run_id=%s event=%s delivery_id=%s "
-                        "terminal_status=%s recovery_action=%s",
-                        job_id,
-                        run_id,
-                        webhook_delivery.event,
-                        webhook_delivery.delivery_id,
-                        JobStatus.failed.value,
-                        (
-                            "atomic_intent_created"
-                            if intent_created
-                            else "existing_intent_noop"
-                        ),
-                    )
+                await self._commit_terminal_intent(
+                    db,
+                    webhook_delivery,
+                    job_id=job_id,
+                    run_id=run_id,
+                    status=JobStatus.failed.value,
+                    created_at=failed_at,
+                )
                 return
             if job_status != JobStatus.running.value:
                 await db.rollback()
@@ -1813,26 +1816,14 @@ class SQLiteJobStore:
             if cursor.rowcount != 1:
                 await db.rollback()
                 self._raise_ownership("fail", job_id, run_id)
-            intent_created = False
-            if webhook_delivery is not None:
-                intent_created = await insert_webhook_delivery(
-                    db,
-                    webhook_delivery,
-                    created_at=failed_at,
-                )
-            await db.commit()
-            if webhook_delivery is not None:
-                logger.info(
-                    "Terminal webhook intent persisted atomically "
-                    "job_id=%s run_id=%s event=%s delivery_id=%s "
-                    "terminal_status=%s recovery_action=%s",
-                    job_id,
-                    run_id,
-                    webhook_delivery.event,
-                    webhook_delivery.delivery_id,
-                    JobStatus.failed.value,
-                    ("atomic_intent_created" if intent_created else "existing_intent_noop"),
-                )
+            await self._commit_terminal_intent(
+                db,
+                webhook_delivery,
+                job_id=job_id,
+                run_id=run_id,
+                status=JobStatus.failed.value,
+                created_at=failed_at,
+            )
 
     async def list_terminal_webhook_candidates(
         self,
