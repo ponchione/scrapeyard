@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
+from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
@@ -30,6 +32,18 @@ RECEIVED_BYTES_ATTRIBUTE = "_scrapeyard_received_bytes"
 tldextract.TLD_EXTRACTOR = OFFLINE_TLD_EXTRACTOR
 
 
+@cache
+def _tls_context() -> ssl.SSLContext:
+    """Return the verifying TLS context every basic transport shares.
+
+    It is the context httpx builds for ``verify=True`` without environment
+    overrides; loading its CA bundle for each client cost about 20 ms. All
+    basic transports speak HTTP/1.1 only, so the ALPN list httpcore sets on it
+    is always the same.
+    """
+    return httpx.create_ssl_context(trust_env=False)
+
+
 class BasicSession:
     """One target's cookie jar and at most one origin/endpoint-specific pool."""
 
@@ -44,7 +58,9 @@ class BasicSession:
             if self._client is not None:
                 await self._client.aclose()
             self._client = httpx.AsyncClient(
-                transport=httpx.AsyncHTTPTransport(proxy=proxy, retries=0, trust_env=False),
+                transport=httpx.AsyncHTTPTransport(
+                    verify=_tls_context(), proxy=proxy, retries=0, trust_env=False,
+                ),
                 trust_env=False,
             )
             self._key = key
