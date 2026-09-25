@@ -1175,6 +1175,14 @@ class ExecutionConfig(StrictConfigModel):
             "browser subresources are outside this limit"
         ),
     )
+    reuse_browser: bool = Field(
+        default=False,
+        description=(
+            "Browser targets of the run with the same registrable domain, fetcher, proxy "
+            "and browser settings share one browser and context, including cookies and "
+            "storage; every fetch still opens a fresh page"
+        ),
+    )
     mode: ExecutionMode = Field(default=ExecutionMode.auto, description="Response mode")
     priority: Priority = Field(default=Priority.normal, description="Queue priority")
     fail_strategy: FailStrategy = Field(

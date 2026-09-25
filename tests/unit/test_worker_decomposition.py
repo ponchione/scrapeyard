@@ -19,6 +19,7 @@ from scrapeyard.config.schema import (
     OnEmptyAction,
     ScrapeConfig,
 )
+from scrapeyard.engine.browser_pool import BrowserPool, current_browser_pool
 from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
@@ -136,6 +137,33 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
     assert len(results) == 4
     assert max_active_fetches == 2
     assert limiter.active == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reuse", [False, True])
+async def test_reuse_browser_lends_the_run_one_pool_and_closes_it_after_the_targets(reuse):
+    targets = [
+        _concurrent_target(f"https://www.example.test/c/{index}", FetcherType.dynamic)
+        for index in range(3)
+    ]
+    context = _job_execution_context(targets, concurrency=1)
+    context.config.execution.reuse_browser = reuse
+    pools = []
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        pools.append(current_browser_pool())
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    with (
+        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
+        patch.object(BrowserPool, "aclose", autospec=True) as aclose,
+    ):
+        await _run_targets(context, BrowserExecutionLimiter(1), job_id="reuse")
+
+    assert len(pools) == 3 and len({id(pool) for pool in pools}) == 1
+    assert (pools[0] is not None) is reuse
+    assert aclose.call_count == int(reuse)
+    assert current_browser_pool() is None
 
 
 @pytest.mark.asyncio

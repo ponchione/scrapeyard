@@ -47,6 +47,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - `run_budget.traffic.resource_types` and each listed host's `resource_types`
   split requests, blocks and bytes by resource type (`document`, `script`,
   `xhr`, `fetch`, `other`).
+- Added opt-in `execution.reuse_browser`: browser targets of a run with the same
+  registrable domain, fetcher, proxy and browser settings share one browser and
+  context (cookies and storage included) instead of launching one each; every
+  fetch still opens a fresh page. With `concurrency` above 1 a group keeps up to
+  `concurrency` browsers, one per running target.
 
 ### Changed
 - Click pagination now waits in the page for the items to change (checked every

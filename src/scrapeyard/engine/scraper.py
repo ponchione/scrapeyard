@@ -27,6 +27,7 @@ from scrapeyard.config.schema import (
 )
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
 from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE, BasicSession
+from scrapeyard.engine.browser_pool import current_browser_pool
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.browser_debug import (
     browser_fetch_kwargs,
@@ -749,11 +750,14 @@ def _prepare_scrape_context(
     response_observer: Callable[[], None] | None,
     rate_limiter: DomainRateLimiter | None,
     domain_rate_limit: float,
+    shared_session: BrowserSession | None = None,
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
     Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
     fetcher = _get_fetcher(target.fetcher)
-    if fetcher is Fetcher:
+    if shared_session is not None:
+        fetcher = shared_session
+    elif fetcher is Fetcher:
         fetcher = BasicSession()
     elif fetcher in (PlayWrightFetcher, StealthyFetcher):
         fetcher = BrowserSession(fetcher)
@@ -923,6 +927,12 @@ async def scrape_target(
 ) -> TargetResult:
     """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
+    pool = current_browser_pool() if target.fetcher is not FetcherType.basic else None
+    shared_session = (
+        await pool.acquire(target, proxy_url, _get_fetcher(target.fetcher))
+        if pool is not None
+        else None
+    )
     context = _prepare_scrape_context(
         target,
         retry,
@@ -932,6 +942,7 @@ async def scrape_target(
         response_observer,
         rate_limiter,
         domain_rate_limit,
+        shared_session,
     )
 
     try:
@@ -965,7 +976,10 @@ async def scrape_target(
     except Exception as exc:
         _handle_scrape_exception(result, target, exc)
     finally:
-        if isinstance(context.fetcher_cls, (BasicSession, BrowserSession)):
+        if pool is not None and shared_session is not None:
+            # The run's pool keeps the browser for the next target of this group.
+            await await_cleanup(pool.release(shared_session))
+        elif isinstance(context.fetcher_cls, (BasicSession, BrowserSession)):
             await await_cleanup(context.fetcher_cls.aclose())
 
     return result

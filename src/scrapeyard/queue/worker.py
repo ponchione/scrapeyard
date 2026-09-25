@@ -33,6 +33,7 @@ from scrapeyard.engine.domain_guard import (
     domain_guard_host,
     effective_daily_page_limit,
 )
+from scrapeyard.engine.browser_pool import BrowserPool, activate_browser_pool
 from scrapeyard.engine.page_cache import PageCache, activate_page_cache
 from scrapeyard.engine.fetch_classifier import ACCESS_DENIAL_TYPES, classify_fetch_exception
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
@@ -997,10 +998,17 @@ async def _process_all_targets(
                     activity=context.activity,
                 )
 
-    # Target tasks inherit the run's domain policy and page cache.
+    # Replay launches no browser, so there is nothing to share.
+    browser_pool = (
+        BrowserPool(config.execution.concurrency)
+        if config.execution.reuse_browser and not context.replaying
+        else None
+    )
+    # Target tasks inherit the run's domain policy, page cache and browser pool.
     with (
         activate_domain_policy(context.domain_policy),
         activate_page_cache(context.page_cache, unavailable=context.page_cache_unavailable),
+        activate_browser_pool(browser_pool),
     ):
         tasks = [
             asyncio.create_task(_process_one(target_index, target_cfg))
@@ -1015,6 +1023,15 @@ async def _process_all_targets(
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            if browser_pool is not None:
+                try:
+                    await browser_pool.aclose()
+                except Exception as exc:
+                    # Results are already extracted; a failed close must not lose them.
+                    logger.warning(
+                        "Closing shared browsers failed job_id=%s run_id=%s error_type=%s",
+                        job_id, run_id, type(exc).__name__,
+                    )
 
 
 async def _fetch_and_validate_target(

@@ -168,9 +168,17 @@ class BrowserSession:
         self.fetcher_cls = fetcher_cls
         self._stack = AsyncExitStack()
         self._context: Any = None
+        # Requests the route guard handled since the browser opened.
+        self.routed_requests = 0
+
+    @property
+    def disconnected(self) -> bool:
+        """True when the browser went away after the session opened it."""
+        return self._context is not None and not self._context.browser.is_connected()
 
     async def aclose(self) -> None:
         self._context = None
+        self.routed_requests = 0
         await self._stack.aclose()
 
     async def _open(self, engine: Any) -> None:
@@ -433,7 +441,7 @@ class BrowserSession:
             **kwargs,
             adaptor_arguments={**self.fetcher_cls._generate_parser_arguments(), **custom_config},
         )
-        if self._context is not None and not self._context.browser.is_connected():
+        if self.disconnected:
             raise httpx.NetworkError("Browser session disconnected")
         if self._context is None:
             await self._open(engine)
@@ -496,6 +504,7 @@ class BrowserSession:
 
         async def guard(route: Any) -> None:
             nonlocal route_error
+            self.routed_requests += 1
             try:
                 wrapped = (
                     _BudgetedRoute(route, reserve, observe_abort) if budget is not None else route

@@ -487,6 +487,22 @@ runs on that host fail fast with `domain_cooldown` and make no request. Each
 run reports these outcomes in `run_budget.domain_guard`. Operators inspect or
 clear a host with `GET`/`DELETE /domains/{host}/guard`.
 
+`execution.reuse_browser: true` keeps one browser and context for the run's
+browser targets that share a registrable domain, fetcher, proxy and `browser`
+block, instead of launching a browser per target. Each fetch still opens a fresh
+page, and routes, budgets, URL guards and per-target diagnostics are unchanged.
+Cookies, local storage and other context state carry over from one target to the
+next, so a consent or session cookie one target receives is sent by the next.
+With `concurrency` above 1, a group keeps up to `concurrency` browsers and each
+running target uses one of them alone; the run never holds more than
+`concurrency` browsers, closing an idle browser of another group before opening
+one. Between targets an idle shared browser stays open: it holds no
+`SCRAPEYARD_WORKERS_MAX_BROWSERS` slot but its memory counts in the memory
+headroom check. A shared browser is replaced once it has handled 500 requests
+(sent, blocked or otherwise routed), because the Playwright driver's heap grows
+while one browser lives long, and all of the run's browsers close when its
+targets finish. Default `false`.
+
 `execution.page_cache` is a development aid for iterating on selectors without
 contacting the site. `record` stores the rendered HTML and minimal metadata of
 every successful top-level page (initial, pagination, and click-pagination
@@ -691,7 +707,8 @@ have a separate budget: HTML is sliced inside the browser, excerpts are truncate
 or omitted, and screenshots are omitted before writing when they do not fit.
 These diagnostic omissions do not fail an otherwise successful run.
 
-Each target's browser, context, pages and driver close when the target finishes.
+Each target's browser, context, pages and driver close when the target finishes
+(with `execution.reuse_browser`, when the run's targets finish).
 When the last running job ends, the worker also collects garbage and, on glibc,
 returns freed heap pages to the operating system (`malloc_trim`), so an idle
 service drops back toward its startup memory instead of keeping the heap high

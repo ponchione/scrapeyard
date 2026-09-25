@@ -22,6 +22,7 @@ from scrapling.engines.pw import PlaywrightEngine
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
+from scrapeyard.engine.browser_pool import BrowserPool, activate_browser_pool
 from scrapeyard.engine.scraper import TargetStatus, scrape_target
 
 
@@ -212,3 +213,27 @@ async def test_allow_listed_cdn_still_renders_the_items(fixture_site, tmp_path, 
     assert fixture_site.hits["static.example-cdn.test"] == int(allow)
     assert fixture_site.hits["tags.example-ads.test"] == 0
     assert traffic["third_party"]["requests"] == int(allow)
+
+
+async def test_same_site_targets_share_one_browser_launch(
+    fixture_site, tmp_path, monkeypatch,
+) -> None:
+    launch_kwargs = PlaywrightEngine._PlaywrightEngine__launch_kwargs  # type: ignore[attr-defined]
+    launches: list[object] = []
+
+    def counted_launch_kwargs(engine: Any) -> dict[str, Any]:
+        launches.append(engine)
+        return launch_kwargs(engine)
+
+    monkeypatch.setattr(PlaywrightEngine, "_PlaywrightEngine__launch_kwargs", counted_launch_kwargs)
+    pool = BrowserPool(1)
+    try:
+        with activate_browser_pool(pool):
+            first, first_traffic, _ = await scrape_fixture(tmp_path)
+            second, second_traffic, _ = await scrape_fixture(tmp_path)
+    finally:
+        await pool.aclose()
+
+    assert len(launches) == 1
+    assert second.data == first.data and len(first.data) == PRODUCTS
+    assert second_traffic["requests"] == first_traffic["requests"]
