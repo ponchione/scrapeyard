@@ -1392,29 +1392,43 @@ def _redact_output_artifact(
 
     if config.output.group_by == GroupBy.merge:
         if records_already_redacted:
-            redacted_merged_results = results
+            redacted_results: Any = results
             redaction_count = record_redaction_count
         else:
-            redacted_merged_results, redaction_count = (
-                redact_deployment_secrets_in_value_with_count(
-                    results,
-                    secret_values=secret_values,
-                )
+            redacted_results, redaction_count = redact_deployment_secrets_in_value_with_count(
+                results,
+                secret_values=secret_values,
             )
-        redacted_output["results"] = redacted_merged_results
-        if redaction_count:
-            redaction_metadata = {
-                "deployment_secret_matches": redaction_count,
-            }
-            if budget is not None:
-                budget.reserve_estimated_result_bytes(
-                    compact_json_size({"result_redaction": redaction_metadata})
-                )
-            redacted_output["result_redaction"] = redaction_metadata
+    else:
+        redacted_results, redaction_count = _redact_grouped_results(
+            results,
+            secret_values=secret_values,
+            records_already_redacted=records_already_redacted,
+            record_redaction_count=record_redaction_count,
+        )
+    redacted_output["results"] = redacted_results
+    if redaction_count:
+        redaction_metadata = {
+            "deployment_secret_matches": redaction_count,
+        }
         if budget is not None:
-            budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
-        return redacted_output
+            budget.reserve_estimated_result_bytes(
+                compact_json_size({"result_redaction": redaction_metadata})
+            )
+        redacted_output["result_redaction"] = redaction_metadata
+    if budget is not None:
+        budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
+    return redacted_output
 
+
+def _redact_grouped_results(
+    results: dict[str, Any],
+    *,
+    secret_values: Any,
+    records_already_redacted: bool,
+    record_redaction_count: int,
+) -> tuple[dict[str, Any], int]:
+    """Redact each target group's diagnostics, records and group key."""
     redacted_results: dict[str, Any] = {}
     redaction_count = record_redaction_count
     for group_key, target_result in results.items():
@@ -1448,19 +1462,7 @@ def _redact_output_artifact(
             unique_group_key = f"{redacted_group_key}#{suffix}"
             suffix += 1
         redacted_results[unique_group_key] = redacted_target
-    redacted_output["results"] = redacted_results
-    if redaction_count:
-        redaction_metadata = {
-            "deployment_secret_matches": redaction_count,
-        }
-        if budget is not None:
-            budget.reserve_estimated_result_bytes(
-                compact_json_size({"result_redaction": redaction_metadata})
-            )
-        redacted_output["result_redaction"] = redaction_metadata
-    if budget is not None:
-        budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
-    return redacted_output
+    return redacted_results, redaction_count
 
 
 def _redact_result_records(
