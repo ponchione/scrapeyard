@@ -421,6 +421,17 @@ class LocalResultStore:
                 if budget is not None:
                     budget.check_deadline()
 
+            async def restore_previous() -> None:
+                """Put back the prior artifact, or remove this run's new one."""
+                if previous_payload is None:
+                    with suppress(FileNotFoundError):
+                        path.unlink()
+                else:
+                    await cleanup_safe_to_thread(write_bytes_file, path, previous_payload)
+                if not run_dir_existed:
+                    with suppress(OSError):
+                        run_dir.rmdir()
+
             try:
                 serialized_bytes = await cleanup_safe_to_thread(
                     write_json_file_bounded,
@@ -456,18 +467,7 @@ class LocalResultStore:
                 if budget is not None:
                     budget.check_deadline()
             except JsonFileSizeLimitExceeded as exc:
-                if previous_payload is None:
-                    with suppress(FileNotFoundError):
-                        path.unlink()
-                else:
-                    await cleanup_safe_to_thread(
-                        write_bytes_file,
-                        path,
-                        previous_payload,
-                    )
-                if not run_dir_existed:
-                    with suppress(OSError):
-                        run_dir.rmdir()
+                await restore_previous()
                 if budget is not None:
                     budget.enforce_serialized_result_bytes(exc.observed_bytes)
                 raise BudgetExceeded(
@@ -477,18 +477,7 @@ class LocalResultStore:
                 ) from None
             except BaseException:
                 if not metadata_committed:
-                    if previous_payload is None:
-                        with suppress(FileNotFoundError):
-                            path.unlink()
-                    else:
-                        await cleanup_safe_to_thread(
-                            write_bytes_file,
-                            path,
-                            previous_payload,
-                        )
-                    if not run_dir_existed:
-                        with suppress(OSError):
-                            run_dir.rmdir()
+                    await restore_previous()
                 raise
 
         return SaveResultMeta(
