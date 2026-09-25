@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import os
 import re
 import sys
+from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 
 from scrapeyard.runtime.metrics import MEMORY_HEADROOM
@@ -114,3 +118,31 @@ def memory_headroom_mb(limit_mb: int, proc_root: Path = _DEFAULT_PROC_ROOT) -> f
                 headroom = limit_mb - usage
     MEMORY_HEADROOM.set(headroom * 1024 * 1024)
     return headroom
+
+
+@cache
+def _malloc_trim() -> Callable[[int], int] | None:
+    """Return glibc's ``malloc_trim``, or ``None`` on other platforms and C libraries."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        trim = ctypes.CDLL(None).malloc_trim
+    except (OSError, AttributeError):
+        return None
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    return trim
+
+
+def release_memory() -> None:
+    """Collect garbage and return freed heap pages to the operating system.
+
+    Browsers and their drivers exit with each target, but the allocator keeps
+    the heap pages freed after parsing pages and building results. Returning
+    them brings an idle process back near its baseline for admission checks
+    and the container limit.
+    """
+    gc.collect()
+    trim = _malloc_trim()
+    if trim is not None:
+        trim(0)

@@ -943,3 +943,27 @@ async def test_execute_without_task_handler_raises_instead_of_succeeding_silentl
 
     with pytest.raises(RuntimeError, match="requires a task_handler"):
         await pool._execute("job-1", run_id="run-1")
+
+
+@pytest.mark.asyncio
+async def test_memory_is_released_only_after_the_last_active_job_finishes():
+    pool = _make_pool()
+    release = {name: asyncio.Event() for name in ("job-1", "job-2")}
+
+    async def _execute(job_id: str, **_kwargs: Any) -> None:
+        await release[job_id].wait()
+        if job_id == "job-2":
+            raise RuntimeError("scrape crashed")
+
+    pool._execute = AsyncMock(side_effect=_execute)
+    with patch("scrapeyard.queue.pool.release_memory") as release_memory:
+        tasks = [asyncio.create_task(pool._run_job({}, job_id, job_id)) for job_id in release]
+        await asyncio.sleep(0)
+        release["job-1"].set()
+        await tasks[0]
+        release_memory.assert_not_called()
+
+        release["job-2"].set()
+        with pytest.raises(RuntimeError):
+            await tasks[1]
+        release_memory.assert_called_once_with()

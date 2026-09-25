@@ -689,6 +689,12 @@ have a separate budget: HTML is sliced inside the browser, excerpts are truncate
 or omitted, and screenshots are omitted before writing when they do not fit.
 These diagnostic omissions do not fail an otherwise successful run.
 
+Each target's browser, context, pages and driver close when the target finishes.
+When the last running job ends, the worker also collects garbage and, on glibc,
+returns freed heap pages to the operating system (`malloc_trim`), so an idle
+service drops back toward its startup memory instead of keeping the heap high
+from parsing pages and building results.
+
 Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
 Retries stop at the configured total-attempt or persisted-age boundary, honor
 safe `Retry-After` values for 429/503 responses, and retain inspectable failed

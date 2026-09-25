@@ -5,7 +5,8 @@ import asyncio
 import pytest
 
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
-from scrapeyard.queue.memory import get_process_rss_mb, memory_headroom_mb
+from scrapeyard.queue import memory
+from scrapeyard.queue.memory import get_process_rss_mb, memory_headroom_mb, release_memory
 
 
 def test_get_process_rss_mb_returns_none_off_linux() -> None:
@@ -93,3 +94,32 @@ async def test_browser_memory_reservations_wait_resume_and_release_on_cancellati
         await asyncio.wait_for(waiting, timeout=2)
     assert entered.is_set()
     assert limiter.active == 0
+
+
+def test_release_memory_collects_garbage_then_trims_the_heap(monkeypatch) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(memory.gc, "collect", lambda: calls.append("collect"))
+    monkeypatch.setattr(memory, "_malloc_trim", lambda: lambda pad: calls.append(("trim", pad)))
+
+    release_memory()
+
+    assert calls == ["collect", ("trim", 0)]
+
+
+def test_release_memory_without_malloc_trim_still_collects(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(memory.gc, "collect", lambda: calls.append("collect"))
+    monkeypatch.setattr(memory, "_malloc_trim", lambda: None)
+
+    release_memory()
+
+    assert calls == ["collect"]
+
+
+def test_malloc_trim_is_unavailable_off_linux(monkeypatch) -> None:
+    memory._malloc_trim.cache_clear()
+    monkeypatch.setattr(memory.sys, "platform", "darwin")
+    try:
+        assert memory._malloc_trim() is None
+    finally:
+        memory._malloc_trim.cache_clear()

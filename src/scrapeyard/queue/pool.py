@@ -23,7 +23,7 @@ from scrapeyard.queue.cancellation import (
     QueueDeliveryState as QueueDeliveryState,
     RunCancellationResult,
 )
-from scrapeyard.queue.memory import memory_headroom_mb
+from scrapeyard.queue.memory import memory_headroom_mb, release_memory
 from scrapeyard.runtime.metrics import MEMORY_DEFERRALS
 from scrapeyard.queue.priority import (
     PRIORITIES,
@@ -881,6 +881,8 @@ class WorkerPool:
             )
         finally:
             self._active_tasks -= 1
+            if self._active_tasks == 0:
+                release_memory()
         return {"job_id": job_id}
 
     async def _execute(
