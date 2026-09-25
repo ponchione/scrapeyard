@@ -62,6 +62,7 @@ _MAX_CONSOLE_MESSAGES = 20
 _MAX_REQUEST_FAILURES = 20
 _MAX_BLOCKED_REQUESTS = 20
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
@@ -510,7 +511,20 @@ def coerce_to_text(value: Any) -> str:
 
 
 def truncate_text(value: str, limit: int = _HTML_EXCERPT_CHARS) -> str:
-    normalized = re.sub(r"\s+", " ", value).strip()
+    """Collapse whitespace runs to one space, strip, and cut to *limit* characters.
+
+    Collapsing a prefix yields a prefix of the collapsed whole, and stripping
+    the whole removes at most its one trailing space. A prefix that keeps more
+    than ``limit + 1`` characters therefore decides the result, so a large page
+    is never normalized in full.
+    """
+    prefix_chars = 4 * limit
+    while limit >= 3 and prefix_chars < len(value):
+        normalized = _WHITESPACE_RE.sub(" ", value[:prefix_chars]).lstrip()
+        if len(normalized) > limit + 1:
+            return normalized[: limit - 3] + "..."
+        prefix_chars *= 2
+    normalized = _WHITESPACE_RE.sub(" ", value).strip()
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 3] + "..."
@@ -523,12 +537,12 @@ def response_text(page: Any) -> str:
     return coerce_to_text(page)
 
 
-def response_title(page: Any) -> str | None:
+def response_title(page: Any, html: Callable[[], str] | None = None) -> str | None:
     value = getattr(page, "title", None)
     if isinstance(value, str) and value.strip():
         return value.strip()
-    html = response_text(page)
-    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    text = response_text(page) if html is None else html()
+    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
     if match:
         return truncate_text(match.group(1), 300)
     return None
@@ -885,9 +899,17 @@ def populate_fetch_debug(debug: dict[str, Any], response: Any, url: str) -> None
     if not isinstance(response_url, str) or not response_url:
         response_url = None
     debug["final_url"] = response_url or debug.get("final_url") or url
-    debug["page_title"] = debug.get("page_title") or response_title(response)
+    # Parsed pages serialize their whole document for each text access.
+    html: list[str] = []
+
+    def page_html() -> str:
+        if not html:
+            html.append(response_text(response))
+        return html[0]
+
+    debug["page_title"] = debug.get("page_title") or response_title(response, page_html)
     excerpt_captured = bool(debug.pop("_html_excerpt_captured", False))
     if not excerpt_captured and not debug.get("html_excerpt_omitted"):
         debug["html_excerpt"] = debug.get("html_excerpt") or (
-            truncate_text(response_text(response)) or None
+            truncate_text(page_html()) or None
         )
