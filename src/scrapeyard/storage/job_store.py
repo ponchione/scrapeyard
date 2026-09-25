@@ -400,38 +400,10 @@ class SQLiteJobStore:
             )
             idempotency_row = await idempotency_cursor.fetchone()
             adhoc_cursor = await db.execute(
-                """SELECT COUNT(*) AS eligible_count,
-                          MIN(COALESCE(
-                              jobs.deletion_requested_at,
-                              jobs.updated_at,
-                              jobs.created_at
-                          )) AS oldest_eligible_at
-                   FROM jobs
-                   WHERE jobs.schedule_cron IS NULL
-                     AND (
-                         (
-                             jobs.status IN ('complete', 'partial', 'failed', 'cancelled')
-                             AND COALESCE(jobs.updated_at, jobs.created_at) <= ?
-                         )
-                         OR (
-                             jobs.status = 'deleting'
-                             AND jobs.delete_results_on_delete = 0
-                         )
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM webhook_deliveries
-                         WHERE webhook_deliveries.job_id = jobs.job_id
-                           AND (
-                               webhook_deliveries.status NOT IN ('delivered', 'failed')
-                               OR webhook_deliveries.scrubbed_at IS NULL
-                               OR webhook_deliveries.scrubbed_at > ?
-                           )
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM scrape_idempotency
-                         WHERE scrape_idempotency.job_id = jobs.job_id
-                           AND scrape_idempotency.expires_at > ?
-                     )""",
+                "SELECT COUNT(*) AS eligible_count, "
+                "MIN(COALESCE(jobs.deletion_requested_at, jobs.updated_at, jobs.created_at)) "
+                "AS oldest_eligible_at FROM jobs WHERE "
+                + self._adhoc_retention_eligibility_sql(),
                 (
                     fmt_dt(adhoc_expired_before),
                     fmt_dt(tombstone_expired_before),
@@ -486,33 +458,9 @@ class SQLiteJobStore:
             raise ValueError("Ad-hoc job cleanup limit must be positive")
         async with get_db("jobs.db") as db:
             cursor = await db.execute(
-                """SELECT jobs.job_id
-                   FROM jobs
-                   WHERE jobs.schedule_cron IS NULL
-                     AND (
-                         (
-                             jobs.status IN ('complete', 'partial', 'failed', 'cancelled')
-                             AND COALESCE(jobs.updated_at, jobs.created_at) <= ?
-                         )
-                         OR (
-                             jobs.status = 'deleting'
-                             AND jobs.delete_results_on_delete = 0
-                         )
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM webhook_deliveries
-                         WHERE webhook_deliveries.job_id = jobs.job_id
-                           AND (
-                               webhook_deliveries.status NOT IN ('delivered', 'failed')
-                               OR webhook_deliveries.scrubbed_at IS NULL
-                               OR webhook_deliveries.scrubbed_at > ?
-                             )
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM scrape_idempotency
-                         WHERE scrape_idempotency.job_id = jobs.job_id
-                           AND scrape_idempotency.expires_at > ?
-                     )
+                "SELECT jobs.job_id FROM jobs WHERE "
+                + self._adhoc_retention_eligibility_sql()
+                + """
                    ORDER BY COALESCE(
                                 jobs.deletion_requested_at,
                                 jobs.updated_at,
@@ -528,6 +476,37 @@ class SQLiteJobStore:
                 ),
             )
             return [str(row["job_id"]) for row in await cursor.fetchall()]
+
+    @staticmethod
+    def _adhoc_retention_eligibility_sql() -> str:
+        """Ad-hoc jobs safe to compact; parameters: expired, tombstone, observed."""
+        return """
+            jobs.schedule_cron IS NULL
+            AND (
+                (
+                    jobs.status IN ('complete', 'partial', 'failed', 'cancelled')
+                    AND COALESCE(jobs.updated_at, jobs.created_at) <= ?
+                )
+                OR (
+                    jobs.status = 'deleting'
+                    AND jobs.delete_results_on_delete = 0
+                )
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM webhook_deliveries
+                WHERE webhook_deliveries.job_id = jobs.job_id
+                  AND (
+                      webhook_deliveries.status NOT IN ('delivered', 'failed')
+                      OR webhook_deliveries.scrubbed_at IS NULL
+                      OR webhook_deliveries.scrubbed_at > ?
+                  )
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM scrape_idempotency
+                WHERE scrape_idempotency.job_id = jobs.job_id
+                  AND scrape_idempotency.expires_at > ?
+            )
+        """
 
     @staticmethod
     def _scheduled_history_eligibility_sql() -> str:
