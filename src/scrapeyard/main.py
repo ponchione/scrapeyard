@@ -50,6 +50,7 @@ from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
+from scrapeyard.queue.memory import freeze_startup_heap, thaw_startup_heap
 from scrapeyard.queue.reconciliation import (
     reconcile_stale_queued_jobs,
     start_queued_reconciliation_loop,
@@ -409,9 +410,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _ensure_runtime_directories()
         await _recover_stale_running_jobs()
         await _startup_runtime_services(app)
+        freeze_startup_heap()
 
         yield
     finally:
+        thaw_startup_heap()
         release_instance_lock = True
         try:
             await _shutdown_runtime_services(

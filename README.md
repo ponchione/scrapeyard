@@ -693,7 +693,9 @@ Each target's browser, context, pages and driver close when the target finishes.
 When the last running job ends, the worker also collects garbage and, on glibc,
 returns freed heap pages to the operating system (`malloc_trim`), so an idle
 service drops back toward its startup memory instead of keeping the heap high
-from parsing pages and building results.
+from parsing pages and building results. Objects built at startup are frozen
+out of garbage collection, so that collection and the ones during jobs scan only
+newer objects.
 
 Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
 Retries stop at the configured total-attempt or persisted-age boundary, honor

@@ -134,6 +134,22 @@ def _malloc_trim() -> Callable[[int], int] | None:
     return trim
 
 
+def freeze_startup_heap() -> None:
+    """Keep objects built at startup out of every later garbage collection.
+
+    Modules, settings, stores and the application live as long as the process.
+    After one collection they move to the permanent generation, so collections
+    during jobs and the one in :func:`release_memory` scan only newer objects.
+    """
+    gc.collect()
+    gc.freeze()
+
+
+def thaw_startup_heap() -> None:
+    """Return frozen objects to normal collection when the service shuts down."""
+    gc.unfreeze()
+
+
 def release_memory() -> None:
     """Collect garbage and return freed heap pages to the operating system.
 

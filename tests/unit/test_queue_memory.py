@@ -6,7 +6,13 @@ import pytest
 
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue import memory
-from scrapeyard.queue.memory import get_process_rss_mb, memory_headroom_mb, release_memory
+from scrapeyard.queue.memory import (
+    freeze_startup_heap,
+    get_process_rss_mb,
+    memory_headroom_mb,
+    release_memory,
+    thaw_startup_heap,
+)
 
 
 def test_get_process_rss_mb_returns_none_off_linux() -> None:
@@ -123,3 +129,15 @@ def test_malloc_trim_is_unavailable_off_linux(monkeypatch) -> None:
         assert memory._malloc_trim() is None
     finally:
         memory._malloc_trim.cache_clear()
+
+
+def test_startup_heap_is_collected_then_frozen_and_thawed(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(memory.gc, "collect", lambda: calls.append("collect"))
+    monkeypatch.setattr(memory.gc, "freeze", lambda: calls.append("freeze"))
+    monkeypatch.setattr(memory.gc, "unfreeze", lambda: calls.append("unfreeze"))
+
+    freeze_startup_heap()
+    thaw_startup_heap()
+
+    assert calls == ["collect", "freeze", "unfreeze"]

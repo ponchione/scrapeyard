@@ -52,6 +52,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - When the last running job finishes, the worker collects garbage and returns
   freed heap memory to the operating system (glibc `malloc_trim`), so idle
   memory returns near its startup level between jobs.
+- Objects built at startup are frozen out of garbage collection (`gc.freeze`),
+  which cuts the per-job collection from about 60 ms to 7 ms and lowers
+  per-job CPU time.
 - Browser configuration is now rejected for `fetcher: basic`, action fields
   that do not apply to the selected browser action are rejected, and YAML
   booleans are no longer coerced into numeric execution controls.

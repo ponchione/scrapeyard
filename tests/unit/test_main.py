@@ -176,8 +176,13 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     )
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", AsyncMock())
     monkeypatch.setattr(main_module, "close_db", AsyncMock())
+    heap = MagicMock()
+    monkeypatch.setattr(main_module, "freeze_startup_heap", heap.freeze)
+    monkeypatch.setattr(main_module, "thaw_startup_heap", heap.thaw)
 
     async with main_module.lifespan(app):
+        heap.freeze.assert_called_once_with()
+        heap.thaw.assert_not_called()
         assert not hasattr(app.state, "job_store")
         assert not hasattr(app.state, "error_store")
         assert not hasattr(app.state, "result_store")
@@ -223,6 +228,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     webhook_timeout = main_module.close_webhook_dispatcher.await_args.kwargs["timeout"]
     assert 0 <= webhook_timeout <= worker_timeout <= 7
     main_module.close_db.assert_awaited_once()
+    heap.thaw.assert_called_once_with()
     assert app.state.instance_lock is None
 
     restarted_lock = main_module.SingleInstanceLock(
