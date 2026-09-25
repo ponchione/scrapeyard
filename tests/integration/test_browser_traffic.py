@@ -169,6 +169,11 @@ async def test_report_lists_hosts_and_blocking_removes_them_without_changing_rec
     first = hosts["www.example.test"]
     # Catalog, app.js and its beacon are sent; the stylesheet is blocked.
     assert (first["third_party"], first["requests"], first["blocked"]) == (False, 3, 1)
+    types = first["resource_types"]
+    assert {name: (row["requests"], row["blocked"]) for name, row in types.items()} == {
+        "document": (1, 0), "script": (1, 0), "xhr": (1, 0), "other": (0, 1),
+    }
+    assert types["document"]["bytes"] > len(PAGES["www.example.test", "/catalog"][1])
     assert first["bytes"] > len(PAGES["www.example.test", "/catalog"][1])
     for host in THIRD_PARTY:
         assert hosts[host]["third_party"] is True

@@ -1,9 +1,9 @@
-"""Per-host request, block and byte counts reported in ``run_budget.traffic``."""
+"""Per-host and per-resource-type traffic counts reported in ``run_budget.traffic``."""
 
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,6 +18,9 @@ REPORTED_HOSTS = 25
 # Distinct hosts tracked per run; later hosts are pooled per party.
 MAX_TRACKED_HOSTS = 1000
 _OTHER_HOSTS = {False: "(other first-party hosts)", True: "(other third-party hosts)"}
+# Browser resource types counted separately; every other type counts as "other".
+RESOURCE_TYPES = ("document", "script", "xhr", "fetch", "other")
+_NAMED_TYPES = frozenset(RESOURCE_TYPES)
 
 
 @lru_cache(maxsize=4096)
@@ -57,11 +60,26 @@ def url_site(url: str) -> str | None:
 
 
 @dataclass
-class _HostCounts:
-    third_party: bool
+class _Counts:
     requests: int = 0
     blocked: int = 0
     bytes: int = 0
+
+    def report(self) -> dict[str, int]:
+        return {"requests": self.requests, "blocked": self.blocked, "bytes": self.bytes}
+
+
+@dataclass
+class _HostCounts(_Counts):
+    third_party: bool = False
+    types: dict[str, _Counts] = field(default_factory=dict)
+
+    def of_type(self, resource_type: str) -> _Counts:
+        name = resource_type if resource_type in _NAMED_TYPES else "other"
+        counts = self.types.get(name)
+        if counts is None:
+            counts = self.types[name] = _Counts()
+        return counts
 
 
 class HostTraffic:
@@ -69,9 +87,10 @@ class HostTraffic:
 
     ``requests`` are requests released to the network (including native
     redirect hops), ``blocked`` are browser requests aborted before sending, and
-    ``bytes`` are response bytes the transport reported receiving. A host is
-    third-party when its registrable domain differs from the requesting
-    target's; a host that is first-party for any target stays first-party.
+    ``bytes`` are response bytes the transport reported receiving. Each count is
+    also kept per resource type (:data:`RESOURCE_TYPES`). A host is third-party
+    when its registrable domain differs from the requesting target's; a host
+    that is first-party for any target stays first-party.
     """
 
     def __init__(self, *, max_hosts: int = MAX_TRACKED_HOSTS) -> None:
@@ -92,15 +111,23 @@ class HostTraffic:
             counts.third_party = False
         return counts
 
-    def request(self, url: str, site: str | None) -> None:
-        self._counts(url, site).requests += 1
+    def request(self, url: str, site: str | None, resource_type: str = "other") -> None:
+        counts = self._counts(url, site)
+        counts.requests += 1
+        counts.of_type(resource_type).requests += 1
 
-    def blocked(self, url: str, site: str | None) -> None:
-        self._counts(url, site).blocked += 1
+    def blocked(self, url: str, site: str | None, resource_type: str = "other") -> None:
+        counts = self._counts(url, site)
+        counts.blocked += 1
+        counts.of_type(resource_type).blocked += 1
 
-    def received(self, url: str, site: str | None, amount: int) -> None:
+    def received(
+        self, url: str, site: str | None, amount: int, resource_type: str = "other",
+    ) -> None:
         if amount > 0:
-            self._counts(url, site).bytes += amount
+            counts = self._counts(url, site)
+            counts.bytes += amount
+            counts.of_type(resource_type).bytes += amount
 
     def snapshot(self, *, reported_hosts: int = REPORTED_HOSTS) -> dict[str, Any]:
         ranked = sorted(
@@ -117,6 +144,14 @@ class HostTraffic:
                 "bytes": sum(counts.bytes for counts in group),
             }
 
+        by_type = {name: _Counts() for name in RESOURCE_TYPES}
+        for _, counts in ranked:
+            for name, typed in counts.types.items():
+                total = by_type[name]
+                total.requests += typed.requests
+                total.blocked += typed.blocked
+                total.bytes += typed.bytes
+
         first, third = totals(False), totals(True)
         return {
             "requests": first["requests"] + third["requests"],
@@ -124,13 +159,17 @@ class HostTraffic:
             "bytes": first["bytes"] + third["bytes"],
             "first_party": first,
             "third_party": third,
+            "resource_types": {name: counts.report() for name, counts in by_type.items()},
             "hosts": [
                 {
                     "host": host,
                     "third_party": counts.third_party,
-                    "requests": counts.requests,
-                    "blocked": counts.blocked,
-                    "bytes": counts.bytes,
+                    **counts.report(),
+                    "resource_types": {
+                        name: counts.types[name].report()
+                        for name in RESOURCE_TYPES
+                        if name in counts.types
+                    },
                 }
                 for host, counts in ranked[:reported_hosts]
             ],

@@ -291,7 +291,7 @@ async def _fetch_basic_with_safe_redirects(
         )
         if budget is not None:
             await budget.reserve_requests()
-            budget.traffic.request(current_url, site)
+            budget.traffic.request(current_url, site, "document")
         if production_stream:
             request_kwargs["cookie_jar"] = cookie_jar
             request_kwargs["cookie_url"] = current_url
@@ -318,13 +318,13 @@ async def _fetch_basic_with_safe_redirects(
             measured_bytes = _measured_response_body_bytes(response)
             if measured_bytes is not None:
                 await budget.consume_fetched_bytes(measured_bytes)
-                budget.traffic.received(current_url, site, measured_bytes)
+                budget.traffic.received(current_url, site, measured_bytes, "document")
             else:
                 budget.check_deadline()
         elif budget is not None:
             received = getattr(response, RECEIVED_BYTES_ATTRIBUTE, None)
             if isinstance(received, int):
-                budget.traffic.received(current_url, site, received)
+                budget.traffic.received(current_url, site, received, "document")
         if getattr(response, "status", None) not in _BASIC_REDIRECT_STATUSES:
             if redirects:
                 debug["redirects"] = redirects

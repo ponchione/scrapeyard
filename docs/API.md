@@ -163,11 +163,25 @@ Every run reports `run_budget.traffic`, the requests it sent grouped by host:
   "bytes": 5210044,
   "first_party": {"hosts": 2, "requests": 640, "blocked": 3100, "bytes": 4900312},
   "third_party": {"hosts": 14, "requests": 172, "blocked": 301, "bytes": 309732},
+  "resource_types": {
+    "document": {"requests": 30, "blocked": 0, "bytes": 1802113},
+    "script": {"requests": 505, "blocked": 12, "bytes": 3015880},
+    "xhr": {"requests": 180, "blocked": 0, "bytes": 290051},
+    "fetch": {"requests": 90, "blocked": 0, "bytes": 96000},
+    "other": {"requests": 7, "blocked": 3389, "bytes": 6000}
+  },
   "hosts": [
     {"host": "www.example.test", "third_party": false, "requests": 610,
-     "blocked": 3050, "bytes": 4700120},
+     "blocked": 3050, "bytes": 4700120,
+     "resource_types": {
+       "document": {"requests": 30, "blocked": 0, "bytes": 1802113},
+       "script": {"requests": 400, "blocked": 0, "bytes": 2607956},
+       "xhr": {"requests": 180, "blocked": 0, "bytes": 290051},
+       "other": {"requests": 0, "blocked": 3050, "bytes": 0}
+     }},
     {"host": "tags.example-ads.test", "third_party": true, "requests": 96,
-     "blocked": 0, "bytes": 180211}
+     "blocked": 0, "bytes": 180211,
+     "resource_types": {"script": {"requests": 96, "blocked": 0, "bytes": 180211}}}
   ],
   "hosts_omitted": 3
 }
@@ -192,6 +206,11 @@ Every run reports `run_budget.traffic`, the requests it sent grouped by host:
   `hosts_omitted` counts the rest, which the totals still include. A run tracks
   at most 1,000 distinct hosts; later hosts are pooled as `(other first-party
   hosts)` or `(other third-party hosts)`.
+- `resource_types` splits the same counts by the browser's resource type:
+  `document` (pages, frames and basic fetches), `script`, `xhr`, `fetch`, and
+  `other` for everything else (stylesheets, images, fonts, media, beacons and
+  unknown types). The run totals always list all five types; each host lists
+  only the types it had.
 - Only hostnames are recorded, never paths or query strings.
 
 ## Error envelope

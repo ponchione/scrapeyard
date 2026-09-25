@@ -454,11 +454,11 @@ class BrowserSession:
             if budget is not None:
                 await budget.reserve_requests(_MAX_REDIRECTS + 1)
                 chains[request] = 1
-                budget.traffic.request(request.url, site)
+                budget.traffic.request(request.url, site, request.resource_type)
 
         def observe_abort(request: Any) -> None:
             if traffic is not None:
-                traffic.blocked(request.url, site)
+                traffic.blocked(request.url, site, request.resource_type)
 
         def observe_request(request: Any) -> None:
             if request.redirected_from is None:
@@ -469,19 +469,19 @@ class BrowserSession:
             if root in chains:
                 chains[root] += 1
                 if traffic is not None:
-                    traffic.request(request.url, site)
+                    traffic.request(request.url, site, request.resource_type)
 
         def record_received(request: Any, sized: asyncio.Future[int]) -> None:
             sizing.discard(sized)
             if traffic is not None and not sized.cancelled() and sized.exception() is None:
-                traffic.received(request.url, site, sized.result())
+                traffic.received(request.url, site, sized.result(), request.resource_type)
 
         def observe_response(response: Any) -> None:
             if traffic is None:
                 return
             declared = _declared_response_bytes(response)
             if declared is not None:
-                traffic.received(response.url, site, declared)
+                traffic.received(response.url, site, declared, response.request.resource_type)
             else:
                 # Chunked bodies declare no length; ask the browser once they finish.
                 unsized.add(response.request)

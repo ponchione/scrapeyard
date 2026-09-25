@@ -44,6 +44,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   subrequests outside the target's registrable domain except
   `browser.third_party_allow_hosts`, and `browser.block_url_patterns` aborts
   subrequests matching `*` patterns. Top-level navigations are never blocked.
+- `run_budget.traffic.resource_types` and each listed host's `resource_types`
+  split requests, blocks and bytes by resource type (`document`, `script`,
+  `xhr`, `fetch`, `other`).
 
 ### Changed
 - Click pagination now waits in the page for the items to change (checked every

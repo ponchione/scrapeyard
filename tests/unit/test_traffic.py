@@ -41,16 +41,20 @@ def test_registrable_domain_uses_the_bundled_suffix_list(host: str, expected: st
     assert registrable_domain(host) == expected
 
 
+def _counts(requests: int = 0, blocked: int = 0, bytes: int = 0) -> dict[str, int]:
+    return {"requests": requests, "blocked": blocked, "bytes": bytes}
+
+
 def test_report_keeps_hosts_only_and_splits_first_and_third_party() -> None:
     traffic = HostTraffic()
     site = url_site("https://www.example.test/catalog?page=2")
-    traffic.request("https://www.example.test/catalog?page=2&token=abc", site)
-    traffic.request("https://img.example.test/a.js", site)
-    traffic.received("https://www.example.test/catalog?page=2", site, 1200)
-    traffic.request("https://tags.example-ads.test/t.js?id=secret", site)
-    traffic.request("https://tags.example-ads.test/t.js?id=other", site)
-    traffic.blocked("https://collect.example-metrics.test/b?u=1", site)
-    traffic.received("https://tags.example-ads.test/t.js", site, 300)
+    traffic.request("https://www.example.test/catalog?page=2&token=abc", site, "document")
+    traffic.request("https://img.example.test/a.js", site, "script")
+    traffic.received("https://www.example.test/catalog?page=2", site, 1200, "document")
+    traffic.request("https://tags.example-ads.test/t.js?id=secret", site, "script")
+    traffic.request("https://tags.example-ads.test/t.js?id=other", site, "script")
+    traffic.blocked("https://collect.example-metrics.test/b?u=1", site, "ping")
+    traffic.received("https://tags.example-ads.test/t.js", site, 300, "script")
 
     report = traffic.snapshot()
 
@@ -60,13 +64,38 @@ def test_report_keeps_hosts_only_and_splits_first_and_third_party() -> None:
     assert report["first_party"] == {"hosts": 2, "requests": 2, "blocked": 0, "bytes": 1200}
     assert report["third_party"] == {"hosts": 2, "requests": 2, "blocked": 1, "bytes": 300}
     assert report["hosts"] == [
-        {"host": "tags.example-ads.test", "third_party": True, "requests": 2, "blocked": 0, "bytes": 300},
-        {"host": "www.example.test", "third_party": False, "requests": 1, "blocked": 0, "bytes": 1200},
-        {"host": "img.example.test", "third_party": False, "requests": 1, "blocked": 0, "bytes": 0},
-        {"host": "collect.example-metrics.test", "third_party": True, "requests": 0, "blocked": 1, "bytes": 0},
+        {"host": "tags.example-ads.test", "third_party": True, **_counts(2, 0, 300),
+         "resource_types": {"script": _counts(2, 0, 300)}},
+        {"host": "www.example.test", "third_party": False, **_counts(1, 0, 1200),
+         "resource_types": {"document": _counts(1, 0, 1200)}},
+        {"host": "img.example.test", "third_party": False, **_counts(1),
+         "resource_types": {"script": _counts(1)}},
+        {"host": "collect.example-metrics.test", "third_party": True, **_counts(0, 1),
+         "resource_types": {"other": _counts(0, 1)}},
     ]
     assert report["hosts_omitted"] == 0
     assert "?" not in repr(report) and "/" not in repr(report)
+
+
+def test_report_totals_every_resource_type_and_pools_the_rest_as_other() -> None:
+    traffic = HostTraffic()
+    for resource_type in ("document", "script", "script", "xhr", "fetch", "stylesheet", "image"):
+        traffic.request("https://www.example.test/x", "example.test", resource_type)
+    traffic.blocked("https://www.example.test/p.png", "example.test", "image")
+    traffic.received("https://www.example.test/app.js", "example.test", 500, "script")
+    traffic.request("https://www.example.test/unknown", "example.test")
+
+    report = traffic.snapshot()
+
+    assert report["resource_types"] == {
+        "document": _counts(1),
+        "script": _counts(2, 0, 500),
+        "xhr": _counts(1),
+        "fetch": _counts(1),
+        "other": _counts(3, 1),
+    }
+    assert report["hosts"][0]["resource_types"] == report["resource_types"]
+    assert sum(row["requests"] for row in report["resource_types"].values()) == report["requests"]
 
 
 def test_report_is_bounded_but_totals_cover_every_host() -> None:
@@ -123,7 +152,8 @@ async def test_basic_redirects_are_counted_per_host(monkeypatch) -> None:
 
     hosts = {row["host"]: row for row in budget.snapshot()["traffic"]["hosts"]}
     assert hosts["www.example.test"] == {
-        "host": "www.example.test", "third_party": False, "requests": 1, "blocked": 0, "bytes": 3,
+        "host": "www.example.test", "third_party": False, **_counts(1, 0, 3),
+        "resource_types": {"document": _counts(1, 0, 3)},
     }
     assert hosts["shop.example-mall.test"]["third_party"] is True
     assert hosts["shop.example-mall.test"]["bytes"] == 5
@@ -179,8 +209,8 @@ async def test_streamed_basic_fetch_reports_encoded_bytes_received(monkeypatch, 
 
     report = budget.snapshot()["traffic"]
     assert report["hosts"] == [{
-        "host": "www.example.test", "third_party": False, "requests": 1, "blocked": 0,
-        "bytes": len(encoded),
+        "host": "www.example.test", "third_party": False, **_counts(1, 0, len(encoded)),
+        "resource_types": {"document": _counts(1, 0, len(encoded))},
     }]
     assert budget.fetched_bytes == len(response.body) > len(encoded)
 
