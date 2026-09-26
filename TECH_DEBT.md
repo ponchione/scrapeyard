@@ -84,6 +84,8 @@ coverage and removal-scope contract documented in [docs/API.md](docs/API.md#pagi
 | TD-20 | P1 | Secure startup after host/Docker restart and runtime monitoring are unqualified |
 | TD-21 | P1 | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | Deployment and rollback lack retained, qualified release artifacts |
+| TD-23 | P3 | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
+| TD-24 | P3 | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 
 For TD-17 through TD-22, read the deployment assessment and the linked source
 before implementation. Reuse existing scripts and settings. Record local
@@ -91,6 +93,8 @@ implementation checks separately from operator/environment-dependent evidence;
 keep an entry open until its deployed acceptance checks pass. Eyebox's
 [go-live checklist](../eyebox/GO-LIVE-TESTING-CHECKLIST.md) owns launch gate
 closure. Repository edits alone do not provision infrastructure or activate jobs.
+TD-23 and TD-24 come from the 2026-09-25 traffic and memory pass (`d0591c7`
+through `5de7dc9`); measure before changing anything.
 
 ### TD-17 — Eyebox and Scrapeyard limits lack a jointly qualified operating envelope
 
@@ -341,3 +345,70 @@ Verify readiness, known result reads, effective security policy, and one
 application instance after both transitions. Exercise the documented data
 restore branch in isolation if schema rollback requires it; record image/config
 identifiers and commands so another operator can repeat the rollback.
+
+### TD-23 — The browser URL guard pays a thread hop and a DNS lookup on every subrequest
+
+**Priority/ownership:** P3; browser fetch efficiency. Measured locally; the
+guard itself must not change without a security review.
+
+**Problem:** `_guarded_async_intercept_route` runs `assert_public_url` through
+`run_thread_work` for every browser subrequest, and each call resolves the host
+again. Measured over 6,500 subrequests on 40 hosts: the lexical checks alone
+take 12 us per request, the thread hop brings it to 126 us wall and 347 us CPU
+(about 0.8 s wall and 2.3 s CPU per run), and an uncached resolver answer costs
+up to 50 ms, which dominates. With four run threads, slow lookups also delay page
+loads: a fixture page of 250 subrequests on unresolvable `.test` names spends
+most of its 5.5 s in guard lookups.
+
+**Start here:** [browser_debug.py](src/scrapeyard/engine/browser_debug.py)
+(`_guarded_async_intercept_route`),
+[url_guard.py](src/scrapeyard/engine/url_guard.py) (`assert_public_url`),
+[run_threads.py](src/scrapeyard/common/run_threads.py).
+
+**Work:** evaluate a per-run verdict cache keyed by canonical hostname with a
+short TTL (for example 30 to 60 seconds): run the lexical checks inline on every
+request, and hop to a thread and resolve only when the host has no fresh
+verdict. Keep rejections uncached or cached as rejections only, keep
+`URLResolutionError` behavior when resolution is required (proxy or remote
+CDP), and write down the rebinding argument (the browser resolves on its own
+after the guard in both designs). Measure on real traffic first: if resolver
+answers are already cached upstream and fast, the thread hop alone may not be
+worth a guard change.
+
+**Done when:** a security review accepts the design, the guard's existing tests
+pass unchanged, and a before/after run on the same pages shows the saved CPU and
+wall time with identical records and traffic counts.
+
+### TD-24 — Browser reuse and its script cache are tuned on fixtures, not real traffic
+
+**Priority/ownership:** P3; browser traffic and memory. `execution.reuse_browser`
+is opt-in; the numbers behind its defaults come from local fixtures only.
+
+**Problem:** three choices rest on fixture measurements: the shared-browser
+replacement threshold (`RECYCLE_AFTER_REQUESTS = 250` routed requests, chosen to
+keep peak memory within about 5% of one browser per target), the script cache
+bounds (32 MiB per run, 8 MiB per response), and the cache admitting only
+responses with explicit freshness and no `Vary` beyond `Accept-Encoding`. On
+fixtures, reuse cut requests by 60-66% and bytes by 82-95% with identical
+records, and peak memory rose 5-8% in-process and 12-15% in the production
+image with 1 MB pages (driver heap timing). Sites that send `no-cache` with
+`ETag`, `Vary: Origin`, or cache-busting query strings get no benefit, and heavy
+pages reach the threshold within one target, so they still launch one browser
+per target.
+
+**Start here:** [browser_pool.py](src/scrapeyard/engine/browser_pool.py),
+[asset_cache.py](src/scrapeyard/engine/asset_cache.py),
+[browser_session.py](src/scrapeyard/engine/browser_session.py) (`fetch`,
+`_ReleasedRoute`), and `run_budget.traffic` (`cached`, `resource_types`).
+
+**Work:** once runs with `reuse_browser` exist, compare each against the same
+job without it: `traffic.requests`, `traffic.bytes`, `traffic.cached`, the
+`script` share of `resource_types`, launches, wall time, and container anon
+peak. Only if real pages show a large uncached script share, consider
+revalidation (answer a `304` from the stored body) or `Vary: Origin` support.
+Retune the replacement threshold from real peaks, or count fulfilled bytes as
+well as requests if cached bodies drive the driver's heap.
+
+**Done when:** the defaults are confirmed or changed with a before/after
+measurement on real runs, with identical records, and README states the
+measured effect instead of fixture numbers.
