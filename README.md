@@ -733,6 +733,13 @@ from parsing pages and building results. Objects built at startup are frozen
 out of garbage collection, so that collection and the ones during jobs scan only
 newer objects.
 
+A container's `memory.current` (and `docker stats` or cAdvisor usage) also counts
+page cache: after browser jobs, about 300-450 MB of `file` memory in
+`memory.stat` is Chromium, Firefox and library files the container has read,
+plus data files. The kernel reclaims it under memory pressure, so judge the
+service by `anon` memory, which returns to about 125 MB after jobs (about
+105 MB at startup).
+
 Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
 Retries stop at the configured total-attempt or persisted-age boundary, honor
 safe `Retry-After` values for 429/503 responses, and retain inspectable failed
