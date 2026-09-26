@@ -1016,3 +1016,27 @@ def test_scrapling_response_debug_reads_document_instead_of_root_node_text():
     populate_fetch_debug(debug, response, response.url)
     assert debug["page_title"] == "Verify you are human"
     assert classify_page_signals(debug) == ErrorType.challenge_page
+
+
+def test_building_a_response_keeps_no_reference_to_the_page_text() -> None:
+    import gc
+    import sys
+
+    from scrapling import PlayWrightFetcher
+    from scrapling.engines.toolbelt.custom import Response, ResponseEncoding
+
+    text = "<html><body><p>" + "Scope — 3-9x40 ® " * 200 + "</p></body></html>"
+    references = sys.getrefcount(text)
+
+    response = Response(
+        url="https://www.example.test/c/1", text=text, body=text.encode(), status=200,
+        reason="OK", cookies={}, headers={}, request_headers={},
+        encoding="text/html; charset=utf-8", **PlayWrightFetcher._generate_parser_arguments(),
+    )
+    assert response.encoding == "utf-8"
+    del response
+    gc.collect()
+
+    assert sys.getrefcount(text) == references
+    assert ResponseEncoding.get_value("text/html", "plain") == "ISO-8859-1"
+    assert ResponseEncoding.get_value(None) == "utf-8"

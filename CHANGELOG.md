@@ -83,6 +83,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The service no longer keeps the last 128 fetched pages in memory after runs:
+  Scrapling's `ResponseEncoding.get_value` memoized every response's full text
+  in an `lru_cache`. Scrapeyard now calls it uncached; encodings are unchanged.
 - Closed owned subprocess pipes on every egress-probe helper path, including
   assertion and timeout cleanup, so the warning-clean test gate stays clean.
 - Allowed source-scoped established return traffic through the deployment

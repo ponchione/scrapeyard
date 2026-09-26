@@ -18,6 +18,7 @@ from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
 from scrapling.engines import camo as scrapling_camo_engine
 from scrapling.engines import pw as scrapling_pw_engine
 from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
+from scrapling.engines.toolbelt.custom import ResponseEncoding
 from scrapling.engines.toolbelt.navigation import (
     async_intercept_route as scrapling_async_intercept_route,
 )
@@ -244,12 +245,26 @@ def _install_browser_route_guard() -> None:
     )
 
 
+def _uncache_response_encoding() -> None:
+    # Scrapling memoizes ResponseEncoding.get_value(content_type, text) in an
+    # lru_cache(128) keyed by each page's full text, so the process kept the
+    # last 128 pages alive after runs (hundreds of MB for large listings).
+    # Distinct pages never hit that cache and the function is pure.
+    get_value = ResponseEncoding.__dict__["get_value"].__func__
+    _set_dynamic_attribute(
+        ResponseEncoding,
+        "get_value",
+        classmethod(getattr(get_value, "__wrapped__", get_value)),
+    )
+
+
 def _set_dynamic_attribute(target: object, name: str, value: object) -> None:
     """Set one attribute at an explicitly dynamic dependency boundary."""
     setattr(target, name, value)
 
 
 _install_browser_route_guard()
+_uncache_response_encoding()
 
 
 def _safe_text_attr(value: Any, attr: str) -> str | None:
