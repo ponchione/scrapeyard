@@ -386,20 +386,35 @@ async def recover_stale_running_jobs(
     recovered_at: datetime,
     limit: int | None,
 ) -> list[RunRecovery]:
-    query = """SELECT jobs.job_id, jobs.current_run_id
-                       FROM jobs
-                       LEFT JOIN job_runs
-                         ON job_runs.job_id = jobs.job_id
-                        AND job_runs.run_id = jobs.current_run_id
-                       WHERE jobs.status = 'running'
-                         AND (
-                             job_runs.run_id IS NULL
-                             OR job_runs.status != 'running'
-                             OR job_runs.heartbeat_at IS NULL
-                             OR job_runs.heartbeat_at <= ?
-                         )
-                       ORDER BY COALESCE(job_runs.heartbeat_at, jobs.updated_at) ASC,
-                                jobs.job_id ASC"""
+    # Owned running jobs come from the partial idx_jobs_admission, which the
+    # redundant status IN (...) lets apply, and running jobs without a current
+    # run from idx_jobs_running_unowned, so neither branch scans every job.
+    query = """SELECT job_id, current_run_id
+                       FROM (
+                           SELECT jobs.job_id, jobs.current_run_id,
+                                  COALESCE(job_runs.heartbeat_at, jobs.updated_at)
+                                      AS recovery_order
+                           FROM jobs
+                           LEFT JOIN job_runs
+                             ON job_runs.job_id = jobs.job_id
+                            AND job_runs.run_id = jobs.current_run_id
+                           WHERE jobs.status = 'running'
+                             AND jobs.status IN ('queued', 'running')
+                             AND jobs.current_run_id IS NOT NULL
+                             AND (
+                                 job_runs.run_id IS NULL
+                                 OR job_runs.status != 'running'
+                                 OR job_runs.heartbeat_at IS NULL
+                                 OR job_runs.heartbeat_at <= ?
+                             )
+                           UNION ALL
+                           SELECT jobs.job_id, jobs.current_run_id,
+                                  jobs.updated_at AS recovery_order
+                           FROM jobs
+                           WHERE jobs.status = 'running'
+                             AND jobs.current_run_id IS NULL
+                       )
+                       ORDER BY recovery_order ASC, job_id ASC"""
     parameters: tuple[object, ...] = (fmt_dt(cutoff),)
     if limit is not None:
         if limit < 1:

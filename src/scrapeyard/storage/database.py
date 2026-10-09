@@ -34,6 +34,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "019_create_queued_run_snapshots.sql",
         "021_add_admission_index.sql",
         "022_add_retention_lookup_indexes.sql",
+        "025_add_running_unowned_index.sql",
     ),
     "errors.db": (
         "002_create_errors.sql",

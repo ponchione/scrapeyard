@@ -58,6 +58,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Stale-running recovery, which runs every minute under the jobs.db write
+  lock, no longer scans every job. With 2 KiB configs it took 7.7 ms at 6,600
+  jobs and 27 ms at 25,000; it now takes under 1 ms at both. Migration `025`
+  adds a partial index on running jobs without a current run, which stays
+  empty unless that invalid state exists. A binary older than this change
+  refuses to start on an upgraded database, so rolling back means restoring
+  the pre-upgrade backup.
 - The container image builds with pip 26.2.1 (26.1.2 has PYSEC-2026-3721)
   and no longer ships pip at runtime. Its Debian package snapshot moves to
   2026-10-08, which picks up the perl security update. CI and the

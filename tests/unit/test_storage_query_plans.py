@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 import scrapeyard.storage.error_store as error_store_module
+import scrapeyard.storage.job_recovery as job_recovery_module
 import scrapeyard.storage.job_store as job_store_module
 from scrapeyard.models.job import ErrorFilters
 from scrapeyard.storage.database import get_db, init_db
@@ -95,6 +96,21 @@ WHERE jobs.status = 'queued'
 ORDER BY jobs.updated_at ASC, jobs.job_id ASC LIMIT ? OFFSET ?"""
 
 _OLD_SCHEDULED_FROM = "FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id WHERE "
+
+_OLD_STALE_RUNNING = """SELECT jobs.job_id, jobs.current_run_id
+FROM jobs
+LEFT JOIN job_runs
+  ON job_runs.job_id = jobs.job_id
+ AND job_runs.run_id = jobs.current_run_id
+WHERE jobs.status = 'running'
+  AND (
+      job_runs.run_id IS NULL
+      OR job_runs.status != 'running'
+      OR job_runs.heartbeat_at IS NULL
+      OR job_runs.heartbeat_at <= ?
+  )
+ORDER BY COALESCE(job_runs.heartbeat_at, jobs.updated_at) ASC,
+         jobs.job_id ASC"""
 
 
 class _RecordingConnection:
@@ -270,6 +286,67 @@ async def test_stale_queued_jobs_use_admission_index_and_keep_results(statements
 
         plan = await _plan("jobs.db", sql, params)
         assert plan[0].startswith("SEARCH jobs USING INDEX idx_jobs_admission")
+
+
+async def test_stale_running_recovery_uses_indexes_and_keeps_results(statements, monkeypatch):
+    store = SQLiteJobStore()
+    await _seed(_INSERT_JOB, [
+        ("fresh", "a", "running", _ts(1), _ts(1), None, "f-run", None),
+        ("stale", "b", "running", _ts(1), _ts(1), None, "s-run", None),
+        ("stale-tie", "c", "running", _ts(1), _ts(1), "0 * * * *", "st-run", None),
+        ("at-cutoff", "d", "running", _ts(1), _ts(1), None, "c-run", None),
+        ("terminal-run", "e", "running", _ts(1), _ts(1), None, "t-run", None),
+        ("missing-run", "f", "running", _ts(1), _ts(2), None, "m-run", None),
+        ("unowned-b", "g", "running", _ts(1), _ts(4), None, None, None),
+        ("unowned-a", "h", "running", _ts(1), _ts(4), "0 * * * *", None, None),
+        ("queued", "i", "queued", _ts(1), _ts(1), None, "q-run", None),
+        ("done", "j", "complete", _ts(1), _ts(1), None, "d-run", None),
+    ])
+    await _seed(_INSERT_RUN, [
+        ("f-run", "fresh", "running", _ts(1), _ts(20), None, None, None),
+        ("s-run", "stale", "running", _ts(1), _ts(5), None, None, None),
+        ("st-run", "stale-tie", "running", _ts(1), _ts(4), None, None, None),
+        ("c-run", "at-cutoff", "running", _ts(1), _ts(10), None, None, None),
+        ("t-run", "terminal-run", "complete", _ts(1), _ts(20), _ts(20), None, None),
+        ("q-run", "queued", "queued", _ts(1), _ts(1), None, None, None),
+        ("d-run", "done", "complete", _ts(1), _ts(1), _ts(1), None, None),
+    ])
+    recovered: list[tuple[str, str | None]] = []
+
+    async def record_recovery(_db, *, job_id, expected_run_id, **_kwargs):
+        recovered.append((job_id, expected_run_id))
+        return None
+
+    monkeypatch.setattr(job_recovery_module, "_recover_current_run", record_recovery)
+    expected = [
+        ("missing-run", "m-run"),
+        ("stale-tie", "st-run"),
+        ("unowned-a", None),
+        ("unowned-b", None),
+        ("stale", "s-run"),
+        ("at-cutoff", "c-run"),
+        ("terminal-run", "t-run"),
+    ]
+    cutoff = datetime(2026, 9, 10, tzinfo=timezone.utc)
+
+    for limit in (None, 4):
+        statements.clear()
+        recovered.clear()
+        await store.recover_stale_running_jobs(cutoff, _NOW, limit=limit)
+        sql, params = _statement(statements, "AS recovery_order")
+        old_sql = _OLD_STALE_RUNNING + ("" if limit is None else " LIMIT ?")
+
+        new_rows = await _rows("jobs.db", sql, params)
+        assert new_rows == await _rows("jobs.db", old_sql, params)
+        assert new_rows == expected[:limit]
+        assert recovered == expected[:limit]
+
+        plan = await _plan("jobs.db", sql, params)
+        assert not any(line == "SCAN jobs" for line in plan), plan
+        assert any(
+            line.startswith("SEARCH jobs USING INDEX idx_jobs_admission") for line in plan
+        )
+        assert "SCAN jobs USING INDEX idx_jobs_running_unowned" in plan
 
 
 async def test_scheduled_history_scans_start_from_scheduled_jobs(statements):

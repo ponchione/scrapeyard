@@ -235,14 +235,13 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-57 | P3 | storage | low | none | |
-| 3 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 4 | TD-56 | P3 | redaction | low | none | |
-| 5 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 6 | TD-63 | P3 | worker | low | none | |
-| 7 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 8 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 9 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 3 | TD-56 | P3 | redaction | low | none | |
+| 4 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 5 | TD-63 | P3 | worker | low | none | |
+| 6 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 7 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 8 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -280,7 +279,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
-| TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 | TD-59 | P3 | ready | A client that stops reading a result download holds its body in memory until TCP gives up |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
@@ -398,26 +396,6 @@ entry deleted.
 one redaction span.
 **Done when:** a test with overlapping equal-length secrets gives the same
 output under different `PYTHONHASHSEED` values.
-
-### TD-57 — Stale-running recovery scans every job under the write lock
-
-**Priority:** P3 · **Area:** storage · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `recover_stale_running_jobs` runs inside `BEGIN IMMEDIATE` every
-  `workers_running_reconciliation_interval_seconds` (60 s) and plans as
-  `SCAN jobs`: 5.3 ms at 6,600 jobs and 16.7 ms at 25,000, on the shared
-  jobs.db connection.
-- It can't use the partial `idx_jobs_admission`, because it deliberately
-  includes `running` rows whose `current_run_id` is NULL.
-
-**Code:** `storage/job_store.py` (`recover_stale_running_jobs`).
-**Fix:** split it into a `UNION`: an indexed branch for running rows with a
-`current_run_id`, plus a branch for running rows without one, backed by a small
-partial index (for example `(job_id) WHERE status = 'running' AND
-current_run_id IS NULL`) or by proof that the state can't exist.
-**Done when:** the plan has no `SCAN jobs`, and results are unchanged on seeded
-edge rows.
 
 ### TD-58 — Every parsed page waits for the cyclic garbage collector to free its tree
 

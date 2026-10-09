@@ -59,6 +59,7 @@ REQUIRED_MIGRATION_FILES = {
         "019_create_queued_run_snapshots.sql",
         "021_add_admission_index.sql",
         "022_add_retention_lookup_indexes.sql",
+        "025_add_running_unowned_index.sql",
     ),
     "errors.db": (
         "002_create_errors.sql",
@@ -200,6 +201,7 @@ REQUIRED_INDEXES = {
     "jobs.db": {
         "idx_jobs_project",
         "idx_jobs_scheduled",
+        "idx_jobs_running_unowned",
         "idx_job_runs_job_started",
         "idx_job_runs_terminal_reconciliation",
         "idx_scrape_idempotency_expires",
