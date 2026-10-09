@@ -1,6 +1,6 @@
-__pycache__
-*.pyc
-*.pyo
+**/__pycache__
+**/*.pyc
+**/*.pyo
 .coverage
 .coverage.*
 coverage.xml
@@ -24,3 +24,8 @@ work-orders/
 handoffs/
 issues/
 project.yaml
+artifacts/
+.artifacts/
+.worktrees/
+data/
+**/*.db

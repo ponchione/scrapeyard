@@ -30,11 +30,12 @@ def _chromium_installed() -> bool:
     try:
         manifest = Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
         browsers = json.loads(manifest.read_text())["browsers"]
-        revision = next(b["revision"] for b in browsers if b["name"] == "chromium-headless-shell")
+        revision = next(b["revision"] for b in browsers if b["name"] == "chromium")
     except (OSError, KeyError, StopIteration, ValueError):
         return False
     root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright")
-    return (root / f"chromium_headless_shell-{revision}").is_dir()
+    # Scrapling launches channel "chromium", the full build, never the headless shell.
+    return (root / f"chromium-{revision}").is_dir()
 
 
 pytestmark = pytest.mark.skipif(not _chromium_installed(), reason="Playwright Chromium not installed")

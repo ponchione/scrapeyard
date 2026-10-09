@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
 def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
     dockerfile = Path("Dockerfile").read_text()
 
-    assert "python -m playwright install --with-deps chromium" in dockerfile
-    assert "python -m rebrowser_playwright install chromium" in dockerfile
+    assert "python -m playwright install --with-deps --no-shell chromium" in dockerfile
+    assert "python -m rebrowser_playwright install --no-shell chromium" in dockerfile
     assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1208" in dockerfile
     assert "ARG REBROWSER_CHROMIUM_REVISION=1169" in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
@@ -19,6 +20,28 @@ def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
     assert "USER 10001:10001" in dockerfile
     assert "setpriv" not in dockerfile
     assert "exec su scrapeyard" not in dockerfile
+
+
+def test_dockerfile_installs_wheels_without_a_build_toolchain() -> None:
+    dockerfile = Path("Dockerfile").read_text()
+
+    assert "pip install --no-cache-dir --only-binary=:all: -r requirements.txt" in dockerfile
+    for package in ("build-essential", "libxml2-dev", "libxslt1-dev"):
+        assert package not in dockerfile
+
+
+def test_browser_driver_pins_match_the_versions_the_image_asserts() -> None:
+    dockerfile = Path("Dockerfile").read_text()
+    pyproject = Path("pyproject.toml").read_text()
+
+    for package, arg in (
+        ("playwright", "PLAYWRIGHT_VERSION"),
+        ("rebrowser-playwright", "REBROWSER_PLAYWRIGHT_VERSION"),
+        ("camoufox", "CAMOUFOX_PACKAGE_VERSION"),
+    ):
+        match = re.search(rf"(?m)^ARG {arg}=(\S+)$", dockerfile)
+        assert match is not None
+        assert f'"{package}=={match.group(1)}"' in pyproject
 
 
 def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
@@ -55,6 +78,21 @@ def test_dockerignore_excludes_local_env_files_from_build_context() -> None:
     assert ".env" in dockerignore
     assert ".env.*" in dockerignore
     assert "!.env.example" in dockerignore
+
+
+def test_dockerignore_excludes_local_state_and_nested_caches() -> None:
+    dockerignore = Path(".dockerignore").read_text().splitlines()
+
+    for pattern in (
+        "artifacts/",
+        ".artifacts/",
+        ".worktrees/",
+        "data/",
+        "**/*.db",
+        "**/__pycache__",
+        "**/*.pyc",
+    ):
+        assert pattern in dockerignore
 
 
 def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:

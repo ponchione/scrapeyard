@@ -66,6 +66,9 @@ COPY --from=builder /build/requirements.txt .
 
 # Browser binaries are installed at build time. Runtime sandboxing uses
 # unprivileged user namespaces instead of a revision-specific setuid helper.
+# Every locked dependency ships a wheel, so nothing is compiled. Scrapling
+# launches the full Chromium build (channel "chromium"), never the headless
+# shell, so the shells are not installed.
 RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     printf '%s\n' \
       'Types: deb' \
@@ -83,24 +86,21 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     apt-get update && \
     apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
-        build-essential \
         ca-certificates \
         curl \
         libdbus-glib-1-2 \
         libgtk-3-0 \
-        libxml2-dev \
-        libxslt1-dev \
         unzip \
     && pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --only-binary=:all: -r requirements.txt \
     && groupadd --gid "${SCRAPEYARD_GID}" scrapeyard \
     && useradd --uid "${SCRAPEYARD_UID}" --gid "${SCRAPEYARD_GID}" \
         --create-home --home-dir /home/scrapeyard --shell /usr/sbin/nologin scrapeyard \
     && mkdir -p \
         /data/db /data/results /data/adaptive /data/logs \
         "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}/camoufox" \
-    && python -m playwright install --with-deps chromium \
-    && python -m rebrowser_playwright install chromium \
+    && python -m playwright install --with-deps --no-shell chromium \
+    && python -m rebrowser_playwright install --no-shell chromium \
     && curl --fail --location --retry 3 \
         --output /tmp/camoufox.zip \
         "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}/camoufox-${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}-lin.x86_64.zip" \
@@ -126,7 +126,7 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && chown -R "${SCRAPEYARD_UID}:${SCRAPEYARD_GID}" /data /home/scrapeyard \
     && chmod 0750 /data /data/db /data/results /data/adaptive /data/logs \
     && chmod -R a-w "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}" \
-    && apt-get purge -y build-essential libxml2-dev libxslt1-dev unzip \
+    && apt-get purge -y unzip \
     && apt-get autoremove -y \
     && dpkg-query -W -f='${Package}=${Version}\n' | sort \
         > /usr/share/scrapeyard-os-packages.txt \

@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-60**) and use this template:
+7. **New findings** take the next free ID (**TD-61**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,17 +230,16 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-43 | P3 | image, dependencies | low | none | |
-| 2 | TD-44 | P3 | lint, docs | low | none | |
-| 3 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 4 | TD-52 | P2 | worker | low | none | |
-| 5 | TD-53 | P3 | engine | low | none | |
-| 6 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 7 | TD-55 | P2 | URL guard, API | low | none | |
-| 8 | TD-56 | P3 | redaction | low | none | |
-| 9 | TD-57 | P3 | storage | low | none | |
-| 10 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 11 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 1 | TD-44 | P3 | lint, docs | low | none | |
+| 2 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 3 | TD-52 | P2 | worker | low | none | |
+| 4 | TD-53 | P3 | engine | low | none | |
+| 5 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 6 | TD-55 | P2 | URL guard, API | low | none | |
+| 7 | TD-56 | P3 | redaction | low | none | |
+| 8 | TD-57 | P3 | storage | low | none | |
+| 9 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 10 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -249,7 +248,7 @@ qualification workflows passing.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
-- TD-23 and TD-46: one security review covering both.
+- TD-23, TD-46 and TD-60: one security review covering all three.
 - TD-47: a decision.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
@@ -271,7 +270,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-43 | P3 | ready | The runtime image and dependency declarations carry waste |
 | TD-44 | P3 | ready | Lint configuration is partly inert, and README omits settings |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-46 | P2 | coordinated | Subrequest DNS failures and IPv6 gaps in the browser guard |
@@ -287,6 +285,7 @@ qualification workflows passing.
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 | TD-59 | P3 | ready | A client that stops reading a result download holds its body in memory until TCP gives up |
+| TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 
 ## Ready to implement
 
@@ -334,33 +333,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-43 — The runtime image and dependency declarations carry waste
-
-**Priority:** P3 · **Area:** Dockerfile, `pyproject.toml` · **Risk:** low · **Contract:** none; Eyebox's dev container uses its own venv and browser cache · **Depends on:** —
-
-- **a. About 570 MB of unused Chromium headless shells.**
-  - The image installs Chromium headless shells (about 570 MB uncompressed)
-    that are never used. Scrapling launches full Chromium
-    (`channel='chromium'`), and `BrowserSession` is the only launch site.
-  - **Fix:** add `--no-shell` to the two `playwright install` lines in the
-    Dockerfile, and update `tests/unit/test_browser_runtime_contract.py`.
-- **b. Build packages that are never needed.**
-  - `build-essential`, `libxml2-dev` and `libxslt1-dev` are installed from the
-    slow snapshot mirror and purged later. Every Linux dependency in the lock
-    ships a cp312 x86_64 wheel.
-  - **Fix:** drop them and add `--only-binary=:all:` to the pip install.
-- **c. Direct imports that aren't declared** in `pyproject.toml`: playwright,
-  rebrowser-playwright, camoufox, redis, tldextract and starlette.
-  - Scrapling only requires `playwright>=1.49.1` and `camoufox>=0.4.11`, while
-    the Dockerfile asserts exact versions.
-  - **Fix:** declare pins equal to the lock, so no installed version changes.
-- **d. `.dockerignore` gaps.** It doesn't exclude `artifacts/`, `.artifacts/`,
-  `.worktrees/`, `data/` or `*.db`. `.worktrees/` matters once the worktree
-  workflow in [How to use this list](#how-to-use-this-list) is followed.
-
-**Done when:** the image builds, browser smoke passes, and the image size is
-recorded before and after.
 
 ### TD-44 — Lint configuration is partly inert, and README omits settings
 
@@ -762,6 +734,31 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
+
+### TD-60 — Chromium favicon requests bypass the browser route guard and budget
+
+**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** the TD-23/TD-46 security review
+
+**Problem:**
+- In a 2026-10-09 container check, the rebrowser stealth path sometimes sent a
+  `/favicon.ico` request to the page's host. It reached the server but never
+  passed `_guarded_async_intercept_route` or the run budget.
+- That makes `tests/smoke/verify_fetch_sessions.py` flaky on the old and new
+  images alike, at its `run_budget.requests == len(Fixture.requests) == 1`
+  assertion (2 of 4 runs passed on the old image, 3 of 4 on the new).
+- A request outside `page.route` is also outside the URL guard. Only
+  same-origin favicons were observed. A cross-origin `<link rel=icon>` pointing
+  at a private address was not tested, so the host egress policy is the only
+  known backstop.
+
+**Code:** `engine/browser_session.py`, `engine/browser_debug.py`
+(`_guarded_async_intercept_route`), `tests/smoke/verify_fetch_sessions.py`.
+**Fix:** test whether cross-origin icon links bypass routing. If they do, stop
+favicon fetches (a Chromium switch or blocking `link[rel=icon]`), or document
+the reliance on the egress policy. Make the smoke assertion ignore
+`/favicon.ico`.
+**Done when:** a test with a cross-origin icon link shows it is guarded or
+blocked, and the smoke verifier passes repeatedly.
 
 ## Operational and deployment qualification
 

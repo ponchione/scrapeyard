@@ -58,6 +58,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- The container image no longer installs Chromium headless shells, which
+  are never launched, or C build packages, which no locked dependency
+  needs; it is 595 MB smaller uncompressed (4,018 MB to 3,423 MB).
+  Dependency installs accept wheels only.
+- Packages Scrapeyard imports directly (playwright, rebrowser-playwright,
+  camoufox, redis, starlette, tldextract) are now declared dependencies,
+  at the versions already locked.
 - Split the SQLite job store's retention, deletion, terminal webhook
   reconciliation and recovery code into separate modules; behavior is
   unchanged.
