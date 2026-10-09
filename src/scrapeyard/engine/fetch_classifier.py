@@ -206,7 +206,8 @@ def classify_fetch_exception(
                     return signal, exc.status, exc.debug
             return ErrorType.blocked_response, exc.status, exc.debug
         return ErrorType.http_error, exc.status, exc.debug
-    if isinstance(exc, asyncio.TimeoutError | httpx.TimeoutException):
+    # Distinct classes before Python 3.11; BrowserTransportTimeout is a TimeoutError.
+    if isinstance(exc, TimeoutError | asyncio.TimeoutError | httpx.TimeoutException):
         return (
             ErrorType.navigation_timeout if fetcher_type != FetcherType.basic else ErrorType.timeout,
             None,

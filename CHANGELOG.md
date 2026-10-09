@@ -163,6 +163,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- On Python 3.10, a browser navigation timeout is now reported as
+  `navigation_timeout`, and a builtin `TimeoutError` from a basic fetch as
+  `timeout`, as on 3.11 and later. They used to come out as `browser_error`
+  or `network_error`.
 - A submitted config holding a surrogate code point (a YAML escape from
   `\uD800` to `\uDFFF`) in any key or value is now rejected with a 422 that
   names its location. In a selector field name it used to let the run complete

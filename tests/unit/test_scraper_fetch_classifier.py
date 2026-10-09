@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from scrapeyard.config.schema import FetcherType
+from scrapeyard.engine.browser_debug import BrowserTransportTimeout
 from scrapeyard.engine.fetch_classifier import (
     classify_fetch_exception,
     classify_page_signals,
@@ -38,6 +39,25 @@ def test_classify_fetch_exception_maps_browser_timeout_for_dynamic_fetcher():
     assert error_type == ErrorType.navigation_timeout
     assert http_status is None
     assert debug is None
+
+
+@pytest.mark.parametrize("fetcher", [FetcherType.dynamic, FetcherType.stealthy])
+def test_classify_fetch_exception_maps_browser_transport_timeout_on_every_python(fetcher):
+    # A builtin TimeoutError, which is not asyncio.TimeoutError before 3.11.
+    debug = {"final_url": "https://example.com/slow", "main_document_status": None}
+    exc = BrowserTransportTimeout("Page.goto: Timeout 30000ms exceeded.", debug=debug)
+
+    error_type, http_status, observed_debug = classify_fetch_exception(exc, fetcher)
+
+    assert error_type == ErrorType.navigation_timeout
+    assert http_status is None
+    assert observed_debug is debug
+
+
+def test_classify_fetch_exception_maps_builtin_timeout_for_basic_fetcher():
+    error_type, _, _ = classify_fetch_exception(TimeoutError("timed out"), FetcherType.basic)
+
+    assert error_type == ErrorType.timeout
 
 
 def test_classify_fetch_exception_maps_httpx_timeout_for_basic_fetcher():

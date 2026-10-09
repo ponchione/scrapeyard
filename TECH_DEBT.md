@@ -235,15 +235,14 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-53 | P3 | engine | low | none | |
-| 3 | TD-57 | P3 | storage | low | none | |
-| 4 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 5 | TD-56 | P3 | redaction | low | none | |
-| 6 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 7 | TD-63 | P3 | worker | low | none | |
-| 8 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 9 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 10 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-57 | P3 | storage | low | none | |
+| 3 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 4 | TD-56 | P3 | redaction | low | none | |
+| 5 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 6 | TD-63 | P3 | worker | low | none | |
+| 7 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 8 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 9 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -280,7 +279,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
-| TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
@@ -381,29 +379,6 @@ update the two tests and `docs/DEPLOYMENT.md` to match.
 **Done when:** a test with a stuck run thread shows shutdown closing the stores
 and the process exiting within the grace, or the trade-off is accepted and this
 entry deleted.
-
-### TD-53 — On Python 3.10, browser navigation timeouts are misclassified
-
-**Priority:** P3 · **Area:** engine · **Risk:** low · **Contract:** none; production and Eyebox's container run 3.12, which is unaffected · **Depends on:** —
-
-**Problem:**
-- `BrowserTransportTimeout` subclasses the builtin `TimeoutError`, but
-  `classify_fetch_exception` checks `asyncio.TimeoutError | httpx.TimeoutException`.
-- Before 3.11, `asyncio.TimeoutError` is a separate class, so on 3.10 the check
-  misses. The builtin `TimeoutError` is an `OSError`, so a browser navigation
-  timeout ends as `browser_error` or `network_error` instead of
-  `navigation_timeout`.
-- `pyproject.toml` allows 3.10 and CI tests it. Not reproduced on a 3.10
-  interpreter. Egress attestation had the same bug and now catches both
-  classes.
-
-**Code:** `engine/browser_debug.py` (`BrowserTransportTimeout`),
-`engine/fetch_classifier.py` (`classify_fetch_exception`).
-**Fix:** also match the builtin `TimeoutError` (the same class from 3.11 on),
-and grep for other places that catch only one of the two.
-**Done when:** a test raising `BrowserTransportTimeout` through
-`classify_fetch_exception` expects `navigation_timeout`, and it runs on 3.10 in
-CI.
 
 ### TD-56 — Secret redaction order depends on the process hash seed for equal-length secrets
 
