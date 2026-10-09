@@ -230,18 +230,17 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 2 | TD-43 | P3 | image, dependencies | low | none | |
-| 3 | TD-44 | P3 | lint, docs | low | none | |
-| 4 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 5 | TD-52 | P2 | worker | low | none | |
-| 6 | TD-53 | P3 | engine | low | none | |
-| 7 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 8 | TD-55 | P2 | URL guard, API | low | none | |
-| 9 | TD-56 | P3 | redaction | low | none | |
-| 10 | TD-57 | P3 | storage | low | none | |
-| 11 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 12 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 1 | TD-43 | P3 | image, dependencies | low | none | |
+| 2 | TD-44 | P3 | lint, docs | low | none | |
+| 3 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 4 | TD-52 | P2 | worker | low | none | |
+| 5 | TD-53 | P3 | engine | low | none | |
+| 6 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 7 | TD-55 | P2 | URL guard, API | low | none | |
+| 8 | TD-56 | P3 | redaction | low | none | |
+| 9 | TD-57 | P3 | storage | low | none | |
+| 10 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 11 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -272,7 +271,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-42 | P3 | ready | `job_store.py` (2.5k lines) mixes five concerns |
 | TD-43 | P3 | ready | The runtime image and dependency declarations carry waste |
 | TD-44 | P3 | ready | Lint configuration is partly inert, and README omits settings |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
@@ -336,23 +334,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-42 — `job_store.py` (2.5k lines) mixes five concerns
-
-**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** —
-
-**Fix:** keep `SQLiteJobStore` as a thin facade and move the code into module
-functions that take `db`. Approximate line ranges at `b0b285e`:
-
-| Concern | Lines | Starting from |
-| --- | --- | --- |
-| Retention | ~391–659 | `summarize_cleanup_backlog` |
-| Deletion and cancel | ~857–1185 | — |
-| Terminal webhook reconciliation | ~214–286 and ~1828–2097 | — |
-| Queued/stale recovery | ~2213–2510 | — |
-
-These are pure moves with no behavior change, one commit per module, and the
-existing tests pass unchanged.
 
 ### TD-43 — The runtime image and dependency declarations carry waste
 

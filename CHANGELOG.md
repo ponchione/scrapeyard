@@ -58,6 +58,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Split the SQLite job store's retention, deletion, terminal webhook
+  reconciliation and recovery code into separate modules; behavior is
+  unchanged.
 - Removed fetch code paths and helpers that only tests reached, and merged
   duplicated decrypt-and-verify and thread-pool code. Behavior is unchanged.
 - A result response now counts against `SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS`
