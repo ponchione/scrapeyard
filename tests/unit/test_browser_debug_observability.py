@@ -871,6 +871,37 @@ async def test_browser_screenshot_exact_boundary_is_written_atomically(tmp_path)
     assert budget.browser_debug_bytes == 4
 
 
+
+@pytest.mark.asyncio
+async def test_later_page_screenshot_replaces_the_earlier_ones_debug_charge(tmp_path) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+    )
+    budget = _debug_budget(10)
+    artifacts_dir = str(tmp_path / "artifacts")
+    for payload in (b"123456", b"1234"):
+        capture = default_debug_blob(FetcherType.dynamic, target, target.url)
+        page = MagicMock()
+        page.url = target.url
+        page.title = AsyncMock(return_value="Example")
+        page.evaluate = AsyncMock(return_value="")
+        page.screenshot = AsyncMock(return_value=payload)
+
+        await capture_browser_state(
+            page,
+            browser=target.browser,
+            fetcher_type=FetcherType.dynamic,
+            artifacts_dir=artifacts_dir,
+            capture=capture,
+            budget=budget,
+        )
+
+    # Pages of one target share a screenshot path: only the bytes on disk count.
+    assert Path(capture["screenshot_path"]).read_bytes() == b"1234"
+    assert budget.browser_debug_bytes == 4
+
 @pytest.mark.asyncio
 async def test_browser_budget_retains_limiter_until_cancellation_acknowledged() -> None:
     target = TargetConfig(

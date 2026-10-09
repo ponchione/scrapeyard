@@ -664,12 +664,26 @@ async def _capture_screenshot(
     screenshot_path = artifacts_path / f"{fetcher_type.value}-main.png"
     try:
         await cleanup_safe_to_thread(ensure_directory, artifacts_path)
-        await cleanup_safe_to_thread(write_bytes_file, screenshot_path, payload)
+        replaced = await cleanup_safe_to_thread(_replace_bytes_file, screenshot_path, payload)
     except BaseException:
         if budget is not None and granted:
             await budget.release_browser_debug_bytes(granted)
         raise
+    if budget is not None and replaced:
+        # Later pages of a target overwrite its screenshot; the replaced file
+        # was reserved in full and no longer occupies the debug budget.
+        await budget.release_browser_debug_bytes(replaced)
     capture["screenshot_path"] = str(screenshot_path)
+
+
+def _replace_bytes_file(path: Path, payload: bytes) -> int:
+    """Write *payload* to *path* and return the size of the file it replaced."""
+    try:
+        replaced = path.stat().st_size
+    except FileNotFoundError:
+        replaced = 0
+    write_bytes_file(path, payload)
+    return replaced
 
 
 async def capture_browser_state(

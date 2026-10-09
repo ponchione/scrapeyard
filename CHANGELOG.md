@@ -83,6 +83,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Browser fetches no longer exhaust `max_requests` far below the number of
+  requests sent. Every subrequest reserves room for 20 native redirects, and
+  those reservations were returned only when the whole fetch ended; click
+  pagination is a single fetch, so long fetches failed with `budget_exceeded`
+  (one run counted 10,010 requests with about 5,730 sent). Each redirect
+  chain now returns its unused reservation as soon as it ends, and
+  `max_requests` remains a hard ceiling. A frame that cannot take the
+  request-denying policy while its page closes (it is navigating or busy) no
+  longer turns a successful fetch into a failure. A debug screenshot replaced
+  by a later page of the same target no longer keeps its bytes charged to the
+  browser-debug budget.
 - A finished run whose stored config can no longer load, for example after a
   referenced deployment secret was removed, no longer fails terminal webhook
   reconciliation on every pass. That kept `/health/ready` at 503 and stopped

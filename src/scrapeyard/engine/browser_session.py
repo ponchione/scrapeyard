@@ -77,10 +77,18 @@ _ITEMS_CHANGED_SCRIPT = f"""([query, type, count, hash]) => {{
 # Both pinned Chromium builds stop after 20 redirects. Pin Firefox to that same
 # ceiling; reserve the entire chain before releasing an intercepted request.
 _MAX_REDIRECTS = 20
+# Responses after which the browser issues another request in the same chain.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 # Bound the wait for byte counts and asset-cache stores of finished requests.
 _SIZES_SETTLE_SECONDS = 0.5
+
+
+def _chain_root(request: Any) -> Any:
+    while request.redirected_from is not None:
+        request = request.redirected_from
+    return request
 
 
 class _ReleasedRoute:
@@ -151,20 +159,37 @@ async def _close_resource(resource: Any, browser: Any) -> None:
             raise
 
 
+_DENY_DOCUMENT_REQUESTS = """() => {
+    if (!document.head) return;
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'Content-Security-Policy';
+    meta.content = "default-src 'none'";
+    document.head.prepend(meta);
+}"""
+
+
+async def _deny_frame_requests(frame: Any) -> None:
+    if not frame.is_detached():
+        await asyncio.wait_for(frame.evaluate(_DENY_DOCUMENT_REQUESTS), timeout=1)
+
+
 async def _close_page(page: Any, browser: Any) -> None:
     try:
         # Native keepalive can escape offline routing during pagehide. Deny new
         # document requests before firing unload handlers, including in frames.
+        # This is best effort per frame: a frame that is navigating or busy must
+        # not stop the others, and the page closes either way, so a failure here
+        # must not fail a fetch that already succeeded.
         if browser.is_connected() and not page.is_closed():
-            for frame in page.frames:
-                if not frame.is_detached():
-                    await asyncio.wait_for(frame.evaluate("""() => {
-                        if (!document.head) return;
-                        const meta = document.createElement('meta');
-                        meta.httpEquiv = 'Content-Security-Policy';
-                        meta.content = "default-src 'none'";
-                        document.head.prepend(meta);
-                    }"""), timeout=1)
+            outcomes = await asyncio.gather(
+                *(_deny_frame_requests(frame) for frame in page.frames),
+                return_exceptions=True,
+            )
+            skipped = [
+                type(outcome).__name__ for outcome in outcomes if isinstance(outcome, BaseException)
+            ]
+            if skipped:
+                logger.debug("Closing page without request denial in frames: %s", skipped)
     finally:
         await _close_resource(page, browser)
 
@@ -459,7 +484,9 @@ class BrowserSession:
         # Playwright's dispatcher survives page fetches and inherits the context
         # of its creation. Bind each route to THIS page's budget/diagnostics.
         route_context = copy_context()
+        # Requests issued per redirect chain that still holds its reservation.
         chains: dict[Any, int] = {}
+        releasing: set[asyncio.Future[None]] = set()
         route_error: BaseException | None = None
         traffic = budget.traffic if budget is not None else None
         if site is None:
@@ -489,16 +516,28 @@ class BrowserSession:
                     traffic.cached(request.url, site, request.resource_type)
             return asset
 
+        def release_chain(request: Any) -> None:
+            # A chain that ended cannot redirect again: return its unused
+            # capacity now, so long fetches do not hold it until they finish.
+            issued = chains.pop(_chain_root(request), None)
+            if budget is not None and issued is not None:
+                released = asyncio.ensure_future(
+                    budget.settle_requests(_MAX_REDIRECTS + 1, issued)
+                )
+                releasing.add(released)
+                released.add_done_callback(releasing.discard)
+
         def observe_request(request: Any) -> None:
             if request.redirected_from is None:
                 return
-            root = request.redirected_from
-            while root.redirected_from is not None:
-                root = root.redirected_from
+            root = _chain_root(request)
             if root in chains:
                 chains[root] += 1
                 if traffic is not None:
                     traffic.request(request.url, site, request.resource_type)
+
+        def observe_failed(request: Any) -> None:
+            release_chain(request)
 
         def record_received(request: Any, sized: asyncio.Future[int]) -> None:
             sizing.discard(sized)
@@ -506,6 +545,8 @@ class BrowserSession:
                 traffic.received(request.url, site, sized.result(), request.resource_type)
 
         def observe_response(response: Any) -> None:
+            if response.status not in _REDIRECT_STATUSES:
+                release_chain(response.request)
             if response.request in served:
                 return
             if assets is not None and assets.wants(site, response):
@@ -561,6 +602,7 @@ class BrowserSession:
             context.on("request", observe_request)
             context.on("response", observe_response)
             context.on("requestfinished", observe_finished)
+            context.on("requestfailed", observe_failed)
             await context.route("**/*", guard)
             await context.set_offline(False)
             page = await context.new_page()
@@ -639,6 +681,7 @@ class BrowserSession:
                 context.remove_listener("request", observe_request)
                 context.remove_listener("response", observe_response)
                 context.remove_listener("requestfinished", observe_finished)
+                context.remove_listener("requestfailed", observe_failed)
                 stopped = True
             except BaseException:
                 # A crashed page/context can reject cleanup RPCs while its driver
@@ -652,5 +695,7 @@ class BrowserSession:
                 unsettled: list[asyncio.Future[Any]] = [*sizing, *storing]
                 for pending in unsettled:
                     pending.cancel()
+                if releasing:
+                    await asyncio.gather(*releasing)
                 if budget is not None and stopped:
                     await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))

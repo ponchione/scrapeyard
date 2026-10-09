@@ -223,3 +223,112 @@ async def test_browser_cleanup_preserves_failure_and_settles_requests(ending):
     stop_driver.assert_awaited_once()
     assert session._context is None
     assert budget.snapshot()["requests"] == 1
+
+
+class _Frame:
+    def __init__(self, behavior: str) -> None:
+        self.behavior = behavior
+        self.denied = False
+
+    def is_detached(self) -> bool:
+        return False
+
+    async def evaluate(self, _script: str) -> None:
+        if self.behavior == "navigating":
+            raise RuntimeError("Execution context was destroyed")
+        if self.behavior == "busy":
+            await asyncio.Event().wait()
+        self.denied = True
+
+
+async def test_page_close_tolerates_frames_that_cannot_take_request_denial() -> None:
+    from scrapeyard.engine.browser_session import _close_page
+
+    healthy = _Frame("healthy")
+    page = MagicMock(frames=[_Frame("navigating"), _Frame("busy"), healthy])
+    page.is_closed.return_value = False
+    page.close = AsyncMock()
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await _close_page(page, browser)
+
+    assert loop.time() - started < 1.5
+    assert healthy.denied
+    page.close.assert_awaited_once()
+
+
+async def test_page_close_still_raises_when_the_page_cannot_close() -> None:
+    from scrapeyard.engine.browser_session import _close_page
+
+    page = MagicMock(frames=[_Frame("navigating")])
+    page.is_closed.return_value = False
+    page.close = AsyncMock(side_effect=RuntimeError("Target crashed"))
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+
+    with pytest.raises(RuntimeError, match="Target crashed"):
+        await _close_page(page, browser)
+
+
+class _Request:
+    def __init__(self, url: str, redirected_from: "_Request | None" = None) -> None:
+        self.url = url
+        self.redirected_from = redirected_from
+        self.resource_type = "script"
+        self.method = "GET"
+
+
+def _response(request: _Request, status: int) -> MagicMock:
+    return MagicMock(status=status, url=request.url, request=request, headers={"content-length": "0"})
+
+
+async def test_browser_returns_unused_redirect_capacity_when_each_chain_ends():
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+    page = MagicMock(frames=[])
+    page.close = AsyncMock()
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.unroute = AsyncMock()
+    context.set_offline = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
+    budget = RunBudget(max_duration_seconds=10, max_requests=100,
+        max_fetched_bytes=1000, max_extracted_records=100,
+        max_serialized_result_bytes=1000, max_browser_debug_bytes=1000)
+
+    async def guard(route):
+        await route.continue_()
+
+    async def settle() -> None:
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    async def navigate(*args, **kwargs):
+        handlers = {call.args[0]: call.args[1] for call in context.on.call_args_list}
+        roots = [_Request(f"https://fixture.example/{n}") for n in range(4)]
+        for root in roots:
+            await context.route.call_args.args[1](MagicMock(request=root, continue_=AsyncMock()))
+        await settle()
+        assert budget.requests == 4 * 21
+
+        handlers["response"](_response(roots[0], 200))
+        handlers["response"](_response(roots[1], 302))
+        hop = _Request("https://fixture.example/moved", redirected_from=roots[1])
+        handlers["request"](hop)
+        handlers["response"](_response(hop, 200))
+        handlers["requestfailed"](roots[2])
+        await settle()
+        # Ended chains count only what they sent; the open one keeps its 21.
+        assert budget.requests == 1 + 2 + 1 + 21
+        raise RuntimeError("stop after accounting")
+
+    page.goto = AsyncMock(side_effect=navigate)
+    with pytest.raises(RuntimeError, match="stop after accounting"):
+        await session.fetch("https://fixture.example/", {}, guard, budget=budget)
+    # The chain still open at the end settles to the one request it sent.
+    assert budget.requests == 1 + 2 + 1 + 1
