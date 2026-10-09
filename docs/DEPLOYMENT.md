@@ -920,12 +920,16 @@ SNI. HTTP connection pools are isolated by that logical hostname, so hosts
 sharing one address can never reuse each other's authenticated TLS session.
 Resolver availability failures are retryable transport failures; a concrete
 private or otherwise non-public address remains a permanent safety rejection.
-Response handling streams only status and headers, closes the response without
-consuming its unused body, and therefore does not buffer destination-controlled
-response content.
+Response handling streams the status and headers, then reads at most 64 KiB of
+the unused body, undecoded and discarded, so the connection can be reused; a
+longer body closes the connection. Destination-controlled response content is
+never buffered. The webhook `timeout` bounds each connect, write and read, and
+also the whole exchange: a receiver that trickles bytes fails the attempt as a
+retryable transport timeout. A status that arrived in time keeps its outcome
+even if the body is still arriving at the deadline.
 
 For 429 and 503 only, `Retry-After` accepts either non-negative integer delta
-seconds or a future timezone-aware HTTP date. Malformed, negative, past, or
+seconds (ASCII digits) or a future timezone-aware HTTP date. Malformed, negative, past, or
 status-inapplicable values are ignored. An accepted value is a minimum delay:
 the persisted retry uses the greater of exponential backoff and `Retry-After`.
 It never authorizes a retry at or beyond the maximum delivery-age deadline.

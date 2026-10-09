@@ -7,6 +7,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -39,6 +40,9 @@ _DEFAULT_CLIENT_CACHE_MAX_SIZE = 64
 _DEFAULT_CLIENT_CACHE_IDLE_TTL_SECONDS = 300.0
 _COORDINATOR_ERROR_RETRY_SECONDS = 1.0
 _COORDINATOR_MIN_IDLE_DELAY_SECONDS = 0.05
+# Receivers' response bodies are read up to this size, undecoded, only so the
+# connection can be reused; a longer body closes the connection instead.
+_MAX_DRAINED_RESPONSE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,7 +334,8 @@ class HttpWebhookDispatcher:
             return None, "inapplicable_status"
 
         value = raw_value.strip()
-        if value.isdigit():
+        # str.isdigit also accepts digits such as "²" that float() rejects.
+        if value.isascii() and value.isdigit():
             delay = float(value)
             if not math.isfinite(delay):
                 return None, "out_of_range"
@@ -347,12 +352,30 @@ class HttpWebhookDispatcher:
             return None, "past_http_date"
         return delay, "accepted_http_date"
 
+    @staticmethod
+    async def _drain_response(response: httpx.Response) -> None:
+        """Read a small body so the connection returns to the client's pool."""
+
+        if response.is_stream_consumed:
+            return
+        received = 0
+        async for chunk in response.aiter_raw():
+            received += len(chunk)
+            if received > _MAX_DRAINED_RESPONSE_BYTES:
+                return
+
     async def send_once(
         self,
         config: WebhookConfig | WebhookRequestConfig,
         payload: dict[str, Any],
     ) -> WebhookDispatchResult:
-        """Perform one safety-checked HTTP request without retrying."""
+        """Perform one safety-checked HTTP request without retrying.
+
+        ``config.timeout`` bounds each connect, write and read, and also the
+        whole exchange, so a receiver that trickles bytes cannot hold a worker.
+        A response whose status arrived in time keeps that outcome even if its
+        body is still arriving at the deadline.
+        """
 
         url = str(config.url)
         start = time.monotonic()
@@ -374,12 +397,20 @@ class HttpWebhookDispatcher:
                     "timeout": httpx.Timeout(config.timeout).as_dict(),
                 },
             )
-            response = await client.send(
-                request,
-                stream=True,
-                follow_redirects=False,
+            sent_at = time.monotonic()
+            response = await asyncio.wait_for(
+                client.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                ),
+                timeout=config.timeout,
             )
             try:
+                remaining = config.timeout - (time.monotonic() - sent_at)
+                if remaining > 0:
+                    with suppress(asyncio.TimeoutError, httpx.HTTPError):
+                        await asyncio.wait_for(self._drain_response(response), timeout=remaining)
                 elapsed_ms = (time.monotonic() - start) * 1000
 
                 if response.is_success:
@@ -457,6 +488,8 @@ class HttpWebhookDispatcher:
             )
         except (
             URLResolutionError,
+            # The total deadline; a separate class from TimeoutError before 3.11.
+            asyncio.TimeoutError,
             httpx.TimeoutException,
             httpx.ConnectError,
             httpx.HTTPError,

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import time
 from contextlib import suppress
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
 import httpcore
@@ -394,6 +396,141 @@ async def test_slow_continuous_body_closes_socket_before_deadline_error_returns(
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
     assert chunks_sent == sent_at_return
     assert chunks_sent < 100
+
+
+def _trickling_handler(prefix: bytes, unit: bytes, closed: asyncio.Event):
+    """Answer with *prefix*, then send *unit* every 50 ms so no read ever stalls."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _read_request(reader)
+            writer.write(prefix)
+            await writer.drain()
+            for _ in range(200):
+                writer.write(unit)
+                await writer.drain()
+                await asyncio.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+            closed.set()
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("prefix", "unit"),
+    [
+        (b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"a"),
+        (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", b"1\r\nx\r\n"),
+    ],
+    ids=["headers", "body"],
+)
+async def test_trickled_response_times_out_at_the_total_timeout(prefix, unit) -> None:
+    connection_closed = asyncio.Event()
+    server, url = await _request_url(_trickling_handler(prefix, unit, connection_closed))
+    started = time.monotonic()
+    try:
+        with pytest.raises(httpx.TimeoutException, match="total timeout"):
+            await asyncio.wait_for(
+                fetch_streaming_response(
+                    Fetcher,
+                    url,
+                    {"timeout": 0.3, "stealthy_headers": False},
+                    budget=_budget(fetched_bytes=1 << 20, duration=30),
+                ),
+                timeout=5,
+            )
+        elapsed = time.monotonic() - started
+        await asyncio.wait_for(connection_closed.wait(), timeout=1)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert 0.3 <= elapsed < 2
+
+
+async def test_trickled_response_times_out_without_a_run_budget() -> None:
+    connection_closed = asyncio.Event()
+    server, url = await _request_url(
+        _trickling_handler(b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"a", connection_closed)
+    )
+    try:
+        with pytest.raises(httpx.TimeoutException, match="total timeout"):
+            await asyncio.wait_for(
+                fetch_streaming_response(
+                    Fetcher,
+                    url,
+                    {"timeout": 0.3, "stealthy_headers": False},
+                    budget=None,
+                ),
+                timeout=5,
+            )
+        await asyncio.wait_for(connection_closed.wait(), timeout=1)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_trickled_basic_fetch_fails_the_target_as_timeout(monkeypatch, tmp_path) -> None:
+    connection_closed = asyncio.Event()
+    server, connect_url = await _request_url(
+        _trickling_handler(b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"a", connection_closed)
+    )
+    target = TargetConfig.model_validate(
+        {"url": "http://origin.example/products", "selectors": {"title": "h1"}}
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.get_settings",
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=0.3, adaptive_dir=str(tmp_path)),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda _url: ResolvedPublicURL(connect_url, "origin.example", "origin.example"),
+    )
+    try:
+        result = await asyncio.wait_for(
+            scrape_target(
+                target,
+                adaptive=False,
+                retry=RetryConfig(max_attempts=1),
+                adaptive_dir=str(tmp_path),
+                budget=_budget(duration=30),
+            ),
+            timeout=5,
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result.error_type is ErrorType.timeout
+    assert "total timeout" in (result.error_detail or "")
+
+
+async def test_run_deadline_still_wins_when_it_ends_before_the_request_timeout() -> None:
+    connection_closed = asyncio.Event()
+    server, url = await _request_url(
+        _trickling_handler(b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"a", connection_closed)
+    )
+    try:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await asyncio.wait_for(
+                fetch_streaming_response(
+                    Fetcher,
+                    url,
+                    {"timeout": 0.3, "stealthy_headers": False},
+                    budget=_budget(duration=0.3),
+                ),
+                timeout=5,
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
 
 
 async def test_cookie_jar_preserves_redirect_and_rfc_scope_without_conflicts() -> None:

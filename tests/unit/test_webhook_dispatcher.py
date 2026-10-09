@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -83,18 +86,67 @@ def _payload(delivery_id: str = "delivery-1") -> dict[str, Any]:
     }
 
 
-class _UnreadResponseStream(httpx.AsyncByteStream):
+class _EndlessResponseStream(httpx.AsyncByteStream):
     def __init__(self) -> None:
-        self.iterated = False
+        self.bytes_read = 0
         self.closed = False
 
     async def __aiter__(self):
-        self.iterated = True
-        raise AssertionError("webhook response body must not be consumed")
-        yield b"unreachable"
+        while True:
+            self.bytes_read += 16 * 1024
+            yield b"x" * (16 * 1024)
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def _route_hooks_to(monkeypatch, connect_base: str) -> None:
+    """Send hooks.example.com webhooks to a loopback test server."""
+
+    def _resolve(url: str) -> ResolvedPublicURL:
+        parsed = urlparse(url)
+        assert parsed.hostname == "hooks.example.com"
+        return ResolvedPublicURL(
+            f"{connect_base}{parsed.path}",
+            "hooks.example.com",
+            "hooks.example.com",
+        )
+
+    monkeypatch.setattr("scrapeyard.webhook.dispatcher.resolve_public_url", _resolve)
+
+
+async def _loopback_server(handler) -> tuple[asyncio.AbstractServer, str]:
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, f"http://127.0.0.1:{port}"
+
+
+async def _read_webhook_request(reader: asyncio.StreamReader) -> None:
+    head = await reader.readuntil(b"\r\n\r\n")
+    match = re.search(rb"content-length: *(\d+)", head, re.IGNORECASE)
+    await reader.readexactly(int(match.group(1)) if match else 0)
+
+
+def _trickling_webhook_handler(prefix: bytes, unit: bytes):
+    """Answer with *prefix*, then send *unit* every 50 ms so no read ever stalls."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _read_webhook_request(reader)
+            writer.write(prefix)
+            await writer.drain()
+            for _ in range(200):
+                writer.write(unit)
+                await writer.drain()
+                await asyncio.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+
+    return handler
 
 
 class MemoryWebhookOutboxStore:
@@ -399,8 +451,8 @@ class TestSendOnce:
         assert request.extensions["sni_hostname"] == "example.com"
 
     @pytest.mark.asyncio
-    async def test_send_once_closes_stream_without_reading_response_body(self) -> None:
-        stream = _UnreadResponseStream()
+    async def test_send_once_reads_at_most_a_small_response_body(self) -> None:
+        stream = _EndlessResponseStream()
         response = httpx.Response(
             503,
             headers={"Retry-After": "2"},
@@ -415,8 +467,98 @@ class TestSendOnce:
 
         assert result.status is WebhookDispatchStatus.retryable_failed
         assert result.retry_after_seconds == 2
-        assert stream.iterated is False
+        assert 0 < stream.bytes_read <= 80 * 1024
         assert stream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_send_once_reuses_connections_to_the_same_receiver(
+        self,
+        monkeypatch,
+    ) -> None:
+        connections = 0
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            nonlocal connections
+            connections += 1
+            try:
+                while True:
+                    await _read_webhook_request(reader)
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionResetError):
+                pass
+            finally:
+                writer.close()
+                with suppress(BrokenPipeError, ConnectionResetError):
+                    await writer.wait_closed()
+
+        server, connect_base = await _loopback_server(handler)
+        _route_hooks_to(monkeypatch, connect_base)
+        dispatcher = HttpWebhookDispatcher()
+        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=5)
+        try:
+            results = [await dispatcher.send_once(config, _payload()) for _ in range(5)]
+        finally:
+            await dispatcher.shutdown(timeout=1)
+            server.close()
+            await server.wait_closed()
+
+        assert {result.status for result in results} == {WebhookDispatchStatus.delivered}
+        assert connections == 1
+
+    @pytest.mark.asyncio
+    async def test_send_once_times_out_a_trickling_receiver_at_the_total_timeout(
+        self,
+        monkeypatch,
+    ) -> None:
+        server, connect_base = await _loopback_server(
+            _trickling_webhook_handler(b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"a")
+        )
+        _route_hooks_to(monkeypatch, connect_base)
+        dispatcher = HttpWebhookDispatcher()
+        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.3)
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(dispatcher.send_once(config, _payload()), timeout=5)
+            elapsed = time.monotonic() - started
+        finally:
+            await dispatcher.shutdown(timeout=1)
+            server.close()
+            await server.wait_closed()
+
+        assert result.status is WebhookDispatchStatus.retryable_failed
+        assert result.reason_code is not None
+        assert result.reason_code.value == "transport_failure"
+        assert 0.3 <= elapsed < 2
+
+    @pytest.mark.asyncio
+    async def test_send_once_keeps_the_status_when_the_body_trickles_past_the_deadline(
+        self,
+        monkeypatch,
+    ) -> None:
+        server, connect_base = await _loopback_server(
+            _trickling_webhook_handler(
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 7\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n",
+                b"1\r\nx\r\n",
+            )
+        )
+        _route_hooks_to(monkeypatch, connect_base)
+        dispatcher = HttpWebhookDispatcher()
+        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.3)
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(dispatcher.send_once(config, _payload()), timeout=5)
+            elapsed = time.monotonic() - started
+        finally:
+            await dispatcher.shutdown(timeout=1)
+            server.close()
+            await server.wait_closed()
+
+        assert result.status is WebhookDispatchStatus.retryable_failed
+        assert result.last_error == "HTTP 503"
+        assert result.retry_after_seconds == 7
+        assert elapsed < 2
 
     @pytest.mark.asyncio
     async def test_send_once_isolates_clients_by_logical_tls_hostname(self) -> None:
@@ -1206,6 +1348,9 @@ class TestRetryAfter:
         [
             (429, "bogus", "malformed"),
             (429, "-1", "malformed"),
+            # Unicode digits arrive as UTF-8 header bytes; str.isdigit accepts them.
+            (503, "\u00b2".encode(), "malformed"),
+            (429, "\uff11\uff12".encode(), "malformed"),
             (429, "9" * 309, "out_of_range"),
             (
                 503,
@@ -1232,6 +1377,34 @@ class TestRetryAfter:
         )
         assert delay is None
         assert action == expected_action
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_digit_retry_after_still_retries(self, monkeypatch) -> None:
+        created = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+        outbox = MemoryWebhookOutboxStore()
+        delivery = await _enqueue_memory_delivery(
+            outbox,
+            delivery_id="retry-after-superscript",
+            created_at=created,
+        )
+        client = AsyncMock()
+        client.send.return_value = httpx.Response(
+            503,
+            headers={"Retry-After": "\u00b2".encode()},
+            request=httpx.Request("POST", "https://example.com"),
+        )
+        dispatcher = HttpWebhookDispatcher(
+            client_factory=lambda: client,
+            outbox_store=outbox,
+            backoff_base=1,
+        )
+        monkeypatch.setattr("scrapeyard.webhook.dispatcher.utc_now", lambda: created)
+
+        await dispatcher._process_delivery(delivery)
+
+        persisted = outbox.deliveries[delivery.delivery_id]
+        assert persisted.status is WebhookDeliveryStatus.pending
+        assert persisted.next_attempt_at == created + timedelta(seconds=1)
 
     @pytest.mark.asyncio
     async def test_out_of_range_retry_after_uses_normal_backoff(

@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-53**) and use this template:
+7. **New findings** take the next free ID (**TD-54**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,21 +230,21 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
-| 2 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
-| 3 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 4 | TD-35 | P3 | API, job store | low | none | |
-| 5 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 6 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 7 | TD-38 | P3 | result store | low | none | |
-| 8 | TD-39 | P3 | click pagination | medium | timing only | |
-| 9 | TD-40 | P3 | API | low | `offset` bound | |
-| 10 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 11 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 12 | TD-43 | P3 | image, dependencies | low | none | |
-| 13 | TD-44 | P3 | lint, docs | low | none | |
-| 14 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 15 | TD-52 | P2 | worker | low | none | |
+| 1 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
+| 2 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
+| 3 | TD-35 | P3 | API, job store | low | none | |
+| 4 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 5 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 6 | TD-38 | P3 | result store | low | none | |
+| 7 | TD-39 | P3 | click pagination | medium | timing only | |
+| 8 | TD-40 | P3 | API | low | `offset` bound | |
+| 9 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 10 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 11 | TD-43 | P3 | image, dependencies | low | none | |
+| 12 | TD-44 | P3 | lint, docs | low | none | |
+| 13 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 14 | TD-52 | P2 | worker | low | none | |
+| 15 | TD-53 | P3 | engine | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -275,7 +275,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-32 | P2 | ready | Outbound HTTP has no total deadline, and webhook retry handling has gaps |
 | TD-33 | P2 | ready | Retryable HTTP failures lose their diagnostics and challenge classification |
 | TD-34 | P3 | ready | Result JSON is encoded with Python's pure-Python encoder |
 | TD-35 | P3 | ready | API handlers decrypt, hash and parse YAML on the event loop |
@@ -295,6 +294,7 @@ qualification workflows passing.
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-52 | P2 | ready | A cancellation during run-budget handling skips cancellation recovery |
+| TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 
 ## Ready to implement
 
@@ -342,45 +342,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-32 — Outbound HTTP has no total deadline, and webhook retry handling has gaps
-
-**Priority:** P2 · **Area:** webhook dispatcher, basic fetch · **Risk:** low · **Contract:** responses that trickle in now time out (a retryable failure for webhooks, error type `timeout` for basic fetches) · **Depends on:** —
-
-- **a. Webhook sends have no total time limit.**
-  - `HttpWebhookDispatcher.send_once` relies on httpx timeouts, which apply to
-    each read, not to the whole request.
-  - A receiver sending one header byte every 0.3 s kept a request with a 0.5 s
-    timeout open past 6 s. A hostile URL can hold a dispatcher worker for days,
-    and 4 such URLs stop all delivery.
-  - **Fix:** wrap `client.send` in `asyncio.wait_for(…, config.timeout)` and
-    treat a timeout as a retryable transport failure.
-- **b. Basic fetches have no total time limit either.**
-  - `fetch_streaming_response` uses the same per-phase `timeout`, so a server
-    that trickles bytes can hold a fetch until the run deadline. Eyebox uses
-    `fetcher: basic`.
-  - **Fix:** put an `asyncio.timeout` around the whole request, including body
-    streaming, with a total that fits the current semantics.
-- **c. A malformed `Retry-After` dead-letters a retryable webhook.**
-  - `_parse_retry_after` checks `value.isdigit()`, which accepts Unicode digits
-    such as `"²"`. `float("²")` then raises `ValueError` in the generic handler,
-    turning a retryable 429 or 503 into a permanent failure.
-  - **Fix:** check `value.isascii() and value.isdigit()`.
-- **d. Webhook connections are never reused.**
-  - The response is closed without reading its body, so httpcore drops the
-    connection: 5 requests opened 5 connections. The per-host client cache only
-    saves SSL-context setup.
-  - **Fix:** read a small capped body (up to 64 KiB) before closing, or
-    simplify the cache.
-
-**Code:** `webhook/dispatcher.py` (`send_once`, `_parse_retry_after`),
-`engine/basic_fetch.py` (`fetch_streaming_response`).
-
-**Done when:**
-- Tests against a trickling server time out at the configured total on both
-  paths.
-- A `Retry-After: ²` test retries.
-- A connection-count test shows connections being reused.
 
 ### TD-33 — Retryable HTTP failures lose their diagnostics and challenge classification
 
@@ -831,6 +792,29 @@ entry deleted.
 check and shielded crash finalization as the main cancellation handler.
 **Done when:** a test that cancels the task during budget finalization shows
 the run reaching `failed` or `cancelled` before the task ends.
+
+### TD-53 — On Python 3.10, browser navigation timeouts are misclassified
+
+**Priority:** P3 · **Area:** engine · **Risk:** low · **Contract:** none; production and Eyebox's container run 3.12, which is unaffected · **Depends on:** —
+
+**Problem:**
+- `BrowserTransportTimeout` subclasses the builtin `TimeoutError`, but
+  `classify_fetch_exception` checks `asyncio.TimeoutError | httpx.TimeoutException`.
+- Before 3.11, `asyncio.TimeoutError` is a separate class, so on 3.10 the check
+  misses. The builtin `TimeoutError` is an `OSError`, so a browser navigation
+  timeout ends as `browser_error` or `network_error` instead of
+  `navigation_timeout`.
+- `pyproject.toml` allows 3.10 and CI tests it. Not reproduced on a 3.10
+  interpreter. Egress attestation had the same bug and now catches both
+  classes.
+
+**Code:** `engine/browser_debug.py` (`BrowserTransportTimeout`),
+`engine/fetch_classifier.py` (`classify_fetch_exception`).
+**Fix:** also match the builtin `TimeoutError` (the same class from 3.11 on),
+and grep for other places that catch only one of the two.
+**Done when:** a test raising `BrowserTransportTimeout` through
+`classify_fetch_exception` expects `navigation_timeout`, and it runs on 3.10 in
+CI.
 
 ## Coordinated
 

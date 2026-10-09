@@ -153,12 +153,18 @@ async def fetch_streaming_response(
     *,
     budget: RunBudget | None,
 ) -> Any:
-    """Stream one response and close it at the byte or monotonic run limit."""
+    """Stream one response and close it at the byte or monotonic run limit.
+
+    ``timeout`` bounds each connect, write and read as before, and also the
+    whole request through the last body byte, so a server that trickles bytes
+    cannot hold the fetch until the run deadline.
+    """
 
     kwargs = dict(call_kwargs)
     proxy = kwargs.pop("proxy", None)
     kwargs.pop("retries", None)
     timeout = kwargs.pop("timeout", 10)
+    total_timeout = float(timeout) if isinstance(timeout, int | float) else None
     follow_redirects = bool(kwargs.pop("follow_redirects", False))
     stealthy = bool(kwargs.pop("stealthy_headers", True))
     custom_config = kwargs.pop("custom_config", None) or {}
@@ -235,15 +241,23 @@ async def fetch_streaming_response(
             setattr(result, RECEIVED_BYTES_ATTRIBUTE, response.num_bytes_downloaded)
             return result
 
-    if budget is None:
+    if budget is None and total_timeout is None:
         return await _request()
     task: asyncio.Task[Any] | None = None
+    run_remaining: float | None = None
     try:
-        budget.check_deadline()
+        if budget is not None:
+            budget.check_deadline()
+            run_remaining = budget.remaining_seconds
+        # A request limit equal to the run's remaining time (the scraper caps it
+        # there) still ends as the run's duration failure.
+        request_limit_first = total_timeout is not None and (
+            run_remaining is None or total_timeout < run_remaining
+        )
         task = asyncio.create_task(_request())
         done, _pending = await asyncio.wait(
             {task},
-            timeout=budget.remaining_seconds,
+            timeout=total_timeout if request_limit_first else run_remaining,
         )
     except BaseException:
         if task is not None and not task.done():
@@ -255,4 +269,9 @@ async def fetch_streaming_response(
         return task.result()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-    budget.exhaust_duration()
+    if not request_limit_first:
+        assert budget is not None
+        budget.exhaust_duration()
+    raise httpx.TimeoutException(
+        f"Basic fetch did not finish within its {total_timeout:g} s total timeout"
+    )

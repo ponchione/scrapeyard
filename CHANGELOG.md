@@ -83,6 +83,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Outbound requests now have a total deadline. A webhook receiver or
+  basic-fetch server that trickles bytes can no longer hold a request open
+  past its timeout: webhook sends fail as a retryable transport timeout, and
+  basic fetches fail with the `timeout` error type once
+  `SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS` has passed. The timeout used to
+  apply only to each connect, write and read.
+- A webhook `Retry-After` made of non-ASCII digits (such as `²`) no longer
+  turns a retryable 429 or 503 into a permanent failure; it is ignored like
+  any malformed value. Webhook connections are now reused: up to 64 KiB of
+  the response body is read and discarded instead of the connection being
+  dropped after every attempt.
 - A failure while recording a run-budget stop, such as a transient database
   error, no longer leaves the run `running` until the heartbeat timeout; the
   run is failed through the normal crash path.
