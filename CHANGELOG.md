@@ -58,6 +58,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Click pagination keeps each captured page as compressed HTML and parses it
+  only while extracting it, instead of holding every page's parse tree until
+  the target ends: a 70-page listing replayed from real recordings peaked
+  285 MB lower. After a click, a `wait_ms` above 250 now ends once the page
+  has gone 250 ms without a DOM change or a pending request (images, fonts
+  and stylesheets aside), so a page still loading content keeps waiting, up
+  to the full `wait_ms`. Records are unchanged.
 - Explicit result deletion (job deletion with `delete_results`, and
   discarding an unowned run's artifact) no longer holds the result metadata
   database while it removes directories, so a large removal no longer stalls

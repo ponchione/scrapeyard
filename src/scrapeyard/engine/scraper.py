@@ -57,6 +57,7 @@ from scrapeyard.engine.resilience import RetryHandler, RetryableError
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
+    ClickSnapshot,
     FetchError,
     FetchOutcome,
     TargetResult as TargetResult,
@@ -436,18 +437,27 @@ def _replay_parser_arguments(
     return parser_arguments
 
 
+def _replayed_response_kwargs(
+    cached: CachedPage,
+    parser_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "url": cached.final_url,
+        "status": cached.status,
+        "reason": StatusText.get(cached.status) or "",
+        "cookies": {},
+        "headers": {"content-type": cached.content_type},
+        "request_headers": {},
+        "encoding": cached.content_type or "utf-8",
+        **parser_arguments,
+    }
+
+
 def _build_replayed_response(cached: CachedPage, parser_arguments: dict[str, Any]) -> Response:
     return Response(
-        url=cached.final_url,
         text=cached.html,
         body=cached.html.encode("utf-8"),
-        status=cached.status,
-        reason=StatusText.get(cached.status) or "",
-        cookies={},
-        headers={"content-type": cached.content_type},
-        request_headers={},
-        encoding=cached.content_type or "utf-8",
-        **parser_arguments,
+        **_replayed_response_kwargs(cached, parser_arguments),
     )
 
 
@@ -462,6 +472,21 @@ async def _replayed_response(
         _build_replayed_response,
         cached,
         parser_arguments,
+        run_budget=budget,
+    )
+
+
+async def _replayed_click_snapshot(
+    cached: CachedPage,
+    parser_arguments: dict[str, Any],
+    budget: RunBudget | None,
+) -> ClickSnapshot:
+    if budget is not None:
+        await budget.consume_fetched_bytes(len(cached.html.encode("utf-8")))
+    return await run_thread_work(
+        ClickSnapshot.capture,
+        cached.html,
+        _replayed_response_kwargs(cached, parser_arguments),
         run_budget=budget,
     )
 
@@ -487,7 +512,7 @@ async def _replay_cached_page(
         and target.pagination is not None
         and target.pagination.mode is PaginationMode.click
     ):
-        snapshots: list[object] = []
+        snapshots: list[ClickSnapshot] = []
         stop_reason = str(cached.click_pagination.get("stop_reason") or "unknown")
         stop_detail: str | None = None
         for index in range(1, int(cached.click_pagination.get("pages") or 0) + 1):
@@ -498,7 +523,7 @@ async def _replay_cached_page(
                 stop_reason = "cache_miss"
                 stop_detail = str(PageCacheMiss(url, click_index=index))
                 break
-            snapshots.append(await _replayed_response(snapshot, parser_arguments, budget))
+            snapshots.append(await _replayed_click_snapshot(snapshot, parser_arguments, budget))
         setattr(
             response,
             CLICK_PAGINATION_ATTRIBUTE,
@@ -532,17 +557,19 @@ def _record_fetched_page(
     click_result = getattr(response, CLICK_PAGINATION_ATTRIBUTE, None)
     if isinstance(click_result, ClickPaginationResult):
         # Snapshots first, so a recorded first page never names missing snapshots.
-        for index, snapshot in enumerate(click_result.pages, start=1):
-            snapshot_url = getattr(snapshot, "url", None)
-            cache.store(
-                url,
-                fetcher_type.value,
-                html=_response_html(snapshot),
-                final_url=snapshot_url if isinstance(snapshot_url, str) and snapshot_url else final_url,
-                status=int(getattr(snapshot, "status", None) or 200),
-                content_type=_response_header(snapshot, "content-type") or "text/html",
-                click_index=index,
-            )
+        for index, captured in enumerate(click_result.pages, start=1):
+            # Parse to store the same serialized HTML as the first page.
+            with captured.parsed() as snapshot:
+                snapshot_url = getattr(snapshot, "url", None)
+                cache.store(
+                    url,
+                    fetcher_type.value,
+                    html=_response_html(snapshot),
+                    final_url=snapshot_url if isinstance(snapshot_url, str) and snapshot_url else final_url,
+                    status=int(getattr(snapshot, "status", None) or 200),
+                    content_type=_response_header(snapshot, "content-type") or "text/html",
+                    click_index=index,
+                )
         click_meta = {"pages": len(click_result.pages), "stop_reason": click_result.stop_reason}
     cache.store(
         url,

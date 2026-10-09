@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-58**) and use this template:
+7. **New findings** take the next free ID (**TD-59**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,19 +230,19 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-39 | P3 | click pagination | medium | timing only | |
-| 2 | TD-40 | P3 | API | low | `offset` bound | |
-| 3 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 4 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 5 | TD-43 | P3 | image, dependencies | low | none | |
-| 6 | TD-44 | P3 | lint, docs | low | none | |
-| 7 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 8 | TD-52 | P2 | worker | low | none | |
-| 9 | TD-53 | P3 | engine | low | none | |
-| 10 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 11 | TD-55 | P2 | URL guard, API | low | none | |
-| 12 | TD-56 | P3 | redaction | low | none | |
-| 13 | TD-57 | P3 | storage | low | none | |
+| 1 | TD-40 | P3 | API | low | `offset` bound | |
+| 2 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 3 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 4 | TD-43 | P3 | image, dependencies | low | none | |
+| 5 | TD-44 | P3 | lint, docs | low | none | |
+| 6 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 7 | TD-52 | P2 | worker | low | none | |
+| 8 | TD-53 | P3 | engine | low | none | |
+| 9 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 10 | TD-55 | P2 | URL guard, API | low | none | |
+| 11 | TD-56 | P3 | redaction | low | none | |
+| 12 | TD-57 | P3 | storage | low | none | |
+| 13 | TD-58 | P3 | engine, memory | low | none | Measure first |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -273,7 +273,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-39 | P3 | ready | Click pagination keeps every parse tree and repeats the full wait per click |
 | TD-40 | P3 | ready | API edge cases: unbounded offsets, unlogged failures, uncounted response memory |
 | TD-41 | P3 | ready | Dead code and duplicated helpers |
 | TD-42 | P3 | ready | `job_store.py` (2.5k lines) mixes five concerns |
@@ -291,6 +290,7 @@ qualification workflows passing.
 | TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
+| TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 
 ## Ready to implement
 
@@ -338,31 +338,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-39 — Click pagination keeps every parse tree and repeats the full wait per click
-
-**Priority:** P3 · **Area:** engine, pagination · **Risk:** medium · **Contract:** timing only; records must be identical · **Depends on:** —
-
-- **a. Every page's parse tree is kept.**
-  - `BrowserSession._click_through_pages` and `_extract_click_pages` parse every
-    click snapshot and keep it until the target ends, while the browser is
-    still open.
-  - Measured about 5.6 MB per eurooptic page (1.42 MB of HTML).
-    `eurooptic-riflescopes` uses `max_pages: 70` (its byte budget was raised to
-    256 MiB for this), which is about 390 MB of trees at once.
-  - Parsing, about 6 ms a page, runs on the event loop.
-  - **Fix:** keep the raw HTML (optionally compressed), parse each snapshot in a
-    worker thread, and drop it after extraction. Record/replay builds the same
-    structure, so update both.
-- **b. The full wait runs after every click.**
-  - `_click_through_pages` waits the full `wait_ms` after every click, even
-    once the item change is confirmed.
-  - eurooptic's 1,000 ms wait adds up to 69 s per riflescopes run; the
-    eurooptic-optics job took 932 s.
-  - **Fix:** skip or cap the wait once the change is confirmed.
-
-**Done when:** records are identical on eurooptic page-cache recordings, with
-peak memory and wall time recorded before and after.
 
 ### TD-40 — API edge cases: unbounded offsets, unlogged failures, uncounted response memory
 
@@ -663,6 +638,27 @@ partial index (for example `(job_id) WHERE status = 'running' AND
 current_run_id IS NULL`) or by proof that the state can't exist.
 **Done when:** the plan has no `SCAN jobs`, and results are unchanged on seeded
 edge rows.
+
+### TD-58 — Every parsed page waits for the cyclic garbage collector to free its tree
+
+**Priority:** P3 · **Area:** engine, memory · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- Scrapling's `Response.__init__` sets `self.adaptor = self`, so a page
+  dropped after extraction is freed only by the cyclic garbage collector, not
+  by reference counting.
+- Extraction allocates enough to promote the page to older generations, so
+  first pages and link and page-parameter pagination pages can accumulate lxml
+  trees until a gen-2 collection or the worker's end-of-job `gc.collect()`.
+- Unmeasured. Click snapshots already break the cycle (`ClickSnapshot.parsed()`).
+
+**Code:** `engine/pagination.py` (`paginate_target`), `engine/scraper.py`
+(`_scrape_first_page`, `_fetch_page`).
+**Fix:** measure peak RSS on a long link-pagination run first. If it matters,
+delete `response.adaptor` once a page is extracted, as `ClickSnapshot.parsed()`
+does.
+**Done when:** a benchmark shows peak RSS before and after on a 50-page link
+pagination run, with identical records.
 
 ## Coordinated
 

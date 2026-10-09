@@ -1,11 +1,17 @@
 """Shared scraper result and fetch outcome models."""
 from __future__ import annotations
 
+import zlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from scrapeyard.models.job import ErrorType
+
+if TYPE_CHECKING:
+    from scrapling.engines.toolbelt.custom import Response
 
 
 class TargetStatus(str, Enum):
@@ -70,10 +76,46 @@ class ClickPaginationSpec:
 
 
 @dataclass(frozen=True)
+class ClickSnapshot:
+    """One rendered click-pagination page, kept as compressed HTML until extraction.
+
+    A target can capture dozens of large pages before any is extracted, and a
+    parse tree is about four times its HTML, so each page is parsed only when
+    it is extracted and its tree is dropped afterwards.
+    """
+
+    compressed_html: bytes
+    # Keyword arguments for the Scrapling Response, other than text and body.
+    response_kwargs: dict[str, Any]
+
+    @classmethod
+    def capture(cls, html: str, response_kwargs: dict[str, Any]) -> ClickSnapshot:
+        return cls(zlib.compress(html.encode("utf-8"), 1), response_kwargs)
+
+    @property
+    def html(self) -> str:
+        return zlib.decompress(self.compressed_html).decode("utf-8")
+
+    @contextmanager
+    def parsed(self) -> Iterator[Response]:
+        """Parse the page, and free its tree on exit rather than at a later GC pass."""
+        from scrapling.engines.toolbelt.custom import Response
+
+        html = self.html
+        response = Response(text=html, body=html.encode("utf-8"), **self.response_kwargs)
+        try:
+            yield response
+        finally:
+            # Scrapling's Response refers to itself (``adaptor``), so without
+            # this only the cyclic garbage collector would free the tree.
+            del response.adaptor
+
+
+@dataclass(frozen=True)
 class ClickPaginationResult:
     """Rendered follow-on pages captured by clicking the next element."""
 
-    pages: list[object] = field(default_factory=list)
+    pages: list[ClickSnapshot] = field(default_factory=list)
     stop_reason: str = "unknown"
     stop_detail: str | None = None
 

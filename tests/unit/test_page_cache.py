@@ -31,7 +31,11 @@ from scrapeyard.engine.page_cache import (
     canonical_cache_url,
 )
 from scrapeyard.engine.resilience import RetryableError
-from scrapeyard.engine.scrape_models import CLICK_PAGINATION_ATTRIBUTE, ClickPaginationResult
+from scrapeyard.engine.scrape_models import (
+    CLICK_PAGINATION_ATTRIBUTE,
+    ClickPaginationResult,
+    ClickSnapshot,
+)
 from scrapeyard.engine.scraper import (
     _fetch_page,
     _record_fetched_page,
@@ -207,6 +211,18 @@ async def test_unconfigured_cache_fails_instead_of_fetching(tmp_path, monkeypatc
         await _fetch_page(object(), BASE, _target(), FetcherType.basic, False, {500}, str(tmp_path))
 
 
+def _click_snapshot(url: str, html: str) -> ClickSnapshot:
+    return ClickSnapshot.capture(html, {
+        "url": url,
+        "status": 200,
+        "reason": "OK",
+        "cookies": {},
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "request_headers": {},
+        **Fetcher._generate_parser_arguments(),
+    })
+
+
 @pytest.mark.asyncio
 async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
     cache = _cache(tmp_path, PageCacheMode.record)
@@ -215,11 +231,18 @@ async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
         first,
         CLICK_PAGINATION_ATTRIBUTE,
         ClickPaginationResult(
-            pages=[_response(BASE, PAGES[f"{BASE}?page=2"]), _response(BASE, PAGES[f"{BASE}?page=3"])],
+            pages=[
+                _click_snapshot(BASE, PAGES[f"{BASE}?page=2"]),
+                _click_snapshot(BASE, PAGES[f"{BASE}?page=3"]),
+            ],
             stop_reason="exhausted",
         ),
     )
     _record_fetched_page(cache, BASE, FetcherType.dynamic, first, BASE)
+    # Snapshots are stored as serialized by the parser, like every other page.
+    assert cache.load(BASE, "dynamic", click_index=2).html == (
+        _response(BASE, PAGES[f"{BASE}?page=3"]).html_content
+    )
 
     target = TargetConfig(
         url=BASE,
@@ -235,7 +258,12 @@ async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
     )
     click = getattr(outcome.page, CLICK_PAGINATION_ATTRIBUTE)
     assert click.stop_reason == "exhausted"
-    assert [page.css("h2::text") for page in click.pages] == [["C"], ["D"]]
+    assert all(isinstance(page, ClickSnapshot) for page in click.pages)
+    names = []
+    for snapshot in click.pages:
+        with snapshot.parsed() as page:
+            names.append(page.css("h2::text"))
+    assert names == [["C"], ["D"]]
 
     for path in cache.root.rglob("*.json"):
         if '"click_index": 2' in path.read_text():

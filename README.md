@@ -363,7 +363,11 @@ Client-rendered listings that change pages only in the browser can use
 captured, Scrapeyard clicks the first visible, enabled `next` element in the
 live page, waits until the `item_selector` matches (or, without one, the page
 body) change, applies `browser.wait_for_selector`/`wait_ms` again, and extracts
-each rendered page like a fetched page. It stops at `max_pages`, with
+each rendered page like a fetched page. After a click, a `wait_ms` above 250
+ends early once the page has made no DOM change for 250 ms with no request in
+flight (images, fonts and stylesheets aside), so a page still loading or
+rendering content keeps waiting, up to the full `wait_ms`. It stops at
+`max_pages`, with
 `exhausted` when the control is missing, hidden, disabled or `aria-disabled`,
 with `repeated_page` when a click leaves the items unchanged or returns an
 earlier page, and with `unknown` when a click fails. Each snapshot counts

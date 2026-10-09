@@ -14,6 +14,7 @@ from scrapeyard.config.schema import PaginationMode, TargetConfig
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
+    ClickSnapshot,
     FetchOutcome,
     ScrapeStop,
     TargetResult,
@@ -428,6 +429,16 @@ async def _paginate_by_page_param(
         )
 
 
+def _extract_click_snapshot(
+    snapshot: ClickSnapshot,
+    target: TargetConfig,
+    extract_page_data: ExtractPageDataCallable,
+) -> list[dict[str, Any]]:
+    # The parse tree exists only while this page is extracted.
+    with snapshot.parsed() as page:
+        return extract_page_data(page, target)
+
+
 async def _extract_click_pages(
     *,
     page: object,
@@ -449,9 +460,10 @@ async def _extract_click_pages(
         if budget is not None:
             budget.check_deadline()
         page_data = await _run_cpu_work(
-            extract_page_data,
+            _extract_click_snapshot,
             snapshot,
             target,
+            extract_page_data,
             budget=budget,
         )
         result.data.extend(page_data)

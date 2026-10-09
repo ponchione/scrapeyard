@@ -18,6 +18,7 @@ from scrapling.engines.toolbelt.custom import Response, StatusText
 
 from scrapeyard.common.async_tools import await_cleanup
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.traffic import url_site
 from scrapeyard.engine.asset_cache import AssetCache, CachedAsset
 from scrapeyard.engine.basic_fetch import generate_convincing_referer
@@ -25,6 +26,7 @@ from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
     ClickPaginationSpec,
+    ClickSnapshot,
     ScrapeStop,
 )
 from scrapeyard.engine.domain_guard import admit_page
@@ -38,6 +40,23 @@ _CLICK_CHANGE_POLL_MS = 50
 _CLICK_NAVIGATION_RETRY_MS = 250
 # Bound the actionability wait before falling back to dispatching the click.
 _CLICK_ACTIONABLE_TIMEOUT_MS = 10_000
+# After a click has changed the items, the configured wait ends early once the
+# document has not changed, with no page request in flight, for this long.
+_CLICK_SETTLE_QUIET_MS = 250
+# Requests that only style or decorate the page and never carry its content.
+_PRESENTATION_RESOURCE_TYPES = frozenset({
+    "font", "image", "manifest", "media", "stylesheet", "texttrack",
+})
+
+# Count DOM mutations anywhere in the document; the handle keeps the observer.
+_OBSERVE_MUTATIONS_SCRIPT = """() => {
+    const state = {mutations: 0};
+    state.observer = new MutationObserver(records => { state.mutations += records.length; });
+    state.observer.observe(document, {
+        subtree: true, childList: true, attributes: true, characterData: true,
+    });
+    return state;
+}"""
 
 # Hash the current page items (or the body when no item selector is set) in the
 # page, so change detection never transfers the rendered document to Python.
@@ -300,6 +319,29 @@ class BrowserSession:
         assert content is not None
         return cast(str, content)
 
+    @staticmethod
+    async def _response_kwargs(
+        page: Any,
+        context: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        *,
+        history: list[Any],
+    ) -> dict[str, Any]:
+        """Scrapling Response arguments for the current page, other than its HTML."""
+        return {
+            "url": page.url,
+            "status": final_response.status,
+            "reason": final_response.status_text or StatusText.get(final_response.status),
+            "encoding": final_response.headers.get("content-type", "") or "utf-8",
+            "cookies": {cookie["name"]: cookie["value"] for cookie in await context.cookies()},
+            "headers": await first_response.all_headers(),
+            "request_headers": await first_response.request.all_headers(),
+            "history": history,
+            **engine.adaptor_arguments,
+        }
+
     async def _snapshot_response(
         self,
         page: Any,
@@ -313,15 +355,29 @@ class BrowserSession:
     ) -> Response:
         content = await self._capture_html(page, budget)
         return Response(
-            url=page.url, text=content, body=content.encode("utf-8"),
-            status=final_response.status,
-            reason=final_response.status_text or StatusText.get(final_response.status),
-            encoding=final_response.headers.get("content-type", "") or "utf-8",
-            cookies={cookie["name"]: cookie["value"] for cookie in await context.cookies()},
-            headers=await first_response.all_headers(),
-            request_headers=await first_response.request.all_headers(),
-            history=history,
-            **engine.adaptor_arguments,
+            text=content,
+            body=content.encode("utf-8"),
+            **await self._response_kwargs(
+                page, context, engine, first_response, final_response, history=history,
+            ),
+        )
+
+    async def _click_snapshot(
+        self,
+        page: Any,
+        context: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        budget: RunBudget | None,
+    ) -> ClickSnapshot:
+        content = await self._capture_html(page, budget)
+        response_kwargs = await self._response_kwargs(
+            page, context, engine, first_response, final_response, history=[],
+        )
+        # Compress off the event loop; extraction parses the page later, in a thread.
+        return await run_thread_work(
+            ClickSnapshot.capture, content, response_kwargs, run_budget=budget,
         )
 
     @staticmethod
@@ -384,6 +440,50 @@ class BrowserSession:
                 await page.wait_for_timeout(_CLICK_NAVIGATION_RETRY_MS)
 
     @staticmethod
+    async def _settle_after_click(page: Any, wait_ms: float, in_flight: set[Any]) -> None:
+        """Apply the configured wait to a clicked page, ending it once the page settles.
+
+        The wait lets late content (prices, availability, images) render after
+        the items change. That content arrives through a request or a DOM
+        update, so the wait ends early only after the whole document has gone
+        _CLICK_SETTLE_QUIET_MS without a change while no page request was in
+        flight (images, fonts and other presentation requests aside). A page
+        that keeps changing, or cannot be observed, waits the full time, as it
+        did before.
+        """
+        if wait_ms <= _CLICK_SETTLE_QUIET_MS:
+            await page.wait_for_timeout(wait_ms)
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_ms / 1000
+        try:
+            observer = await page.evaluate_handle(_OBSERVE_MUTATIONS_SCRIPT)
+            seen = 0
+            # Measured from the first quiet check, so activity that ended just
+            # after the previous check still gets the whole quiet period.
+            quiet_since: float | None = None
+            while (remaining := deadline - loop.time()) > 0:
+                await asyncio.sleep(min(_CLICK_CHANGE_POLL_MS / 1000, remaining))
+                mutations = await observer.evaluate("state => state.mutations")
+                now = loop.time()
+                if mutations != seen or in_flight:
+                    seen = mutations
+                    quiet_since = None
+                elif quiet_since is None:
+                    quiet_since = now
+                elif (now - quiet_since) * 1000 >= _CLICK_SETTLE_QUIET_MS:
+                    break
+        except Exception:
+            # A navigation replaced the document, and its observer with it.
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await page.wait_for_timeout(remaining * 1000)
+            return
+        with suppress(Exception):
+            await observer.evaluate("state => state.observer.disconnect()")
+            await observer.dispose()
+
+    @staticmethod
     async def _activate_control(control: Any, timeout_ms: float) -> None:
         """Click like a user; if an overlay intercepts it, dispatch the click on the control."""
         try:
@@ -406,7 +506,40 @@ class BrowserSession:
         budget: RunBudget | None,
         spec: ClickPaginationSpec,
     ) -> ClickPaginationResult:
-        pages: list[object] = []
+        # Page requests in flight, so the post-click wait can tell when the
+        # rendered page is still loading content.
+        in_flight: set[Any] = set()
+
+        def started(request: Any) -> None:
+            if request.resource_type not in _PRESENTATION_RESOURCE_TYPES:
+                in_flight.add(request)
+
+        def ended(request: Any) -> None:
+            in_flight.discard(request)
+
+        listeners = (("request", started), ("requestfinished", ended), ("requestfailed", ended))
+        for event, listener in listeners:
+            page.on(event, listener)
+        try:
+            return await self._click_pages(
+                page, context, engine, first_response, final_response, budget, spec, in_flight,
+            )
+        finally:
+            for event, listener in listeners:
+                page.remove_listener(event, listener)
+
+    async def _click_pages(
+        self,
+        page: Any,
+        context: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        budget: RunBudget | None,
+        spec: ClickPaginationSpec,
+        in_flight: set[Any],
+    ) -> ClickPaginationResult:
+        pages: list[ClickSnapshot] = []
         previous = await self._item_fingerprint(page, spec)
         seen = {previous}
         timeout_ms = float(engine.timeout)
@@ -437,7 +570,7 @@ class BrowserSession:
                         await page.locator(engine.wait_selector).first.wait_for(
                             state=engine.wait_selector_state,
                         )
-                await page.wait_for_timeout(engine.wait)
+                await self._settle_after_click(page, engine.wait, in_flight)
                 current = await self._item_fingerprint(page, spec)
             except (BudgetExceeded, asyncio.CancelledError):
                 raise
@@ -451,8 +584,8 @@ class BrowserSession:
             seen.add(current)
             previous = current
             pages.append(
-                await self._snapshot_response(
-                    page, context, engine, first_response, final_response, budget, history=[],
+                await self._click_snapshot(
+                    page, context, engine, first_response, final_response, budget,
                 )
             )
         stop_reason = "max_pages" if await self._next_is_available(page, spec) else "exhausted"

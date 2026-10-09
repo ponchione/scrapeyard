@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
+import time
+import weakref
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
+from scrapling import Fetcher
 
 from scrapeyard.config.schema import FetcherType, PaginationMode, RetryConfig, TargetConfig
-from scrapeyard.engine import pagination
+from scrapeyard.engine import browser_session, pagination
 from scrapeyard.engine.browser_debug import click_pagination_spec, fetch_browser_response
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.pagination import paginate_target, with_query_param
@@ -17,6 +22,7 @@ from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
     ClickPaginationSpec,
+    ClickSnapshot,
     FetchOutcome,
     TargetResult,
 )
@@ -270,14 +276,34 @@ class _Snapshot:
         self.title = title
 
 
-@pytest.mark.asyncio
-async def test_click_mode_extracts_each_rendered_snapshot_without_fetching():
+def _click_snapshot(title: str) -> ClickSnapshot:
+    return ClickSnapshot.capture(
+        f"<html><body><h1>{title}</h1></body></html>",
+        {
+            "url": "https://shop.example.test/list",
+            "status": 200,
+            "reason": "OK",
+            "cookies": {},
+            "headers": {},
+            "request_headers": {},
+            **Fetcher._generate_parser_arguments(),
+        },
+    )
+
+
+def _extract_title(page: Any, _target: TargetConfig) -> list[dict[str, Any]]:
+    return [{"title": page.css("h1::text").get()}]
+
+
+async def _paginate_click_snapshots(
+    snapshots: list[ClickSnapshot], extract_page_data: Any = _extract_title,
+) -> tuple[TargetResult, AsyncMock]:
     target = _target({"mode": "click", "next": "button.next", "max_pages": 5}, fetcher="dynamic")
     first = _Snapshot("p1")
     setattr(
         first,
         CLICK_PAGINATION_ATTRIBUTE,
-        ClickPaginationResult(pages=[_Snapshot("p2"), _Snapshot("p3")], stop_reason="exhausted"),
+        ClickPaginationResult(pages=snapshots, stop_reason="exhausted"),
     )
     result = TargetResult(url=target.url, status="success", data=[{"title": "p1"}], pages_scraped=1)
     fetch = AsyncMock()
@@ -287,7 +313,7 @@ async def test_click_mode_extracts_each_rendered_snapshot_without_fetching():
         target=target,
         result=result,
         fetch_target_page=fetch,
-        extract_page_data=lambda page, _target: [{"title": page.title}],
+        extract_page_data=extract_page_data,
         retry_handler=MagicMock(spec=RetryConfig),
         fetcher_cls=object(),
         adaptive=False,
@@ -296,11 +322,49 @@ async def test_click_mode_extracts_each_rendered_snapshot_without_fetching():
         proxy_url=None,
         artifacts_dir=None,
     )
+    return result, fetch
+
+
+@pytest.mark.asyncio
+async def test_click_mode_extracts_each_rendered_snapshot_without_fetching():
+    result, fetch = await _paginate_click_snapshots([_click_snapshot("p2"), _click_snapshot("p3")])
 
     fetch.assert_not_awaited()
     assert result.data == [{"title": "p1"}, {"title": "p2"}, {"title": "p3"}]
     assert result.pages_scraped == 3
     assert result.pagination_stop_reason == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_click_mode_frees_each_parse_tree_before_parsing_the_next_snapshot():
+    parsed: list[weakref.ref[Any]] = []
+    alive_at_parse: list[int] = []
+
+    def extract(page: Any, target: TargetConfig) -> list[dict[str, Any]]:
+        alive_at_parse.append(sum(ref() is not None for ref in parsed))
+        parsed.append(weakref.ref(page))
+        return _extract_title(page, target)
+
+    # Reference counting alone must free each tree: no cyclic collection runs.
+    gc.disable()
+    try:
+        result, _fetch = await _paginate_click_snapshots(
+            [_click_snapshot(f"p{number}") for number in range(2, 6)], extract,
+        )
+    finally:
+        gc.enable()
+
+    assert alive_at_parse == [0, 0, 0, 0]
+    assert all(ref() is None for ref in parsed)
+    assert [row["title"] for row in result.data] == ["p1", "p2", "p3", "p4", "p5"]
+
+
+def test_click_snapshot_keeps_compressed_html_until_parsed():
+    html = "<html><body>" + "<li class='card'>Scope 3-9x40</li>" * 2_000 + "</body></html>"
+    snapshot = ClickSnapshot.capture(html, {"url": "https://shop.example.test/list"})
+
+    assert snapshot.html == html
+    assert len(snapshot.compressed_html) < len(html) // 10
 
 
 @pytest.mark.asyncio
@@ -348,6 +412,13 @@ class _Listing:
         self.disabled_on_last = disabled_on_last
         self.clicks = 0
         self.url = "https://shop.example.test/list"
+        self.listeners: dict[str, list[Any]] = {}
+
+    def on(self, event: str, handler: Any) -> None:
+        self.listeners.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event: str, handler: Any) -> None:
+        self.listeners[event].remove(handler)
 
     def locator(self, query: str) -> _Locator:
         assert query == "button.next"
@@ -446,7 +517,12 @@ async def _click_through(listing: _Listing, max_pages: int) -> ClickPaginationRe
 
 
 def _titles(result: ClickPaginationResult) -> list[str]:
-    return [snapshot.css("li.card::text").get() for snapshot in result.pages]
+    titles = []
+    for snapshot in result.pages:
+        assert isinstance(snapshot, ClickSnapshot)
+        with snapshot.parsed() as page:
+            titles.append(page.css("li.card::text").get())
+    return titles
 
 
 @pytest.mark.asyncio
@@ -514,6 +590,16 @@ async def test_click_change_wait_rearms_after_a_navigation_replaces_the_document
 
 
 @pytest.mark.asyncio
+async def test_click_through_removes_its_request_listeners():
+    listing = _Listing(["p1", "p2"])
+
+    await _click_through(listing, max_pages=10)
+
+    assert all(not handlers for handlers in listing.listeners.values())
+    assert set(listing.listeners) == {"request", "requestfinished", "requestfailed"}
+
+
+@pytest.mark.asyncio
 async def test_click_through_with_a_single_page_cap_only_inspects_next():
     listing = _Listing(["p1", "p2"])
 
@@ -539,9 +625,6 @@ class _LivePage(_Listing):
         return None
 
     def set_default_timeout(self, _timeout: float) -> None:
-        return None
-
-    def on(self, _event: str, _handler: Any) -> None:
         return None
 
     async def goto(self, url: str, referer: str | None = None) -> MagicMock:
@@ -586,9 +669,226 @@ async def test_browser_session_fetch_attaches_click_pagination_snapshots():
 
     assert response.css("li.card::text").get() == "p1"
     click_result = getattr(response, CLICK_PAGINATION_ATTRIBUTE)
-    assert [page.css("li.card::text").get() for page in click_result.pages] == ["p2", "p3"]
+    assert _titles(click_result) == ["p2", "p3"]
     assert click_result.stop_reason == "exhausted"
     context.set_offline.assert_awaited_with(True)
+
+
+# --- settling after a click -------------------------------------------------
+
+
+class _MutationState:
+    def __init__(self, page: _SettlingPage) -> None:
+        self.page = page
+
+    async def evaluate(self, script: str) -> int | None:
+        if self.page.observe_error is not None:
+            raise self.page.observe_error
+        if "disconnect" in script:
+            self.page.disconnected = True
+            return None
+        return self.page.mutations
+
+    async def dispose(self) -> None:
+        self.page.disposed = True
+
+
+class _SettlingPage:
+    """Counts DOM mutations the way the in-page MutationObserver does."""
+
+    def __init__(self, *, observe_error: Exception | None = None) -> None:
+        self.mutations = 0
+        self.observe_error = observe_error
+        self.waited: list[float] = []
+        self.disconnected = False
+        self.disposed = False
+
+    async def evaluate_handle(self, script: str) -> _MutationState:
+        assert "MutationObserver" in script
+        return _MutationState(self)
+
+    async def wait_for_timeout(self, ms: float) -> None:
+        self.waited.append(ms)
+        await asyncio.sleep(ms / 1000)
+
+
+async def _timed_settle(page: Any, wait_ms: float, in_flight: set[Any]) -> float:
+    started = time.monotonic()
+    await BrowserSession._settle_after_click(page, wait_ms, in_flight)
+    return time.monotonic() - started
+
+
+@pytest.fixture
+def _short_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(browser_session, "_CLICK_SETTLE_QUIET_MS", 100)
+
+
+@pytest.mark.asyncio
+async def test_click_settle_ends_the_wait_once_the_page_is_quiet(_short_quiet: None):
+    page = _SettlingPage()
+
+    elapsed = await _timed_settle(page, 2_000, set())
+
+    assert elapsed < 1.0
+    assert page.waited == []
+    assert (page.disconnected, page.disposed) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_click_settle_waits_while_the_document_keeps_changing(_short_quiet: None):
+    page = _SettlingPage()
+
+    async def render_late_content() -> None:
+        for _ in range(10):
+            await asyncio.sleep(0.05)
+            page.mutations += 1
+
+    rendering = asyncio.create_task(render_late_content())
+    elapsed = await _timed_settle(page, 2_000, set())
+    await rendering
+
+    assert 0.6 <= elapsed < 1.9
+
+
+@pytest.mark.asyncio
+async def test_click_settle_waits_while_a_page_request_is_in_flight(_short_quiet: None):
+    page = _SettlingPage()
+    in_flight: set[Any] = {"price-request"}
+
+    async def finish_request() -> None:
+        await asyncio.sleep(0.5)
+        in_flight.clear()
+
+    finishing = asyncio.create_task(finish_request())
+    elapsed = await _timed_settle(page, 2_000, in_flight)
+    await finishing
+
+    assert 0.6 <= elapsed < 1.9
+
+
+@pytest.mark.asyncio
+async def test_click_settle_never_waits_longer_than_configured(_short_quiet: None):
+    page = _SettlingPage()
+
+    elapsed = await _timed_settle(page, 400, {"long-poll"})
+
+    assert 0.4 <= elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_click_settle_keeps_short_waits_unchanged():
+    page = _SettlingPage()
+
+    await BrowserSession._settle_after_click(page, 250, set())
+
+    assert page.waited == [250]
+    assert not page.disposed
+
+
+@pytest.mark.asyncio
+async def test_click_settle_waits_out_the_time_when_the_document_is_replaced(_short_quiet: None):
+    page = _SettlingPage(observe_error=RuntimeError("Execution context was destroyed"))
+
+    elapsed = await _timed_settle(page, 400, set())
+
+    assert len(page.waited) == 1 and 300 < page.waited[0] <= 400
+    assert elapsed >= 0.35
+
+
+class _Request:
+    def __init__(self, resource_type: str) -> None:
+        self.resource_type = resource_type
+
+
+class _LatePriceListing(_Listing):
+    """Each clicked page renders its items at once and its price after a request."""
+
+    def __init__(self, pages: list[str], price_delay: float, *, resource_type: str = "fetch") -> None:
+        super().__init__(pages)
+        self.price_delay = price_delay
+        self.resource_type = resource_type
+        self.priced = 0
+        self.mutations = 0
+
+    async def content(self) -> str:
+        price = "priced" if self.priced == self.index else "pending"
+        return (
+            f"<html><body><li class='card'>{self.pages[self.index]}</li>"
+            f"<span class='price'>{price}</span></body></html>"
+        )
+
+    async def evaluate_handle(self, script: str) -> Any:
+        listing = self
+
+        class _State:
+            async def evaluate(self, script: str) -> int | None:
+                return None if "disconnect" in script else listing.mutations
+
+            async def dispose(self) -> None:
+                return None
+
+        return _State()
+
+    def emit(self, event: str, request: object) -> None:
+        for handler in list(self.listeners.get(event, [])):
+            handler(request)
+
+    async def load_price(self, index: int) -> None:
+        request = _Request(self.resource_type)
+        self.emit("request", request)
+        await asyncio.sleep(self.price_delay)
+        self.priced = index
+        self.mutations += 1
+        self.emit("requestfinished", request)
+
+
+async def _click_through_late_prices(listing: _LatePriceListing) -> tuple[ClickPaginationResult, float]:
+    locator_click = _Locator.click
+    loading: list[asyncio.Task[None]] = []
+
+    async def click(self: _Locator, timeout: float) -> None:
+        await locator_click(self, timeout)
+        loading.append(asyncio.create_task(listing.load_price(listing.index)))
+
+    context, engine, response = _session_response_parts()
+    engine.wait = 3_000
+    spec = ClickPaginationSpec(
+        next_query="button.next", next_type="css", item_query="li.card", item_type="css",
+        max_pages=10,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_Locator, "click", click)
+        started = time.monotonic()
+        result = await BrowserSession(MagicMock())._click_through_pages(
+            listing, context, engine, response, response, None, spec,
+        )
+        elapsed = time.monotonic() - started
+    await asyncio.gather(*loading)
+    return result, elapsed
+
+
+def _price(snapshot: ClickSnapshot) -> str | None:
+    with snapshot.parsed() as page:
+        return page.css("span.price::text").get()
+
+
+@pytest.mark.asyncio
+async def test_click_settle_captures_a_price_that_renders_after_the_items(_short_quiet: None):
+    result, elapsed = await _click_through_late_prices(_LatePriceListing(["p1", "p2"], price_delay=0.4))
+
+    assert _price(result.pages[0]) == "priced"
+    assert 0.5 <= elapsed < 2.5
+
+
+@pytest.mark.asyncio
+async def test_click_settle_does_not_wait_for_presentation_requests(_short_quiet: None):
+    listing = _LatePriceListing(["p1", "p2"], price_delay=1.0, resource_type="image")
+
+    result, elapsed = await _click_through_late_prices(listing)
+
+    # The image never changes the extracted page, so the click settles early.
+    assert _price(result.pages[0]) == "pending"
+    assert elapsed < 0.9
 
 
 # --- click activation fallback ----------------------------------------------
