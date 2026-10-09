@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName
-from scrapeyard.config.schema import FailStrategy, FetcherType, WebhookConfig
+from scrapeyard.config.schema import FailStrategy, FetcherType, OnEmptyAction, WebhookConfig
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.resilience import CircuitBreaker, CircuitProbe, CircuitState
 from scrapeyard.engine.scraper import TargetResult
@@ -737,3 +737,69 @@ async def test_half_open_browser_fetch_deadline_aborts_probe_without_closing():
     replacement = circuit_breaker.check("browser.example")
     assert isinstance(replacement, CircuitProbe)
     assert replacement.generation != probe.generation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retried",
+    [
+        TargetResult(url="https://replay.example", status="success", data=[{"t": "ok"}]),
+        TargetResult(
+            url="https://replay.example",
+            status="failed",
+            http_status=503,
+            error_type=ErrorType.http_error,
+            errors=["HTTP 503"],
+        ),
+    ],
+)
+async def test_replayed_validation_retry_leaves_the_circuit_breaker_alone(retried):
+    circuit_breaker = MagicMock()
+    target = make_target("https://replay.example")
+    recorder = TargetErrorRecorder(
+        job_id="job-replay",
+        run_id="run-replay",
+        project="test",
+        pending_errors=[],
+        circuit_breaker=circuit_breaker,
+    )
+    context = MagicMock()
+    context.replay = True
+    context.recorder.return_value = recorder
+    context.circuit_breaker = circuit_breaker
+    context.budget = None
+    context.run_artifacts_dir = None
+    context.activity.checkpoint = AsyncMock()
+    context.validator.validate.side_effect = [
+        MagicMock(passed=False, action=OnEmptyAction.retry, message="empty"),
+        MagicMock(passed=True),
+    ]
+    runtime = TargetRuntimeContext(
+        domain="replay.example",
+        adaptive=False,
+        proxy_url=None,
+        artifacts_dir=None,
+    )
+    first = TargetResult(url="https://replay.example", status="success", data=[])
+
+    with (
+        patch(
+            "scrapeyard.queue.worker.resolve_target_runtime_context",
+            return_value=runtime,
+        ),
+        patch(
+            "scrapeyard.queue.worker.scrape_target",
+            new=AsyncMock(side_effect=[first, retried]),
+        ),
+    ):
+        result = await _fetch_and_validate_target(
+            target_cfg=target,
+            context=context,
+            pending_errors=[],
+        )
+
+    assert result is retried
+    # The retry's failure is still recorded; only the circuit is left alone.
+    assert len(recorder.pending_errors) == (1 if retried.is_success else 2)
+    circuit_breaker.record_success.assert_not_called()
+    circuit_breaker.record_failure.assert_not_called()

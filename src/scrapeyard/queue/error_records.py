@@ -131,6 +131,7 @@ class TargetErrorRecorder:
         default_error_type: ErrorType = ErrorType.http_error,
         combine_errors: bool = False,
         probe: CircuitProbe | None = None,
+        update_circuit: bool = True,
     ) -> None:
         self.pending_errors.extend(
             build_target_result_error_records(
@@ -146,6 +147,8 @@ class TargetErrorRecorder:
                 combine_errors=combine_errors,
             )
         )
+        if not update_circuit:
+            return
         if circuit_breaker_failure(result):
             if probe is None:
                 self.circuit_breaker.record_failure(domain)

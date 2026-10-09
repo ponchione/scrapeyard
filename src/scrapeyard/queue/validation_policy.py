@@ -61,6 +61,7 @@ async def apply_validation(
     attempt: int = 1,
     budget: RunBudget | None = None,
     cancellation_guard: CancellationCheckpoint | None = None,
+    replay: bool = False,
 ) -> TargetResult:
     """Validate a successful result; retry once on validation failure."""
     if not result.is_success:
@@ -119,6 +120,7 @@ async def apply_validation(
         budget=budget,
         cancellation_guard=cancellation_guard,
         retry_error=retry_error,
+        replay=replay,
     )
 
 
@@ -181,6 +183,7 @@ async def _retry_after_validation_failure(
     budget: RunBudget | None,
     cancellation_guard: CancellationCheckpoint | None,
     retry_error: ErrorRecord,
+    replay: bool,
 ) -> TargetResult:
     retry_result = await scrape(
         target_cfg,
@@ -213,10 +216,14 @@ async def _retry_after_validation_failure(
             result=retry_result,
             default_error_type=ErrorType.http_error,
             combine_errors=True,
+            # A replayed page never reached the site, so it says nothing
+            # about the site's availability.
+            update_circuit=not replay,
         )
         return retry_result
 
-    recorder.record_success(domain)
+    if not replay:
+        recorder.record_success(domain)
     retry_validation = await _validate_result(validator, retry_result.data, budget)
     if retry_validation.passed:
         retry_error.resolved = True

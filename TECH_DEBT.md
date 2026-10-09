@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-52**) and use this template:
+7. **New findings** take the next free ID (**TD-53**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,21 +230,21 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-31 | P2 | queue, runtime | low | none | Six small fixes |
-| 2 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
-| 3 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
-| 4 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 5 | TD-35 | P3 | API, job store | low | none | |
-| 6 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 7 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 8 | TD-38 | P3 | result store | low | none | |
-| 9 | TD-39 | P3 | click pagination | medium | timing only | |
-| 10 | TD-40 | P3 | API | low | `offset` bound | |
-| 11 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 12 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 13 | TD-43 | P3 | image, dependencies | low | none | |
-| 14 | TD-44 | P3 | lint, docs | low | none | |
-| 15 | TD-51 | P3 | lifespan | medium | none | Found during TD-30; needs a design decision |
+| 1 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
+| 2 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
+| 3 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
+| 4 | TD-35 | P3 | API, job store | low | none | |
+| 5 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 6 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 7 | TD-38 | P3 | result store | low | none | |
+| 8 | TD-39 | P3 | click pagination | medium | timing only | |
+| 9 | TD-40 | P3 | API | low | `offset` bound | |
+| 10 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 11 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 12 | TD-43 | P3 | image, dependencies | low | none | |
+| 13 | TD-44 | P3 | lint, docs | low | none | |
+| 14 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 15 | TD-52 | P2 | worker | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -275,7 +275,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-31 | P2 | ready | Worker and runtime error paths have small correctness gaps |
 | TD-32 | P2 | ready | Outbound HTTP has no total deadline, and webhook retry handling has gaps |
 | TD-33 | P2 | ready | Retryable HTTP failures lose their diagnostics and challenge classification |
 | TD-34 | P3 | ready | Result JSON is encoded with Python's pure-Python encoder |
@@ -295,6 +294,7 @@ qualification workflows passing.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
+| TD-52 | P2 | ready | A cancellation during run-budget handling skips cancellation recovery |
 
 ## Ready to implement
 
@@ -342,59 +342,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-31 — Worker and runtime error paths have small correctness gaps
-
-**Priority:** P2 · **Area:** queue, runtime · **Risk:** low · **Contract:** none · **Depends on:** —
-
-Each sub-item gets a regression test that reproduces the failure first.
-
-- **a. Budget handling can leave a run `running`.**
-  - `_handle_budget_exhaustion` catches only `RunOwnershipError` around
-    finalization.
-  - Any other exception, such as a transient SQLite error, escapes from inside
-    the `except BudgetExceeded` block. That skips crash handling and leaves the
-    run `running` for about 600 s.
-  - **Fix:** catch `Exception` and fall through to `_handle_execution_crash`.
-- **b. A completed run's artifact can be deleted.**
-  - `scrape_task` calls `_discard_unowned_result` unconditionally when it loses
-    ownership or crashes.
-  - If a cancellation lands while `finalize_owned_run` is in flight, the
-    database commit still lands on its thread. The handler then deletes the
-    artifact of a run that is now durably `complete`.
-  - **Fix:** re-read the run's status first, and keep the artifact if this run
-    is terminal.
-- **c. Queued reconciliation skips stale rows.**
-  - `start_queued_reconciliation_loop._loop` advances `batch_offset` by the
-    number of rows it inspected. Recovered or failed rows drop out of the stale
-    set, so the next page skips that many rows that are still stale.
-  - Example: with 250 missing deliveries, rows 101–200 wait an extra 60 s
-    interval.
-  - **Fix:** advance only by the rows that remain stale (`queue_present`).
-  - Code: `queue/reconciliation.py`.
-- **d. `enqueue` quietly starts the pool.**
-  - `WorkerPool.enqueue` calls `start()` lazily. After a completed `stop()`, a
-    late enqueue quietly starts a new Redis pool and worker. Two concurrent
-    first calls can start it twice.
-  - **Fix:** raise when the pool isn't started, and adjust `test_pool.py`'s use
-    of the lazy path.
-- **e. Python 3.10 timeouts during egress attestation.**
-  - `runtime/egress.py` (`attest_connected_ip_policy`,
-    `_attest_probe_liveness`) catches the builtin `TimeoutError`. On 3.10,
-    `asyncio.wait_for` raises `asyncio.TimeoutError`, which is a separate class
-    until 3.11.
-  - A DROP-style firewall therefore fails startup instead of counting the
-    timeout as denial.
-  - Production (3.12) and the shipped REJECT policy are unaffected, but CI
-    tests 3.10.
-  - **Fix:** catch both classes, and add a test where the connection hangs.
-- **f. Page-cache replay updates the live circuit breaker.**
-  - With `page_cache: replay` and `on_empty: retry`,
-    `_retry_after_validation_failure` re-reads the same cached page and updates
-    the process-wide circuit breaker. Replay avoids this everywhere else (see
-    `_scrape_and_validate_target`).
-  - Eyebox never replays.
-  - **Fix:** pass the replay flag through and skip circuit updates.
 
 ### TD-32 — Outbound HTTP has no total deadline, and webhook retry handling has gaps
 
@@ -852,7 +799,7 @@ recorded before and after.
   tests enforce it (`test_shutdown_retains_shared_services_for_unresolved_worker`,
   `test_lifespan_retains_instance_guard_for_unresolved_worker`). SQLite stays
   consistent, but every such shutdown ends in SIGKILL.
-- Found while fixing TD-30, which kept this design. Once the pool has used its
+- `WorkerPool.stop` keeps this design. Once the pool has used its
   cancellation reserve, no grace is left to close the stores anyway.
 
 **Code:** `main.py` (`_shutdown_runtime_services`, `live_owned_phases`,
@@ -864,6 +811,26 @@ update the two tests and `docs/DEPLOYMENT.md` to match.
 **Done when:** a test with a stuck run thread shows shutdown closing the stores
 and the process exiting within the grace, or the trade-off is accepted and this
 entry deleted.
+
+### TD-52 — A cancellation during run-budget handling skips cancellation recovery
+
+**Priority:** P2 · **Area:** worker · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `_handle_budget_exhaustion` runs inside `scrape_task`'s
+  `except BudgetExceeded` block. A `CancelledError` raised there, for example
+  a shutdown cancel during its database writes, propagates out without
+  reaching the sibling `except asyncio.CancelledError` handler.
+- The run then stays `running` until the heartbeat timeout, the symptom the
+  shutdown cancellation reserve fixed for the main path. An `Exception` from
+  the same call already goes through crash handling, but `CancelledError` is a
+  `BaseException`.
+
+**Code:** `queue/worker.py` (`scrape_task`, `_handle_budget_exhaustion`).
+**Fix:** send a cancellation from the budget path through the same ownership
+check and shielded crash finalization as the main cancellation handler.
+**Done when:** a test that cancels the task during budget finalization shows
+the run reaching `failed` or `cancelled` before the task ends.
 
 ## Coordinated
 

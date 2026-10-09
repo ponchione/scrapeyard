@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import asyncio
@@ -14,6 +15,7 @@ from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
+from scrapeyard.queue.cancellation import RunActivityGuard
 from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.types import SaveResultMeta
 from tests.unit.worker_helpers import make_job
@@ -318,3 +320,48 @@ execution:
     assert artifact["run_budget"]["fetched_bytes"] == max_requests * 10
     assert artifact["run_budget"]["limits"]["max_requests"] == max_requests
     assert artifact["run_budget"]["limits"]["max_fetched_bytes"] == 500
+
+
+@pytest.mark.asyncio
+async def test_budget_failure_handling_crash_still_fails_the_run(tmp_path):
+    run_id = "run-budget-handler-crash"
+    job_store, result_store, error_store = _stores(run_id)
+    config = """
+project: test
+name: budget-job
+target:
+  url: https://one.example.com
+  selectors:
+    title: h1
+"""
+
+    async def exceed_record_budget(*_args, budget, **_kwargs):
+        await budget.consume_extracted_records(4)
+        raise AssertionError("unreachable")
+
+    real_checkpoint = RunActivityGuard.checkpoint
+
+    async def checkpoint_with_transient_failure(self, name):
+        if name == "before_budget_failure_persistence":
+            raise sqlite3.OperationalError("database is locked")
+        await real_checkpoint(self, name)
+
+    with patch("scrapeyard.queue.worker.scrape_target", exceed_record_budget), patch(
+        "scrapeyard.queue.worker.get_settings",
+        return_value=_settings(tmp_path),
+    ), patch.object(RunActivityGuard, "checkpoint", checkpoint_with_transient_failure):
+        await scrape_task(
+            "job-budget",
+            config,
+            run_id=run_id,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    job_store.finalize_owned_run.assert_not_awaited()
+    job_store.fail_owned_run.assert_awaited_once()
+    assert job_store.fail_owned_run.await_args.args[:2] == ("job-budget", run_id)
+    result_store.delete_result.assert_awaited_once_with("job-budget", run_id)

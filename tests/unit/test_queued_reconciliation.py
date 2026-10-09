@@ -161,7 +161,7 @@ async def test_periodic_reconciliation_uses_bounded_batches(monkeypatch) -> None
         calls += 1
         if calls == 2:
             two_passes.set()
-        return QueuedReconciliationSummary(inspected=17)
+        return QueuedReconciliationSummary(inspected=17, queue_present=17)
 
     reconcile = AsyncMock(side_effect=reconcile_batch)
     monkeypatch.setattr(
@@ -245,6 +245,54 @@ async def test_periodic_reconciliation_eventually_drains_backlog_after_bounded_s
 
     assert remaining == []
     assert all(call.kwargs["limit"] == 2 for call in store.list_stale_queued_jobs.await_args_list)
+
+
+async def test_periodic_reconciliation_pages_past_only_rows_that_stay_stale(
+    monkeypatch,
+) -> None:
+    # Rows 0 and 3 keep an active delivery; the rest are repaired and leave
+    # the stale set, which shifts every later row up the next page.
+    stale = [
+        replace(_stale_job(), job_id=f"job-{index}", run_id=f"run-{index}") for index in range(5)
+    ]
+    still_queued = {"job-0", "job-3"}
+    inspected: list[str] = []
+    all_inspected = asyncio.Event()
+
+    async def list_stale(_cutoff, *, limit, offset):
+        return list(stale[offset : offset + limit])
+
+    async def reconcile_one(job, **_kwargs):
+        inspected.append(job.job_id)
+        if len(set(inspected)) == 5:
+            all_inspected.set()
+        if job.job_id in still_queued:
+            return QueuedReconciliationSummary(inspected=1, queue_present=1)
+        stale.remove(job)
+        return QueuedReconciliationSummary(inspected=1, recovered=1)
+
+    store = MagicMock()
+    store.list_stale_queued_jobs = AsyncMock(side_effect=list_stale)
+    monkeypatch.setattr(
+        "scrapeyard.queue.reconciliation.reconcile_stale_queued_job",
+        reconcile_one,
+    )
+
+    task = start_queued_reconciliation_loop(
+        job_store=store,
+        worker_pool=MagicMock(),
+        queued_claim_timeout_seconds=TIMEOUT,
+        interval_seconds=0.001,
+        batch_size=2,
+    )
+    try:
+        await asyncio.wait_for(all_inspected.wait(), timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    # Every stale row is inspected once, in order, before any row repeats.
+    assert inspected[:5] == ["job-0", "job-1", "job-2", "job-3", "job-4"]
 
 
 @pytest.mark.parametrize(

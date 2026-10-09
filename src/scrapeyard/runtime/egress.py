@@ -47,7 +47,7 @@ async def _attest_probe_liveness(settings: ServiceSettings) -> None:
             response = await asyncio.wait_for(reader.readline(), timeout=timeout)
         finally:
             await _close_writer(writer)
-    except (TimeoutError, OSError, ValueError) as exc:
+    except (asyncio.TimeoutError, OSError, ValueError) as exc:
         raise EgressPolicyAttestationError(
             "Connected-IP egress policy could not be attested because controlled "
             "probe liveness could not be verified"
@@ -76,7 +76,8 @@ async def attest_connected_ip_policy(settings: ServiceSettings) -> None:
             asyncio.open_connection(host, port),
             timeout=settings.egress_policy_probe_timeout_seconds,
         )
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
+        # Distinct classes before Python 3.11: wait_for raises the asyncio one.
         pass
     except OSError as exc:
         denied_errors = {

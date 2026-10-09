@@ -18,6 +18,7 @@ from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.engine.resilience import RetryHandler, RetryableError
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
+from scrapeyard.models.job import JobRun, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.validation_policy import apply_validation
@@ -149,6 +150,86 @@ async def test_cancellation_after_result_write_discards_artifact_before_finaliza
 
     result_store.delete_result.assert_awaited_once_with("job-1", "run-1")
     job_store.finalize_owned_run.assert_not_awaited()
+    job_store.fail_owned_run.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("durable_status", "discarded"),
+    [
+        (JobStatus.complete, False),
+        (JobStatus.partial, False),
+        (JobStatus.cancelled, True),
+        (JobStatus.failed, True),
+        (None, True),
+    ],
+)
+async def test_cancellation_after_finalization_commit_keeps_the_finalized_artifact(
+    mock_stores,
+    durable_status,
+    discarded,
+):
+    job_store, result_store, error_store, circuit_breaker = mock_stores
+    job_store.get_job.return_value = make_job(current_run_id="run-1")
+    active = True
+    job_store.run_is_active.side_effect = lambda *_args: active
+    result_store.save_result.return_value = SaveResultMeta(
+        run_id="run-1",
+        file_path="/tmp/results/test/job/run-1",
+        record_count=1,
+        serialized_bytes=64,
+    )
+
+    async def _commit_then_cancel(*_args, **_kwargs):
+        # The transaction commits on the database thread, then the awaiting
+        # worker is cancelled before it sees the outcome.
+        nonlocal active
+        active = False
+        raise asyncio.CancelledError
+
+    job_store.finalize_owned_run.side_effect = _commit_then_cancel
+    if durable_status is None:
+        job_store.get_job_run.side_effect = OSError("disk I/O error")
+    else:
+        job_store.get_job_run.return_value = JobRun(
+            run_id="run-1",
+            job_id="job-1",
+            status=durable_status,
+            trigger="adhoc",
+            config_hash="0" * 64,
+        )
+    success = TargetResult(
+        url="https://example.com",
+        status="success",
+        data=[{"title": "written"}],
+        pages_scraped=1,
+    )
+    with patch(
+        "scrapeyard.queue.worker.load_config",
+        return_value=make_config_mock(),
+    ), patch(
+        "scrapeyard.queue.worker.scrape_target",
+        return_value=success,
+    ), patch(
+        "scrapeyard.queue.worker.get_settings",
+        return_value=make_settings_mock(),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await scrape_task(
+                "job-1",
+                "yaml",
+                run_id="run-1",
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=circuit_breaker,
+                rate_limiter=LocalDomainRateLimiter(),
+                webhook_dispatcher=AsyncMock(),
+            )
+
+    if discarded:
+        result_store.delete_result.assert_awaited_once_with("job-1", "run-1")
+    else:
+        result_store.delete_result.assert_not_awaited()
     job_store.fail_owned_run.assert_not_awaited()
 
 

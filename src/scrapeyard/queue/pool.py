@@ -457,7 +457,9 @@ class WorkerPool:
                 "WorkerPool cannot enqueue while a previous shutdown is unresolved"
             )
         if not self._started:
-            await self.start()
+            # The lifespan owns start(); starting here would quietly reopen a
+            # stopped pool, and two concurrent first calls would start twice.
+            raise RuntimeError("WorkerPool.enqueue() called before start()")
 
         if self._redis is None:
             raise RuntimeError("WorkerPool.enqueue() called but Redis pool is not connected")

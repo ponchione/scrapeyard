@@ -383,8 +383,10 @@ def start_queued_reconciliation_loop(
                     batch_size=batch_size,
                     batch_offset=batch_offset,
                 )
+                # Recovered and failed rows leave the stale set, so the next
+                # page starts after only the rows that are still stale.
                 batch_offset = (
-                    batch_offset + summary.inspected
+                    batch_offset + summary.queue_present
                     if summary.inspected == batch_size
                     else 0
                 )

@@ -83,6 +83,20 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A failure while recording a run-budget stop, such as a transient database
+  error, no longer leaves the run `running` until the heartbeat timeout; the
+  run is failed through the normal crash path.
+- A cancellation that lands after a run's terminal state has committed no
+  longer deletes that run's result artifact, so a `complete` or `partial`
+  run keeps its results.
+- Periodic queued reconciliation no longer skips stale deliveries on its next
+  page after repairing some of the previous one.
+- Enqueuing on a worker pool that has not been started, or has already
+  stopped, now fails instead of quietly starting a new Redis pool and worker.
+- On Python 3.10, egress attestation treats a timed-out challenge connection
+  as denied, as it already did on 3.11 and later, instead of failing startup.
+- Page-cache replay with `on_empty: retry` no longer updates the live circuit
+  breaker from the replayed retry.
 - A restart or deploy during a run no longer leaves that run `running` for
   about ten minutes. Shutdown used to spend its whole grace draining active
   jobs and then gave cancelled runs no time to record their failure, so they

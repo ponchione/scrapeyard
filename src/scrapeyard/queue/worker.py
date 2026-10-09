@@ -259,17 +259,39 @@ async def scrape_task(
                 webhook_dispatcher=webhook_dispatcher,
             )
             return
-        await _handle_budget_exhaustion(
-            context=context,
-            job_id=job_id,
-            run_id=context.run_id,
-            error=exc,
-            job_store=job_store,
-            result_store=result_store,
-            error_store=error_store,
-            webhook_dispatcher=webhook_dispatcher,
-            heartbeat=heartbeat,
-        )
+        try:
+            await _handle_budget_exhaustion(
+                context=context,
+                job_id=job_id,
+                run_id=context.run_id,
+                error=exc,
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+                heartbeat=heartbeat,
+            )
+        except Exception as handler_exc:
+            # Raised inside this except block, the failure would skip the
+            # crash handler below and leave the run running until the
+            # heartbeat timeout.
+            if heartbeat is not None:
+                await heartbeat.stop()
+            logger.error(
+                "Budget failure handling crashed job_id=%s run_id=%s error_type=%s",
+                job_id,
+                context.run_id,
+                type(handler_exc).__name__,
+            )
+            await _discard_unowned_result(result_store, job_id, context.run_id, job_store=job_store)
+            await _handle_execution_crash(
+                context=context,
+                job_id=job_id,
+                run_id=context.run_id,
+                job_store=job_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+            )
     except asyncio.CancelledError:
         metric_status = "cancelled"
         lease_lost = heartbeat is not None and heartbeat.ownership_lost
@@ -282,7 +304,7 @@ async def scrape_task(
                 active_run_id,
                 heartbeat.lost_reason if heartbeat is not None else None,
             )
-            await _discard_unowned_result(result_store, job_id, active_run_id)
+            await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
             return
         active = False
         if active_run_id is not None:
@@ -298,7 +320,7 @@ async def scrape_task(
                 )
                 active = True
         logger.warning("scrape_task cancelled for job_id=%s run_id=%s", job_id, active_run_id)
-        await _discard_unowned_result(result_store, job_id, active_run_id)
+        await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
         if not active:
             logger.info(
                 "Cooperative worker cancellation completed job_id=%s run_id=%s "
@@ -333,7 +355,7 @@ async def scrape_task(
             active_run_id,
             exc,
         )
-        await _discard_unowned_result(result_store, job_id, active_run_id)
+        await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
     except Exception as exc:
         metric_status = "failed"
         if heartbeat is not None:
@@ -344,7 +366,7 @@ async def scrape_task(
             active_run_id,
             _exception_detail(exc),
         )
-        await _discard_unowned_result(result_store, job_id, active_run_id)
+        await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
         await _handle_execution_crash(
             context=context,
             job_id=job_id,
@@ -460,12 +482,50 @@ async def _handle_execution_crash(
         )
 
 
+# Only the owning worker's finalize_owned_run writes these run statuses.
+_OWNER_FINALIZED_STATUSES = frozenset({JobStatus.complete, JobStatus.partial})
+
+
+async def _run_finalized_by_owner(
+    job_store: JobStore,
+    job_id: str,
+    run_id: str,
+) -> bool:
+    """Whether this run's own finalization committed despite the caller's error.
+
+    A cancellation can interrupt the await on finalize_owned_run after its
+    transaction has already committed on the database thread.
+    """
+    try:
+        run = await job_store.get_job_run(job_id, run_id)
+    except Exception as exc:
+        logger.warning(
+            "Run status unavailable before discarding result artifact "
+            "job_id=%s run_id=%s error_type=%s",
+            job_id,
+            run_id,
+            type(exc).__name__,
+        )
+        return False
+    return run is not None and run.status in _OWNER_FINALIZED_STATUSES
+
+
 async def _discard_unowned_result(
     result_store: ResultStore,
     job_id: str,
     run_id: str | None,
+    *,
+    job_store: JobStore,
 ) -> None:
     if run_id is None:
+        return
+    if await _run_finalized_by_owner(job_store, job_id, run_id):
+        logger.warning(
+            "Kept result artifact of a run finalized before the worker stopped "
+            "job_id=%s run_id=%s",
+            job_id,
+            run_id,
+        )
         return
     try:
         deleted = await result_store.delete_result(job_id, run_id)
@@ -727,7 +787,7 @@ async def _handle_budget_exhaustion(
     try:
         await context.activity.checkpoint("before_budget_failure_persistence")
     except RunOwnershipError:
-        await _discard_unowned_result(result_store, job_id, run_id)
+        await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
         return
     details = BudgetErrorDetails(
         limit_name=error.limit_name.value,
@@ -797,7 +857,7 @@ async def _handle_budget_exhaustion(
         )
         await context.activity.checkpoint("after_budget_result_persistence")
     except RunOwnershipError:
-        await _discard_unowned_result(result_store, job_id, run_id)
+        await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
         return
     except Exception as exc:
         logger.error(
@@ -813,7 +873,7 @@ async def _handle_budget_exhaustion(
             heartbeat.ensure_owned()
         except RunHeartbeatLeaseLost:
             await heartbeat.stop()
-            await _discard_unowned_result(result_store, job_id, run_id)
+            await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
             return
         await heartbeat.stop()
 
@@ -854,7 +914,7 @@ async def _handle_budget_exhaustion(
             job_id,
             run_id,
         )
-        await _discard_unowned_result(result_store, job_id, run_id)
+        await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
         return
     except Exception as exc:
         logger.error(
@@ -864,7 +924,7 @@ async def _handle_budget_exhaustion(
             run_id,
             type(exc).__name__,
         )
-        await _discard_unowned_result(result_store, job_id, run_id)
+        await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
         await _handle_execution_crash(
             context=context,
             job_id=job_id,
@@ -1174,6 +1234,7 @@ async def _scrape_and_validate_target(
         target_index=target_index,
         budget=context.budget,
         cancellation_guard=context.activity.checkpoint,
+        replay=context.replay,
     )
 
 

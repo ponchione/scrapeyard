@@ -577,22 +577,17 @@ async def test_enqueue_repairs_accepted_delivery_even_under_memory_pressure():
 
 
 @pytest.mark.asyncio
-async def test_enqueue_starts_pool_and_enqueues_job():
+async def test_enqueue_routes_job_to_its_priority_queue():
     pool = _make_pool(payload_ttl_seconds=123)
     fake_redis = MagicMock(
         eval=AsyncMock(return_value=1),
         job_serializer=None,
         expires_extra_ms=86_400_000,
     )
+    pool._started = True
+    pool._redis = fake_redis
 
-    async def _fake_start() -> None:
-        pool._started = True
-        pool._redis = fake_redis
-
-    with (
-        patch.object(pool, "_check_memory", return_value=True),
-        patch.object(pool, "start", _fake_start),
-    ):
+    with patch.object(pool, "_check_memory", return_value=True):
         result = await pool.enqueue("job-1", "config: yaml", priority="high", run_id="run-1")
 
     assert hasattr(result, "result")
@@ -600,6 +595,38 @@ async def test_enqueue_starts_pool_and_enqueues_job():
     assert "test-queue:priority:high" in fake_redis.eval.await_args.args
     assert "123000" in fake_redis.eval.await_args.args
     assert "_defer_until" not in fake_redis.eval.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_enqueue_never_starts_the_pool(monkeypatch):
+    pool = _make_pool()
+    start = AsyncMock()
+    monkeypatch.setattr(pool, "start", start)
+
+    with pytest.raises(RuntimeError, match="before start"):
+        await pool.enqueue("job-1", "config: yaml", run_id="run-1")
+
+    async def _close() -> None:
+        return None
+
+    pool._started = True
+    pool._worker = SimpleNamespace(
+        allow_pick_jobs=True,
+        tasks={},
+        main_task=None,
+        close=_close,
+    )
+    pool._redis = MagicMock()
+    pool._runner_task = asyncio.create_task(asyncio.sleep(0))
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: MagicMock(workers_shutdown_grace_seconds=1),
+    )
+    await pool.stop()
+
+    with pytest.raises(RuntimeError, match="before start"):
+        await pool.enqueue("job-2", "config: yaml", run_id="run-2")
+    start.assert_not_awaited()
 
 
 @pytest.mark.asyncio

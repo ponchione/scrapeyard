@@ -156,6 +156,55 @@ async def test_egress_attestation_fails_closed_on_unexpected_challenge_error(mon
         await _stop_servers(challenge, liveness)
 
 
+@pytest.mark.asyncio
+async def test_egress_attestation_counts_a_hanging_challenge_as_denied(monkeypatch):
+    # A DROP-style firewall never answers, so the bounded connect times out.
+    challenge, liveness, challenge_port, liveness_port = (
+        await _start_controlled_probe()
+    )
+    real_open_connection = asyncio.open_connection
+
+    async def hang_challenge(host, port, *args, **kwargs):
+        if port == challenge_port:
+            await asyncio.Event().wait()
+        return await real_open_connection(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "open_connection", hang_challenge)
+    try:
+        await attest_connected_ip_policy(_settings(challenge_port, liveness_port))
+    finally:
+        await _stop_servers(challenge, liveness)
+
+
+class _Python310AsyncioTimeoutError(Exception):
+    """asyncio.TimeoutError before Python 3.11: not the builtin TimeoutError."""
+
+
+@pytest.mark.asyncio
+async def test_egress_attestation_handles_python310_asyncio_timeouts(monkeypatch):
+    challenge, liveness, challenge_port, liveness_port = (
+        await _start_controlled_probe()
+    )
+    real_open_connection = asyncio.open_connection
+    timing_out_port = challenge_port
+
+    async def time_out(host, port, *args, **kwargs):
+        if port == timing_out_port:
+            raise _Python310AsyncioTimeoutError
+        return await real_open_connection(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "TimeoutError", _Python310AsyncioTimeoutError)
+    monkeypatch.setattr(asyncio, "open_connection", time_out)
+    try:
+        await attest_connected_ip_policy(_settings(challenge_port, liveness_port))
+
+        timing_out_port = liveness_port
+        with pytest.raises(EgressPolicyAttestationError, match="liveness could not be verified"):
+            await attest_connected_ip_policy(_settings(challenge_port, liveness_port))
+    finally:
+        await _stop_servers(challenge, liveness)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
