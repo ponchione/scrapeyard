@@ -35,10 +35,19 @@ _TRANSIENT_TRANSPORT_ERRORS = (
 
 
 class RetryableError(Exception):
-    """Raised when a retryable HTTP status is encountered."""
+    """Raised when a retryable HTTP status is encountered.
 
-    def __init__(self, status: int, message: str = "") -> None:
+    *debug* describes the response, so the target reports it once retries end.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        message: str = "",
+        debug: dict[str, Any] | None = None,
+    ) -> None:
         self.status = status
+        self.debug = debug
         super().__init__(message or f"HTTP {status}")
 
 

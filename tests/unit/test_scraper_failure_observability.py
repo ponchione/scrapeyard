@@ -9,6 +9,7 @@ import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.engine.browser_debug import default_debug_blob
 from scrapeyard.engine.scraper import FetchError, FetchOutcome, scrape_target
 from scrapeyard.models.job import ErrorType
 
@@ -388,3 +389,57 @@ async def test_access_interstitial_stops_before_following_pagination(monkeypatch
         assert len(requested) == 3
         assert result.status == "success"
         assert len(result.data) == 3
+
+
+_CHALLENGE_BODY = "<h1>Verify you are human</h1><p>Complete the security check to continue.</p>"
+
+
+@pytest.mark.parametrize(
+    ("status", "title", "body", "error_type", "attempts"),
+    [
+        # 401, 403 and 407 are never retried, even when listed as retryable.
+        (403, "Just a moment...", _CHALLENGE_BODY, ErrorType.challenge_page, 1),
+        (403, "Access Denied", "<p>Reference #18.2f</p>", ErrorType.blocked_response, 1),
+        (503, "Just a moment...", _CHALLENGE_BODY, ErrorType.http_error, 2),
+    ],
+)
+async def test_retryable_status_failure_reports_the_last_response(
+    monkeypatch, tmp_path, status, title, body, error_type, attempts,
+):
+    from scrapling.engines.toolbelt.custom import Response
+
+    requested = []
+
+    async def fetch(_fetcher, url, *_args, **_kwargs):
+        requested.append(url)
+        html = f"<html><head><title>{title}</title></head><body>{body} #{len(requested)}</body></html>"
+        return Response(
+            url=url, text=html, body=html.encode(), status=status, reason="", encoding="utf-8",
+            cookies={}, headers={"Content-Type": "text/html"}, request_headers={}, method="GET",
+            history=[],
+        )
+
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
+    target = _target(url="https://example.com/list")
+    result = await scrape_target(
+        target,
+        adaptive=False,
+        retry=RetryConfig(
+            max_attempts=2, backoff_max=0, retryable_status=[403, 429, 500, 502, 503, 504],
+        ),
+        adaptive_dir=str(tmp_path),
+    )
+
+    assert len(requested) == attempts
+    assert result.status == "failed"
+    assert result.error_type == error_type
+    assert result.http_status == status
+    assert result.debug is not None
+    assert result.debug.keys() == default_debug_blob(target.fetcher, target, target.url).keys() | {
+        "classification"
+    }
+    assert result.debug["main_document_status"] == status
+    assert result.debug["final_url"] == "https://example.com/list"
+    assert result.debug["page_title"] == title
+    assert result.debug["html_excerpt"].endswith(f"#{attempts}</body></html>")
+    assert result.debug["classification"] == error_type.value

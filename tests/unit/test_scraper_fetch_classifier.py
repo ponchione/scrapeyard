@@ -61,6 +61,37 @@ def test_classify_fetch_exception_preserves_retryable_http_statuses():
     assert debug is None
 
 
+_CHALLENGE_DEBUG = {
+    "page_title": "Just a moment...",
+    "html_excerpt": "Verify you are human by completing the security check below",
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "page", "expected"),
+    [
+        (403, _CHALLENGE_DEBUG, ErrorType.challenge_page),
+        (429, _CHALLENGE_DEBUG, ErrorType.challenge_page),
+        (403, {"page_title": "Access Denied", "html_excerpt": "Reference #18"}, ErrorType.blocked_response),
+        # Unlike a non-retryable FetchError, consent and login markers keep
+        # the blocked_response that retryable denials have always reported.
+        (403, {"page_title": "Sign in", "html_excerpt": "Log in to continue"}, ErrorType.blocked_response),
+        (401, {"page_title": "Cookie consent", "html_excerpt": ""}, ErrorType.blocked_response),
+        (404, _CHALLENGE_DEBUG, ErrorType.http_not_found),
+        (503, _CHALLENGE_DEBUG, ErrorType.http_error),
+        (500, {"page_title": "Internal Server Error", "html_excerpt": ""}, ErrorType.http_error),
+    ],
+)
+def test_classify_fetch_exception_checks_retryable_responses_for_challenges(status, page, expected):
+    exc = RetryableError(status, debug={"main_document_status": status, **page})
+
+    error_type, http_status, debug = classify_fetch_exception(exc, FetcherType.basic)
+
+    assert error_type == expected
+    assert http_status == status
+    assert debug is exc.debug
+
+
 def test_classify_page_signals_detects_akamai_interstitial_markers_in_html_excerpt():
     debug = {
         "page_title": "Bass Pro Shops",

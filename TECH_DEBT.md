@@ -230,21 +230,20 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
-| 2 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 3 | TD-35 | P3 | API, job store | low | none | |
-| 4 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 5 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 6 | TD-38 | P3 | result store | low | none | |
-| 7 | TD-39 | P3 | click pagination | medium | timing only | |
-| 8 | TD-40 | P3 | API | low | `offset` bound | |
-| 9 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 10 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 11 | TD-43 | P3 | image, dependencies | low | none | |
-| 12 | TD-44 | P3 | lint, docs | low | none | |
-| 13 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 14 | TD-52 | P2 | worker | low | none | |
-| 15 | TD-53 | P3 | engine | low | none | |
+| 1 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
+| 2 | TD-35 | P3 | API, job store | low | none | |
+| 3 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 4 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 5 | TD-38 | P3 | result store | low | none | |
+| 6 | TD-39 | P3 | click pagination | medium | timing only | |
+| 7 | TD-40 | P3 | API | low | `offset` bound | |
+| 8 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 9 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 10 | TD-43 | P3 | image, dependencies | low | none | |
+| 11 | TD-44 | P3 | lint, docs | low | none | |
+| 12 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 13 | TD-52 | P2 | worker | low | none | |
+| 14 | TD-53 | P3 | engine | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -275,7 +274,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-33 | P2 | ready | Retryable HTTP failures lose their diagnostics and challenge classification |
 | TD-34 | P3 | ready | Result JSON is encoded with Python's pure-Python encoder |
 | TD-35 | P3 | ready | API handlers decrypt, hash and parse YAML on the event loop |
 | TD-36 | P3 | ready | Worker output processing and the poll loop repeat avoidable work |
@@ -342,36 +340,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-33 — Retryable HTTP failures lose their diagnostics and challenge classification
-
-**Priority:** P2 · **Area:** engine · **Risk:** low · **Contract:** `debug` gets real values, and challenge pages served as 403/503 become `challenge_page` instead of `blocked_response`/`http_error` (Eyebox's diagnostics already know all three strings) · **Depends on:** —
-
-**Problem:**
-- **Debug data is dropped.** In `_fetch_page`, a status listed in
-  `retryable_status` raises `RetryableError` with no debug data. Once retries
-  run out, the target gets the default debug blob with no
-  `main_document_status`, title or excerpt. That happens immediately for 401,
-  403 and 407, which `RetryHandler.execute` never retries. Eyebox's
-  `scrapejob_diagnostics` reads `main_document_status`.
-- **Challenge pages are misclassified.** `classify_fetch_exception` doesn't
-  apply `FetchError`'s challenge-signal checks to these errors.
-- **Effect on Eyebox:** 11 Eyebox configs list 403 as retryable. For them, this
-  only degrades diagnostics.
-
-**Code:** `engine/scraper.py` (`_fetch_page`), `engine/fetch_classifier.py`
-(`classify_fetch_exception`), `engine/resilience.py` (`RetryHandler.execute`).
-
-**Fix:**
-- Attach the response's debug data to `RetryableError`, and reuse the
-  challenge-signal checks when classifying.
-- **Do not** reject 401, 403 or 407 in `retry.retryable_status` validation:
-  that would return 422 for eleven Eyebox configs. At most, document that those
-  statuses are never retried.
-
-**Done when:** a 403 challenge fixture yields `challenge_page` with
-`main_document_status: 403` and an excerpt, and Eyebox's
-`test_scrapejob_diagnostics.py` passes.
 
 ### TD-34 — Result JSON is encoded with Python's pure-Python encoder
 
@@ -1429,6 +1397,6 @@ here; record them in Eyebox's tracker when picked up.
 | C-4 | The wait-budget defaults disagree: the code and `.env.prod.example` use 300 s, while Compose defaults to 2,700 s. An operator who copies `.env.prod.example` overrides Compose. This feeds TD-17. | `ingest/config.py`, `.env.prod.example` |
 | C-5 | The hard-test Scrapeyard container runs without an init process (`Init=<nil>` on 2026-10-09), even though `DEPLOY.md` requires one. Launch it with `--init`. Optionally, Scrapeyard could warn at startup when it runs as PID 1. | `.hard-test/scrapeyard-local/` launcher |
 | C-6 | The docs disagree on webhooks. `DEPLOY.md` says Scrapeyard signs `X-Webhook-Signature`; it doesn't, as `README.md` correctly says. `AGENTS.md` and `README.md` say ingest "receives Scrapeyard webhooks", but production pulls. 51 configs still carry `webhook` blocks. `make scrape-live` without strip sends them, and Scrapeyard's dispatch-time SSRF check blocks `host.docker.internal`. | `DEPLOY.md`, `README.md`, `AGENTS.md`, `configs/` |
-| C-7 | 11 configs list 403 in `retryable_status`, which Scrapeyard never retries (TD-33). `adaptive_domain` on 11 Brownells targets does nothing with `adaptive: false`. Both are cosmetic; keep the keys valid. | `configs/` |
+| C-7 | 11 configs list 403 in `retryable_status`, which Scrapeyard never retries. `adaptive_domain` on 11 Brownells targets does nothing with `adaptive: false`. Both are cosmetic; keep the keys valid. | `configs/` |
 | C-8 | Target summary URLs have their query values redacted, so exact URL matching fails for 119 query-string targets across 8 configs, and diagnostics and the backfill fall back to position. This works today; don't add exact-URL logic without a Scrapeyard change. | `ingest/scrapejob_diagnostics.py`, `ingest/pdp_alias_backfill.py` |
 | C-9 | The docs disagree on the pinned production Scrapeyard revision: `ce8fc04` vs `5de7dc9`+. `scrapeyard_identity.source_run()` (legacy `runs[]` shape) is used only by tests. | `docs/hetzner-scrapeyard-deployment-runbook.md`, `docs/scrapeyard-work-orders.md`, `ingest/scrapeyard_identity.py` |

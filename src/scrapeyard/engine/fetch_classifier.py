@@ -186,6 +186,10 @@ def classify_fetch_exception(
         if exc.status == 404:
             return ErrorType.http_not_found, exc.status, debug
         if exc.status in {401, 403, 429}:
+            # Retryable denials have always reported blocked_response, and
+            # clients match on it; only a detected challenge refines it.
+            if debug and classify_page_signals(debug) is ErrorType.challenge_page:
+                return ErrorType.challenge_page, exc.status, debug
             return ErrorType.blocked_response, exc.status, debug
         return ErrorType.http_error, exc.status, debug
     if isinstance(exc, FetchError):

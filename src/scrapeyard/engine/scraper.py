@@ -674,7 +674,7 @@ async def _fetch_page(
     )
     if response.status and response.status >= 400:
         if response.status in retryable_status:
-            raise RetryableError(response.status)
+            raise RetryableError(response.status, debug=debug)
         raise FetchError(response.status, debug=debug)
     # Check every fetched page before pagination or empty-result retries. A
     # normal catalogue can contain account/consent text alongside valid cards.

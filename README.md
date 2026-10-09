@@ -532,7 +532,10 @@ set `record` or `replay` are rejected when the service has no cache directory.
 
 `retry.max_attempts` is the total number of attempts per request, including the
 initial attempt. HTTP 401, 403 and 407 stop immediately even when listed as
-retryable. Connection and timeout failures follow the same backoff,
+retryable. A target that ends on a retryable status reports that last
+response's status, title and excerpt in `debug`, as any other HTTP failure
+does, and a challenge served as 401, 403 or 429 is reported as
+`challenge_page`. Connection and timeout failures follow the same backoff,
 cancellation, rate-limit, metric, and run-budget policy as retryable HTTP statuses.
 
 Terminal webhook intent is durable before a run is reported complete. Each

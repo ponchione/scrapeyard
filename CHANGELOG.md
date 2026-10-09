@@ -83,6 +83,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A target that fails on a status listed in `retry.retryable_status` now
+  reports the last response's `main_document_status`, page title and HTML
+  excerpt in `debug`, as other HTTP failures do; it used to report an empty
+  debug blob. A retryable 401, 403 or 429 that serves a challenge page is
+  now classified as `challenge_page` instead of `blocked_response`.
 - Outbound requests now have a total deadline. A webhook receiver or
   basic-fetch server that trickles bytes can no longer hold a request open
   past its timeout: webhook sends fail as a retryable transport timeout, and
