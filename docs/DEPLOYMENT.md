@@ -564,7 +564,10 @@ Idempotent replay, missing-delivery recovery, and cancellation keep working when
 full; [the API overload contract](API.md#admission-overload) describes retries.
 
 Memory admission and worker-start checks use the process's cgroup memory usage,
-including browser subprocesses, file cache, and kernel charges. Both
+including browser subprocesses, active file cache, and kernel charges, less the
+group's inactive file cache (`inactive_file` on v2, `total_inactive_file` on v1),
+which the kernel reclaims before real memory pressure. Without a readable
+`memory.stat`, the full usage counts. Both
 [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) and
 [cgroup v1](https://docs.kernel.org/admin-guide/cgroup-v1/memory.html) are supported.
 The service ceiling applies to the current group; tighter visible ancestor

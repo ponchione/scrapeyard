@@ -60,6 +60,78 @@ def test_cgroup_headroom_includes_browsers_and_stricter_ancestors(tmp_path, v2):
         assert memory_headroom_mb(0, proc) == float("inf")
 
 
+_MIB = 1024**2
+
+
+def _cgroup_service(tmp_path: Path, v2: bool, usage_mib: int, stat: str | None) -> tuple[Path, Path]:
+    """A service group under an unlimited root; both report the same usage and stat."""
+    proc = tmp_path / "proc" / "self"
+    proc.mkdir(parents=True)
+    root = tmp_path / "cgroup"
+    leaf = root / "service"
+    leaf.mkdir(parents=True)
+    (proc / "cgroup").write_text("0::/service\n" if v2 else "5:cpu,memory:/service\n")
+    (proc / "mountinfo").write_text(
+        f"1 0 0:1 / {root} rw - {'cgroup2 cgroup rw' if v2 else 'cgroup cgroup rw,memory'}\n"
+    )
+    usage, limit = ("memory.current", "memory.max") if v2 else ("memory.usage_in_bytes", "memory.limit_in_bytes")
+    for directory in (leaf, root):
+        (directory / usage).write_text(str(usage_mib * _MIB))
+        (directory / limit).write_text("max" if v2 else str(2**63 - 4096))
+        if stat is not None:
+            (directory / "memory.stat").write_text(stat)
+    return proc, leaf / limit
+
+
+def _memory_stat(v2: bool, *, anon: int, active_file: int, inactive_file: int) -> str:
+    if v2:
+        return (
+            f"anon {anon * _MIB}\nfile {(active_file + inactive_file) * _MIB}\n"
+            f"active_file {active_file * _MIB}\ninactive_file {inactive_file * _MIB}\n"
+        )
+    # v1 lists the group's own counters first; total_* include descendants.
+    return (
+        "cache 0\nrss 0\nactive_file 0\ninactive_file 0\n"
+        f"total_rss {anon * _MIB}\ntotal_active_file {active_file * _MIB}\n"
+        f"total_inactive_file {inactive_file * _MIB}\n"
+    )
+
+
+@pytest.mark.parametrize("v2", [True, False])
+def test_page_cache_heavy_cgroup_usage_still_admits(tmp_path, v2):
+    # memory.current also counts cached files: 23.7 of a WSL shell cgroup's
+    # 28.2 GB (19.6 GB inactive) and 0.9-1.8 of a dev container's 2.3-2.6 GB.
+    stat = _memory_stat(v2, anon=400, active_file=100, inactive_file=4500)
+    proc, leaf_limit = _cgroup_service(tmp_path, v2, 5000, stat)
+
+    assert memory_headroom_mb(4096, proc) == 3596
+
+    # The group's own limit is compared with the same working set.
+    leaf_limit.write_text(str(3000 * _MIB))
+    assert memory_headroom_mb(4096, proc) == 2500
+
+
+@pytest.mark.parametrize("v2", [True, False])
+@pytest.mark.parametrize(
+    ("anon", "active_file", "inactive_file"),
+    [(4800, 100, 100), (400, 4500, 100)],
+    ids=["anon-heavy", "active-file-heavy"],
+)
+def test_anon_or_active_memory_pressure_still_refuses(tmp_path, v2, anon, active_file, inactive_file):
+    stat = _memory_stat(v2, anon=anon, active_file=active_file, inactive_file=inactive_file)
+    proc, _limit = _cgroup_service(tmp_path, v2, 5000, stat)
+
+    assert memory_headroom_mb(4096, proc) == -804
+
+
+@pytest.mark.parametrize("v2", [True, False])
+@pytest.mark.parametrize("stat", [None, "inactive_file unreadable\n"], ids=["missing", "unparseable"])
+def test_unreadable_memory_stat_counts_the_full_usage(tmp_path, v2, stat):
+    proc, _limit = _cgroup_service(tmp_path, v2, 5000, stat)
+
+    assert memory_headroom_mb(4096, proc) == -904
+
+
 def test_memory_fallback_counts_descendants_and_tolerates_exited_child(tmp_path):
     proc = tmp_path / "proc"
     for pid, pages, children in (("self", 2560, "2 3"), ("2", 25600, "4"), ("4", 25600, "")):

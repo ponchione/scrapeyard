@@ -738,7 +738,8 @@ page cache: after browser jobs, about 300-450 MB of `file` memory in
 `memory.stat` is Chromium, Firefox and library files the container has read,
 plus data files. The kernel reclaims it under memory pressure, so judge the
 service by `anon` memory, which returns to about 125 MB after jobs (about
-105 MB at startup).
+105 MB at startup). The admission and browser memory checks subtract the
+cgroup's inactive file cache from its usage for the same reason.
 
 Durable webhook delivery uses a fixed worker pool and bounded due-row batches.
 Retries stop at the configured total-attempt or persisted-age boundary, honor

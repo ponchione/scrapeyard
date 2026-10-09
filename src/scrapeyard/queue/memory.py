@@ -29,8 +29,39 @@ def get_process_rss_mb(proc_root: Path = _DEFAULT_PROC_ROOT) -> float | None:
     return (rss_pages * page_size) / (1024 * 1024)
 
 
+_MIB = 1024 * 1024
+
+
+def _reclaimable_page_cache_mb(directory: Path, v2: bool) -> float:
+    """Inactive file cache charged to a memory cgroup, or 0 when unreadable.
+
+    The kernel reclaims inactive file pages before a group's usage meets real
+    pressure, so they are not working memory. v2 ``inactive_file`` and v1
+    ``total_inactive_file`` cover the group and its descendants, like the
+    usage they are subtracted from; v1 falls back to the group's own
+    ``inactive_file``. Active file pages stay counted.
+    """
+    keys = ("inactive_file",) if v2 else ("total_inactive_file", "inactive_file")
+    try:
+        fields: dict[str, str] = {}
+        for line in (directory / "memory.stat").read_text().splitlines():
+            name, _, value = line.partition(" ")
+            fields[name] = value
+        for key in keys:
+            if key in fields:
+                return max(int(fields[key]), 0) / _MIB
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
 def _cgroup_memory(proc_root: Path) -> list[tuple[float, float]]:
-    """Read usage/limit pairs from the process's v1/v2 memory hierarchy."""
+    """Read working-set/limit pairs from the process's v1/v2 memory hierarchy.
+
+    Working set is the group's usage less its inactive file cache (the measure
+    kubelet and cAdvisor use), so page cache from files the service and its
+    browsers read does not refuse admission while anon memory is low.
+    """
     samples: list[tuple[float, float]] = []
     try:
         memberships = [line.split(":", 2) for line in (proc_root / "cgroup").read_text().splitlines()]
@@ -62,9 +93,10 @@ def _cgroup_memory(proc_root: Path) -> list[tuple[float, float]]:
                     try:
                         usage = int((directory / ("memory.current" if v2 else "memory.usage_in_bytes")).read_text())
                         raw_limit = (directory / ("memory.max" if v2 else "memory.limit_in_bytes")).read_text().strip()
-                        limit = float("inf") if raw_limit == "max" else int(raw_limit) / (1024 * 1024)
+                        limit = float("inf") if raw_limit == "max" else int(raw_limit) / _MIB
                         if usage >= 0 and limit >= 0:
-                            samples.append((usage / (1024 * 1024), limit))
+                            working_set = usage / _MIB - _reclaimable_page_cache_mb(directory, v2)
+                            samples.append((max(working_set, 0.0), limit))
                     except (OSError, ValueError):
                         pass
                     if directory == mountpoint:
@@ -103,7 +135,8 @@ def memory_headroom_mb(limit_mb: int, proc_root: Path = _DEFAULT_PROC_ROOT) -> f
     """Return remaining MiB, or infinity when disabled/unavailable.
 
     A positive service ceiling also respects stricter visible ancestor cgroup
-    limits. Outside cgroups use process-tree RSS (shared pages count twice).
+    limits. Cgroup usage excludes inactive (reclaimable) file cache. Outside
+    cgroups use process-tree RSS (shared pages count twice).
     """
     headroom = float("inf")
     if limit_mb > 0 and sys.platform.startswith("linux"):

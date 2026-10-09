@@ -83,6 +83,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Memory admission and browser start checks no longer count the cgroup's
+  inactive file cache (`inactive_file`, v1 `total_inactive_file`) as used
+  memory. Cached browser, result and log files could push `memory.current`
+  above `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` in a container without a memory
+  limit and make `/scrape` answer 503 while anon memory was low. Anon and active
+  file memory still refuse admission.
 - A rendered listing that fails only result validation (for example one card
   with an empty required field) is no longer classified as an access denial
   because the page carries challenge, consent or login markers, such as the
