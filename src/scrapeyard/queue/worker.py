@@ -240,111 +240,47 @@ async def scrape_task(
         metric_status = persisted.final_status.value
     except BudgetExceeded as exc:
         metric_status = "failed"
-        if context is None:
-            logger.error(
-                "Run budget exceeded before context load job_id=%s run_id=%s "
-                "limit_name=%s configured_limit=%s observed_amount=%s",
-                job_id,
-                active_run_id,
-                exc.limit_name.value,
-                exc.configured_limit,
-                exc.observed_amount,
-            )
-            await _handle_execution_crash(
-                context=None,
+        try:
+            await _handle_budget_stop(
                 job_id=job_id,
                 run_id=active_run_id,
-                job_store=job_store,
-                error_store=error_store,
-                webhook_dispatcher=webhook_dispatcher,
-            )
-            return
-        try:
-            await _handle_budget_exhaustion(
                 context=context,
-                job_id=job_id,
-                run_id=context.run_id,
-                error=exc,
+                heartbeat=heartbeat,
                 job_store=job_store,
                 result_store=result_store,
                 error_store=error_store,
                 webhook_dispatcher=webhook_dispatcher,
-                heartbeat=heartbeat,
+                error=exc,
             )
-        except Exception as handler_exc:
-            # Raised inside this except block, the failure would skip the
-            # crash handler below and leave the run running until the
-            # heartbeat timeout.
-            if heartbeat is not None:
-                await heartbeat.stop()
-            logger.error(
-                "Budget failure handling crashed job_id=%s run_id=%s error_type=%s",
-                job_id,
-                context.run_id,
-                type(handler_exc).__name__,
-            )
-            await _discard_unowned_result(result_store, job_id, context.run_id, job_store=job_store)
-            await _handle_execution_crash(
-                context=context,
-                job_id=job_id,
-                run_id=context.run_id,
-                job_store=job_store,
-                error_store=error_store,
-                webhook_dispatcher=webhook_dispatcher,
-            )
-    except asyncio.CancelledError:
-        metric_status = "cancelled"
-        lease_lost = heartbeat is not None and heartbeat.ownership_lost
-        if heartbeat is not None:
-            await heartbeat.stop()
-        if lease_lost:
-            logger.error(
-                "Stopping scrape after heartbeat lease loss job_id=%s run_id=%s reason=%s",
-                job_id,
-                active_run_id,
-                heartbeat.lost_reason if heartbeat is not None else None,
-            )
-            await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
-            return
-        active = False
-        if active_run_id is not None:
-            try:
-                active = await job_store.run_is_active(job_id, active_run_id)
-            except Exception as exc:
-                logger.warning(
-                    "Cancellation ownership check unavailable job_id=%s run_id=%s "
-                    "cancellation_phase=worker_cancel_handler error_type=%s",
-                    job_id,
-                    active_run_id,
-                    type(exc).__name__,
-                )
-                active = True
-        logger.warning("scrape_task cancelled for job_id=%s run_id=%s", job_id, active_run_id)
-        await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
-        if not active:
-            logger.info(
-                "Cooperative worker cancellation completed job_id=%s run_id=%s "
-                "cancellation_checkpoint=task_cancel_handler "
-                "recovery_action=skip_failed_finalization",
-                job_id,
-                active_run_id,
-            )
-            raise
-        recovery = asyncio.create_task(
-            _handle_execution_crash(
-                context=context,
+        except asyncio.CancelledError:
+            # Raised inside this except block, the cancellation would skip
+            # the cancellation handler below and leave the run running until
+            # the heartbeat timeout.
+            metric_status = "cancelled"
+            if await _handle_worker_cancellation(
                 job_id=job_id,
                 run_id=active_run_id,
+                context=context,
+                heartbeat=heartbeat,
                 job_store=job_store,
+                result_store=result_store,
                 error_store=error_store,
                 webhook_dispatcher=webhook_dispatcher,
-            )
-        )
-        try:
-            await asyncio.shield(recovery)
-        except asyncio.CancelledError:
-            await recovery
-        raise
+            ):
+                raise
+    except asyncio.CancelledError:
+        metric_status = "cancelled"
+        if await _handle_worker_cancellation(
+            job_id=job_id,
+            run_id=active_run_id,
+            context=context,
+            heartbeat=heartbeat,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        ):
+            raise
     except (RunHeartbeatLeaseLost, RunOwnershipError) as exc:
         metric_status = "ignored"
         if heartbeat is not None:
@@ -386,6 +322,137 @@ async def scrape_task(
                 trigger=trigger,
                 duration_seconds=time.monotonic() - metric_started,
             )
+
+
+async def _handle_budget_stop(
+    *,
+    job_id: str,
+    run_id: str | None,
+    context: JobExecutionContext | None,
+    heartbeat: RunHeartbeat | None,
+    job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
+    webhook_dispatcher: WebhookNotifier | None,
+    error: BudgetExceeded,
+) -> None:
+    """Fail a run that hit a hard run limit, falling back to crash handling."""
+    if context is None:
+        logger.error(
+            "Run budget exceeded before context load job_id=%s run_id=%s "
+            "limit_name=%s configured_limit=%s observed_amount=%s",
+            job_id,
+            run_id,
+            error.limit_name.value,
+            error.configured_limit,
+            error.observed_amount,
+        )
+        await _handle_execution_crash(
+            context=None,
+            job_id=job_id,
+            run_id=run_id,
+            job_store=job_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
+        return
+    try:
+        await _handle_budget_exhaustion(
+            context=context,
+            job_id=job_id,
+            run_id=context.run_id,
+            error=error,
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+            heartbeat=heartbeat,
+        )
+    except Exception as handler_exc:
+        # Raised inside scrape_task's except block, the failure would skip its
+        # crash handler and leave the run running until the heartbeat timeout.
+        if heartbeat is not None:
+            await heartbeat.stop()
+        logger.error(
+            "Budget failure handling crashed job_id=%s run_id=%s error_type=%s",
+            job_id,
+            context.run_id,
+            type(handler_exc).__name__,
+        )
+        await _discard_unowned_result(result_store, job_id, context.run_id, job_store=job_store)
+        await _handle_execution_crash(
+            context=context,
+            job_id=job_id,
+            run_id=context.run_id,
+            job_store=job_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
+
+
+async def _handle_worker_cancellation(
+    *,
+    job_id: str,
+    run_id: str | None,
+    context: JobExecutionContext | None,
+    heartbeat: RunHeartbeat | None,
+    job_store: JobStore,
+    result_store: ResultStore,
+    error_store: ErrorStore,
+    webhook_dispatcher: WebhookNotifier | None,
+) -> bool:
+    """Record the outcome of a cancelled run; return whether to propagate the cancellation."""
+    lease_lost = heartbeat is not None and heartbeat.ownership_lost
+    if heartbeat is not None:
+        await heartbeat.stop()
+    if lease_lost:
+        logger.error(
+            "Stopping scrape after heartbeat lease loss job_id=%s run_id=%s reason=%s",
+            job_id,
+            run_id,
+            heartbeat.lost_reason if heartbeat is not None else None,
+        )
+        await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
+        return False
+    active = False
+    if run_id is not None:
+        try:
+            active = await job_store.run_is_active(job_id, run_id)
+        except Exception as exc:
+            logger.warning(
+                "Cancellation ownership check unavailable job_id=%s run_id=%s "
+                "cancellation_phase=worker_cancel_handler error_type=%s",
+                job_id,
+                run_id,
+                type(exc).__name__,
+            )
+            active = True
+    logger.warning("scrape_task cancelled for job_id=%s run_id=%s", job_id, run_id)
+    await _discard_unowned_result(result_store, job_id, run_id, job_store=job_store)
+    if not active:
+        logger.info(
+            "Cooperative worker cancellation completed job_id=%s run_id=%s "
+            "cancellation_checkpoint=task_cancel_handler "
+            "recovery_action=skip_failed_finalization",
+            job_id,
+            run_id,
+        )
+        return True
+    recovery = asyncio.create_task(
+        _handle_execution_crash(
+            context=context,
+            job_id=job_id,
+            run_id=run_id,
+            job_store=job_store,
+            error_store=error_store,
+            webhook_dispatcher=webhook_dispatcher,
+        )
+    )
+    try:
+        await asyncio.shield(recovery)
+    except asyncio.CancelledError:
+        await recovery
+    return True
 
 
 def _heartbeat_cutoff(context: JobExecutionContext | None) -> datetime | None:

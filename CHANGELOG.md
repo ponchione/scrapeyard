@@ -163,6 +163,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A cancellation that lands while a run-budget stop is being recorded, such as
+  a shutdown cancel during its database writes, no longer leaves the run
+  `running` until the heartbeat timeout. It gets the same ownership check and
+  shielded crash finalization as any other cancellation, so the run ends
+  `failed`.
 - `GET /jobs` and `GET /errors` reject an `offset` above 2^63-1 with a 422
   validation error instead of failing with a 500.
 - A schedule update, scheduled job creation or manual trigger that fails and

@@ -82,7 +82,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-63**) and use this template:
+7. **New findings** take the next free ID (**TD-64**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -235,14 +235,14 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-52 | P2 | worker | low | none | |
-| 3 | TD-55 | P2 | URL guard, API | low | none | |
-| 4 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 5 | TD-53 | P3 | engine | low | none | |
-| 6 | TD-57 | P3 | storage | low | none | |
-| 7 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 8 | TD-56 | P3 | redaction | low | none | |
-| 9 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 2 | TD-55 | P2 | URL guard, API | low | none | |
+| 3 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 4 | TD-53 | P3 | engine | low | none | |
+| 5 | TD-57 | P3 | storage | low | none | |
+| 6 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 7 | TD-56 | P3 | redaction | low | none | |
+| 8 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 9 | TD-63 | P3 | worker | low | none | |
 | 10 | TD-62 | P3 | CI | low | none | After TD-26b |
 | 11 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
@@ -281,7 +281,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
-| TD-52 | P2 | ready | A cancellation during run-budget handling skips cancellation recovery |
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 | TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
 | TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
@@ -292,6 +291,7 @@ container scan and qualification workflows passing, which needs both.
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
+| TD-63 | P3 | ready | A cancellation during crash recording leaves the run `running` |
 
 ## Ready to implement
 
@@ -383,26 +383,6 @@ update the two tests and `docs/DEPLOYMENT.md` to match.
 **Done when:** a test with a stuck run thread shows shutdown closing the stores
 and the process exiting within the grace, or the trade-off is accepted and this
 entry deleted.
-
-### TD-52 — A cancellation during run-budget handling skips cancellation recovery
-
-**Priority:** P2 · **Area:** worker · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `_handle_budget_exhaustion` runs inside `scrape_task`'s
-  `except BudgetExceeded` block. A `CancelledError` raised there, for example
-  a shutdown cancel during its database writes, propagates out without
-  reaching the sibling `except asyncio.CancelledError` handler.
-- The run then stays `running` until the heartbeat timeout, the symptom the
-  shutdown cancellation reserve fixed for the main path. An `Exception` from
-  the same call already goes through crash handling, but `CancelledError` is a
-  `BaseException`.
-
-**Code:** `queue/worker.py` (`scrape_task`, `_handle_budget_exhaustion`).
-**Fix:** send a cancellation from the budget path through the same ownership
-check and shielded crash finalization as the main cancellation handler.
-**Done when:** a test that cancels the task during budget finalization shows
-the run reaching `failed` or `cancelled` before the task ends.
 
 ### TD-53 — On Python 3.10, browser navigation timeouts are misclassified
 
@@ -568,6 +548,29 @@ GitHub runs them on Node 24 and only warns for now.
 **Code:** `.github/workflows/*.yml`.
 **Fix:** move to their Node 24 releases, pinned by SHA as today.
 **Done when:** the workflows run without the Node 20 deprecation warning.
+
+### TD-63 — A cancellation during crash recording leaves the run `running`
+
+**Priority:** P3 · **Area:** worker · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `scrape_task`'s `except Exception` handler records a crash with
+  `_handle_execution_crash`. A `CancelledError` raised there, for example a
+  shutdown cancel during its database writes, propagates out unshielded and
+  never reaches the sibling `except asyncio.CancelledError` handler.
+- The run then stays `running` until the heartbeat timeout. Reproduced on the
+  TD-52 branch by blocking `count_errors_for_run` after a crash and
+  cancelling the task. TD-52 closed the same gap on the run-budget path, and
+  `_handle_worker_cancellation` already shields its own crash finalization.
+- It needs a cancel within the few milliseconds a crash takes to record, so
+  it is rare.
+
+**Code:** `queue/worker.py` (`scrape_task`, `_handle_execution_crash`).
+**Fix:** route a cancellation raised during crash recording through
+`_handle_worker_cancellation`, as the run-budget path does, or shield the
+crash finalization there.
+**Done when:** a test that cancels the task while a crash is being recorded
+shows the run reaching `failed` before the task ends.
 
 ## Coordinated
 

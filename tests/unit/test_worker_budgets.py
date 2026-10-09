@@ -16,6 +16,8 @@ from scrapeyard.models.job import ErrorType, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import RunActivityGuard
 from scrapeyard.queue.worker import scrape_task
+from scrapeyard.storage.database import init_db
+from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import SaveResultMeta
 from tests.unit.worker_helpers import make_job
 
@@ -364,3 +366,70 @@ target:
     job_store.fail_owned_run.assert_awaited_once()
     assert job_store.fail_owned_run.await_args.args[:2] == ("job-budget", run_id)
     result_store.delete_result.assert_awaited_once_with("job-budget", run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_write", ["log_error", "save_result"])
+async def test_cancellation_during_budget_finalization_still_fails_the_run(
+    tmp_path,
+    blocked_write,
+):
+    run_id = "run-budget-cancelled"
+    config = """
+project: test
+name: budget-job
+target:
+  url: https://one.example.com
+  selectors:
+    title: h1
+"""
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    await job_store.save_job(
+        make_job(
+            job_id="job-budget",
+            name="budget-job",
+            config_yaml=config,
+            current_run_id=run_id,
+            current_trigger="adhoc",
+        )
+    )
+    _, result_store, error_store = _stores(run_id)
+    blocked = asyncio.Event()
+
+    async def block_forever(*_args, **_kwargs):
+        blocked.set()
+        await asyncio.Event().wait()
+
+    store = error_store if blocked_write == "log_error" else result_store
+    getattr(store, blocked_write).side_effect = block_forever
+
+    async def exceed_record_budget(*_args, budget, **_kwargs):
+        budget.reserve_extracted_records(4)
+        raise AssertionError("unreachable")
+
+    with patch("scrapeyard.queue.worker.scrape_target", exceed_record_budget), patch(
+        "scrapeyard.queue.worker.get_settings",
+        return_value=_settings(tmp_path),
+    ):
+        task = asyncio.create_task(
+            scrape_task(
+                "job-budget",
+                config,
+                run_id=run_id,
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
+            )
+        )
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run = await job_store.get_job_run("job-budget", run_id)
+    assert run is not None
+    assert run.status is JobStatus.failed
+    assert (await job_store.get_job("job-budget")).status is JobStatus.failed
