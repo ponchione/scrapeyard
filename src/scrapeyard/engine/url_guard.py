@@ -9,6 +9,7 @@ import socket
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, quote_plus, unquote_plus, urlparse, urlunparse
 
@@ -336,26 +337,42 @@ def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
     return redact_deployment_secrets_with_count(text, secret_values)[0]
 
 
+def _secret_variants(secret_values: Any) -> tuple[str, ...]:
+    values = (
+        _ACTIVE_DEPLOYMENT_SECRETS.get()
+        if secret_values is None
+        else tuple(value for value in secret_values if isinstance(value, str) and value)
+    )
+    return _variants_longest_first(values)
+
+
+# Redaction runs once per string of every record, so each run's few secrets
+# are expanded and sorted once instead of per string.
+@lru_cache(maxsize=32)
+def _variants_longest_first(values: tuple[str, ...]) -> tuple[str, ...]:
+    variants: set[str] = set()
+    for value in values:
+        variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
+    return tuple(variant for variant in sorted(variants, key=len, reverse=True) if variant)
+
+
+def _redact_variants(text: str, variants: tuple[str, ...]) -> tuple[str, int]:
+    redaction_count = 0
+    for variant in variants:
+        count = text.count(variant)
+        if count:
+            redaction_count += count
+            text = text.replace(variant, _REDACTED_VALUE)
+    return text, redaction_count
+
+
 def redact_deployment_secrets_with_count(
     text: str,
     secret_values: Any = None,
 ) -> tuple[str, int]:
     """Redact resolved secrets and return the number of replaced substrings."""
 
-    values = (
-        _ACTIVE_DEPLOYMENT_SECRETS.get()
-        if secret_values is None
-        else tuple(value for value in secret_values if isinstance(value, str) and value)
-    )
-    variants: set[str] = set()
-    for value in values:
-        variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
-    redaction_count = 0
-    for variant in sorted(variants, key=len, reverse=True):
-        if variant:
-            redaction_count += text.count(variant)
-            text = text.replace(variant, _REDACTED_VALUE)
-    return text, redaction_count
+    return _redact_variants(text, _secret_variants(secret_values))
 
 
 def redact_deployment_secrets_in_value(
@@ -375,18 +392,25 @@ def redact_deployment_secrets_in_value_with_count(
     *,
     secret_values: Any = None,
 ) -> tuple[Any, int]:
-    """Redact JSON-like caller data and report how many matches were changed."""
+    """Redact JSON-like caller data and report how many matches were changed.
 
+    Without any secret to redact, *value* itself is returned uncopied.
+    """
+
+    variants = _secret_variants(secret_values)
+    if not variants:
+        return value, 0
+    return _redact_value_variants(value, variants)
+
+
+def _redact_value_variants(value: Any, variants: tuple[str, ...]) -> tuple[Any, int]:
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
         redaction_count = 0
         for key, item in value.items():
             redacted_key: Any = key
             if isinstance(key, str):
-                redacted_key, key_count = redact_deployment_secrets_with_count(
-                    key,
-                    secret_values,
-                )
+                redacted_key, key_count = _redact_variants(key, variants)
                 redaction_count += key_count
                 if redacted_key in redacted:
                     base_key = redacted_key
@@ -394,39 +418,24 @@ def redact_deployment_secrets_in_value_with_count(
                     while redacted_key in redacted:
                         redacted_key = f"{base_key}#{suffix}"
                         suffix += 1
-            redacted_item, item_count = redact_deployment_secrets_in_value_with_count(
-                item,
-                secret_values=secret_values,
-            )
+            redacted_item, item_count = _redact_value_variants(item, variants)
             redacted[redacted_key] = redacted_item
             redaction_count += item_count
         return redacted, redaction_count
     if isinstance(value, list):
-        redacted_list_items = [
-            redact_deployment_secrets_in_value_with_count(
-                item,
-                secret_values=secret_values,
-            )
-            for item in value
-        ]
+        redacted_list_items = [_redact_value_variants(item, variants) for item in value]
         return (
             [item for item, _count in redacted_list_items],
             sum(count for _item, count in redacted_list_items),
         )
     if isinstance(value, tuple):
-        redacted_tuple_items = tuple(
-            redact_deployment_secrets_in_value_with_count(
-                item,
-                secret_values=secret_values,
-            )
-            for item in value
-        )
+        redacted_tuple_items = tuple(_redact_value_variants(item, variants) for item in value)
         return (
             tuple(item for item, _count in redacted_tuple_items),
             sum(count for _item, count in redacted_tuple_items),
         )
     if isinstance(value, str):
-        return redact_deployment_secrets_with_count(value, secret_values)
+        return _redact_variants(value, variants)
     return value, 0
 
 

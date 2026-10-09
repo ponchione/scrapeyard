@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import random
 import socket
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import quote, quote_plus
 
 import pytest
 
@@ -21,6 +25,7 @@ from scrapeyard.engine.url_guard import (
     reset_deployment_secret_redaction,
     url_host_label,
 )
+from scrapeyard.engine.url_guard import _variants_longest_first as variants_longest_first
 
 
 def test_counted_secret_redaction_handles_encoded_values_and_key_collisions() -> None:
@@ -376,6 +381,110 @@ def test_run_scoped_redaction_masks_raw_encoded_and_nested_tuple_secrets() -> No
         }
     finally:
         reset_deployment_secret_redaction(token)
+
+
+def _reference_redact_text(text: str, secret_values: tuple[str, ...]) -> tuple[str, int]:
+    """Redaction as written before its variants were cached, rebuilt per string."""
+    variants: set[str] = set()
+    for value in (value for value in secret_values if value):
+        variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
+    count = 0
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            count += text.count(variant)
+            text = text.replace(variant, "<redacted>")
+    return text, count
+
+
+def _reference_redact_value(value: Any, secret_values: tuple[str, ...]) -> tuple[Any, int]:
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        count = 0
+        for key, item in value.items():
+            redacted_key: Any = key
+            if isinstance(key, str):
+                redacted_key, key_count = _reference_redact_text(key, secret_values)
+                count += key_count
+                base_key, suffix = redacted_key, 2
+                while redacted_key in redacted:
+                    redacted_key = f"{base_key}#{suffix}"
+                    suffix += 1
+            redacted[redacted_key], item_count = _reference_redact_value(item, secret_values)
+            count += item_count
+        return redacted, count
+    if isinstance(value, (list, tuple)):
+        pairs = [_reference_redact_value(item, secret_values) for item in value]
+        items = [item for item, _count in pairs]
+        return (tuple(items) if isinstance(value, tuple) else items), sum(c for _i, c in pairs)
+    if isinstance(value, str):
+        return _reference_redact_text(value, secret_values)
+    return value, 0
+
+
+_TRICKY_SECRET_SETS = [
+    (),
+    ("tok",),
+    ("tok", "tok123"),
+    ("a b/c+d", "a b"),
+    ("p@ss:w0rd&x=1", "ss:w"),
+    ("Ü-ß/€", "€"),
+]
+_TRICKY_PIECES = [
+    "tok", "tok123", "a b/c+d", "a%20b%2Fc%2Bd", "a+b%2Fc%2Bd", "a b", "p@ss:w0rd&x=1",
+    "p%40ss%3Aw0rd%26x%3D1", "Ü-ß/€", "%E2%82%AC", "x", " ", "/",
+]
+
+
+def _tricky_value(rng: random.Random, depth: int = 0) -> Any:
+    roll = rng.random()
+    if depth < 3 and roll < 0.2:
+        return {_tricky_text(rng) or "k": _tricky_value(rng, depth + 1) for _ in range(rng.randrange(4))}
+    if depth < 3 and roll < 0.35:
+        return [_tricky_value(rng, depth + 1) for _ in range(rng.randrange(4))]
+    if depth < 3 and roll < 0.4:
+        return tuple(_tricky_value(rng, depth + 1) for _ in range(rng.randrange(3)))
+    if roll < 0.5:
+        return rng.choice([None, 1, 2.5, True])
+    return _tricky_text(rng)
+
+
+def _tricky_text(rng: random.Random) -> str:
+    return "".join(rng.choice(_TRICKY_PIECES) for _ in range(rng.randrange(6)))
+
+
+@pytest.mark.parametrize("secret_values", _TRICKY_SECRET_SETS)
+def test_cached_secret_redaction_matches_per_string_redaction(secret_values) -> None:
+    rng = random.Random(len(secret_values))
+
+    for _ in range(300):
+        value = {"record": _tricky_value(rng), "text": _tricky_text(rng)}
+        assert redact_deployment_secrets_in_value_with_count(
+            value, secret_values=secret_values
+        ) == _reference_redact_value(value, secret_values)
+        text = _tricky_text(rng)
+        assert redact_deployment_secrets(text, secret_values) == _reference_redact_text(
+            text, secret_values
+        )[0]
+
+
+def test_secret_variants_are_built_once_per_secret_set() -> None:
+    variants_longest_first.cache_clear()
+    record = {"title": "a Vendor Value/91 b", "tags": ["Vendor%20Value%2F91", "plain"]}
+
+    for _ in range(100):
+        redact_deployment_secrets_in_value_with_count(record, secret_values=["Vendor Value/91"])
+
+    info = variants_longest_first.cache_info()
+    assert (info.misses, info.hits) == (1, 99)
+
+
+def test_redaction_without_secrets_returns_the_value_uncopied() -> None:
+    record = {"title": "visible", "tags": ["a", ("b",)], "nested": {"k": "v"}}
+
+    redacted, count = redact_deployment_secrets_in_value_with_count(record, secret_values=())
+
+    assert redacted is record
+    assert count == 0
 
 
 def test_redact_sensitive_config_text_masks_yaml_secrets() -> None:

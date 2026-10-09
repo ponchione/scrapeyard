@@ -83,6 +83,29 @@ def _cgroup_service(tmp_path: Path, v2: bool, usage_mib: int, stat: str | None) 
     return proc, leaf / limit
 
 
+@pytest.mark.parametrize("v2", [True, False])
+def test_cgroup_directories_are_discovered_once_and_usage_reread(tmp_path, v2):
+    proc, leaf_limit = _cgroup_service(tmp_path, v2, 1000, None)
+
+    assert memory_headroom_mb(4096, proc) == 3096
+    # Membership and mounts are read once; later samples read only usage files.
+    (proc / "cgroup").unlink()
+    (proc / "mountinfo").unlink()
+    leaf_limit.write_text(str(1500 * _MIB))
+    assert memory_headroom_mb(4096, proc) == 500
+
+
+def test_failed_cgroup_discovery_is_retried(tmp_path):
+    proc = tmp_path / "proc" / "self"
+    proc.mkdir(parents=True)
+    with patch("scrapeyard.queue.memory._process_tree_rss_mb", return_value=100):
+        assert memory_headroom_mb(4096, proc) == 3996
+
+    proc.rmdir()
+    proc, _limit = _cgroup_service(tmp_path, True, 1000, None)
+    assert memory_headroom_mb(4096, proc) == 3096
+
+
 def _memory_stat(v2: bool, *, anon: int, active_file: int, inactive_file: int) -> str:
     if v2:
         return (

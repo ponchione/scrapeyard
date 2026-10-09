@@ -910,3 +910,136 @@ def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debu
     assert payload["targets"][0]["debug"]["request_failures"][0]["url"] == (
         "https://example.com/api?signature=<redacted>"
     )
+
+
+def _merge_config(urls: list[str], secrets: tuple[str, ...], group_by: GroupBy) -> ScrapeConfig:
+    config = ScrapeConfig.model_validate(
+        {
+            "project": "test",
+            "name": "job",
+            "output": {"group_by": group_by.value},
+            "targets": [{"url": url, "selectors": {"sku": ".sku"}} for url in urls],
+        }
+    )
+    config._resolved_secret_values = secrets
+    return config
+
+
+def _roomy_budget() -> RunBudget:
+    return RunBudget(
+        max_duration_seconds=60,
+        max_fetched_bytes=1_000_000,
+        max_extracted_records=1_000,
+        max_serialized_result_bytes=1_000_000,
+        max_browser_debug_bytes=1_000,
+    )
+
+
+def test_merged_record_sources_are_redacted_once_per_distinct_source(monkeypatch):
+    from scrapeyard.queue import worker
+
+    urls = ["https://shop.example/a", "https://plain.example/b", "https://shop.example/c"]
+    redacted_sources: list[str] = []
+    real_redact = worker.redact_deployment_secrets_with_count
+
+    def _counting_redact(text, secret_values):
+        redacted_sources.append(text)
+        return real_redact(text, secret_values)
+
+    monkeypatch.setattr(worker, "redact_deployment_secrets_with_count", _counting_redact)
+
+    def _materialize(secret: str) -> tuple[dict, int]:
+        results = [
+            TargetResult(url=url, status="success", data=[{"sku": f"{index}-{n}"} for n in range(20)])
+            for index, url in enumerate(urls)
+        ]
+        budget = _roomy_budget()
+        payload = _materialize_output_artifact(
+            _merge_config(urls, (secret,), GroupBy.merge),
+            results,
+            "job-1",
+            JobStatus.complete,
+            [],
+            publish_results=True,
+            budget=budget,
+        )
+        return payload, budget.estimated_result_bytes
+
+    _unmatched, unmatched_estimate = _materialize("absent")
+    redacted_sources.clear()
+    payload, estimate = _materialize("shop")
+
+    assert redacted_sources == ["shop.example", "plain.example"]
+    assert [item["_source"] for item in payload["results"]] == (
+        ["<redacted>.example"] * 20 + ["plain.example"] * 20 + ["<redacted>.example"] * 20
+    )
+    assert payload["result_redaction"] == {"deployment_secret_matches": 40}
+    # Each of the 40 redacted sources reserves its growth, as before.
+    growth = len("<redacted>.example") - len("shop.example")
+    assert estimate - unmatched_estimate == 40 * growth + compact_json_size(
+        {"result_redaction": payload["result_redaction"]}
+    )
+
+
+@pytest.mark.parametrize("group_by", [GroupBy.merge, GroupBy.target])
+def test_records_are_not_copied_for_redaction_without_secrets(monkeypatch, group_by):
+    from scrapeyard.queue import worker
+
+    config = _merge_config(["https://shop.example/a"], (), group_by)
+    record = {"sku": "a1", "tags": ["x"]}
+    result = TargetResult(url="https://shop.example/a", status="success", data=[record])
+    budget = _roomy_budget()
+    budget.reserve_estimated_result_bytes(compact_json_size(record) + 1)
+    monkeypatch.setattr(
+        worker,
+        "redact_deployment_secrets_in_value_with_count",
+        MagicMock(side_effect=AssertionError("records redacted without secrets")),
+    )
+
+    payload = _materialize_output_artifact(
+        config, [result], "job-1", JobStatus.complete, [], publish_results=True, budget=budget,
+    )
+
+    assert result.data[0] is record
+    if group_by is GroupBy.target:
+        assert payload["results"]["shop.example"]["data"][0] is record
+    else:
+        assert payload["results"] == [{"sku": "a1", "tags": ["x"], "_source": "shop.example"}]
+    assert "result_redaction" not in payload
+
+
+@pytest.mark.asyncio
+async def test_each_target_checks_run_ownership_once_before_its_fetch():
+    targets = [
+        _concurrent_target(f"https://t{index}.example", FetcherType.basic) for index in range(3)
+    ]
+    context = _job_execution_context(targets, concurrency=1)
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
+        await _run_targets(context, BrowserExecutionLimiter(1), job_id="checks")
+
+    checkpoints = [call.args[0] for call in context.activity.checkpoint.await_args_list]
+    assert checkpoints == ["before_target_fetch", "after_target_fetch"] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "current_run_id"),
+    [(JobStatus.complete, "run-1"), (JobStatus.running, "run-2")],
+    ids=["terminal", "superseded"],
+)
+async def test_skipped_delivery_does_not_parse_its_config(monkeypatch, status, current_run_id):
+    from scrapeyard.queue import worker
+
+    job_store = AsyncMock()
+    job_store.get_job.return_value = MagicMock(status=status, current_run_id=current_run_id)
+    load_config = MagicMock(side_effect=AssertionError("config parsed"))
+    monkeypatch.setattr(worker, "load_config", load_config)
+
+    context = await worker._load_job_execution_context("job-1", "unparsed: yaml", "run-1", job_store)
+
+    assert context is None
+    load_config.assert_not_called()

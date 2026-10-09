@@ -249,6 +249,7 @@ async def test_memory_pressure_defers_worker_starts_but_keeps_maintenance(monkey
     worker.job_counter = 0
     worker.max_jobs = 4
     worker.memory_available = lambda: False
+    worker.tasks = {}
     worker._pool = MagicMock(zmscore=AsyncMock(return_value=[None]))
     worker._admit_one = AsyncMock()
     base_poll, base_start = AsyncMock(), AsyncMock()
@@ -263,6 +264,98 @@ async def test_memory_pressure_defers_worker_starts_but_keeps_maintenance(monkey
     worker.memory_available = lambda: True
     await worker.start_jobs([b"accepted-run"])
     base_start.assert_awaited_once_with([b"accepted-run"])
+
+
+def _deferrals() -> float:
+    from scrapeyard.runtime.metrics import MEMORY_DEFERRALS
+
+    return MEMORY_DEFERRALS.labels("worker")._value.get()
+
+
+def _poll_worker(*, job_counter: int, memory_available: MagicMock) -> _PriorityWorker:
+    worker = object.__new__(_PriorityWorker)
+    worker.allow_pick_jobs = True
+    worker.job_counter = job_counter
+    worker.max_jobs = 2
+    worker.queue_name = "test-queue"
+    worker.memory_available = memory_available
+    worker.tasks = {}
+    worker._pool = MagicMock(zcount=AsyncMock(return_value=0), zmscore=AsyncMock(return_value=[None]))
+    worker._admit_one = AsyncMock(return_value=False)
+    return worker
+
+
+async def test_full_worker_neither_samples_memory_nor_counts_a_deferral(monkeypatch):
+    memory_available = MagicMock(return_value=False)
+    worker = _poll_worker(job_counter=2, memory_available=memory_available)
+    monkeypatch.setattr("arq.worker.Worker._poll_iteration", AsyncMock())
+    before = _deferrals()
+
+    await worker._poll_iteration()
+
+    memory_available.assert_not_called()
+    assert _deferrals() == before
+
+
+async def test_memory_is_sampled_and_deferral_counted_once_per_poll(monkeypatch):
+    memory_available = MagicMock(return_value=False)
+    worker = _poll_worker(job_counter=0, memory_available=memory_available)
+    base_start = AsyncMock()
+
+    async def _base_poll(self):
+        # arq starts the ready execution-queue members inside the same poll.
+        await self.start_jobs([b"admitted-run"])
+
+    monkeypatch.setattr("arq.worker.Worker._poll_iteration", _base_poll)
+    monkeypatch.setattr("arq.worker.Worker.start_jobs", base_start)
+    before = _deferrals()
+
+    await worker._poll_iteration()
+    await worker._poll_iteration()
+
+    assert memory_available.call_count == 2
+    assert _deferrals() == before + 2
+    worker._admit_one.assert_not_awaited()
+    base_start.assert_not_awaited()
+
+
+async def test_start_jobs_skips_runs_this_worker_is_already_running(monkeypatch):
+    memory_available = MagicMock(return_value=True)
+    worker = _poll_worker(job_counter=1, memory_available=memory_available)
+    running = asyncio.get_running_loop().create_future()
+    finished = asyncio.get_running_loop().create_future()
+    finished.set_result(None)
+    worker.tasks = {"running-run": running, "finished-run": finished}
+    base_start = AsyncMock()
+    monkeypatch.setattr("arq.worker.Worker.start_jobs", base_start)
+
+    await worker.start_jobs([b"running-run"])
+    await worker.start_jobs([b"running-run", b"finished-run", b"new-run"])
+
+    assert base_start.await_args_list[0].args == ([],)
+    assert base_start.await_args_list[1].args == ([b"finished-run", b"new-run"],)
+    # Only the call that had a run to start checked memory.
+    memory_available.assert_called_once_with()
+    running.cancel()
+
+
+async def test_successful_poll_records_the_worker_last_success(monkeypatch):
+    from scrapeyard.runtime.metrics import LAST_SUCCESS
+
+    worker = _poll_worker(job_counter=2, memory_available=MagicMock(return_value=True))
+    monkeypatch.setattr("arq.worker.Worker._poll_iteration", AsyncMock())
+    LAST_SUCCESS.labels("worker").set(0)
+
+    await worker._poll_iteration()
+
+    assert LAST_SUCCESS.labels("worker")._value.get() >= time.time() - 60
+    LAST_SUCCESS.labels("worker").set(0)
+    monkeypatch.setattr(
+        "arq.worker.Worker._poll_iteration", AsyncMock(side_effect=RuntimeError("redis down"))
+    )
+    with pytest.raises(RuntimeError):
+        await worker._poll_iteration()
+    assert LAST_SUCCESS.labels("worker")._value.get() == 0
 
 
 @pytest.mark.asyncio

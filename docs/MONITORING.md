@@ -41,8 +41,9 @@ queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
 - Durable webhook status counts and oldest-pending age expose retry backlog.
 - Cleanup pass/item/removed-byte totals, artifact finding counts, durable
   history phase failures, exact eligible backlog count/oldest age, and
-  scheduler/cleanup/webhook/reconciliation last-success timestamps expose
-  stalled maintenance and retained-data integrity.
+  worker/scheduler/cleanup/webhook/reconciliation last-success timestamps
+  expose stalled maintenance and retained-data integrity. The worker's
+  timestamp advances on every completed queue poll.
 - Background-task gauges report the embedded worker, scheduler, cleanup loop,
   webhook dispatcher, queued-delivery reconciler, and stale-running reconciler.
   Scheduler readiness also includes durable per-schedule callback failures;

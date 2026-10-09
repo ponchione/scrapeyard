@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-56**) and use this template:
+7. **New findings** take the next free ID (**TD-57**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,20 +230,20 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 2 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 3 | TD-38 | P3 | result store | low | none | |
-| 4 | TD-39 | P3 | click pagination | medium | timing only | |
-| 5 | TD-40 | P3 | API | low | `offset` bound | |
-| 6 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 7 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 8 | TD-43 | P3 | image, dependencies | low | none | |
-| 9 | TD-44 | P3 | lint, docs | low | none | |
-| 10 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 11 | TD-52 | P2 | worker | low | none | |
-| 12 | TD-53 | P3 | engine | low | none | |
-| 13 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 14 | TD-55 | P2 | URL guard, API | low | none | |
+| 1 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 2 | TD-38 | P3 | result store | low | none | |
+| 3 | TD-39 | P3 | click pagination | medium | timing only | |
+| 4 | TD-40 | P3 | API | low | `offset` bound | |
+| 5 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 6 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 7 | TD-43 | P3 | image, dependencies | low | none | |
+| 8 | TD-44 | P3 | lint, docs | low | none | |
+| 9 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 10 | TD-52 | P2 | worker | low | none | |
+| 11 | TD-53 | P3 | engine | low | none | |
+| 12 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 13 | TD-55 | P2 | URL guard, API | low | none | |
+| 14 | TD-56 | P3 | redaction | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -274,7 +274,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-36 | P3 | ready | Worker output processing and the poll loop repeat avoidable work |
 | TD-37 | P3 | ready | Periodic SQLite queries scan history, and the index set is unbalanced |
 | TD-38 | P3 | ready | Result-store deletes hold the metadata lock during `rmtree` |
 | TD-39 | P3 | ready | Click pagination keeps every parse tree and repeats the full wait per click |
@@ -293,6 +292,7 @@ qualification workflows passing.
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 | TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
 | TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
+| TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 
 ## Ready to implement
 
@@ -340,67 +340,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-36 — Worker output processing and the poll loop repeat avoidable work
-
-**Priority:** P3 · **Area:** worker, pool · **Risk:** low · **Contract:** none except sub-item c · **Depends on:** —
-
-- **a. Redaction rebuilds its secret variants for every string.**
-  - `_redact_result_records` calls `redact_deployment_secrets_with_count`
-    (`engine/url_guard.py`) for every string. That call rebuilds and sorts the
-    quoted secret variants each time, and copies every record even when the
-    config references no secrets.
-  - Measured per 100k records:
-
-    | Secrets in config | Now | Cached |
-    | --- | --- | --- |
-    | 0 | 0.59 s | ~0 |
-    | 1 | 1.8 s | 0.19 s |
-    | 3 | 5.1 s | 0.42 s |
-
-  - This is pure Python in a run thread, so it holds the GIL and delays
-    heartbeats and the API.
-  - **Fix:** `lru_cache` the variants keyed on the secret tuple, and return
-    early when there are no secrets. Output must stay byte-identical.
-- **b. Per-target constants are recomputed per record.** `_format_output` and
-  `_materialize_output_artifact` recompute values such as the size of
-  `_source` for every record, about 190 ms per 100k. **Fix:** compute them once
-  per target.
-- **c. A redundant serialization pass** (optional, **contract**).
-  - `_redact_output_artifact` serializes the whole artifact again to enforce
-    `max_serialized_result_bytes` (173 ms for 43 MB). The streaming writer
-    already enforces the same ceiling exactly.
-  - Dropping the pass changes the `observed_amount` reported in `budget_error`.
-    Eyebox reads `budget_error` in the alias backfill, so confirm it ignores
-    `observed_amount` first.
-- **d. Memory sampling on every poll.**
-  - The pool samples memory on every 0.5 s poll (`_poll_iteration`) even when
-    it is full, and again in `start_jobs` whenever any job is running.
-  - Each sample re-reads `mountinfo` and the cgroup files on the event loop,
-    about 310 µs.
-  - `MEMORY_DEFERRALS` increments twice per poll under memory pressure, even
-    when nothing is waiting. That only affects the metric.
-  - **Fix:** cache the cgroup directories (`_cgroup_memory`) and sample once
-    per poll. If sampling drops, refresh `MEMORY_HEADROOM` in
-    `_refresh_metrics`; today it is only updated as a side effect of sampling.
-- **e. arq re-checks jobs this process already runs.** That costs 4 Redis round
-  trips per running job per poll. **Fix:** skip IDs already in `self.tasks`.
-- **f. An extra ownership query per target.**
-  `_process_all_targets._process_one` runs `checkpoint("before_target_start")`,
-  an ownership query per target (up to 100 at once on the single jobs.db
-  connection). It repeats the checks in `before_targets` and
-  `before_target_fetch`. **Fix:** remove it.
-- **g. Parse before skip.** `_load_job_execution_context` parses the config
-  before the cheap skip check. **Fix:** reorder the two.
-- **h. A metric that never updates.** `LAST_SUCCESS{task="worker"}` is never
-  set, so it always reads 0. **Fix:** set it, or drop the label.
-
-**Code:**
-- `queue/worker.py`
-- `queue/pool.py`
-- `queue/memory.py`
-- `runtime/metrics.py`
-- `engine/url_guard.py`
 
 ### TD-37 — Periodic SQLite queries scan history, and the index set is unbalanced
 
@@ -756,6 +695,25 @@ with a record that `/results` cannot encode.
 boundary, keeping today's matches.
 **Done when:** a test redacts a 256 KiB token in well under 100 ms, and the
 existing redaction tests pass unchanged.
+
+### TD-56 — Secret redaction order depends on the process hash seed for equal-length secrets
+
+**Priority:** P3 · **Area:** redaction · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `_variants_longest_first` sorts secret variants by length only, so
+  equal-length variants come out in set order, which depends on the
+  per-process string hash seed.
+- When two equal-length secrets overlap in a string (secrets `ab` and `ba` in
+  `abab`), the redacted text differs between processes: either
+  `<redacted><redacted>` or `a<redacted>b`, and the latter keeps fragments of
+  a secret. This needs overlapping equal-length secrets, so it is contrived.
+
+**Code:** `engine/url_guard.py` (`_variants_longest_first`).
+**Fix:** sort by `(-len(variant), variant)`, or merge overlapping matches into
+one redaction span.
+**Done when:** a test with overlapping equal-length secrets gives the same
+output under different `PYTHONHASHSEED` values.
 
 ## Coordinated
 

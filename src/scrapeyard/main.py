@@ -50,7 +50,7 @@ from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
-from scrapeyard.queue.memory import freeze_startup_heap, thaw_startup_heap
+from scrapeyard.queue.memory import freeze_startup_heap, memory_headroom_mb, thaw_startup_heap
 from scrapeyard.queue.reconciliation import (
     reconcile_stale_queued_jobs,
     start_queued_reconciliation_loop,
@@ -915,6 +915,9 @@ async def _refresh_metrics() -> None:
             DISK_FREE_BYTES.set(shutil.disk_usage(settings.storage_results_dir).free)
         except OSError:
             METRICS_REFRESH_FAILURES.labels("result_storage").inc()
+        # The worker samples memory only when it could start work, so a full
+        # worker would otherwise leave the headroom gauge stale.
+        memory_headroom_mb(settings.workers_memory_limit_mb)
         for name, probe in _background_probes().items():
             BACKGROUND_TASK.labels(name).set(1 if probe.ok else 0)
         _metrics_refreshed_at = now

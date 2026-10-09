@@ -24,7 +24,7 @@ from scrapeyard.queue.cancellation import (
     RunCancellationResult,
 )
 from scrapeyard.queue.memory import memory_headroom_mb, release_memory
-from scrapeyard.runtime.metrics import MEMORY_DEFERRALS
+from scrapeyard.runtime.metrics import MEMORY_DEFERRALS, mark_last_success
 from scrapeyard.queue.priority import (
     PRIORITIES,
     WeightedPriorityPolicy,
@@ -166,6 +166,12 @@ class _PriorityJobHandle:
 class _PriorityWorker(Worker):
     """Single arq Worker with weighted admission from three intake queues."""
 
+    # Within one poll, memory is sampled at most once and a deferral counted
+    # at most once; outside a poll every start check samples afresh.
+    _polling = False
+    _poll_memory_available: bool | None = None
+    _poll_deferred = False
+
     def __init__(
         self, *args: Any, priority_queues: dict[str, str],
         memory_available: Callable[[], bool], **kwargs: Any,
@@ -188,28 +194,52 @@ class _PriorityWorker(Worker):
         await self.pool.aclose(close_connection_pool=True)
         self._pool = None
 
-    async def _poll_iteration(self) -> None:
-        memory_available = self.memory_available()
-        if self.allow_pick_jobs and not memory_available:
+    def _memory_available_for_start(self) -> bool:
+        """Sample memory only when a start check needs it, once per poll."""
+        available = self._poll_memory_available
+        if available is None:
+            available = self.memory_available()
+            if self._polling:
+                self._poll_memory_available = available
+        if not available and not self._poll_deferred:
             MEMORY_DEFERRALS.labels("worker").inc()
-        if self.allow_pick_jobs and self.job_counter < self.max_jobs and memory_available:
-            # arq 0.26.x keeps a running job in the execution queue until
-            # finish_job() removes it. These ready members therefore already
-            # include job_counter and must only be counted once.
-            ready_execution_members = await self.pool.zcount(
-                self.queue_name,
-                min=float("-inf"),
-                max=timestamp_ms(),
-            )
-            available = max(0, self.max_jobs - ready_execution_members)
-            for _ in range(available):
-                if not await self._admit_one():
-                    break
-        await super()._poll_iteration()
+            self._poll_deferred = self._polling
+        return available
+
+    async def _poll_iteration(self) -> None:
+        self._polling = True
+        try:
+            # A full worker starts nothing, so it neither samples memory nor
+            # counts a deferral.
+            if (
+                self.allow_pick_jobs
+                and self.job_counter < self.max_jobs
+                and self._memory_available_for_start()
+            ):
+                # arq 0.26.x keeps a running job in the execution queue until
+                # finish_job() removes it. These ready members therefore already
+                # include job_counter and must only be counted once.
+                ready_execution_members = await self.pool.zcount(
+                    self.queue_name,
+                    min=float("-inf"),
+                    max=timestamp_ms(),
+                )
+                available = max(0, self.max_jobs - ready_execution_members)
+                for _ in range(available):
+                    if not await self._admit_one():
+                        break
+            await super()._poll_iteration()
+        finally:
+            self._polling = False
+            self._poll_memory_available = None
+            self._poll_deferred = False
+        mark_last_success("worker")
 
     async def start_jobs(self, job_ids: list[bytes]) -> None:
-        if job_ids and not self.memory_available():
-            MEMORY_DEFERRALS.labels("worker").inc()
+        # Jobs this process runs stay in the execution queue until they finish;
+        # arq would spend four Redis round trips per poll rediscovering each.
+        job_ids = [job_id for job_id in job_ids if not self._running_here(job_id)]
+        if job_ids and not self._memory_available_for_start():
             # arq acknowledges queued aborts in run_job before calling the
             # scrape handler. Let those acknowledgements drain under pressure.
             scores = await self.pool.zmscore(abort_jobs_ss, [job_id.decode() for job_id in job_ids])
@@ -217,6 +247,10 @@ class _PriorityWorker(Worker):
             if not job_ids:
                 return
         await super().start_jobs(job_ids)
+
+    def _running_here(self, job_id: bytes) -> bool:
+        task = self.tasks.get(job_id.decode())
+        return task is not None and not task.done()
 
     async def _admit_one(self) -> bool:
         order = self.priority_policy.selection_order()

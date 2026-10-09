@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -53,8 +53,11 @@ async def test_durable_metric_refresh_is_cached_and_bounded(monkeypatch, tmp_pat
         metrics_refresh_interval_seconds=30.0,
         health_probe_timeout_seconds=0.5,
         storage_results_dir=str(tmp_path),
+        workers_memory_limit_mb=3072,
     )
+    headroom = MagicMock(return_value=512.0)
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "memory_headroom_mb", headroom)
     monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
     monkeypatch.setattr(main_module.app.state, "webhook_outbox_store", outbox, raising=False)
     monkeypatch.setattr(
@@ -72,6 +75,8 @@ async def test_durable_metric_refresh_is_cached_and_bounded(monkeypatch, tmp_pat
 
     pool.queue_operational_snapshot.assert_awaited_once()
     outbox.summarize.assert_awaited_once()
+    # A full worker stops sampling memory, so the refresh keeps the gauge current.
+    headroom.assert_called_once_with(3072)
     rendered = render_metrics().decode()
     assert 'scrapeyard_queue_depth{priority="normal"} 2.0' in rendered
     assert 'scrapeyard_webhook_deliveries{status="pending"} 3.0' in rendered

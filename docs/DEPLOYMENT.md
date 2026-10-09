@@ -590,7 +590,10 @@ an already-running browser from growing; retain the hard container limits.
 new runs. `scrapeyard_memory_headroom_bytes` reports sampled headroom before
 browser reservations (infinity when unmonitored), and
 `scrapeyard_memory_deferrals_total{stage="worker|browser"}` counts blocked start
-checks. Existing active-work and queue-age metrics show occupancy and delay.
+checks. The worker samples memory at most once per poll and only when it has a
+free slot, so it counts at most one deferral per poll; the metrics refresh
+samples headroom too, keeping the gauge current while the worker is full.
+Existing active-work and queue-age metrics show occupancy and delay.
 
 There are not three arq workers. One Worker owns the global
 `SCRAPEYARD_WORKERS_MAX_CONCURRENT` counter, one process-wide browser limiter

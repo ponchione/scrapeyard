@@ -55,17 +55,17 @@ def _reclaimable_page_cache_mb(directory: Path, v2: bool) -> float:
     return 0.0
 
 
-def _cgroup_memory(proc_root: Path) -> list[tuple[float, float]]:
-    """Read working-set/limit pairs from the process's v1/v2 memory hierarchy.
+def _discover_cgroup_directories(proc_root: Path) -> list[tuple[Path, bool]]:
+    """List the process's memory cgroup directories, its own group first.
 
-    Working set is the group's usage less its inactive file cache (the measure
-    kubelet and cAdvisor use), so page cache from files the service and its
-    browsers read does not refuse admission while anon memory is low.
+    Each entry is a directory and whether it is cgroup v2. Ancestors follow
+    their group up to the mount point. Reading either file can raise OSError;
+    a malformed line ends the listing with the directories found before it.
     """
-    samples: list[tuple[float, float]] = []
+    directories: list[tuple[Path, bool]] = []
+    memberships = [line.split(":", 2) for line in (proc_root / "cgroup").read_text().splitlines()]
+    mounts = (proc_root / "mountinfo").read_text().splitlines()
     try:
-        memberships = [line.split(":", 2) for line in (proc_root / "cgroup").read_text().splitlines()]
-        mounts = (proc_root / "mountinfo").read_text().splitlines()
         for mount in mounts:
             before, after = mount.split(" - ", 1)
             fields, fs = before.split(), after.split()
@@ -90,20 +90,50 @@ def _cgroup_memory(proc_root: Path) -> list[tuple[float, float]]:
                 if ".." in relative.parts:
                     continue
                 while True:
-                    try:
-                        usage = int((directory / ("memory.current" if v2 else "memory.usage_in_bytes")).read_text())
-                        raw_limit = (directory / ("memory.max" if v2 else "memory.limit_in_bytes")).read_text().strip()
-                        limit = float("inf") if raw_limit == "max" else int(raw_limit) / _MIB
-                        if usage >= 0 and limit >= 0:
-                            working_set = usage / _MIB - _reclaimable_page_cache_mb(directory, v2)
-                            samples.append((max(working_set, 0.0), limit))
-                    except (OSError, ValueError):
-                        pass
+                    directories.append((directory, v2))
                     if directory == mountpoint:
                         break
                     directory = directory.parent
-    except (OSError, ValueError, IndexError):
+    except (ValueError, IndexError):
         pass
+    return directories
+
+
+# A process keeps its cgroup membership and mounts, so admission checks on the
+# poll loop read only the usage files after the first successful discovery.
+_cgroup_directory_cache: dict[Path, list[tuple[Path, bool]]] = {}
+
+
+def _cgroup_directories(proc_root: Path) -> list[tuple[Path, bool]]:
+    directories = _cgroup_directory_cache.get(proc_root)
+    if directories is None:
+        directories = _discover_cgroup_directories(proc_root)
+        _cgroup_directory_cache[proc_root] = directories
+    return directories
+
+
+def _cgroup_memory(proc_root: Path) -> list[tuple[float, float]]:
+    """Read working-set/limit pairs from the process's v1/v2 memory hierarchy.
+
+    Working set is the group's usage less its inactive file cache (the measure
+    kubelet and cAdvisor use), so page cache from files the service and its
+    browsers read does not refuse admission while anon memory is low.
+    """
+    samples: list[tuple[float, float]] = []
+    try:
+        directories = _cgroup_directories(proc_root)
+    except OSError:
+        return samples
+    for directory, v2 in directories:
+        try:
+            usage = int((directory / ("memory.current" if v2 else "memory.usage_in_bytes")).read_text())
+            raw_limit = (directory / ("memory.max" if v2 else "memory.limit_in_bytes")).read_text().strip()
+            limit = float("inf") if raw_limit == "max" else int(raw_limit) / _MIB
+            if usage >= 0 and limit >= 0:
+                working_set = usage / _MIB - _reclaimable_page_cache_mb(directory, v2)
+                samples.append((max(working_set, 0.0), limit))
+        except (OSError, ValueError):
+            pass
     return samples
 
 

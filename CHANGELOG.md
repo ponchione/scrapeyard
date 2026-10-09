@@ -58,6 +58,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Result redaction builds each run's secret variants once instead of for
+  every string, and leaves records uncopied when the config references no
+  secrets. Redacting 100k records took 0.72 s with no secrets and 7.9 s with
+  three, and now takes 0.03 s and 1.0 s; the output is unchanged.
+- The worker samples memory at most once per queue poll and only when it has
+  a free slot, reads the cgroup layout once instead of on every sample, no
+  longer re-checks in Redis the jobs it is already running, and no longer
+  runs an extra ownership query per target. `scrapeyard_memory_deferrals_total`
+  counts at most one worker deferral per poll, and
+  `scrapeyard_background_last_success_timestamp_seconds{task="worker"}` is now
+  set after each completed poll instead of always reading 0.
 - The exact-run poll (`GET /jobs/{id}/runs/{run_id}`), `GET /jobs/{id}`,
   `GET /jobs` and `POST /scrape` no longer decrypt, hash or parse configs on
   the event loop beyond what each needs. An exact-run poll parses each run's

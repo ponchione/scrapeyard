@@ -554,16 +554,8 @@ async def _load_job_execution_context(
     *,
     domain_guard: DomainGuard | None = None,
 ) -> JobExecutionContext | None:
-    config = await asyncio.to_thread(load_config, config_yaml)
     job = await job_store.get_job(job_id)
     effective_run_id = run_id or job.current_run_id or generate_run_id()
-    settings = get_settings()
-    adaptive_dir, run_artifacts_dir = build_run_paths(
-        settings,
-        config.project,
-        job.name,
-        effective_run_id,
-    )
     if _should_skip_delivery(job, effective_run_id):
         logger.info(
             "Skipping duplicate, terminal, or superseded delivery "
@@ -574,6 +566,14 @@ async def _load_job_execution_context(
             job.status.value,
         )
         return None
+    config = await asyncio.to_thread(load_config, config_yaml)
+    settings = get_settings()
+    adaptive_dir, run_artifacts_dir = build_run_paths(
+        settings,
+        config.project,
+        job.name,
+        effective_run_id,
+    )
     started_at = utc_now()
     budget = RunBudget.from_settings(settings, execution=config.execution)
     if config.execution.deadline_at is not None:
@@ -983,7 +983,6 @@ async def _process_all_targets(
         target_result: TargetResult | None = None
         target_started = 0.0
         try:
-            await context.activity.checkpoint("before_target_start")
             async with sem:
                 await context.activity.checkpoint("before_target_fetch")
                 if pacing and config.execution.delay_between > 0:
@@ -1415,6 +1414,7 @@ def _format_output(
         merged: list[Any] = []
         for result in all_results:
             source = url_host_label(result.url)
+            source_field_size = compact_json_size({"_source": source}) - 2
             for item in result.data:
                 if isinstance(item, dict):
                     if "_source" in item:
@@ -1422,7 +1422,6 @@ def _format_output(
                             "Extracted record contains reserved merge field '_source'"
                         )
                     if budget is not None:
-                        source_field_size = compact_json_size({"_source": source}) - 2
                         budget.reserve_estimated_result_bytes(
                             source_field_size + int(bool(item))
                         )
@@ -1551,12 +1550,15 @@ def _redact_result_records(
 ) -> int:
     """Redact records one at a time without retaining a second full result graph."""
 
+    secret_values = config.resolved_secret_values
+    if not secret_values:
+        return 0
     redaction_count = 0
     for result in all_results:
         for index, item in enumerate(result.data):
             redacted_item, item_count = redact_deployment_secrets_in_value_with_count(
                 item,
-                secret_values=config.resolved_secret_values,
+                secret_values=secret_values,
             )
             # Only a replacement can change a record's serialized size.
             if item_count:
@@ -1592,19 +1594,28 @@ def _materialize_output_artifact(
         publish_results=publish_results,
         budget=budget,
     )
-    if publish_results and config.output.group_by == GroupBy.merge:
+    if (
+        publish_results
+        and config.output.group_by == GroupBy.merge
+        and config.resolved_secret_values
+    ):
+        # Every record of a target carries the same source, so each distinct
+        # source is redacted and measured once.
+        redacted_sources: dict[str, tuple[str, int, int]] = {}
         for item in output_data["results"]:
             if not isinstance(item, dict) or not isinstance(item.get("_source"), str):
                 continue
             source = item["_source"]
-            redacted_source, source_count = redact_deployment_secrets_with_count(
-                source,
-                config.resolved_secret_values,
-            )
-            if len(redacted_source.encode("utf-8")) > len(source.encode("utf-8")):
-                budget.reserve_estimated_result_bytes(
-                    len(redacted_source.encode("utf-8")) - len(source.encode("utf-8"))
+            if source not in redacted_sources:
+                redacted_source, source_count = redact_deployment_secrets_with_count(
+                    source,
+                    config.resolved_secret_values,
                 )
+                growth = len(redacted_source.encode("utf-8")) - len(source.encode("utf-8"))
+                redacted_sources[source] = (redacted_source, source_count, growth)
+            redacted_source, source_count, growth = redacted_sources[source]
+            if growth > 0:
+                budget.reserve_estimated_result_bytes(growth)
             item["_source"] = redacted_source
             redaction_count += source_count
     return _redact_output_artifact(
