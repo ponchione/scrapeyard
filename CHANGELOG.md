@@ -163,6 +163,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A submitted config holding a surrogate code point (a YAML escape from
+  `\uD800` to `\uDFFF`) in any key or value is now rejected with a 422 that
+  names its location. In a selector field name it used to let the run complete
+  with records that made every `GET /results` for that run fail with a 500;
+  in URLs, selectors and transform arguments it failed the target as
+  `http_error`. A stored config holding one fails its run before fetching.
 - Redacting URLs in error text, YAML errors and `GET /jobs/{id}` configs no
   longer takes quadratic time on a long run of letters, digits, `+`, `.` or
   `-` with no `://`. A 256 KiB config holding one such token cost about two

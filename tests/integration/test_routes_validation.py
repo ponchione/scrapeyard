@@ -68,6 +68,23 @@ async def test_scrape_defensively_translates_parser_recursion_error(
     assert "interpreter detail" not in response.text
 
 
+async def test_scrape_rejects_surrogate_code_points_with_an_encodable_422(client):
+    response = await client.post(
+        "/scrape",
+        content=(
+            "project: test\nname: surrogate\ntarget:\n  url: https://example.com\n"
+            '  selectors:\n    "\\ud800": h1\n    price: {query: .p, bogus: 1}\n'
+        ),
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == (
+        "Invalid config: Config strings must not contain surrogate code points "
+        "(U+D800 to U+DFFF): target.selectors.\\ud800"
+    )
+
+
 @pytest.mark.asyncio
 async def test_scrape_missing_required_field_returns_422(client):
     """Valid YAML but missing required 'project' field should return 422."""

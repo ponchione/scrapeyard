@@ -1378,6 +1378,67 @@ target:
         assert config.schedule is not None
         assert config.schedule.enabled is False
 
+    @pytest.mark.parametrize(
+        ("selectors", "url", "location"),
+        [
+            ('"\\ud800": h1', "https://example.com", r"target.selectors.\ud800"),
+            ('"\\ud83d\\ude00": h1', "https://example.com", r"target.selectors.\ud83d\ude00"),
+            ('title: "h1\\U0000DC80"', "https://example.com", "target.selectors.title"),
+            (
+                'title: {query: h1, transform: "append(\\"\\udfff\\")"}',
+                "https://example.com",
+                "target.selectors.title.transform",
+            ),
+            ("title: h1", '"https://example.com/\\ud800"', "target.url"),
+        ],
+        ids=["field-name", "escaped-pair", "selector", "transform-argument", "url"],
+    )
+    def test_surrogate_code_points_are_rejected_with_an_encodable_location(
+        self, selectors, url, location
+    ):
+        yaml_str = f"""
+project: demo
+name: job
+target:
+  url: {url}
+  selectors:
+    {selectors}
+"""
+        with pytest.raises(ValueError) as caught:
+            load_config(yaml_str)
+
+        message = str(caught.value)
+        assert message == (
+            "Config strings must not contain surrogate code points (U+D800 to U+DFFF): "
+            f"{location}"
+        )
+        message.encode("utf-8")
+
+    def test_surrogates_are_rejected_in_list_items_and_secret_bearing_configs(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST", '{"demo":["SCRAPEYARD_SECRET_TOKEN"]}'
+        )
+        monkeypatch.setenv("SCRAPEYARD_SECRET_TOKEN", "token-value-1")
+        get_settings.cache_clear()
+        yaml_str = """
+project: demo
+name: job
+targets:
+  - url: https://example.com/${SCRAPEYARD_SECRET_TOKEN}
+    selectors:
+      title: h1
+  - url: https://example.org
+    selectors:
+      title: h1
+    browser:
+      extra_headers:
+        X-Note: "\\ud800"
+"""
+        with pytest.raises(ValueError, match=r"targets\.1\.browser\.extra_headers\.X-Note$"):
+            load_config(yaml_str)
+
     def test_root_template_yaml_loads(self):
         template_path = Path(__file__).resolve().parents[2] / "template.yaml"
         config = load_config(template_path.read_text())

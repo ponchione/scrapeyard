@@ -82,7 +82,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-64**) and use this template:
+7. **New findings** take the next free ID (**TD-65**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -235,13 +235,13 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 3 | TD-53 | P3 | engine | low | none | |
-| 4 | TD-57 | P3 | storage | low | none | |
-| 5 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 6 | TD-56 | P3 | redaction | low | none | |
-| 7 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 8 | TD-63 | P3 | worker | low | none | |
+| 2 | TD-53 | P3 | engine | low | none | |
+| 3 | TD-57 | P3 | storage | low | none | |
+| 4 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 5 | TD-56 | P3 | redaction | low | none | |
+| 6 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 7 | TD-63 | P3 | worker | low | none | |
+| 8 | TD-64 | P3 | engine | low | none for the decoding fix | |
 | 9 | TD-62 | P3 | CI | low | none | After TD-26b |
 | 10 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
@@ -281,7 +281,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
-| TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
@@ -290,6 +289,7 @@ container scan and qualification workflows passing, which needs both.
 | TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 | TD-63 | P3 | ready | A cancellation during crash recording leaves the run `running` |
+| TD-64 | P3 | ready | A page whose declared charset decodes to a surrogate fails as `http_error` |
 
 ## Ready to implement
 
@@ -405,33 +405,6 @@ and grep for other places that catch only one of the two.
 `classify_fetch_exception` expects `navigation_timeout`, and it runs on 3.10 in
 CI.
 
-### TD-54 — A lone surrogate in a selector field name makes that run's `GET /results` fail with 500
-
-**Priority:** P3 · **Area:** config validation, API · **Risk:** low · **Contract:** new 422s only for configs that already break; no Eyebox config contains a surrogate · **Depends on:** —
-
-**Problem:**
-- YAML `"\ud800"` loads as a lone surrogate. Used as a `selectors` key, it
-  reaches records and `targets[].debug.selector_counts`.
-- The run ends `complete` and the artifact writes, ASCII-escaped. But
-  `_render_result_response` encodes with `ensure_ascii=False`, so every
-  `GET /results` for that run raises `UnicodeEncodeError` and returns a generic
-  500. Reproduced on `a36c0a7` through `POST /scrape` and the real worker.
-- Lone surrogates in transform arguments, selector queries or target URLs fail
-  the target inside the engine instead, reported as `error_type: http_error`.
-- Page content can't produce one: basic fetch decodes with `errors="replace"`,
-  Chromium delivers U+FFFD, and a server-declared `unicode_escape` or `utf-7`
-  charset fails in Scrapling's `Adaptor`, also as `http_error`.
-
-**Code:** `config/schema.py`, `config/loader.py`, `api/result_responses.py`
-(`_render_result_response`), `engine/fetch_classifier.py`
-(`classify_fetch_exception`).
-**Fix:** reject strings containing U+D800–U+DFFF anywhere in a submitted config
-with 422. Optionally, classify a `UnicodeError` raised while parsing as a
-content error instead of `http_error`.
-**Done when:** a config with a lone surrogate in a field name, transform
-argument, selector or URL gets a 422, and a test shows no run can complete
-with a record that `/results` cannot encode.
-
 ### TD-56 — Secret redaction order depends on the process hash seed for equal-length secrets
 
 **Priority:** P3 · **Area:** redaction · **Risk:** low · **Contract:** none · **Depends on:** —
@@ -535,10 +508,10 @@ GitHub runs them on Node 24 and only warns for now.
   `_handle_execution_crash`. A `CancelledError` raised there, for example a
   shutdown cancel during its database writes, propagates out unshielded and
   never reaches the sibling `except asyncio.CancelledError` handler.
-- The run then stays `running` until the heartbeat timeout. Reproduced on the
-  TD-52 branch by blocking `count_errors_for_run` after a crash and
-  cancelling the task. TD-52 closed the same gap on the run-budget path, and
-  `_handle_worker_cancellation` already shields its own crash finalization.
+- The run then stays `running` until the heartbeat timeout. Reproduced on
+  2026-10-09 by blocking `count_errors_for_run` after a crash and cancelling
+  the task. The run-budget path already sends such a cancellation through
+  `_handle_worker_cancellation`, which shields its own crash finalization.
 - It needs a cancel within the few milliseconds a crash takes to record, so
   it is rare.
 
@@ -548,6 +521,33 @@ GitHub runs them on Node 24 and only warns for now.
 crash finalization there.
 **Done when:** a test that cancels the task while a crash is being recorded
 shows the run reaching `failed` before the task ends.
+
+### TD-64 — A page whose declared charset decodes to a surrogate fails as `http_error`
+
+**Priority:** P3 · **Area:** engine · **Risk:** low · **Contract:** none for the decoding fix; a different `error_type` for the classification fix · **Depends on:** —
+
+**Problem:**
+- A server can declare a codec that turns body bytes into surrogate code
+  points, such as `utf-7` or `unicode_escape`. Basic fetch decodes with the
+  declared codec and `errors="replace"`, which doesn't stop these codecs from
+  emitting surrogates, and Scrapling's parser then raises
+  `UnicodeEncodeError`. `classify_fetch_exception` reports the 200 response as
+  `http_error`.
+- Checked on 2026-10-09 by parsing such bodies through basic fetch's
+  `Response`, not through a live server. Chromium delivers U+FFFD instead, so
+  browser fetchers are unaffected.
+- Submitted configs already reject surrogates. Here the target fails instead
+  of producing a record that `/results` can't encode, and it needs a server
+  declaring one of these codecs, so it is rare.
+
+**Code:** `engine/basic_fetch.py` (`_decode_body`, `fetch_streaming_response`),
+`engine/fetch_classifier.py` (`classify_fetch_exception`).
+**Fix:** decode bodies whose declared codec can emit surrogates as UTF-8 with
+replacement, so the page parses and `error_type` strings are unchanged. Only
+classifying the `UnicodeError` as a content error instead would change the
+`error_type` Eyebox sees, which needs its agreement.
+**Done when:** a basic fetch of a 200 page declared as `utf-7` holding `+2AA-`
+parses, and its records encode as UTF-8.
 
 ## Coordinated
 

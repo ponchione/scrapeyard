@@ -88,6 +88,48 @@ async def test_bad_persisted_yaml_creates_durable_preclaim_failure_run(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_persisted_surrogate_config_fails_before_any_record_is_written(tmp_path):
+    # Accepted before submission rejected surrogates; its records would make
+    # every GET /results for the run fail to encode.
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    surrogate_yaml = SIMPLE_YAML.replace("t: h1", '"\\ud800": h1')
+    assert surrogate_yaml != SIMPLE_YAML
+    await job_store.save_job(
+        Job(
+            job_id="surrogate-job",
+            project="test",
+            name="surrogate-job",
+            config_yaml=surrogate_yaml,
+            current_run_id="surrogate-run",
+        )
+    )
+    error_store = AsyncMock()
+    error_store.count_errors_for_run.return_value = 0
+    result_store = AsyncMock()
+    result_store.delete_result.return_value = False
+    fetch = AsyncMock()
+
+    with patch("scrapeyard.queue.worker.scrape_target", fetch):
+        await scrape_task(
+            "surrogate-job",
+            surrogate_yaml,
+            run_id="surrogate-run",
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=MagicMock(),
+            rate_limiter=LocalDomainRateLimiter(),
+        )
+
+    run = await job_store.get_job_run("surrogate-job", "surrogate-run")
+    assert run is not None
+    assert run.status is JobStatus.failed
+    fetch.assert_not_awaited()
+    result_store.save_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scrape_task_marks_job_failed_on_missing_job():
     """If job_store.get_job raises KeyError, job should still be marked failed."""
     job_store = AsyncMock()

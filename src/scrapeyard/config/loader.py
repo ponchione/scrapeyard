@@ -12,7 +12,43 @@ from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.config.schema import ScrapeConfig
 
 _SECRET_REFERENCE_RE = re.compile(r"\$\{(SCRAPEYARD_SECRET_[A-Z0-9_]+)\}")
+# YAML's \uD800-style escapes load as surrogate code points, which no UTF-8
+# encoder accepts, so a string holding one breaks every response it reaches.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 MIN_DEPLOYMENT_SECRET_LENGTH = 8
+
+
+def _surrogate_location(value: Any, location: tuple[str, ...] = ()) -> str | None:
+    """Return the dotted location of the first key or string with a surrogate."""
+
+    if isinstance(value, str):
+        if _SURROGATE_RE.search(value):
+            return ".".join(location) or "config"
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            # Escaped, so the error message itself stays encodable.
+            part = str(key).encode("utf-8", "backslashreplace").decode("utf-8")
+            if _SURROGATE_RE.search(str(key)):
+                return ".".join((*location, part))
+            found = _surrogate_location(item, (*location, part))
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            found = _surrogate_location(item, (*location, str(index)))
+            if found is not None:
+                return found
+    return None
+
+
+def _reject_surrogates(data: dict[str, Any]) -> None:
+    location = _surrogate_location(data)
+    if location is not None:
+        raise ValueError(
+            f"Config strings must not contain surrogate code points (U+D800 to U+DFFF): "
+            f"{location}"
+        )
 
 
 def _secret_references(value: Any) -> set[str]:
@@ -86,6 +122,7 @@ def load_config(yaml_str: str) -> ScrapeConfig:
 
 def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
     """Validate a parsed YAML mapping into a ScrapeConfig."""
+    _reject_surrogates(data)
     references = _secret_references(data)
     resolved_secrets: dict[str, str] = {}
     if references:
