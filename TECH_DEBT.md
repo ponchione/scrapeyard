@@ -226,20 +226,6 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-**Fixed on branches, awaiting merge.** Each is verified (full suite, ruff,
-mypy) but changes runtime code, so merging it updates what Eyebox's local stack
-runs on its next restart. Merge when that is convenient, then close out the
-entry. On 2026-10-09 all four merged cleanly together on top of TD-25 and
-passed three consecutive full runs (2,366 passed, no exit hangs, no env
-override), as well as ruff and mypy.
-
-| Entry | Branch | Contract |
-| --- | --- | --- |
-| TD-27 | `td-27-unloadable-config-reconciliation` | readiness/startup only |
-| TD-28 | `td-28-browser-false-failures` | fewer false `budget_exceeded`/`http_error` failures |
-| TD-29 | `td-29-paged-secret-migration` | none |
-| TD-50 | `td-50-sqlite-thread-leaks` | none |
-
 Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
@@ -253,7 +239,7 @@ Ready to implement, in order. Each row is one PR.
 | 7 | TD-36 | P3 | worker, pool | low | sub-item c only | |
 | 8 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
 | 9 | TD-38 | P3 | result store | low | none | |
-| 10 | TD-39 | P3 | click pagination | medium | timing only | After TD-28 |
+| 10 | TD-39 | P3 | click pagination | medium | timing only | |
 | 11 | TD-40 | P3 | API | low | `offset` bound | |
 | 12 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
 | 13 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
@@ -289,9 +275,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-27 | P1 | fix on branch | One run whose stored config no longer loads blocks readiness and startup |
-| TD-28 | P2 | fix on branch | Browser fetches fail for reasons unrelated to the site |
-| TD-29 | P2 | fix on branch | Startup secret migration holds every stored config in memory |
 | TD-30 | P2 | ready | Shutdown drain leaves cancelled runs `running` for about ten minutes |
 | TD-31 | P2 | ready | Worker and runtime error paths have small correctness gaps |
 | TD-32 | P2 | ready | Outbound HTTP has no total deadline, and webhook retry handling has gaps |
@@ -312,7 +295,6 @@ qualification workflows passing.
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-50 | P2 | fix on branch | Cancelling a SQLite open or close leaks a thread that blocks process exit |
 
 ## Ready to implement
 
@@ -361,144 +343,6 @@ security, so nothing gates merges.
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
 
-### TD-27 — One run whose stored config no longer loads blocks readiness and startup
-
-**Priority:** P1 · **Area:** queue reconciliation · **Risk:** low · **Contract:** readiness and startup only (improves both) · **Depends on:** —
-
-**Status:** fixed on branch `td-27-unloadable-config-reconciliation`, awaiting merge.
-
-**Problem:** suppose a run's persisted config stops loading
-(`_load_job_execution_context` calls `load_config`, which raises).
-- **The run is left half-reconciled.** `scrape_task` records a failed run
-  through crash handling, but leaves `webhook_reconciled_at` empty.
-  `reconcile_terminal_webhook_intents` then calls `load_config` on the same YAML
-  every pass, fails the same way, and raises `TerminalIntentReconciliationError`
-  after the batch.
-- **Readiness stays down.** After two passes the `running_reconciliation`
-  monitor turns unhealthy, so `/health/ready` stays 503.
-- **Startup fails.** `_startup_runtime_services` calls the reconciler with no
-  guard, so the service **will not start** until someone deletes the job or
-  restores the environment.
-- **Scheduled triggers fail too,** because `SchedulerService._trigger_job` makes
-  the same call.
-- **Triggers:** a removed `SCRAPEYARD_SECRET_*` variable, a narrowed secret
-  allow-list, or a schema tightening while runs are queued. Reproduced with
-  `${SCRAPEYARD_SECRET_GONE}`.
-
-**Code:**
-- `queue/terminal_reconciliation.py` (`reconcile_terminal_webhook_intents`)
-- `main.py` (`_startup_runtime_services`)
-- `scheduler/cron.py` (`SchedulerService._trigger_job`)
-- `storage/job_store.py` (`SQLiteJobStore.reconcile_terminal_webhook_candidate`;
-  passing no delivery already marks the run reconciled)
-- `queue/worker.py` (`scrape_task`, `_load_job_execution_context`)
-
-**Fix:**
-- When `load_config` fails during reconciliation, check the raw mapping
-  (`load_yaml_mapping(...).get("webhook") is None`). If there is no webhook
-  block, reconcile the run as not required. Keep failing closed only when a
-  webhook block exists. Eyebox strips webhooks, so all of its runs resolve.
-- Separately, decide whether one bad candidate should abort startup at all. The
-  alternative is to log it, count it, and report it through readiness.
-
-**Done when:**
-- A test persists a run whose config references a missing secret, and shows
-  that startup succeeds and readiness recovers after one pass.
-- The same test shows that a run whose config does have a webhook block still
-  fails closed.
-
-### TD-28 — Browser fetches fail for reasons unrelated to the site
-
-**Priority:** P2 · **Area:** engine, browser session · **Risk:** medium (a), low (b, c) · **Contract:** fewer false `budget_exceeded` and `http_error` failures; no shape change; Eyebox benefits · **Depends on:** —
-
-**Status:** fixed on branch `td-28-browser-false-failures`, awaiting merge.
-
-- **a. The request budget is over-reserved.**
-  - `BrowserSession.fetch.reserve` reserves `_MAX_REDIRECTS + 1` (21) requests
-    for every allowed subrequest. `BrowserSession.fetch` settles only when the
-    whole fetch ends, and click pagination is a single fetch for all of its
-    pages.
-  - Running out of request budget fails the whole run. Eyebox runs show it:
-
-    | Run | Limit | Counted at failure | Actually sent |
-    | --- | --- | --- | --- |
-    | `sportsmans-optics` | 10,000 | 10,010 | ~5,730 |
-    | blackstone probe | 1,000 | 1,008 | 47 |
-    | `sportsmans-lean-probe` | 150 | 168 | 7 |
-
-  - **Fix:** when a request's redirect chain finishes or fails, settle that
-    chain's unused reservation, instead of settling everything at the end of
-    the fetch. The hard ceiling must still hold, so test it with a chain that
-    uses all 21.
-- **b. Errors while closing a page fail fetches that succeeded.**
-  - `_close_page` injects a CSP `<meta>` into every frame with
-    `asyncio.wait_for(frame.evaluate(...), timeout=1)`. Any error escapes,
-    because the `finally` only closes the page.
-  - Called from the `finally` in `BrowserSession.fetch`, this turns a
-    successful fetch into a failure and tears down the browser.
-  - Reproduced: an iframe that keeps reloading raised "Execution context was
-    destroyed" in 7 of 10 closes (classified `http_error` and not retried). A
-    1.5 s main-thread task raised `TimeoutError` in 10 of 10 (retried with a
-    browser relaunch).
-  - **Fix:** catch errors per frame and run the frames concurrently under one
-    1 s bound. The page is closed either way.
-- **c. Debug screenshots overwrite each other but keep their budget.**
-  - `_capture_screenshot` writes `{fetcher}-main.png` for every page and
-    reserves debug bytes each time. Overwritten files stay charged, which
-    starves later targets of `run_max_browser_debug_bytes`.
-  - This only matters when browser debug is enabled.
-  - **Fix:** take a screenshot of the first page only, or put the page index in
-    the filename and release the replaced file's reservation.
-
-**Code:**
-- `engine/browser_session.py` (`BrowserSession.fetch`, `fetch.reserve`,
-  `_close_page`)
-- `engine/browser_debug.py` (`_capture_screenshot`)
-- `common/budgets.py` (`RunBudget.reserve_requests`, `settle_requests`)
-
-**Done when:**
-- A fixture page with N subrequests uses about N of the request budget while
-  the fetch is still running.
-- A page with a reloading iframe returns its records.
-- The screenshot bytes charged equal the bytes on disk.
-
-### TD-29 — Startup secret migration holds every stored config in memory
-
-**Priority:** P2 · **Area:** storage · **Risk:** low–medium · **Contract:** none · **Depends on:** —
-
-**Status:** fixed on branch `td-29-paged-secret-migration`, awaiting merge.
-
-**Problem:** `migrate_persisted_secrets` runs on every startup.
-- **It loads everything at once.** It calls `fetchall()` on `config_yaml` from
-  `jobs`, `job_runs` and `queued_run_snapshots`, and keeps every decrypted job
-  config in `job_plaintexts`. Memory and time grow with history.
-- **Projected at Eyebox volume:** 55 configs × 4 runs a day × 30-day retention
-  is about 6,600 jobs, with encrypted configs of about 75 KB.
-  - Peak memory of about 1.35 GB, with about 430 MB still resident after
-    garbage collection, and 2.25 s.
-  - That is against a 4 GiB container, and the leftover memory reduces
-    admission headroom.
-  - The live hard-test `jobs.db` is already 21 MB for 136 jobs.
-- **`secure_delete` stays on.** It runs `PRAGMA secure_delete = ON` on the
-  shared jobs.db connection and never resets it. That makes each job deletion
-  write about 3.5× the WAL bytes (202 vs 57 KiB). `docs/SECRET_STORAGE.md`
-  describes it as only for migrating legacy plaintext.
-
-**Code:** `storage/secret_envelope.py` (`migrate_persisted_secrets`).
-
-**Fix:**
-- Page through the rows by key, about 200 at a time, inside the same
-  transaction.
-- Resolve the legacy NULL run-snapshot lookups with a join instead of the dict.
-- Turn on `secure_delete` only when a legacy-plaintext or key-rotation rewrite
-  actually happens. If keeping it on is intended (to scrub old-key
-  ciphertext), document that and limit it to that work.
-
-**Done when:**
-- Peak memory during startup migration stays flat as stored jobs grow, tested
-  with a few thousand seeded rows.
-- The existing migration and rotation tests pass unchanged.
-
 ### TD-30 — Shutdown drain leaves cancelled runs `running` for about ten minutes
 
 **Priority:** P2 · **Area:** worker pool, lifespan · **Risk:** medium · **Contract:** none (the 40 s Compose `stop_grace_period` is unchanged; jobs get slightly less drain time) · **Depends on:** —
@@ -528,45 +372,6 @@ security, so nothing gates merges.
 **Done when:** a test that stops the pool in the middle of a run shows the run
 reaching its terminal status (`cancelled` or `failed`, per policy) before
 `stop()` returns and within the grace period.
-
-### TD-50 — Cancelling a SQLite open or close leaks a thread that blocks process exit
-
-**Priority:** P2 · **Area:** storage · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Status:** fixed on branch `td-50-sqlite-thread-leaks`, awaiting merge.
-
-**Problem:**
-- Every aiosqlite connection owns a non-daemon thread, and the interpreter waits
-  for it at exit.
-- aiosqlite 0.20 starts that thread before connecting, but only stops it when
-  the connect raises `Exception`. A cancellation during the connect leaves it
-  blocked forever, and `close()` cannot stop it, because it returns early while
-  `_connection` is still `None`.
-- In Scrapeyard:
-  - `DatabaseManager._get_cached_connection` and `init` open connections that a
-    cancellation can leak this way.
-  - `_close_cached_connections` clears the cache before closing one connection
-    at a time, so a cancellation partway through leaks the rest.
-- Effects:
-  - In the suite, an occasional run passes every test and then never exits.
-    On 2026-10-09, 3 of 13 full runs on one host hung, on branches with and
-    without the TD-25 test changes. The stack dump showed only an aiosqlite
-    thread and `threading._shutdown`.
-  - In production, a shutdown or startup cancelled at the wrong moment hangs
-    until Docker sends SIGKILL.
-- Reproduced deterministically on `7772cd9`: a cancelled first `get_db` leaked
-  1 thread, and a cancelled `close_db` leaked 2.
-
-**Code:** `storage/database.py` (`DatabaseManager._get_cached_connection`,
-`init`, `_close_cached_connections`).
-
-**Fix (on the branch):**
-- Open through `_connect`, which finishes and closes an interrupted open before
-  the cancellation propagates.
-- Close every cached connection under `await_cleanup`, then raise the first
-  failure.
-- Regression tests in `tests/unit/test_database.py` stop any leaked thread
-  themselves, so a regression fails instead of hanging.
 
 ### TD-31 — Worker and runtime error paths have small correctness gaps
 
@@ -897,7 +702,7 @@ lock, so a slow query blocks heartbeats, claims and API polls. Timings are for
 
 ### TD-39 — Click pagination keeps every parse tree and repeats the full wait per click
 
-**Priority:** P3 · **Area:** engine, pagination · **Risk:** medium · **Contract:** timing only; records must be identical · **Depends on:** TD-28 (same code)
+**Priority:** P3 · **Area:** engine, pagination · **Risk:** medium · **Contract:** timing only; records must be identical · **Depends on:** —
 
 - **a. Every page's parse tree is kept.**
   - `BrowserSession._click_through_pages` and `_extract_click_pages` parse every
@@ -997,7 +802,7 @@ deleting.
 
 ### TD-42 — `job_store.py` (2.5k lines) mixes five concerns
 
-**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-29, TD-35, TD-37 and TD-41 (to avoid conflicts)
+**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-35, TD-37 and TD-41 (to avoid conflicts)
 
 **Fix:** keep `SQLiteJobStore` as a thin facade and move the code into module
 functions that take `db`. Approximate line ranges at `b0b285e`:
@@ -1603,7 +1408,8 @@ records why and what would change that.
   `status`, and `list_jobs_with_stats` takes 95 ms per page.
 - Eyebox configs compress about 9× with zlib: 1 GB would become 119 MB, and
   those queries would take 9–12 ms.
-- This drives TD-29's startup memory and TD-21's backup size.
+- This drives TD-21's backup size. It also drove startup memory until the
+  secret migration started paging through rows (2026-10-09).
 
 **Why deferred:**
 - Compressing before encrypting (a `syenc:v2` envelope read alongside v1)
@@ -1611,7 +1417,8 @@ records why and what would change that.
   breaks the TD-22 rollback story.
 - Compression before encryption of attacker-influenced plaintext needs a
   security review.
-- TD-29 removes the startup-memory symptom without any format change.
+- The startup-memory symptom is already gone without a format change: the
+  secret migration pages through rows.
 
 **Revisit when:** jobs.db grows past a few hundred MB, or TD-22's rollback
 process covers format migrations. A cheaper intermediate step is moving the
