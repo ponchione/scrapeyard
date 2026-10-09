@@ -72,6 +72,10 @@ _ATOMIC_TEMP_PATTERN = re.compile(
 )
 
 
+# Directory, then results.json device, inode, size, mtime_ns and ctime_ns.
+_ArtifactFingerprint = tuple[str, int, int, int, int, int]
+
+
 @dataclass(frozen=True, slots=True)
 class _RunIdentity:
     project: str
@@ -182,6 +186,8 @@ class LocalResultStore:
         self._max_artifact_tree_entries = max_artifact_tree_entries
         self._save_locks: dict[Path, _SaveLockEntry] = {}
         self._reconciliation_lock = asyncio.Lock()
+        # Artifacts that parsed cleanly, by results_meta ID (never reused).
+        self._validated_artifacts: dict[int, _ArtifactFingerprint] = {}
 
     @asynccontextmanager
     async def _save_guard(self, run_dir: Path) -> AsyncIterator[None]:
@@ -282,8 +288,8 @@ class LocalResultStore:
             if cursor.rowcount != 1:
                 raise RuntimeError("Result reconciliation cursor state is missing")
 
-    @staticmethod
     async def _delete_metadata_ids(
+        self,
         db: Any,
         rows: Sequence[Mapping[str, Any]],
     ) -> None:
@@ -295,6 +301,8 @@ class LocalResultStore:
                 f"DELETE FROM results_meta WHERE id IN ({placeholders})",
                 batch,
             )
+        for row_id in ids:
+            self._validated_artifacts.pop(int(row_id), None)
 
     async def _delete_retention_batch(
         self,
@@ -351,7 +359,6 @@ class LocalResultStore:
 
     async def _delete_files_then_ids(
         self,
-        db: Any,
         rows: Sequence[Mapping[str, Any]],
         additional_paths: Sequence[Path] = (),
     ) -> int:
@@ -360,6 +367,10 @@ class LocalResultStore:
         Unlike general retention cleanup, cancellation/deletion must be safely
         retryable after a filesystem fault. Keeping metadata until every
         contained directory removal succeeds preserves the paths for a retry.
+        The metadata database is not held while directories are removed, so a
+        large removal cannot stall result saves and reads. Rows are deleted by
+        ID, which AUTOINCREMENT never reuses, so a row replaced meanwhile
+        survives.
         """
 
         if not rows and not additional_paths:
@@ -369,7 +380,7 @@ class LocalResultStore:
         paths = list(dict.fromkeys(paths))
         await cleanup_safe_to_thread(remove_directories, paths)
         if rows:
-            async with db_transaction(db):
+            async with get_db("results_meta.db") as db, db_transaction(db):
                 await self._delete_metadata_ids(db, rows)
         return len(rows)
 
@@ -574,7 +585,7 @@ class LocalResultStore:
         async with get_db("results_meta.db") as db:
             cursor = await db.execute(JOB_RESULTS_DELETE_QUERY, (job_id,))
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            await self._delete_files_then_ids(db, rows, expected_paths)
+        await self._delete_files_then_ids(rows, expected_paths)
 
     async def delete_result(self, job_id: str, run_id: str) -> bool:
         """Delete one run artifact, including an unindexed browser-debug directory."""
@@ -586,8 +597,8 @@ class LocalResultStore:
                 (job_id, run_id),
             )
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-            if await self._delete_files_then_ids(db, rows):
-                return True
+        if await self._delete_files_then_ids(rows):
+            return True
 
         project, job_name = await self._job_lookup(job_id)
         run_dir = self._checked_result_dir(
@@ -627,6 +638,8 @@ class LocalResultStore:
         state: _ReconciliationState,
         deadline_reached: Callable[[], bool],
     ) -> None:
+        row_id = int(row["id"])
+        validated = self._validated_artifacts.pop(row_id, None)
         try:
             run_dir = self._checked_result_dir(str(row["file_path"]))
         except (OSError, ValueError) as exc:
@@ -640,7 +653,7 @@ class LocalResultStore:
         result_path = run_dir / "results.json"
         try:
             run_mode = run_dir.lstat().st_mode
-            result_mode = result_path.lstat().st_mode
+            result_stat = result_path.lstat()
         except FileNotFoundError as exc:
             self._record_artifact_failure(
                 state,
@@ -657,44 +670,85 @@ class LocalResultStore:
                 type(exc).__name__,
             )
             return
-        if not stat.S_ISDIR(run_mode) or not stat.S_ISREG(result_mode):
+        if not stat.S_ISDIR(run_mode) or not stat.S_ISREG(result_stat.st_mode):
             self._record_artifact_failure(
                 state,
                 row,
                 ResultArtifactFailureKind.unsafe,
             )
             return
-        try:
-            read_json_file_no_follow(
-                result_path,
-                max_bytes=self._max_serialized_result_bytes,
-                deadline_reached=deadline_reached,
-            )
-        except FileNotFoundError as exc:
-            self._record_artifact_failure(
-                state,
-                row,
-                ResultArtifactFailureKind.missing,
-                type(exc).__name__,
-            )
-        except (FileSizeLimitExceeded, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            self._record_artifact_failure(
-                state,
-                row,
-                ResultArtifactFailureKind.corrupt,
-                type(exc).__name__,
-            )
-        except FilesystemDeadlineReached:
-            raise
-        except OSError as exc:
-            self._record_artifact_failure(
-                state,
-                row,
-                ResultArtifactFailureKind.unreadable,
-                type(exc).__name__,
-            )
-        else:
-            state.valid_artifacts += 1
+        # Results are only ever replaced atomically, so a file with the same
+        # inode, size and timestamps as when it last parsed is still valid.
+        # Each store instance parses every retained artifact once.
+        fingerprint = (
+            str(run_dir),
+            result_stat.st_dev,
+            result_stat.st_ino,
+            result_stat.st_size,
+            result_stat.st_mtime_ns,
+            result_stat.st_ctime_ns,
+        )
+        if validated != fingerprint:
+            try:
+                read_json_file_no_follow(
+                    result_path,
+                    max_bytes=self._max_serialized_result_bytes,
+                    deadline_reached=deadline_reached,
+                )
+            except FileNotFoundError as exc:
+                self._record_artifact_failure(
+                    state,
+                    row,
+                    ResultArtifactFailureKind.missing,
+                    type(exc).__name__,
+                )
+                return
+            except (FileSizeLimitExceeded, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                self._record_artifact_failure(
+                    state,
+                    row,
+                    ResultArtifactFailureKind.corrupt,
+                    type(exc).__name__,
+                )
+                return
+            except FilesystemDeadlineReached:
+                raise
+            except OSError as exc:
+                self._record_artifact_failure(
+                    state,
+                    row,
+                    ResultArtifactFailureKind.unreadable,
+                    type(exc).__name__,
+                )
+                return
+        self._validated_artifacts[row_id] = fingerprint
+        state.valid_artifacts += 1
+
+    def _forget_unlisted_artifacts(
+        self,
+        after_id: int,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        exhausted: bool,
+    ) -> None:
+        """Drop remembered validations for rows a completed page no longer lists.
+
+        A row replaced by ``save_result`` or deleted while its validation was
+        in flight can leave an entry behind. IDs only grow, so an ID that a
+        page covered without returning no longer exists, and neither does one
+        above the last row of an exhausted pass. Call this on the event loop
+        after the validation thread has finished.
+        """
+
+        listed = {int(row["id"]) for row in rows}
+        upper = int(rows[-1]["id"]) if rows else after_id
+        stale = [
+            row_id
+            for row_id in self._validated_artifacts
+            if row_id > after_id and (exhausted or row_id <= upper) and row_id not in listed
+        ]
+        for row_id in stale:
+            del self._validated_artifacts[row_id]
 
     def _validate_metadata_rows(
         self,
@@ -1225,6 +1279,11 @@ class LocalResultStore:
                 )
                 metadata_exhausted = (
                     len(fetched_rows) <= metadata_limit and completed_rows == len(rows)
+                )
+                self._forget_unlisted_artifacts(
+                    metadata_cursor,
+                    rows[:completed_rows],
+                    exhausted=metadata_exhausted,
                 )
                 if metadata_exhausted:
                     next_metadata_cursor = 0

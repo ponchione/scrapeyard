@@ -230,20 +230,19 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-38 | P3 | result store | low | none | |
-| 2 | TD-39 | P3 | click pagination | medium | timing only | |
-| 3 | TD-40 | P3 | API | low | `offset` bound | |
-| 4 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 5 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 6 | TD-43 | P3 | image, dependencies | low | none | |
-| 7 | TD-44 | P3 | lint, docs | low | none | |
-| 8 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 9 | TD-52 | P2 | worker | low | none | |
-| 10 | TD-53 | P3 | engine | low | none | |
-| 11 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 12 | TD-55 | P2 | URL guard, API | low | none | |
-| 13 | TD-56 | P3 | redaction | low | none | |
-| 14 | TD-57 | P3 | storage | low | none | |
+| 1 | TD-39 | P3 | click pagination | medium | timing only | |
+| 2 | TD-40 | P3 | API | low | `offset` bound | |
+| 3 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 4 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 5 | TD-43 | P3 | image, dependencies | low | none | |
+| 6 | TD-44 | P3 | lint, docs | low | none | |
+| 7 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 8 | TD-52 | P2 | worker | low | none | |
+| 9 | TD-53 | P3 | engine | low | none | |
+| 10 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 11 | TD-55 | P2 | URL guard, API | low | none | |
+| 12 | TD-56 | P3 | redaction | low | none | |
+| 13 | TD-57 | P3 | storage | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -274,7 +273,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-38 | P3 | ready | Result-store deletes hold the metadata lock during `rmtree` |
 | TD-39 | P3 | ready | Click pagination keeps every parse tree and repeats the full wait per click |
 | TD-40 | P3 | ready | API edge cases: unbounded offsets, unlogged failures, uncounted response memory |
 | TD-41 | P3 | ready | Dead code and duplicated helpers |
@@ -340,25 +338,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-38 — Result-store deletes hold the metadata lock during `rmtree`
-
-**Priority:** P3 · **Area:** result store · **Risk:** low · **Contract:** none · **Depends on:** —
-
-- **a. Deletes block reads and writes.**
-  - `LocalResultStore.delete_results` and `delete_result` hold the
-    results_meta.db lock while removing directories. That blocks `save_result`
-    and `GET /results` in the meantime.
-  - `_delete_retention_batch` already avoids this.
-  - **Fix:** read the rows, release the lock, remove the directories, then
-    delete the IDs. Keep the filesystem-first ordering.
-- **b. Reconciliation re-parses every retained artifact.**
-  - `_validate_metadata_row` re-reads and JSON-parses every retained artifact
-    every 6 hours.
-  - At steady state (live average 420 KB) that is about 2.8 GB per cycle, about
-    4 s of CPU, and about 11 GB of disk reads a day.
-  - **Fix:** check existence and size first, and parse only new or changed
-    artifacts. Alternatively, accept the cost and close this sub-item.
 
 ### TD-39 — Click pagination keeps every parse tree and repeats the full wait per click
 

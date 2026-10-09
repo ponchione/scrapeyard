@@ -765,7 +765,8 @@ and releases SQLite before removing
 the corresponding directories, so filesystem latency does not block result
 metadata access. Retention remains metadata-first, so a crash leaves a
 recoverable filesystem orphan.
-Explicit job deletion remains filesystem-first and retryable. Running
+Explicit job deletion remains filesystem-first and retryable, and it also
+releases SQLite while it removes directories. Running
 reconciliation after retention avoids diagnosing directories the same pass is
 already meant to remove normally.
 
@@ -779,7 +780,12 @@ ownership is queried again from `jobs.db`, and filesystem timestamps are
 rechecked. Recursive byte accounting uses non-following stats; recursive
 removal does not follow a symlink, so an external symlink target is untouched.
 Metadata validation reads at most `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES`;
-larger files are reported as corrupt without being loaded. A run-tree snapshot
+larger files are reported as corrupt without being loaded. Each process parses
+a retained `results.json` once: while its inode, size, and modification and
+change times stay the same, later passes only check that it is still a regular
+file. Replacing or modifying the file changes at least one of those, so it is
+parsed again; media corruption that changes none of them is found after the
+next restart or when the result is read. A run-tree snapshot
 is bounded by twice the sum of the configured serialized-result and
 browser-debug byte limits (covering both committed targets and interrupted
 atomic-writer temp files) and by

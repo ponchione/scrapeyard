@@ -1274,6 +1274,142 @@ async def test_reconciliation_reports_unreadable_artifact_without_deleting(store
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_parses_each_unchanged_artifact_once(store, monkeypatch):
+    meta = await store.save_result("job-cached", {"ok": True}, run_id="run-cached")
+    real_read = result_store_module.read_json_file_no_follow
+    reads = []
+
+    def counting_read(path, **kwargs):
+        reads.append(Path(path))
+        return real_read(path, **kwargs)
+
+    monkeypatch.setattr(result_store_module, "read_json_file_no_follow", counting_read)
+    first = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    second = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+
+    assert first.valid_artifacts == second.valid_artifacts == 1
+    assert second.metadata_rows_inspected == 1
+    assert reads == [Path(meta.file_path) / "results.json"]
+
+    restarted = LocalResultStore(str(store._results_dir), _lookup)
+    third = await restarted.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+
+    assert third.valid_artifacts == 1
+    assert len(reads) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["truncate", "replace", "remove"])
+async def test_reconciliation_rechecks_validated_artifact_after_change(store, change):
+    meta = await store.save_result("job-changed", {"ok": True}, run_id="run-changed")
+    result = Path(meta.file_path) / "results.json"
+    first = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    assert first.valid_artifacts == 1
+
+    if change == "truncate":
+        with result.open("r+b") as handle:
+            handle.truncate(3)
+    elif change == "replace":
+        # Same size, new inode: what an atomic rewrite with bad content looks like.
+        replacement = result.with_name("replacement.tmp")
+        replacement.write_bytes(b"x" * result.stat().st_size)
+        os.replace(replacement, result)
+    else:
+        result.unlink()
+    second = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    third = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+
+    field = "missing_result_files" if change == "remove" else "corrupt_result_files"
+    assert getattr(second, field) == getattr(third, field) == 1
+    assert second.valid_artifacts == third.valid_artifacts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["delete_result", "delete_results", "delete_expired"])
+async def test_result_deletion_forgets_validated_artifact(store, operation):
+    meta = await store.save_result("job-forget", {"ok": True}, run_id="run-forget")
+    await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    assert len(store._validated_artifacts) == 1
+
+    if operation == "delete_result":
+        assert await store.delete_result("job-forget", meta.run_id) is True
+    elif operation == "delete_results":
+        await store.delete_results("job-forget")
+    else:
+        async with get_db("results_meta.db") as db:
+            await db.execute(
+                "UPDATE results_meta SET created_at = ?",
+                ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),),
+            )
+            await db.commit()
+        assert await store.delete_expired(30) == 1
+
+    assert store._validated_artifacts == {}
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_forgets_replaced_artifact_row(store):
+    await store.save_result("job-replaced", {"v": 1}, run_id="run-replaced")
+    await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    old_ids = set(store._validated_artifacts)
+    assert len(old_ids) == 1
+
+    # INSERT OR REPLACE gives the run a new row ID without a metadata delete.
+    await store.save_result("job-replaced", {"v": 2}, run_id="run-replaced")
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+
+    assert report.valid_artifacts == 1
+    assert len(store._validated_artifacts) == 1
+    assert not old_ids & set(store._validated_artifacts)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_pages_forget_rows_deleted_outside_the_store(store):
+    for index in range(5):
+        await store.save_result(f"job-page-{index}", {"v": index}, run_id=f"run-page-{index}")
+    await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    ids = sorted(store._validated_artifacts)
+    assert len(ids) == 5
+    # Like a deletion whose cache pop raced a validation that re-added the entry.
+    async with get_db("results_meta.db") as db:
+        await db.execute("DELETE FROM results_meta WHERE id IN (?, ?)", (ids[1], ids[3]))
+        await db.commit()
+    page = dict(
+        grace_seconds=86400,
+        dry_run=True,
+        now=NOW,
+        metadata_scan_limit=1,
+        filesystem_scan_limit=0,
+    )
+
+    await store.reconcile_artifacts(**page)
+    assert sorted(store._validated_artifacts) == ids
+
+    await store.reconcile_artifacts(**page)
+    assert sorted(store._validated_artifacts) == [ids[0], ids[2], ids[3], ids[4]]
+
+    last = await store.reconcile_artifacts(**page)
+    assert last.metadata_scan_exhausted is True
+    assert sorted(store._validated_artifacts) == [ids[0], ids[2], ids[4]]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_reconciliation_forgets_rows_above_the_last_page(store):
+    for index in range(2):
+        await store.save_result(f"job-tail-{index}", {"v": index}, run_id=f"run-tail-{index}")
+    await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+    ids = sorted(store._validated_artifacts)
+    async with get_db("results_meta.db") as db:
+        await db.execute("DELETE FROM results_meta WHERE id = ?", (ids[1],))
+        await db.commit()
+
+    report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=True, now=NOW)
+
+    assert report.metadata_scan_exhausted is True
+    assert sorted(store._validated_artifacts) == [ids[0]]
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_reports_unsafe_outside_metadata_and_preserves_target(store, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()

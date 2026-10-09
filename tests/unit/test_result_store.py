@@ -678,6 +678,61 @@ async def test_delete_results_offloads_directory_removal(store):
     }
 
 
+@pytest.mark.parametrize("operation", ["delete_result", "delete_results"])
+async def test_delete_releases_database_before_directory_removal(store, operation):
+    deleted = await store.save_result("j-1", [{"price": 9.99}], run_id="run-deleted")
+    retained = await store.save_result("j-2", [{"price": 19.99}], run_id="run-retained")
+    removal_started = asyncio.Event()
+    release_removal = asyncio.Event()
+
+    async def _blocked_to_thread(func, *args, **kwargs):
+        removal_started.set()
+        await release_removal.wait()
+        return func(*args, **kwargs)
+
+    with patch.object(result_store_module.asyncio, "to_thread", _blocked_to_thread):
+        if operation == "delete_result":
+            deletion = asyncio.create_task(store.delete_result("j-1", deleted.run_id))
+        else:
+            deletion = asyncio.create_task(store.delete_results("j-1"))
+        try:
+            await asyncio.wait_for(removal_started.wait(), timeout=1)
+            metadata = await asyncio.wait_for(
+                store.get_result_metadata("j-2", retained.run_id),
+                timeout=0.2,
+            )
+            # The run being deleted stays visible until its files are gone.
+            pending = await store.get_result_metadata("j-1", deleted.run_id)
+        finally:
+            release_removal.set()
+        await deletion
+
+    assert metadata is not None
+    assert metadata.run_id == retained.run_id
+    assert pending is not None
+    assert not Path(deleted.file_path).exists()
+    assert await store.get_result_metadata("j-1", deleted.run_id) is None
+    assert (await store.get_result("j-2", retained.run_id)).data == [{"price": 19.99}]
+
+
+async def test_delete_result_filesystem_failure_keeps_metadata_for_retry(store):
+    meta = await store.save_result("j-1", [{"price": 9.99}], run_id="run-owned")
+
+    with patch.object(
+        result_store_module,
+        "remove_directories",
+        side_effect=PermissionError("injected filesystem fault"),
+    ):
+        with pytest.raises(PermissionError, match="injected filesystem fault"):
+            await store.delete_result("j-1", "run-owned")
+
+    assert Path(meta.file_path).is_dir()
+    assert await store.get_result_metadata("j-1", "run-owned") is not None
+    assert await store.delete_result("j-1", "run-owned") is True
+    assert not Path(meta.file_path).exists()
+    assert await store.get_result_metadata("j-1", "run-owned") is None
+
+
 async def test_delete_result_removes_metadata_and_run_directory(store):
     meta = await store.save_result("j-1", [{"price": 9.99}], run_id="run-owned")
 

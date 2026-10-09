@@ -58,6 +58,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Explicit result deletion (job deletion with `delete_results`, and
+  discarding an unowned run's artifact) no longer holds the result metadata
+  database while it removes directories, so a large removal no longer stalls
+  result saves and `GET /results`. Deletion still removes files first and
+  stays retryable.
+- Periodic artifact reconciliation no longer re-reads and re-parses every
+  retained `results.json` on every pass. Each process parses an artifact once
+  and afterwards only checks that its inode, size and timestamps are
+  unchanged. Validating 500 artifacts of 410 KB went from 0.61 s to 0.04 s of
+  CPU, with no file reads.
 - Periodic reconciliation, retention and backlog queries no longer scan
   retained history while holding the shared jobs.db connection. At 25,000
   jobs, terminal webhook reconciliation went from 63 ms to under 0.1 ms,
