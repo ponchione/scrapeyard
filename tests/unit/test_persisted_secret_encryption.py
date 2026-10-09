@@ -518,3 +518,71 @@ async def test_missing_envelope_key_id_fails_closed(tmp_path, monkeypatch):
     _set_keys(monkeypatch, {"new": _encoded(b"n")}, "new")
     with pytest.raises(SecretDecryptionError, match="unavailable encryption key"):
         await migrate_persisted_secrets()
+
+
+async def _secure_delete(db) -> int:
+    async with db.execute("PRAGMA secure_delete") as cursor:
+        row = await cursor.fetchone()
+    return int(row[0])
+
+
+async def test_migration_pages_through_legacy_rows_and_restores_secure_delete(
+    tmp_path, monkeypatch
+):
+    import scrapeyard.storage.secret_envelope as envelope
+
+    # Several pages per table, so keyset paging and the legacy-run join are
+    # exercised while the same transaction rewrites rows it has returned.
+    monkeypatch.setattr(envelope, "_MIGRATION_PAGE_ROWS", 2)
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    job_ids = [f"legacy-job-{n}" for n in range(5)]
+    async with get_db("jobs.db") as db:
+        assert await _secure_delete(db) == 0
+        for job_id in job_ids:
+            plaintext = _job(job_id).config_yaml
+            config_hash = hashlib.sha256(plaintext.encode()).hexdigest()
+            await db.execute(
+                """INSERT INTO jobs (job_id, project, name, status, config_yaml, created_at)
+                   VALUES (?, 'secrets', ?, 'complete', ?, ?)""",
+                (job_id, job_id, plaintext, NOW.isoformat()),
+            )
+            await db.execute(
+                """INSERT INTO job_runs
+                   (run_id, job_id, status, trigger, config_hash, started_at,
+                    heartbeat_at, config_yaml)
+                   VALUES (?, ?, 'complete', 'adhoc', ?, ?, ?, NULL)""",
+                (f"{job_id}-run", job_id, config_hash, NOW.isoformat(), NOW.isoformat()),
+            )
+        await db.commit()
+
+    await migrate_persisted_secrets()
+
+    keyring = EncryptionKeyring.from_settings(required=True)
+    assert keyring is not None
+    async with get_db("jobs.db") as db:
+        assert await _secure_delete(db) == 0
+        async with db.execute(
+            "SELECT run_id, job_id, config_yaml FROM job_runs ORDER BY run_id"
+        ) as cursor:
+            runs = list(await cursor.fetchall())
+    assert [row[1] for row in runs] == job_ids
+    for run_id, job_id, stored in runs:
+        assert stored is not None
+        revealed = keyring.reveal(stored, purpose=f"job_runs.config_yaml:{run_id}")
+        assert revealed == _job(job_id).config_yaml
+    for job_id in job_ids:
+        assert (await SQLiteJobStore().get_job(job_id)).config_yaml == _job(job_id).config_yaml
+    await close_db()
+    raw_backup = b"".join(path.read_bytes() for path in db_dir.glob("jobs.db*"))
+    assert CONFIG_SECRET.encode() not in raw_backup
+
+
+async def test_migration_with_nothing_to_rewrite_leaves_secure_delete_off(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    await SQLiteJobStore().save_job(_job())
+
+    await migrate_persisted_secrets()
+
+    async with get_db("jobs.db") as db:
+        assert await _secure_delete(db) == 0

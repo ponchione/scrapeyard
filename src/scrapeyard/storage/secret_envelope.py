@@ -8,7 +8,11 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from typing import Any
+
+import aiosqlite
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -142,162 +146,204 @@ def reveal_text(value: str, *, purpose: str) -> str:
     return keyring.reveal(value, purpose=purpose)
 
 
+# Rows per page while migrating, so startup memory does not grow with history.
+_MIGRATION_PAGE_ROWS = 100
+
+
+async def _paged_rows(db: aiosqlite.Connection, sql: str) -> AsyncIterator[Sequence[Any]]:
+    """Yield rows of *sql* in key order, one page at a time.
+
+    *sql* filters on its first selected column with ``> ?``, orders by it, and
+    takes the page size as a second parameter. Keyset paging stays exact while
+    the same transaction rewrites the rows it has already returned.
+    """
+    after = ""
+    while True:
+        async with db.execute(sql, (after, _MIGRATION_PAGE_ROWS)) as cursor:
+            rows = list(await cursor.fetchall())
+        for row in rows:
+            yield row
+        if len(rows) < _MIGRATION_PAGE_ROWS:
+            return
+        after = str(rows[-1][0])
+
+
 async def migrate_persisted_secrets() -> None:
     """Atomically encrypt legacy plaintext and rotate envelopes to the active key."""
 
     keyring = EncryptionKeyring.from_settings(required=False)
     legacy_migrated = False
+    secure_delete_before: int | None = None
     async with get_db("jobs.db") as db:
-        await db.execute("PRAGMA secure_delete = ON")
-        async with db_transaction(db):
-            job_rows = await (
-                await db.execute(
-                    "SELECT job_id, config_yaml, config_hash FROM jobs ORDER BY job_id"
-                )
-            ).fetchall()
-            run_rows = await (
-                await db.execute(
-                    """SELECT run_id, job_id, config_yaml, config_hash
-                       FROM job_runs ORDER BY run_id"""
-                )
-            ).fetchall()
-            queued_rows = await (
-                await db.execute(
-                    """SELECT run_id, job_id, config_yaml, config_hash
-                       FROM queued_run_snapshots ORDER BY run_id"""
-                )
-            ).fetchall()
-            webhook_rows = await (
-                await db.execute(
-                    """SELECT delivery_id, url, headers_json, payload_json,
-                              last_error, scrubbed_at
-                       FROM webhook_deliveries ORDER BY delivery_id"""
-                )
-            ).fetchall()
-            protected_state_exists = bool(job_rows) or any(
-                row[5] is None for row in webhook_rows
-            ) or any(row[2] is not None for row in run_rows) or bool(queued_rows)
-            if keyring is None:
-                if protected_state_exists:
-                    raise SecretKeyConfigurationError(
-                        "Persisted jobs or webhook requests require deployment encryption keys"
-                    )
-                return
 
-            job_plaintexts: dict[str, str] = {}
-            for row in job_rows:
-                job_id = str(row[0])
-                stored = str(row[1])
-                purpose = f"jobs.config_yaml:{job_id}"
-                key_id = envelope_key_id(stored)
-                plaintext = keyring.reveal(stored, purpose=purpose)
-                expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
-                job_plaintexts[job_id] = plaintext
-                legacy_migrated |= key_id is None
-                protected = (
-                    stored
-                    if key_id == keyring.active_key_id
-                    else keyring.protect(plaintext, purpose=purpose)
-                )
-                if protected != stored or str(row[2]) != expected_hash:
-                    await db.execute(
-                        "UPDATE jobs SET config_yaml = ?, config_hash = ? "
-                        "WHERE job_id = ?",
-                        (protected, expected_hash, job_id),
-                    )
+        async def rewrite(sql: str, params: tuple[Any, ...]) -> None:
+            # Scrub the replaced plaintext or old-key ciphertext from freed
+            # pages. Only rewrites need it; it multiplies WAL bytes per delete.
+            nonlocal secure_delete_before
+            if secure_delete_before is None:
+                async with db.execute("PRAGMA secure_delete") as cursor:
+                    setting = await cursor.fetchone()
+                secure_delete_before = 0 if setting is None else int(setting[0])
+                await db.execute("PRAGMA secure_delete = ON")
+            await db.execute(sql, params)
 
-            for row in run_rows:
-                run_id = str(row[0])
-                job_id = str(row[1])
-                stored_value = row[2]
-                purpose = f"job_runs.config_yaml:{run_id}"
-                if stored_value is None:
-                    run_plaintext = job_plaintexts.get(job_id)
-                    if (
-                        run_plaintext is None
-                        or hashlib.sha256(run_plaintext.encode("utf-8")).hexdigest()
-                        != str(row[3])
-                    ):
-                        continue
-                    key_id = None
-                    stored = ""
-                else:
-                    stored = str(stored_value)
+        try:
+            async with db_transaction(db):
+                if keyring is None:
+                    async with db.execute(
+                        """SELECT EXISTS (SELECT 1 FROM jobs)
+                               OR EXISTS (SELECT 1 FROM webhook_deliveries
+                                          WHERE scrubbed_at IS NULL)
+                               OR EXISTS (SELECT 1 FROM job_runs
+                                          WHERE config_yaml IS NOT NULL)
+                               OR EXISTS (SELECT 1 FROM queued_run_snapshots)"""
+                    ) as cursor:
+                        protected_state = await cursor.fetchone()
+                    if protected_state is not None and protected_state[0]:
+                        raise SecretKeyConfigurationError(
+                            "Persisted jobs or webhook requests require deployment encryption keys"
+                        )
+                    return
+
+                async for row in _paged_rows(
+                    db,
+                    """SELECT job_id, config_yaml, config_hash FROM jobs
+                       WHERE job_id > ? ORDER BY job_id LIMIT ?""",
+                ):
+                    job_id = str(row[0])
+                    stored = str(row[1])
+                    purpose = f"jobs.config_yaml:{job_id}"
+                    key_id = envelope_key_id(stored)
+                    plaintext = keyring.reveal(stored, purpose=purpose)
+                    expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+                    legacy_migrated |= key_id is None
+                    protected = (
+                        stored
+                        if key_id == keyring.active_key_id
+                        else keyring.protect(plaintext, purpose=purpose)
+                    )
+                    if protected != stored or str(row[2]) != expected_hash:
+                        await rewrite(
+                            "UPDATE jobs SET config_yaml = ?, config_hash = ? "
+                            "WHERE job_id = ?",
+                            (protected, expected_hash, job_id),
+                        )
+
+                async for row in _paged_rows(
+                    db,
+                    """SELECT run_id, config_yaml FROM job_runs
+                       WHERE run_id > ? AND config_yaml IS NOT NULL
+                       ORDER BY run_id LIMIT ?""",
+                ):
+                    run_id = str(row[0])
+                    stored = str(row[1])
+                    purpose = f"job_runs.config_yaml:{run_id}"
                     key_id = envelope_key_id(stored)
                     run_plaintext = keyring.reveal(stored, purpose=purpose)
                     legacy_migrated |= key_id is None
-                protected = (
-                    stored
-                    if key_id == keyring.active_key_id
-                    else keyring.protect(run_plaintext, purpose=purpose)
-                )
-                if protected != stored:
-                    await db.execute(
-                        "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
-                        (protected, run_id),
-                    )
+                    if key_id != keyring.active_key_id:
+                        await rewrite(
+                            "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
+                            (keyring.protect(run_plaintext, purpose=purpose), run_id),
+                        )
 
-            for row in queued_rows:
-                run_id = str(row[0])
-                stored = str(row[2])
-                purpose = f"queued_run_snapshots.config_yaml:{run_id}"
-                key_id = envelope_key_id(stored)
-                plaintext = keyring.reveal(stored, purpose=purpose)
-                expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
-                legacy_migrated |= key_id is None
-                protected = (
-                    stored
-                    if key_id == keyring.active_key_id
-                    else keyring.protect(plaintext, purpose=purpose)
-                )
-                if protected != stored or str(row[3]) != expected_hash:
-                    await db.execute(
-                        """UPDATE queued_run_snapshots
-                           SET config_yaml = ?, config_hash = ? WHERE run_id = ?""",
-                        (protected, expected_hash, run_id),
-                    )
-
-            for row in webhook_rows:
-                if row[5] is not None:
-                    continue
-                delivery_id = str(row[0])
-                updates: dict[str, str] = {}
-                for column, raw_value in (
-                    ("url", row[1]),
-                    ("headers_json", row[2]),
-                    ("payload_json", row[3]),
+                # Legacy runs without a snapshot take their parent's config when
+                # its hash proves it is the config the run executed.
+                async for row in _paged_rows(
+                    db,
+                    """SELECT job_runs.run_id, job_runs.job_id, jobs.config_yaml,
+                              job_runs.config_hash
+                       FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id
+                       WHERE job_runs.run_id > ? AND job_runs.config_yaml IS NULL
+                       ORDER BY job_runs.run_id LIMIT ?""",
                 ):
-                    stored = str(raw_value)
-                    purpose = f"webhook.{column}:{delivery_id}"
+                    run_id = str(row[0])
+                    run_plaintext = keyring.reveal(
+                        str(row[2]), purpose=f"jobs.config_yaml:{row[1]}"
+                    )
+                    if hashlib.sha256(run_plaintext.encode("utf-8")).hexdigest() != str(row[3]):
+                        continue
+                    await rewrite(
+                        "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
+                        (
+                            keyring.protect(
+                                run_plaintext, purpose=f"job_runs.config_yaml:{run_id}"
+                            ),
+                            run_id,
+                        ),
+                    )
+
+                async for row in _paged_rows(
+                    db,
+                    """SELECT run_id, config_yaml, config_hash FROM queued_run_snapshots
+                       WHERE run_id > ? ORDER BY run_id LIMIT ?""",
+                ):
+                    run_id = str(row[0])
+                    stored = str(row[1])
+                    purpose = f"queued_run_snapshots.config_yaml:{run_id}"
                     key_id = envelope_key_id(stored)
                     plaintext = keyring.reveal(stored, purpose=purpose)
+                    expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
                     legacy_migrated |= key_id is None
-                    if key_id != keyring.active_key_id:
-                        updates[column] = keyring.protect(
-                            plaintext,
-                            purpose=purpose,
-                        )
-                if row[4] is not None:
-                    stored_error = str(row[4])
-                    purpose = f"webhook.last_error:{delivery_id}"
-                    error_key_id = envelope_key_id(stored_error)
-                    plaintext_error = keyring.reveal(stored_error, purpose=purpose)
-                    legacy_migrated |= error_key_id is None
-                    if error_key_id != keyring.active_key_id:
-                        updates["last_error"] = keyring.protect(
-                            plaintext_error,
-                            purpose=purpose,
-                        )
-                if updates:
-                    assignments = ", ".join(f"{column} = ?" for column in updates)
-                    await db.execute(
-                        f"UPDATE webhook_deliveries SET {assignments} "
-                        "WHERE delivery_id = ?",
-                        (*updates.values(), delivery_id),
+                    protected = (
+                        stored
+                        if key_id == keyring.active_key_id
+                        else keyring.protect(plaintext, purpose=purpose)
                     )
+                    if protected != stored or str(row[2]) != expected_hash:
+                        await rewrite(
+                            """UPDATE queued_run_snapshots
+                               SET config_yaml = ?, config_hash = ? WHERE run_id = ?""",
+                            (protected, expected_hash, run_id),
+                        )
 
-    if legacy_migrated:
-        async with get_db("jobs.db") as db:
-            cursor = await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            await cursor.fetchall()
-            await cursor.close()
+                async for row in _paged_rows(
+                    db,
+                    """SELECT delivery_id, url, headers_json, payload_json, last_error
+                       FROM webhook_deliveries
+                       WHERE delivery_id > ? AND scrubbed_at IS NULL
+                       ORDER BY delivery_id LIMIT ?""",
+                ):
+                    delivery_id = str(row[0])
+                    updates: dict[str, str] = {}
+                    for column, raw_value in (
+                        ("url", row[1]),
+                        ("headers_json", row[2]),
+                        ("payload_json", row[3]),
+                    ):
+                        stored = str(raw_value)
+                        purpose = f"webhook.{column}:{delivery_id}"
+                        key_id = envelope_key_id(stored)
+                        plaintext = keyring.reveal(stored, purpose=purpose)
+                        legacy_migrated |= key_id is None
+                        if key_id != keyring.active_key_id:
+                            updates[column] = keyring.protect(
+                                plaintext,
+                                purpose=purpose,
+                            )
+                    if row[4] is not None:
+                        stored_error = str(row[4])
+                        purpose = f"webhook.last_error:{delivery_id}"
+                        error_key_id = envelope_key_id(stored_error)
+                        plaintext_error = keyring.reveal(stored_error, purpose=purpose)
+                        legacy_migrated |= error_key_id is None
+                        if error_key_id != keyring.active_key_id:
+                            updates["last_error"] = keyring.protect(
+                                plaintext_error,
+                                purpose=purpose,
+                            )
+                    if updates:
+                        assignments = ", ".join(f"{column} = ?" for column in updates)
+                        await rewrite(
+                            f"UPDATE webhook_deliveries SET {assignments} "
+                            "WHERE delivery_id = ?",
+                            (*updates.values(), delivery_id),
+                        )
+
+            if legacy_migrated:
+                cursor = await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await cursor.fetchall()
+                await cursor.close()
+        finally:
+            if secure_delete_before is not None:
+                await db.execute(f"PRAGMA secure_delete = {secure_delete_before}")
