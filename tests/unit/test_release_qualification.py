@@ -421,8 +421,12 @@ def test_runner_has_scoped_cleanup_signal_timeout_and_secret_scan_contracts() ->
     harness = Path("tests/qualification/run_qualification.py").read_text(encoding="utf-8")
     assert 'last = self.request("/health/ready", timeout=3)' in harness
     assert 'last = self.request("/health", authenticated=False' not in harness
-    assert harness.count('"--user", "10001:1000"') == 2
+    # The backup container runs as the data owner with the host backup
+    # directory's group, whichever account owns it.
+    assert 'backup_user = f"10001:{self.backup_dir.stat().st_gid}"' in harness
+    assert harness.count('"--user", backup_user') == 2
     assert '"--user", "1000:1000"' not in harness
+    assert '"10001:1000"' not in harness
     assert "chmod -R g+rwX /qualification-backup/set" in harness
     assert "--sql-dir /app/sql" in harness
     assert '"--sql-dir", "/app/sql"' in harness

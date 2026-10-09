@@ -58,6 +58,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- The container image builds with pip 26.2.1 (26.1.2 has PYSEC-2026-3721)
+  and no longer ships pip at runtime. Its Debian package snapshot moves to
+  2026-10-08, which picks up the perl security update. CI and the
+  dependency-audit workflow pin the same pip, the live Redis job enables
+  append-only persistence, and release qualification no longer assumes the
+  runner owns group 1000.
 - Development: ruff is upgraded to 0.16, import order is now enforced, and
   the Python helpers under `security/` are linted. The README settings
   table now lists every `SCRAPEYARD_*` setting with its default, checked

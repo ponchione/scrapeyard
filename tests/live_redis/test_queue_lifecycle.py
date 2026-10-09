@@ -132,8 +132,22 @@ async def _await_terminal_status(client, job_id: str) -> str:
     pytest.fail(f"Timed out waiting for terminal job status for {job_id}")
 
 
+@pytest.fixture()
+def memory_admission(monkeypatch):
+    """Re-enable memory admission, which the root conftest turns off.
+
+    The worker pool reads the limit when it is built, so this must run before
+    ``client``. Admission starts from a quiet cgroup, not the host's real one.
+    """
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB", "4096")
+    monkeypatch.setattr("scrapeyard.queue.memory._cgroup_memory", lambda _: [(100, 6000)])
+    get_settings.cache_clear()
+
+
 @pytest.mark.live_redis
-async def test_atomic_admission_cap_replay_recovery_cancellation_and_draining(client, monkeypatch):
+async def test_atomic_admission_cap_replay_recovery_cancellation_and_draining(
+    memory_admission, client, monkeypatch,
+):
     settings = get_settings()
     monkeypatch.setattr(settings, "workers_max_accepted_runs", 3)
     pool, store = get_worker_pool(), get_job_store()

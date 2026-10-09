@@ -58,6 +58,24 @@ def test_ci_required_gate_contracts() -> None:
     live_commands = _run_commands(live_redis)
     assert "python scripts/check_packaging_toolchain.py" in live_commands
     assert "pytest -W error --no-cov -m live_redis tests/live_redis" in live_commands
+    # tests/live_redis asserts appendonly, which a service container can't be
+    # started with, so it is set before the tests run.
+    step_names = [step.get("name", "") for step in live_redis["steps"]]
+    persistence = step_names.index("Enable Redis append-only persistence")
+    assert persistence < step_names.index("Exercise the authenticated real Redis/arq path")
+    assert (
+        'docker exec "${{ job.services.redis.id }}" redis-cli CONFIG SET appendonly yes'
+        in live_redis["steps"][persistence]["run"]
+    )
+
+
+def test_ci_type_checks_once_against_the_configured_target() -> None:
+    quality = _workflow("ci.yml")["jobs"]["quality"]
+    type_check = next(step for step in quality["steps"] if step.get("name") == "Type check")
+    # mypy's python_version, not the interpreter, decides what it checks.
+    assert 'python_version = "3.10"' in Path("pyproject.toml").read_text(encoding="utf-8")
+    assert type_check["if"] == "matrix.python-version == '3.10'"
+    assert type_check["run"] == "poetry run mypy src"
 
 
 def test_ci_caches_only_dependency_downloads() -> None:
@@ -96,6 +114,14 @@ def test_dependency_audit_remains_scheduled_and_required() -> None:
     assert "python scripts/check_packaging_toolchain.py" in commands
     assert "python -m pip_audit --local --progress-spinner=off" in commands
     assert "poetry run python scripts/audit_dependencies.py all" in commands
+    # Packages the runner or virtualenv preinstall are audited too, so the
+    # unused setuptools is removed and Poetry's seeded pip gets the pinned one.
+    assert commands.index("pip uninstall -y setuptools") < commands.index(
+        "python -m pip_audit --local"
+    )
+    assert commands.index("poetry run python -m pip install --upgrade pip==") < commands.index(
+        "audit_dependencies.py all"
+    )
 
 
 def test_container_security_workflow_builds_sbom_and_enforces_scans() -> None:

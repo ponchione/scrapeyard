@@ -14,16 +14,8 @@ on:
       - poetry.lock
       - pyproject.toml
       - scripts/run_container_browser_smoke.sh
-      - src/scrapeyard/api/**
-      - src/scrapeyard/common/**
-      - src/scrapeyard/config/**
-      - src/scrapeyard/engine/**
-      - src/scrapeyard/main.py
-      - src/scrapeyard/queue/**
-      - src/scrapeyard/runtime/**
-      - src/scrapeyard/scheduler/**
-      - src/scrapeyard/storage/**
-      - src/scrapeyard/webhook/**
+      - src/scrapeyard/**
+      - sql/**
       - tests/smoke/**
       - tests/unit/test_container_browser_smoke.py
       - .github/workflows/container-browser-smoke.yml

@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
-PIP_VERSION = "26.1.2"
+PIP_VERSION = "26.2.1"
 POETRY_VERSION = "2.3.4"
 POETRY_EXPORT_VERSION = "1.10.0"
 

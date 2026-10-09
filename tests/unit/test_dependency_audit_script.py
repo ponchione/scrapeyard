@@ -15,6 +15,11 @@ from scripts.audit_dependencies import (
     audit_development,
     audit_production,
 )
+from scripts.check_packaging_toolchain import (
+    PIP_VERSION,
+    POETRY_EXPORT_VERSION,
+    POETRY_VERSION,
+)
 
 
 def _write_exceptions(path: Path, exceptions: list[dict[str, Any]]) -> None:
@@ -118,15 +123,15 @@ def test_docker_and_ci_pin_audited_packaging_tools() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/dependency-audit.yml").read_text(encoding="utf-8")
 
-    assert "ARG PIP_VERSION=26.1.2" in dockerfile
+    assert dockerfile.count(f"ARG PIP_VERSION={PIP_VERSION}") == 2
     assert '"pip==${PIP_VERSION}"' in dockerfile
-    assert "ARG POETRY_VERSION=2.3.4" in dockerfile
+    assert f"ARG POETRY_VERSION={POETRY_VERSION}" in dockerfile
     assert '"poetry==${POETRY_VERSION}"' in dockerfile
-    assert "ARG POETRY_EXPORT_VERSION=1.10.0" in dockerfile
+    assert f"ARG POETRY_EXPORT_VERSION={POETRY_EXPORT_VERSION}" in dockerfile
     assert '"poetry-plugin-export==${POETRY_EXPORT_VERSION}"' in dockerfile
 
-    assert "pip==26.1.2" in workflow
-    assert "poetry==2.3.4" in workflow
-    assert "poetry-plugin-export==1.10.0" in workflow
+    assert workflow.count(f"pip=={PIP_VERSION}") == 2
+    assert f"poetry=={POETRY_VERSION}" in workflow
+    assert f"poetry-plugin-export=={POETRY_EXPORT_VERSION}" in workflow
     assert "python -m pip_audit --local --progress-spinner=off" in workflow
     assert "poetry run python scripts/audit_dependencies.py all" in workflow

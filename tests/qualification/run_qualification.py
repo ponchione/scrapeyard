@@ -826,16 +826,18 @@ class Harness:
         ).strip()
         self.compose("exec", "-T", "redis", "redis-cli", "SAVE", timeout=30)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        # The random host directory belongs to the invoking operator (UID/GID
-        # 1000 in the qualification runner), while /data is mode-0750/0600 and
-        # owned by the production UID 10001. Run as the data owner with the
-        # host directory's group, and grant only that group temporary access.
+        # The random host directory belongs to the invoking operator, while
+        # /data is mode-0750/0600 and owned by the production UID 10001. Run as
+        # the data owner with the host directory's group (1000 for a local
+        # operator, something else on a hosted CI runner), and grant only that
+        # group temporary access.
         self.backup_dir.chmod(0o770)
+        backup_user = f"10001:{self.backup_dir.stat().st_gid}"
         tool = self.repo_root / "scripts" / "qualification_backup.py"
         backup_mount = f"{self.backup_dir}:/qualification-backup"
         tool_mount = f"{tool}:/qualification_backup.py:ro"
         self.compose(
-            "run", "--rm", "--no-deps", "--user", "10001:1000", "--entrypoint", "sh",
+            "run", "--rm", "--no-deps", "--user", backup_user, "--entrypoint", "sh",
             "-v", backup_mount, "-v", tool_mount,
             "scrapeyard", "-c",
             "python /qualification_backup.py create --data-root /data "
@@ -857,7 +859,7 @@ class Harness:
 
         self.compose("down", "-v", "--remove-orphans", timeout=120)
         self.compose(
-            "run", "--rm", "--no-deps", "--user", "10001:1000", "--entrypoint", "python",
+            "run", "--rm", "--no-deps", "--user", backup_user, "--entrypoint", "python",
             "-v", backup_mount, "-v", tool_mount,
             "scrapeyard", "/qualification_backup.py", "restore",
             "--backup", "/qualification-backup/set", "--data-root", "/data",

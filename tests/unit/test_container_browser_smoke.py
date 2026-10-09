@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import subprocess
 import threading
 import urllib.error
@@ -203,10 +204,9 @@ def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cach
     paths = workflow["on"]["pull_request"]["paths"]
     assert "Dockerfile" in paths
     assert "poetry.lock" in paths
-    assert "src/scrapeyard/main.py" in paths
-    assert "src/scrapeyard/runtime/**" in paths
-    assert "src/scrapeyard/scheduler/**" in paths
-    assert "src/scrapeyard/webhook/**" in paths
+    # Every package and migration ships in the image the smoke exercises.
+    assert "src/scrapeyard/**" in paths
+    assert "sql/**" in paths
     assert "tests/smoke/**" in paths
 
     job = workflow["jobs"]["production-container-smoke"]
@@ -229,7 +229,8 @@ def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cach
 def test_dockerfile_has_immutable_inputs_and_non_root_runtime_contract() -> None:
     text = Path("Dockerfile").read_text(encoding="utf-8")
     assert "python:3.12.11-slim-bookworm@sha256:" in text
-    assert "ARG DEBIAN_SNAPSHOT=20260715T000000Z" in text
+    # A fixed snapshot timestamp, so every build resolves the same packages.
+    assert re.search(r"(?m)^ARG DEBIAN_SNAPSHOT=[0-9]{8}T[0-9]{6}Z$", text)
     assert "snapshot.debian.org/archive/debian/" in text
     assert "apt-get upgrade -y --no-install-recommends" in text
     assert "--without-hashes" not in text

@@ -34,9 +34,9 @@ def test_packaging_toolchain_accepts_exact_versions() -> None:
     check_packaging_toolchain(
         runner=_runner_for(
             [
-                "pip 26.1.2 from /tmp/site-packages/pip (python 3.12)\n",
-                "Poetry (version 2.3.4)\n",
-                "  - poetry-plugin-export (1.10.0) Poetry plugin\n",
+                f"pip {PIP_VERSION} from /tmp/site-packages/pip (python 3.12)\n",
+                f"Poetry (version {POETRY_VERSION})\n",
+                f"  - poetry-plugin-export ({POETRY_EXPORT_VERSION}) Poetry plugin\n",
             ]
         )
     )
@@ -47,9 +47,9 @@ def test_packaging_toolchain_rejects_version_drift() -> None:
         check_packaging_toolchain(
             runner=_runner_for(
                 [
-                    "pip 26.1.2 from /tmp/site-packages/pip (python 3.12)\n",
+                    f"pip {PIP_VERSION} from /tmp/site-packages/pip (python 3.12)\n",
                     "Poetry (version 2.3.3)\n",
-                    "  - poetry-plugin-export (1.10.0) Poetry plugin\n",
+                    f"  - poetry-plugin-export ({POETRY_EXPORT_VERSION}) Poetry plugin\n",
                 ]
             )
         )
@@ -71,5 +71,6 @@ def test_repository_surfaces_declare_and_check_the_same_toolchain() -> None:
     assert f"poetry=={POETRY_VERSION}" in audit
     assert f"poetry-plugin-export=={POETRY_EXPORT_VERSION}" in audit
     assert f"Poetry {POETRY_VERSION}" in docs
+    assert f"pip {PIP_VERSION}" in docs
     for document in (dockerfile, ci, audit):
         assert "check_packaging_toolchain.py" in document

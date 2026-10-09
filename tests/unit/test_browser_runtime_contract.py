@@ -30,6 +30,18 @@ def test_dockerfile_installs_wheels_without_a_build_toolchain() -> None:
         assert package not in dockerfile
 
 
+def test_runtime_image_removes_pip_after_its_last_install() -> None:
+    dockerfile = Path("Dockerfile").read_text()
+    runtime = dockerfile[dockerfile.index("AS runtime"):]
+    uninstall = runtime.index("python -m pip uninstall --yes pip")
+
+    assert runtime.rindex("pip install") < uninstall
+    assert "! python -c 'import pip'" in runtime[uninstall:]
+    # Nothing the image runs may need pip once it is gone.
+    assert "pip" not in Path("scripts/container-entrypoint.sh").read_text().split()
+    assert "pip" not in runtime[runtime.index("HEALTHCHECK"):]
+
+
 def test_browser_driver_pins_match_the_versions_the_image_asserts() -> None:
     dockerfile = Path("Dockerfile").read_text()
     pyproject = Path("pyproject.toml").read_text()

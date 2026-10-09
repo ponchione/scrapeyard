@@ -5,7 +5,7 @@ ARG PYTHON_IMAGE="python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9
 # Export the production lock with the same pinned toolchain used by CI.
 FROM ${PYTHON_IMAGE} AS builder
 
-ARG PIP_VERSION=26.1.2
+ARG PIP_VERSION=26.2.1
 ARG POETRY_VERSION=2.3.4
 ARG POETRY_EXPORT_VERSION=1.10.0
 RUN pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" && \
@@ -22,7 +22,7 @@ RUN poetry export --only main -f requirements.txt -o requirements.txt
 # Runtime inputs are immutable or explicitly recorded in OCI labels/SBOM.
 FROM ${PYTHON_IMAGE} AS runtime
 
-ARG PIP_VERSION=26.1.2
+ARG PIP_VERSION=26.2.1
 ARG PLAYWRIGHT_VERSION=1.58.0
 ARG PLAYWRIGHT_CHROMIUM_REVISION=1208
 ARG REBROWSER_PLAYWRIGHT_VERSION=1.52.0
@@ -37,7 +37,7 @@ ARG UBO_SHA256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
-ARG DEBIAN_SNAPSHOT=20260715T000000Z
+ARG DEBIAN_SNAPSHOT=20261008T000000Z
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -136,8 +136,12 @@ COPY src/ src/
 COPY sql/ sql/
 COPY pyproject.toml README.md ./
 COPY scripts/container-entrypoint.sh /usr/local/bin/scrapeyard-entrypoint
+# Nothing at runtime installs packages, so pip leaves the image after the last
+# install instead of shipping as attack surface and scanner noise.
 RUN pip install --no-cache-dir --no-deps . && \
     python -c 'import importlib.metadata as m, scrapeyard; assert scrapeyard.__version__ == m.version("scrapeyard")' && \
+    python -m pip uninstall --yes pip && \
+    ! python -c 'import pip' 2>/dev/null && \
     chmod 0555 /usr/local/bin/scrapeyard-entrypoint && \
     chmod -R a-w /app
 

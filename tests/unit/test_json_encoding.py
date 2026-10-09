@@ -63,6 +63,9 @@ def test_compact_json_size_rejects_what_the_encoder_rejects() -> None:
         compact_json_size({"results": [{(1, 2): "tuple key"}]})
 
 
+# json's message for NaN or infinity with allow_nan=False.
+_NON_FINITE_MESSAGE = "Out of range float values are not JSON compliant"
+
 # The persisted artifact options, and the stricter /results response options.
 _OPTION_SETS = [
     pytest.param({}, id="artifact"),
@@ -80,7 +83,11 @@ def _outcome(encode: Any) -> tuple[Any, ...]:
     try:
         return ("bytes", encode())
     except Exception as exc:
-        return (type(exc), str(exc))
+        message = str(exc)
+        # On Python 3.10 the C encoder leaves the value out of this message.
+        if message.startswith(_NON_FINITE_MESSAGE):
+            message = _NON_FINITE_MESSAGE
+        return (type(exc), message)
 
 
 def _assert_matches_reference(data: Any, options: dict[str, Any]) -> None:

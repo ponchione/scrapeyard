@@ -1,4 +1,4 @@
-"""Query plans and results of the periodic SQLite queries tuned for TD-37.
+"""Query plans and results of the periodic SQLite queries tuned to use indexes.
 
 Each rewritten query is checked two ways: its plan reaches rows through an
 index instead of scanning history, and on seeded edge rows it returns exactly
@@ -23,7 +23,7 @@ from scrapeyard.storage.job_store import SQLiteJobStore
 
 _NOW = datetime(2026, 10, 9, tzinfo=timezone.utc)
 
-# The queries as they were before TD-37, kept as the reference for results.
+# The queries as they were before that tuning, kept as the reference for results.
 _OLD_TERMINAL_CANDIDATES = """SELECT job_runs.job_id,
        job_runs.run_id,
        job_runs.status,

@@ -6,6 +6,9 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-09** (`a36c0a7` onwards): roadmap pass. TD-30 to TD-44 were fixed
+  and removed, and TD-26's code-side fixes landed. Findings made while fixing
+  them are TD-51 to TD-62.
 - **2026-10-09** (`b0b285e`): wide sweep of all of `src/`, storage and SQL,
   build, CI, tests and docs, with an Eyebox integration map (Eyebox at
   `a466ee2`). Added TD-25 to TD-49 and C-1 to C-9, and refreshed TD-17, TD-23
@@ -79,7 +82,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-61**) and use this template:
+7. **New findings** take the next free ID (**TD-63**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -106,6 +109,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | `pip-audit` on pip 26.1.2 | PYSEC-2026-3721, fixed in 26.2 (TD-26) |
 | Eyebox configs vs. schema | 56 of 56 validate |
 | `pytest -W error` after TD-25 | 2,356 passed, 17 skipped, with no env override and no network lookups; 41–54 s |
+| After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages (TD-61) |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -230,20 +234,22 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
 | 2 | TD-52 | P2 | worker | low | none | |
-| 3 | TD-53 | P3 | engine | low | none | |
+| 3 | TD-55 | P2 | URL guard, API | low | none | |
 | 4 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 5 | TD-55 | P2 | URL guard, API | low | none | |
-| 6 | TD-56 | P3 | redaction | low | none | |
-| 7 | TD-57 | P3 | storage | low | none | |
-| 8 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 9 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 5 | TD-53 | P3 | engine | low | none | |
+| 6 | TD-57 | P3 | storage | low | none | |
+| 7 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 8 | TD-56 | P3 | redaction | low | none | |
+| 9 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 10 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 11 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
-**Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
-not deployment, so local checks cover it until then. The pip vulnerability only
-matters in a built image, and a release (TD-22) needs the container scan and
-qualification workflows passing.
+**Before the first deploy:** TD-61 (dependency advisories), then TD-26
+(re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
+deployment, so local checks cover it until then. A release (TD-22) needs the
+container scan and qualification workflows passing, which needs both.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
@@ -268,7 +274,7 @@ qualification workflows passing.
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
-| TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
+| TD-26 | P1 | before first deploy | CI is disabled, and its workflows haven't run since their fixes |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-46 | P2 | coordinated | Subrequest DNS failures and IPv6 gaps in the browser guard |
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
@@ -284,53 +290,71 @@ qualification workflows passing.
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 | TD-59 | P3 | ready | A client that stops reading a result download holds its body in memory until TCP gives up |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
+| TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
+| TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 
 ## Ready to implement
 
-### TD-26 — CI is disabled and red, and the pinned pip has a known vulnerability
+### TD-26 — CI is disabled, and its workflows haven't run since their fixes
 
-**Priority:** P1 · **Area:** CI, build · **Risk:** low · **Contract:** none · **Depends on:** an operator re-enabling Actions
+**Priority:** P1 · **Area:** CI, build · **Risk:** low · **Contract:** none · **Depends on:** an operator re-enabling Actions; TD-61
 
 **Problem:** Actions is disabled for the repository
-(`gh api repos/{owner}/{repo}/actions/permissions` returns `enabled: false`).
-The last runs on `main` (2026-09-07) failed in CI, Dependency audit and Container
-security, so nothing gates merges.
-- **a. pip 26.1.2 has PYSEC-2026-3721** (fixed in 26.2) and ships in the runtime
-  image. It is pinned in:
-  - `Dockerfile` (`ARG PIP_VERSION`, both stages)
-  - `.github/workflows/ci.yml` (`PIP_VERSION`)
-  - `.github/workflows/dependency-audit.yml`
-  - `scripts/check_packaging_toolchain.py` (`PIP_VERSION`)
-  - literal strings in `tests/unit/test_packaging_toolchain.py` and
-    `tests/unit/test_dependency_audit_script.py`
-- **b. The `live-redis` job cannot pass.**
-  `tests/live_redis/test_queue_lifecycle.py` asserts `appendonly yes`, but
-  GitHub service containers can't pass `--appendonly yes`.
-- **c. The container scan fails,** which is consistent with the stale Debian
-  snapshot (`ARG DEBIAN_SNAPSHOT=20260715T000000Z`).
-- **d. CI wastes work** (optional; same PR or a follow-up):
-  - mypy targets 3.10 on both matrix legs, so the second run repeats the first.
-  - A PR that only touches `src/` does two cold image builds of about 2.5 min
-    each.
-  - The browser-smoke path filter leaves out `src/scrapeyard/models/**` and
-    `sql/**`.
+(`gh api repos/{owner}/{repo}/actions/permissions` returns `enabled: false`),
+so nothing gates merges. The last runs on `main` (2026-09-07) failed in CI,
+Dependency audit, Container security and Release qualification. The code-side
+causes were fixed on 2026-10-09:
+- pip moved to 26.2.1 everywhere (26.1.2 had PYSEC-2026-3721), and the runtime
+  image no longer ships pip.
+- The live-redis job enables append-only persistence with `CONFIG SET`, and its
+  admission test re-enables memory admission through a fixture. All 17 live
+  tests passed locally against a service-style Redis.
+- The Debian snapshot moved to `20261008T000000Z`; a local image scan found no
+  Debian findings.
+- Release qualification's backup runs as the backup directory's group, not
+  1000.
+- mypy runs on one matrix leg, and browser smoke also triggers on model and SQL
+  changes.
 
-**Fix:**
-- **a.**
-  - Bump pip to 26.2 or later everywhere.
-  - Have the tests import the constant from
-    `scripts/check_packaging_toolchain.py` instead of repeating the literal.
-  - Remove pip from the runtime stage after the final install
-    (`pip uninstall -y pip`), after first confirming nothing at runtime invokes
-    it.
-- **b.** Add a step:
-  `docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET appendonly yes`.
-- **c.** Advance the snapshot and re-run the scan.
-- **d.** Run mypy on one leg, share or cache the image layers between jobs, and
-  widen the path filter.
+**Remaining:**
+- **a. Fix TD-61.** Dependency audit and Container security fail on the locked
+  Python packages until it lands.
+- **b. Re-enable Actions,** then confirm on `main` that CI (both quality legs,
+  build, live-redis), Dependency audit (both legs), Container security,
+  Container and browser smoke, and Release qualification (quick and full)
+  pass. Browser smoke and release qualification install host security policy,
+  so they weren't run locally.
+- **c. Optional:** share or cache image layers between jobs. A PR that only
+  touches `src/` still does two cold image builds of about 2.5 min each; this
+  can't be verified without Actions.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
+
+### TD-61 — Locked Python dependencies have known vulnerabilities
+
+**Priority:** P1 · **Area:** dependencies · **Risk:** medium · **Contract:** none; Eyebox's hard-test venv is separate and doesn't follow the lock · **Depends on:** —
+
+**Problem:**
+- On 2026-10-09, `pip-audit` reported 32 advisories in the production lock and
+  34 in the development lock, and the image scan reported 12 HIGH/CRITICAL
+  findings, all in locked Python packages. Dependency audit and Container
+  security fail on them, so TD-26 can't close until they're fixed.
+- Affected, with the fixed version: aiohttp 3.14.1 (3.14.3), anyio 4.12.1
+  (4.14.2), multidict 6.7.1 (6.9.1), urllib3 2.7.0 (2.8.0), pyjwt 2.13.0
+  (2.15.0), and cryptography 48.0.1 (49 or 50, but `pyproject.toml` pins
+  `<49`).
+- PYSEC-2026-4146 in pyjwt has no fixed release. pyjwt comes in through
+  `redis` 5.3.1, so it needs a reviewed entry in
+  `security/dependency-audit-exceptions.json` or a way to drop it.
+
+**Code:** `pyproject.toml`, `poetry.lock`,
+`security/dependency-audit-exceptions.json`, `scripts/audit_dependencies.py`.
+**Fix:** update the lock to the fixed versions, review the cryptography 49/50
+changes against `storage/secret_envelope.py` before widening its constraint,
+decide the pyjwt exception, then rebuild the image and rerun the scan.
+**Done when:** `scripts/audit_dependencies.py all` and the container scan are
+clean, with the full suite passing.
 
 ### TD-51 — Shutdown ends in SIGKILL while a run or result thread is still active
 
@@ -533,6 +557,17 @@ pagination run, with identical records.
 document the reliance on ingress restrictions.
 **Done when:** a test with a client that stops reading shows the connection
 closed and the body released within the bound.
+
+### TD-62 — Pinned GitHub actions run on Node 20
+
+**Priority:** P3 · **Area:** CI · **Risk:** low · **Contract:** none · **Depends on:** TD-26b
+
+**Problem:** the workflows pin `actions/checkout` v4, `actions/setup-python` v5,
+`actions/cache` v4 and `actions/upload-artifact` v4, which target Node 20.
+GitHub runs them on Node 24 and only warns for now.
+**Code:** `.github/workflows/*.yml`.
+**Fix:** move to their Node 24 releases, pinned by SHA as today.
+**Done when:** the workflows run without the Node 20 deprecation warning.
 
 ## Coordinated
 
