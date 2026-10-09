@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -195,16 +196,21 @@ def test_policy_replacement_restores_prior_deny_path_at_every_mutation_stage(
         mutation_index("ip6tables", "-D DOCKER-USER"),
     }
 
-    for failure_point in sorted(failure_points):
+    def fail_at(failure_point: int) -> tuple[Path, subprocess.CompletedProcess[str]]:
         state_dir = tmp_path / f"failure-{failure_point}"
         shutil.copytree(baseline, state_dir)
         for name in ("mutation-count", "mutations.log"):
             (state_dir / name).unlink(missing_ok=True)
         env = _environment(bin_dir, state_dir)
         env["FAIL_AT"] = str(failure_point)
+        return state_dir, _run(installer, env)
 
-        result = _run(installer, env)
+    # Each failure point uses its own state directory, and every installer run
+    # spawns dozens of shim processes, so run them concurrently.
+    with ThreadPoolExecutor() as pool:
+        outcomes = list(pool.map(fail_at, sorted(failure_points)))
 
+    for state_dir, result in outcomes:
         assert result.returncode != 0
         assert "prior policy restored" in result.stderr
         _assert_old_policy_active(state_dir)

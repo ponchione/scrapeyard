@@ -80,6 +80,7 @@ targets:
       title: h1
 execution:
   concurrency: 2
+  delay_between: 0
   fail_strategy: {fail_strategy.value}
 webhook:
   url: https://hooks.example.com/budget

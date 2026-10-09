@@ -210,6 +210,10 @@ def _listing_config(on_empty: str) -> str:
 project: demo
 name: guard-job
 targets:{target.format(url=URL)}{target.format(url=SECOND_URL)}
+execution:
+  concurrency: 1
+  delay_between: 0
+  domain_rate_limit: 0
 validation:
   required_fields: [name, price]
   min_results: 1

@@ -57,7 +57,9 @@ class TestRetryHandler:
         assert fn.await_count == 1
 
     async def test_retries_on_retryable_error(self):
-        handler = RetryHandler(self._config(max_attempts=3, backoff=BackoffStrategy.fixed))
+        handler = RetryHandler(
+            self._config(max_attempts=3, backoff=BackoffStrategy.fixed, backoff_max=0)
+        )
         fn = AsyncMock(side_effect=[RetryableError(503), RetryableError(503), "ok"])
         result = await handler.execute(fn)
         assert result == "ok"
@@ -113,7 +115,9 @@ class TestRetryHandler:
         assert fn.await_count == 3
 
     async def test_exhausts_retries(self):
-        handler = RetryHandler(self._config(max_attempts=2, backoff=BackoffStrategy.fixed))
+        handler = RetryHandler(
+            self._config(max_attempts=2, backoff=BackoffStrategy.fixed, backoff_max=0)
+        )
         fn = AsyncMock(side_effect=RetryableError(503))
         with pytest.raises(RetryableError):
             await handler.execute(fn)

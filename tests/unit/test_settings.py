@@ -34,7 +34,8 @@ class TestServiceSettingsDefaults:
         settings = ServiceSettings()
         assert settings.workers_max_browsers == 2
 
-    def test_workers_memory_limit_mb_default(self):
+    def test_workers_memory_limit_mb_default(self, monkeypatch):
+        monkeypatch.delenv("SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB")
         settings = ServiceSettings()
         assert settings.workers_memory_limit_mb == 4096
 

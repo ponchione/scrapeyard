@@ -21,9 +21,14 @@ async def _close_writer(writer: asyncio.StreamWriter) -> None:
 
 
 async def _start_controlled_probe(
+    challenge_handled: asyncio.Event | None = None,
 ) -> tuple[asyncio.Server, asyncio.Server, int, int]:
     async def challenge(_reader, writer):
-        await _close_writer(writer)
+        try:
+            await _close_writer(writer)
+        finally:
+            if challenge_handled is not None:
+                challenge_handled.set()
 
     challenge_server = await asyncio.start_server(challenge, "127.0.0.1", 0)
     challenge_port = challenge_server.sockets[0].getsockname()[1]
@@ -62,12 +67,18 @@ async def _stop_servers(*servers: asyncio.Server) -> None:
 
 @pytest.mark.asyncio
 async def test_egress_attestation_rejects_reachable_live_challenge():
+    challenge_handled = asyncio.Event()
     challenge, liveness, challenge_port, liveness_port = (
-        await _start_controlled_probe()
+        await _start_controlled_probe(challenge_handled)
     )
     try:
         with pytest.raises(EgressPolicyAttestationError, match="challenge was reachable"):
             await attest_connected_ip_policy(_settings(challenge_port, liveness_port))
+        # asyncio accepts a connection before a separate task attaches its
+        # transport to the server. Closing the server in between makes
+        # wait_closed() return early and leaks the accepted socket, so let
+        # the handler finish first.
+        await asyncio.wait_for(challenge_handled.wait(), timeout=5)
     finally:
         await _stop_servers(challenge, liveness)
 

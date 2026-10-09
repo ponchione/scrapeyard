@@ -83,6 +83,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The test suite no longer depends on the machine it runs on. Scrape admission
+  sampled the test runner's real cgroup, so a developer host with a busy cgroup
+  refused every scrape and about 150 tests failed; tests now disable memory
+  admission unless they set a limit themselves. 57 tests resolved
+  `example.com`, `.test` and `.example` names through real DNS; a fake
+  resolver now answers them the way public DNS does, offline. Tests that
+  inherited the 2 s target stagger, 3 s domain rate limit or 1 s retry backoff
+  no longer sleep, and the egress-installer rollback matrix runs its failure
+  points concurrently. The suite takes about 45 s instead of 76 s. The
+  reachable-challenge egress test no longer races asyncio's accept path and
+  leaks a socket that failed an unrelated test under `-W error`.
 - Memory admission and browser start checks no longer count the cgroup's
   inactive file cache (`inactive_file`, v1 `total_inactive_file`) as used
   memory. Cached browser, result and log files could push `memory.current`
