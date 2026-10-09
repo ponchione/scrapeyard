@@ -83,6 +83,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A finished run whose stored config can no longer load, for example after a
+  referenced deployment secret was removed, no longer fails terminal webhook
+  reconciliation on every pass. That kept `/health/ready` at 503 and stopped
+  the service from starting until the job was deleted. When the config
+  declares no `webhook` block the run is reconciled as not requiring a
+  delivery; runs that declare one still fail closed.
 - The test suite no longer depends on the machine it runs on. Scrape admission
   sampled the test runner's real cgroup, so a developer host with a busy cgroup
   refused every scrape and about 150 tests failed; tests now disable memory

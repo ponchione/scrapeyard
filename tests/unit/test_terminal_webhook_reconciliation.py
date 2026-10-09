@@ -491,3 +491,46 @@ async def test_bad_candidate_is_rotated_behind_later_bounded_batch(
         event="job.complete",
     )
     assert await SQLiteWebhookOutboxStore().get_delivery(repaired_id) is not None
+
+
+async def test_unloadable_config_without_webhook_reconciles_as_not_required(
+    store: SQLiteJobStore,
+) -> None:
+    # A deployment secret removed after the run ended makes the snapshot
+    # unloadable; with no webhook block, no delivery can be owed.
+    await _terminal_without_intent(
+        store,
+        _yaml(webhook_on=None, target="example.com/${SCRAPEYARD_SECRET_GONE}"),
+        status=JobStatus.failed,
+    )
+
+    summary = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+    )
+
+    assert summary.inspected == 1
+    assert summary.not_required == 1
+    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    later = await reconcile_terminal_webhook_intents(
+        job_store=store,
+        result_store=_result_store(),
+    )
+    assert later.inspected == 0
+
+
+async def test_unloadable_config_with_webhook_still_fails_closed(
+    store: SQLiteJobStore,
+) -> None:
+    await _terminal_without_intent(
+        store,
+        _yaml(webhook_on="failed", target="example.com/${SCRAPEYARD_SECRET_GONE}"),
+        status=JobStatus.failed,
+    )
+
+    for _ in range(2):
+        with pytest.raises(TerminalIntentReconciliationError):
+            await reconcile_terminal_webhook_intents(
+                job_store=store,
+                result_store=_result_store(),
+            )

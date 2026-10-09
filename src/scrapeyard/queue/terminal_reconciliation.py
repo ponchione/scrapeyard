@@ -8,7 +8,9 @@ import logging
 from dataclasses import dataclass
 
 from scrapeyard.common.time import utc_now
+from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.config.loader import load_config
+from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.storage.protocols import JobStore, ResultStore
 from scrapeyard.storage.types import (
     ResultMetadata,
@@ -90,6 +92,41 @@ async def _load_result_metadata(
         )
         return None, True
     return metadata, False
+
+
+def _declares_webhook(config_yaml: str) -> bool:
+    """Whether raw YAML has a ``webhook`` block; YAML that cannot be read counts as one."""
+    try:
+        return load_yaml_mapping(config_yaml).get("webhook") is not None
+    except Exception:
+        return True
+
+
+async def _load_terminal_config(candidate: TerminalWebhookCandidate) -> ScrapeConfig | None:
+    """Load the run's config, or ``None`` when it cannot load and declares no webhook.
+
+    A config can stop loading after the run ends, for example when a referenced
+    deployment secret is removed or validation tightens. Without a ``webhook``
+    block no delivery could ever be owed, so the run reconciles as not required
+    instead of failing every pass. Runs that declare a webhook still fail closed.
+    """
+    try:
+        return await asyncio.to_thread(load_config, candidate.config_yaml)
+    except Exception as exc:
+        if await asyncio.to_thread(_declares_webhook, candidate.config_yaml):
+            raise
+        logger.warning(
+            "Terminal webhook config unloadable without a webhook "
+            "job_id=%s run_id=%s event=%s delivery_id=%s terminal_status=%s "
+            "recovery_action=config_unloadable_not_required error_type=%s",
+            candidate.job_id,
+            candidate.run_id,
+            _event(candidate),
+            _delivery_id(candidate),
+            candidate.status.value,
+            type(exc).__name__,
+        )
+        return None
 
 
 async def reconcile_terminal_webhook_intents(
@@ -174,19 +211,19 @@ async def reconcile_terminal_webhook_intents(
                     )
                 continue
 
-            config = await asyncio.to_thread(load_config, candidate.config_yaml)
             persisted_hash = hashlib.sha256(candidate.config_yaml.encode()).hexdigest()
             if persisted_hash != candidate.config_hash:
                 raise ValueError(
                     "Persisted job config no longer matches the terminal run config hash"
                 )
+            config = await _load_terminal_config(candidate)
 
-            webhook_required = (
-                config.webhook is not None
-                and should_fire(config.webhook, candidate.status)
-            )
             delivery = None
-            if webhook_required:
+            if (
+                config is not None
+                and config.webhook is not None
+                and should_fire(config.webhook, candidate.status)
+            ):
                 counts["required"] += 1
                 metadata: ResultMetadata | None = None
                 metadata_missing = False
