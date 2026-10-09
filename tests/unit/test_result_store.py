@@ -6,14 +6,13 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from unittest.mock import ANY, AsyncMock, call, patch
 
 import pytest
-from unittest.mock import ANY, AsyncMock, call, patch
 
 import scrapeyard.storage.result_store as result_store_module
 from scrapeyard.common.budgets import BudgetExceeded
-from scrapeyard.storage.database import get_db
-from scrapeyard.storage.database import init_db
+from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.result_store import LocalResultStore, SaveResultMeta
 from scrapeyard.storage.types import ResultArtifactReadError
 

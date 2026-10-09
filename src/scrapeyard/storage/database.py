@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.resources
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 
 import aiosqlite
 

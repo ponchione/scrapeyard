@@ -11,7 +11,6 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.config.schema import ScrapeConfig
 
-
 _SECRET_REFERENCE_RE = re.compile(r"\$\{(SCRAPEYARD_SECRET_[A-Z0-9_]+)\}")
 MIN_DEPLOYMENT_SECRET_LENGTH = 8
 

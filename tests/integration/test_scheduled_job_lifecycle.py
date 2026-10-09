@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from scrapeyard.api.dependencies import get_job_store, get_scheduler, get_worker_pool
+from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.secret_envelope import SecretKeyConfigurationError
-from scrapeyard.engine.scraper import TargetResult
 from tests.integration.conftest import poll_until_ready
 
 

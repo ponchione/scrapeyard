@@ -15,7 +15,6 @@ from scrapeyard.engine.rate_limiter import (
     RedisDomainRateLimiter,
 )
 
-
 # ---------------------------------------------------------------------------
 # LocalDomainRateLimiter
 # ---------------------------------------------------------------------------

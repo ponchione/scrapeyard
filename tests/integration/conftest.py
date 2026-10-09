@@ -22,12 +22,12 @@ from scrapeyard.api.dependencies import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
 from scrapeyard.main import app
-from scrapeyard.queue.worker import scrape_task
 from scrapeyard.queue.cancellation import (
     QueueCancellationOutcome,
     QueueDeliveryState,
     RunCancellationResult,
 )
+from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.database import close_db, init_db
 
 

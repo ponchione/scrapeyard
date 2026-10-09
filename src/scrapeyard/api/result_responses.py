@@ -18,7 +18,6 @@ from scrapeyard.api.serializers import serialize_result_response
 from scrapeyard.common.json_encoding import iter_json_bytes
 from scrapeyard.common.run_threads import OwnedThreadPool
 
-
 T = TypeVar("T")
 
 # A rendered body is sent in pieces of this size, so the server's flow control

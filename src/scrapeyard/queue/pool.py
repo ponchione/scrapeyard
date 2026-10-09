@@ -15,8 +15,8 @@ from arq.jobs import Job, ResultNotFound, serialize_job
 from arq.utils import timestamp_ms
 from arq.worker import Worker, func
 
-from scrapeyard.common.settings import get_settings
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.settings import get_settings
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import (
     QueueCancellationOutcome,
@@ -24,12 +24,12 @@ from scrapeyard.queue.cancellation import (
     RunCancellationResult,
 )
 from scrapeyard.queue.memory import memory_headroom_mb, release_memory
-from scrapeyard.runtime.metrics import MEMORY_DEFERRALS, mark_last_success
 from scrapeyard.queue.priority import (
     PRIORITIES,
     WeightedPriorityPolicy,
     priority_queue_names,
 )
+from scrapeyard.runtime.metrics import MEMORY_DEFERRALS, mark_last_success
 
 _ARQ_FUNCTION_NAME = "scrape_job"
 _KEEP_RESULT_SECONDS = 3600

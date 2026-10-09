@@ -4,8 +4,8 @@ import pytest
 import yaml
 
 from scrapeyard.common.yaml import MAX_YAML_NESTING, load_yaml_mapping
-from scrapeyard.config.transforms import parse_transform
 from scrapeyard.config.schema import PaginationConfig, SelectorLong, SelectorType
+from scrapeyard.config.transforms import parse_transform
 
 
 def test_parse_transform_join_func_syntax_raises():

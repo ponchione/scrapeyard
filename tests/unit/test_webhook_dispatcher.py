@@ -18,8 +18,8 @@ import pytest
 
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
-    URLResolutionError,
     ResolvedPublicURL,
+    URLResolutionError,
     resolve_public_url,
 )
 from scrapeyard.storage.webhook_outbox import (
@@ -36,7 +36,6 @@ from scrapeyard.webhook.dispatcher import (
     WebhookDispatchStatus,
     WebhookRequestConfig,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -948,8 +947,8 @@ class TestDurableOutboxDispatch:
 
 class TestDeliveryId:
     def test_payload_contains_delivery_id(self) -> None:
-        from scrapeyard.webhook.payload import build_webhook_payload
         from scrapeyard.models.job import JobStatus
+        from scrapeyard.webhook.payload import build_webhook_payload
 
         payload = build_webhook_payload(
             job_id="j1",
@@ -969,8 +968,8 @@ class TestDeliveryId:
         assert len(payload["delivery_id"]) == 69
 
     def test_same_logical_event_reuses_delivery_id(self) -> None:
-        from scrapeyard.webhook.payload import build_webhook_payload
         from scrapeyard.models.job import JobStatus
+        from scrapeyard.webhook.payload import build_webhook_payload
 
         p1 = build_webhook_payload(
             job_id="j1",

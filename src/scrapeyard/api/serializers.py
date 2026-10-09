@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import OrderedDict
 from datetime import datetime
-import hashlib
 from typing import Any
 
+from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.engine.url_guard import (
     redact_sensitive_config_text,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
 )
 from scrapeyard.models.job import ErrorRecord, Job, JobRun, JobSummary
-from scrapeyard.api.response_models import APICompatibility
 
 # Redacted job configs remembered by the SHA-256 of the stored config. Only
 # configs up to the size limit are kept, so the cache stays under ~2 MiB.

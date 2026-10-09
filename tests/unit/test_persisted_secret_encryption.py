@@ -23,7 +23,6 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
 )
 
-
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 CONFIG_SECRET = "proxy-password-sentinel"
 HEADER_SECRET = "webhook-bearer-sentinel"

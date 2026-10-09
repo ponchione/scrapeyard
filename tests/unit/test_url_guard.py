@@ -9,8 +9,9 @@ from urllib.parse import quote, quote_plus
 import pytest
 
 from scrapeyard.engine.url_guard import (
-    URLResolutionError,
     UnsafeURLError,
+    URLResolutionError,
+    _variants_longest_first as variants_longest_first,
     activate_deployment_secret_redaction,
     assert_public_url,
     canonical_url_origin,
@@ -21,11 +22,10 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
     redact_userinfo_in_text,
     redact_userinfo_in_url,
-    resolve_public_url,
     reset_deployment_secret_redaction,
+    resolve_public_url,
     url_host_label,
 )
-from scrapeyard.engine.url_guard import _variants_longest_first as variants_longest_first
 
 
 def test_counted_secret_redaction_handles_encoded_values_and_key_collisions() -> None:

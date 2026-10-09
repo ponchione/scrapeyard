@@ -27,7 +27,6 @@ from scrapeyard.storage.types import StaleQueuedJob
 from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.webhook.payload import deterministic_delivery_id
 
-
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 TIMEOUT = 300
 CONFIG_YAML = """

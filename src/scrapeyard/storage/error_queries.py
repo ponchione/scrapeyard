@@ -5,7 +5,6 @@ from __future__ import annotations
 from scrapeyard.common.dt import fmt_dt
 from scrapeyard.models.job import ErrorFilters
 
-
 ERROR_SELECT_COLUMNS = (
     "id",
     "job_id",

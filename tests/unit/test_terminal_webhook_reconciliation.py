@@ -18,8 +18,8 @@ from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import ResultMetadata, ScheduledJobMutationAction
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
-    WebhookFailureReason,
     WebhookDeliveryStatus,
+    WebhookFailureReason,
 )
 from scrapeyard.webhook.payload import deterministic_delivery_id
 

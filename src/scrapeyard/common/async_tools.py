@@ -7,7 +7,6 @@ from collections.abc import Awaitable
 from contextlib import suppress
 from typing import Any, TypeVar
 
-
 T = TypeVar("T")
 
 

@@ -9,7 +9,6 @@ from scrapeyard.storage.database import init_db
 from scrapeyard.storage.job_store import DuplicateJobError, SQLiteJobStore
 from scrapeyard.storage.types import ScheduledJobMutationAction
 
-
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 
 

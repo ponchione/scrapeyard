@@ -11,7 +11,7 @@ from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.run_threads import RunThreadPool, run_thread_work
 from scrapeyard.config.schema import BrowserActionConfig, RetryConfig
 from scrapeyard.engine.browser_debug import run_browser_actions
-from scrapeyard.engine.resilience import RetryHandler, RetryableError
+from scrapeyard.engine.resilience import RetryableError, RetryHandler
 from scrapeyard.engine.scraper import _acquire_request_rate_limit
 
 
@@ -262,6 +262,7 @@ async def test_request_reservations_are_shared_and_settle_only_unused_redirect_c
 
 def test_submitted_caps_can_only_shorten_service_limits():
     from types import SimpleNamespace
+
     from scrapeyard.config.schema import ExecutionConfig
     budget = RunBudget.from_settings(SimpleNamespace(run_max_requests=200), execution=ExecutionConfig(
         max_requests=20, max_fetched_bytes=1024, max_extracted_records=5, max_serialized_result_bytes=4096))
@@ -273,6 +274,7 @@ def test_submitted_caps_can_only_shorten_service_limits():
 @pytest.mark.parametrize("value", [True, 0, -1, 1.5, "10000"])
 def test_submitted_budget_caps_reject_ambiguous_or_unbounded_values(field, value):
     from pydantic import ValidationError
+
     from scrapeyard.config.schema import ExecutionConfig
     with pytest.raises(ValidationError):
         ExecutionConfig(**{field: value})

@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.storage.cleanup import CleanupCycleOutcome, start_cleanup_loop
 from scrapeyard.runtime.background import BackgroundLoopMonitor
 from scrapeyard.runtime.health import probe_background_service
+from scrapeyard.storage.cleanup import CleanupCycleOutcome, start_cleanup_loop
 
 
 @pytest.mark.asyncio

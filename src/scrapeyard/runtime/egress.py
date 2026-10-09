@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import errno
 import logging
 import secrets
+from contextlib import suppress
 
 from scrapeyard.common.settings import ServiceSettings
-
 
 logger = logging.getLogger(__name__)
 

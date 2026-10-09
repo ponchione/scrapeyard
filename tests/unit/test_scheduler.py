@@ -1,8 +1,8 @@
 """Tests for scrapeyard.scheduler.cron — SchedulerService."""
 
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
@@ -13,7 +13,6 @@ from scrapeyard.queue.pool import QueueDeliveryState
 from scrapeyard.scheduler.cron import SchedulerService, SchedulerUnavailableError
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
-
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 CONFIG_YAML = """

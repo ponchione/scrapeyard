@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from scrapeyard.queue.memory import memory_headroom_mb
 from scrapeyard.runtime.metrics import MEMORY_DEFERRALS

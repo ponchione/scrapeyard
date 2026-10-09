@@ -16,12 +16,12 @@ from typing import Any, Protocol
 
 import httpx
 
-from scrapeyard.common.time import utc_now
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
-    URLResolutionError,
     UnsafeURLError,
+    URLResolutionError,
     resolve_public_url,
 )
 from scrapeyard.runtime.metrics import RETRIES, WEBHOOK_DELIVERIES, mark_last_success

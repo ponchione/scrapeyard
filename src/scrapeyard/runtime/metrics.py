@@ -18,7 +18,6 @@ from prometheus_client import (
 
 from scrapeyard.storage.types import CleanupBacklogSnapshot
 
-
 REGISTRY = CollectorRegistry(auto_describe=True)
 ProcessCollector(registry=REGISTRY)
 ADMISSION_REJECTIONS = Counter(

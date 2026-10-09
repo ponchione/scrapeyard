@@ -12,10 +12,10 @@ from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.types import SaveResultMeta
 from tests.unit.worker_helpers import (
     finalized_status,
+    make_config_mock,
     make_job,
     make_settings_mock,
     make_target,
-    make_config_mock,
 )
 
 

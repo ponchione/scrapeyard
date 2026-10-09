@@ -14,17 +14,16 @@ from scrapeyard.api.dependencies import (
     get_worker_pool,
 )
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.models.job import JobStatus
-from scrapeyard.models.job import Job
+from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.queue.cancellation import (
     QueueCancellationOutcome,
     RunCancellationResult,
 )
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
     WebhookDeliveryCreate,
 )
-from scrapeyard.storage.database import get_db
 from tests.integration.conftest import poll_until_ready
 
 
@@ -488,6 +487,7 @@ async def test_expected_run_cancellation_rejects_wrong_owner_before_side_effects
 async def test_exact_run_lookup_reads_old_run_beyond_latest_ten_and_never_substitutes(client, monkeypatch):
     import hashlib
     from datetime import timedelta
+
     from scrapeyard.storage.secret_envelope import protect_text
 
     store = get_job_store()

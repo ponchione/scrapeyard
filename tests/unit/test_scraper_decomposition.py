@@ -15,15 +15,15 @@ from scrapeyard.engine.adaptive_diagnostics import (
     log_adaptive_selector_gap,
     missing_adaptive_selectors,
 )
-from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
 from scrapeyard.engine.basic_fetch import BasicSession, _request_headers
+from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
 from scrapeyard.engine.resilience import RetryHandler
 from scrapeyard.engine.scraper import (
     _fetch_basic_with_safe_redirects,
     _fetch_page,
     _fetch_target_page,
 )
-from scrapeyard.engine.url_guard import ResolvedPublicURL, URLResolutionError, UnsafeURLError
+from scrapeyard.engine.url_guard import ResolvedPublicURL, UnsafeURLError, URLResolutionError
 from tests.unit.browser_fakes import ScriptedBrowserSession
 
 

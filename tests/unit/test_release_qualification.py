@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -11,13 +11,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from scripts.qualification_backup import (
-    REQUIRED_MIGRATION_FILES,
-    BackupError,
-    create_backup,
-    restore_backup,
-    validate_backup,
-)
 from scrapeyard.common.qualification import (
     QUALIFICATION_CRASH_POINTS,
     QUALIFICATION_SENTINEL_CONTENT,
@@ -25,6 +18,13 @@ from scrapeyard.common.qualification import (
 )
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.storage.database import _DB_MIGRATIONS
+from scripts.qualification_backup import (
+    REQUIRED_MIGRATION_FILES,
+    BackupError,
+    create_backup,
+    restore_backup,
+    validate_backup,
+)
 from tests.qualification.run_qualification import (
     CRASH_EXPECTATIONS,
     Thresholds,

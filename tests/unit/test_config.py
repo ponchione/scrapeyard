@@ -23,10 +23,9 @@ from scrapeyard.config import (
     parse_transform,
     parse_transform_pipeline,
 )
-from scrapeyard.config.transforms import split_transform_pipeline
 from scrapeyard.config.schema import (
-    MAX_BROWSER_ACTIONS,
     MAX_BROWSER_ACTION_REPEAT,
+    MAX_BROWSER_ACTIONS,
     MAX_BROWSER_HUMANIZE_SECONDS,
     MAX_BROWSER_TIMEOUT_MS,
     MAX_BROWSER_WAIT_MS,
@@ -37,22 +36,22 @@ from scrapeyard.config.schema import (
     MAX_EXECUTION_CONCURRENCY,
     MAX_EXECUTION_DELAY_SECONDS,
     MAX_PAGINATION_PAGES,
+    MAX_REQUIRED_FIELDS,
     MAX_RETRY_ATTEMPTS,
     MAX_RETRY_BACKOFF_SECONDS,
     MAX_RETRYABLE_STATUSES,
-    MAX_REQUIRED_FIELDS,
     MAX_TARGETS_PER_JOB,
     MAX_WEBHOOK_TIMEOUT_SECONDS,
-    BrowserConfig,
     BrowserActionConfig,
+    BrowserConfig,
     ExecutionConfig,
     PaginationConfig,
     RetryConfig,
-    StrictConfigModel,
     StockPatternConfig,
+    StrictConfigModel,
     ValidationConfig,
 )
-
+from scrapeyard.config.transforms import split_transform_pipeline
 
 # --- Helpers ---
 

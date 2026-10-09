@@ -39,6 +39,7 @@ from scrapeyard.storage.job_rows import (
     row_to_schedule_state,
 )
 from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS, select_columns
+from scrapeyard.storage.secret_envelope import protect_text, reveal_text
 from scrapeyard.storage.types import (
     CancellationOutcome,
     CleanupBacklogSnapshot,
@@ -56,8 +57,6 @@ from scrapeyard.storage.types import (
     TerminalWebhookCandidate,
 )
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
-from scrapeyard.storage.secret_envelope import protect_text, reveal_text
-
 
 _SCHEDULE_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # Exact-run identities remembered by verified config hash (see get_job_run_state).

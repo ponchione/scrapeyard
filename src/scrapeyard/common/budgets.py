@@ -14,7 +14,6 @@ from typing import Any, Awaitable, NoReturn, TypeVar
 from scrapeyard.common.async_tools import cancel_task_nowait
 from scrapeyard.common.traffic import HostTraffic
 
-
 T = TypeVar("T")
 NumericLimit = int | float
 _DEFAULT_MAX_DURATION_SECONDS = 900.0

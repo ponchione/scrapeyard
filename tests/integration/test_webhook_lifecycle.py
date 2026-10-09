@@ -7,9 +7,8 @@ from datetime import timedelta
 
 import pytest
 
-from tests.integration.conftest import poll_until_ready
-from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.common.time import utc_now
+from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
 from scrapeyard.storage.cleanup import run_cleanup
 from scrapeyard.storage.database import get_db
@@ -18,6 +17,7 @@ from scrapeyard.webhook.dispatcher import (
     WebhookDispatchResult,
     WebhookDispatchStatus,
 )
+from tests.integration.conftest import poll_until_ready
 
 
 def _webhook_yaml(webhook_url: str) -> str:

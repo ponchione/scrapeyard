@@ -35,18 +35,19 @@ from scrapeyard.config.schema import (
     SelectorValue,
     TargetConfig,
 )
-from scrapeyard.engine.url_guard import (
-    URLResolutionError,
-    UnsafeURLError,
-    assert_public_url,
-    canonical_url_origin,
-    redact_sensitive_mapping,
-)
-from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
 from scrapeyard.engine.basic_fetch import fetch_streaming_response
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.scrape_models import ClickPaginationSpec
 from scrapeyard.engine.subrequest_filter import SubrequestFilter
+from scrapeyard.engine.url_guard import (
+    UnsafeURLError,
+    URLResolutionError,
+    assert_public_url,
+    canonical_url_origin,
+    redact_sensitive_mapping,
+    redact_userinfo_in_text,
+    redact_userinfo_in_url,
+)
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,

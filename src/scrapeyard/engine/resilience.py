@@ -14,11 +14,11 @@ import httpx
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import BackoffStrategy, OnEmptyAction, RetryConfig, ValidationConfig
+from scrapeyard.engine.url_guard import URLResolutionError
 from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
 )
-from scrapeyard.engine.url_guard import URLResolutionError
 from scrapeyard.runtime.metrics import RETRIES
 
 T = TypeVar("T")

@@ -19,7 +19,6 @@ from scrapeyard.models.job import ErrorType
 from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from tests.integration.conftest import poll_until_ready
 
-
 SENTINEL = "deployment-secret-sentinel-91a7"
 
 

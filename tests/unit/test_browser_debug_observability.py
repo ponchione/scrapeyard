@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
+from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.engine.browser_debug import (
     BrowserPageActionError,
     BrowserTransportTimeout,
@@ -20,7 +20,7 @@ from scrapeyard.engine.browser_debug import (
     fetch_browser_response,
     run_browser_actions,
 )
-from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
+from scrapeyard.engine.url_guard import UnsafeURLError, URLResolutionError
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from tests.unit.browser_fakes import ScriptedBrowserSession
 
@@ -1007,6 +1007,7 @@ async def test_browser_limiter_survives_repeated_outer_cancellation() -> None:
 
 def test_scrapling_response_debug_reads_document_instead_of_root_node_text():
     from scrapling.engines.toolbelt.custom import Response
+
     from scrapeyard.engine.browser_debug import populate_fetch_debug
     from scrapeyard.engine.fetch_classifier import classify_page_signals
     from scrapeyard.models.job import ErrorType

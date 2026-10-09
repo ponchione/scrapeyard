@@ -476,7 +476,7 @@ def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
             if _is_sensitive_key(str(key)):
                 redacted[redacted_key] = _REDACTED_VALUE
             elif normalized in _SECRET_CONTAINER_KEYS and isinstance(item, Mapping):
-                redacted[redacted_key] = {header: _REDACTED_VALUE for header in item}
+                redacted[redacted_key] = dict.fromkeys(item, _REDACTED_VALUE)
             else:
                 redacted[redacted_key] = redact_sensitive_mapping(
                     item,

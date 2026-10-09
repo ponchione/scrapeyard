@@ -11,8 +11,8 @@ from scrapeyard.engine.fetch_classifier import (
     classify_page_signals,
     classify_rendered_outcome,
 )
-from scrapeyard.engine.scraper import FetchError
 from scrapeyard.engine.resilience import RetryableError
+from scrapeyard.engine.scraper import FetchError
 from scrapeyard.models.job import ErrorType
 
 

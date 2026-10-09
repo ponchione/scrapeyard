@@ -10,7 +10,6 @@ from scrapeyard.common.dt import parse_dt
 from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
 from scrapeyard.storage.secret_envelope import reveal_text
 
-
 RowMapping = Mapping[str, object]
 
 

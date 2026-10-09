@@ -1,12 +1,13 @@
 """Test result retention auto-cleanup."""
 
 import asyncio
-
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
+from scrapeyard.models.job import JobStatus
+from scrapeyard.runtime.metrics import CLEANUP_ARTIFACT_FINDINGS
 from scrapeyard.storage.cleanup import (
     CleanupCycleOutcome,
     CleanupIncompleteError,
@@ -14,17 +15,15 @@ from scrapeyard.storage.cleanup import (
     _CleanupCycleBudget,
     run_cleanup,
 )
-from scrapeyard.models.job import JobStatus
-from scrapeyard.runtime.metrics import CLEANUP_ARTIFACT_FINDINGS
 from scrapeyard.storage.types import (
     DeletionFinalizationAction,
     DeletionFinalizationOutcome,
     DeletionReservationAction,
     DeletionReservationOutcome,
     HistoryPruneResult,
+    ReconciliationOperationFailure,
     ResultArtifactFailure,
     ResultArtifactFailureKind,
-    ReconciliationOperationFailure,
     ResultReconciliationReport,
 )
 from scrapeyard.storage.webhook_outbox import WebhookRetentionSummary

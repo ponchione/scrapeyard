@@ -11,13 +11,13 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
-from tldextract import tldextract
 from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 from scrapling.engines.toolbelt.fingerprints import (
     generate_convincing_referer as generate_convincing_referer,
     generate_headers,
 )
+from tldextract import tldextract
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.traffic import OFFLINE_TLD_EXTRACTOR

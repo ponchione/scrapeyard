@@ -12,7 +12,6 @@ from pydantic_settings import BaseSettings
 
 from scrapeyard.engine.proxy import normalize_service_proxy_url
 
-
 _SECRET_REFERENCE_NAME_RE = re.compile(r"^SCRAPEYARD_SECRET_[A-Z0-9_]+$")
 
 

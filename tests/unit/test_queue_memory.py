@@ -1,11 +1,11 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
-import asyncio
 import pytest
 
-from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue import memory
+from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.memory import (
     freeze_startup_heap,
     get_process_rss_mb,

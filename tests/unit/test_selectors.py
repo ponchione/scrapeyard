@@ -13,9 +13,9 @@ from scrapling import Adaptor
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import (
-    MAX_SELECTORS_PER_TARGET,
     MAX_SELECTOR_FIELD_NAME_CHARS,
     MAX_SELECTOR_QUERY_CHARS,
+    MAX_SELECTORS_PER_TARGET,
     SelectorLong,
     SelectorType,
     TargetConfig,

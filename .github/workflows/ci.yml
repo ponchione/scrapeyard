@@ -51,7 +51,7 @@ jobs:
           poetry check --lock
           poetry sync --no-interaction
       - name: Lint
-        run: poetry run ruff check src tests scripts
+        run: poetry run ruff check src tests scripts security
       - name: Type check
         run: poetry run mypy src
       - name: Test with coverage

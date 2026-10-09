@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException
 
 from scrapeyard import __version__
+from scrapeyard.api.auth import AuthScope, authorize_request, parse_api_credentials
 from scrapeyard.api.dependencies import (
     RuntimeServices,
     build_runtime_services,
@@ -37,8 +38,6 @@ from scrapeyard.api.middleware import (
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
 )
-from scrapeyard.api.auth import AuthScope, authorize_request, parse_api_credentials
-from scrapeyard.api.routes import router
 from scrapeyard.api.response_models import (
     ERROR_RESPONSES,
     ErrorEnvelope,
@@ -46,8 +45,9 @@ from scrapeyard.api.response_models import (
     LivenessResponse,
 )
 from scrapeyard.api.response_utils import error_content
-from scrapeyard.common.logging import setup_logging
+from scrapeyard.api.routes import router
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.queue.memory import freeze_startup_heap, memory_headroom_mb, thaw_startup_heap
@@ -61,19 +61,19 @@ from scrapeyard.queue.running_reconciliation import (
 from scrapeyard.queue.terminal_reconciliation import (
     reconcile_terminal_webhook_intents,
 )
+from scrapeyard.runtime.background import BackgroundLoopMonitor
+from scrapeyard.runtime.egress import attest_connected_ip_policy
 from scrapeyard.runtime.health import (
     HealthCache,
     ProbeResult,
     ProjectSummary,
     SingleFlightSyncProbe,
-    probe_disk,
     probe_background_service,
+    probe_disk,
     probe_redis,
     probe_result_storage,
     probe_sqlite,
 )
-from scrapeyard.runtime.background import BackgroundLoopMonitor
-from scrapeyard.runtime.egress import attest_connected_ip_policy
 from scrapeyard.runtime.instance_guard import (
     SingleInstanceLock,
     instance_identity,
@@ -96,12 +96,11 @@ from scrapeyard.runtime.metrics import (
 )
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
-from scrapeyard.storage.secret_envelope import migrate_persisted_secrets
 from scrapeyard.storage.secret_envelope import (
     EncryptionKeyring,
     SecretKeyConfigurationError,
+    migrate_persisted_secrets,
 )
-
 
 _health = HealthCache(get_job_store)
 logger = logging.getLogger(__name__)

@@ -15,7 +15,6 @@ from fastapi import Request
 from scrapeyard.api.response_utils import raise_json_error
 from scrapeyard.common.paths import safe_path_part
 
-
 _CREDENTIAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 

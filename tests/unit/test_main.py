@@ -12,11 +12,6 @@ import pytest
 from fastapi import FastAPI
 
 import scrapeyard.main as main_module
-from scrapeyard.queue.reconciliation import (
-    QueuedReconciliationError,
-    QueuedReconciliationSummary,
-)
-from scrapeyard.runtime.instance_guard import SingleInstanceError
 from scrapeyard.api.middleware import (
     APIKeyAuthMiddleware,
     APIVersionHeaderMiddleware,
@@ -24,6 +19,11 @@ from scrapeyard.api.middleware import (
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
 )
+from scrapeyard.queue.reconciliation import (
+    QueuedReconciliationError,
+    QueuedReconciliationSummary,
+)
+from scrapeyard.runtime.instance_guard import SingleInstanceError
 from scrapeyard.storage.types import RunRecovery
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 

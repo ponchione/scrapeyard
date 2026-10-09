@@ -41,7 +41,7 @@ include = [{path = "sql/*.sql", format = ["sdist", "wheel"]}]
 pytest = "^9.0.3"
 pytest-asyncio = "^1.3.0"
 pytest-timeout = "^2.4.0"
-ruff = "^0.9"
+ruff = "^0.16.9"
 respx = "^0.22.0"
 pytest-cov = "^6.0"
 mypy = "^1.20.0"
@@ -63,13 +63,18 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "I", "UP", "C4", "SIM"]
-ignore = ["E501", "I001", "UP035", "UP038", "SIM105", "SIM110"]
+ignore = ["E501", "UP035", "SIM105", "SIM110"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/scrapeyard/api/routes.py" = ["B008"]
-"src/scrapeyard/config/schema.py" = ["UP007"]
-"src/scrapeyard/models/job.py" = ["UP007"]
+# The models keep Optional/Union spellings; ruff 0.10 moved Optional to UP045.
+"src/scrapeyard/config/schema.py" = ["UP007", "UP045"]
+"src/scrapeyard/models/job.py" = ["UP007", "UP045"]
 "tests/**/*.py" = ["B007", "C408", "SIM117"]
+
+[tool.ruff.lint.isort]
+# Keep `import x as x` re-exports in the same statement as their siblings.
+combine-as-imports = true
 
 [tool.mypy]
 python_version = "3.10"

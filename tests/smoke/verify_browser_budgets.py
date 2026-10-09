@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 from scrapling import PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
-from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.browser_debug import _capture_html_excerpt
+from scrapeyard.engine.browser_session import BrowserSession
 
 
 class Fixture(BaseHTTPRequestHandler):

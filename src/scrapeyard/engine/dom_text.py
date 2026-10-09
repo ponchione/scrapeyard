@@ -7,7 +7,6 @@ from typing import cast
 
 from lxml import etree  # type: ignore[import-untyped]
 
-
 _NON_VISIBLE_TAGS = {"script", "style"}
 
 

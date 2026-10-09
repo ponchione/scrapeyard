@@ -1,7 +1,7 @@
 """Tests for scrapeyard.common.logging — JSON formatter correctness."""
 
-import json
 import io
+import json
 import logging
 
 from scrapling.engines.toolbelt.custom import Response

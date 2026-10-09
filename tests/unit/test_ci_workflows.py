@@ -6,7 +6,6 @@ from typing import Any
 
 import yaml
 
-
 WORKFLOWS = Path(".github/workflows")
 
 
@@ -35,7 +34,7 @@ def test_ci_required_gate_contracts() -> None:
         "poetry check --lock",
         "poetry sync --no-interaction",
         "python scripts/check_packaging_toolchain.py",
-        "poetry run ruff check src tests scripts",
+        "poetry run ruff check src tests scripts security",
         "poetry run mypy src",
         "poetry run pytest",
     ):

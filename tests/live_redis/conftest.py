@@ -13,6 +13,7 @@ from arq.connections import RedisSettings, create_pool
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from scrapeyard.api.auth import parse_api_credentials
 from scrapeyard.api.dependencies import (
     close_webhook_dispatcher,
     get_scheduler,
@@ -20,12 +21,10 @@ from scrapeyard.api.dependencies import (
 )
 from scrapeyard.common.settings import get_settings
 from scrapeyard.main import app
-from scrapeyard.api.auth import parse_api_credentials
 from scrapeyard.storage.database import close_db, init_db
 
 
 def _clear_singletons() -> None:
-    from scrapeyard.common.settings import get_settings as _get_settings
     from scrapeyard.api.dependencies import (
         get_circuit_breaker as _get_circuit_breaker,
         get_error_store as _get_error_store,
@@ -36,6 +35,7 @@ def _clear_singletons() -> None:
         get_webhook_outbox_store as _get_webhook_outbox_store,
         get_worker_pool as _get_worker_pool,
     )
+    from scrapeyard.common.settings import get_settings as _get_settings
 
     for cached_fn in [
         _get_settings,

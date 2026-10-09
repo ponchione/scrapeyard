@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from scrapeyard.common.yaml import MAX_YAML_NESTING
-
 from scrapeyard.api.dependencies import get_worker_pool
+from scrapeyard.common.yaml import MAX_YAML_NESTING
 
 
 @pytest.mark.asyncio

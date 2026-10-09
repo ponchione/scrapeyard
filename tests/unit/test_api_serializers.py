@@ -8,9 +8,10 @@ from scrapeyard.api.serializers import (
     redact_job_config,
     serialize_error_record,
     serialize_job_detail,
-    serialize_job_summary,
     serialize_job_run,
+    serialize_job_summary,
 )
+from scrapeyard.engine.url_guard import redact_sensitive_config_text
 from scrapeyard.models.job import (
     ActionTaken,
     BudgetErrorDetails,
@@ -19,7 +20,6 @@ from scrapeyard.models.job import (
     JobRun,
     JobStatus,
 )
-from scrapeyard.engine.url_guard import redact_sensitive_config_text
 from tests.unit.worker_helpers import make_job
 
 

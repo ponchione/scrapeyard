@@ -12,7 +12,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-
 PUBLIC_ORIGIN = "http://fixture.public.test:8080"
 PRIVATE_ORIGIN = "http://fixture.private.test:8080"
 

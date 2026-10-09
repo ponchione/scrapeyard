@@ -58,6 +58,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Development: ruff is upgraded to 0.16, import order is now enforced, and
+  the Python helpers under `security/` are linted. The README settings
+  table now lists every `SCRAPEYARD_*` setting with its default, checked
+  against the code by a test.
 - The container image no longer installs Chromium headless shells, which
   are never launched, or C build packages, which no locked dependency
   needs; it is 595 MB smaller uncompressed (4,018 MB to 3,423 MB).

@@ -8,9 +8,9 @@ from functools import lru_cache
 
 from arq.connections import ArqRedis, RedisSettings
 
-from scrapeyard.common.settings import get_settings
-from scrapeyard.common.run_threads import RunThreadPool
 from scrapeyard.api.result_responses import ResultResponseThreadPool
+from scrapeyard.common.run_threads import RunThreadPool
+from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.engine.domain_guard import DomainGuard, LocalDomainGuard, RedisDomainGuard
 from scrapeyard.engine.rate_limiter import (
@@ -19,19 +19,18 @@ from scrapeyard.engine.rate_limiter import (
     RedisDomainRateLimiter,
 )
 from scrapeyard.engine.resilience import CircuitBreaker
-from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
-from scrapeyard.queue.worker import scrape_task
+from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
+from scrapeyard.queue.worker import scrape_task
 from scrapeyard.scheduler.cron import SchedulerService
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore, WebhookOutboxStore
 from scrapeyard.storage.result_store import LocalResultStore
-from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.storage.types import RunOwnershipError
+from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
-
 
 logger = logging.getLogger(__name__)
 

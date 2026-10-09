@@ -8,6 +8,8 @@ import pytest
 from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 
+from scrapeyard.api.transport_policy import enforce_submission_page_cache_policy
+from scrapeyard.config.loader import load_config
 from scrapeyard.config.schema import (
     ExecutionConfig,
     FetcherType,
@@ -15,8 +17,6 @@ from scrapeyard.config.schema import (
     RetryConfig,
     TargetConfig,
 )
-from scrapeyard.api.transport_policy import enforce_submission_page_cache_policy
-from scrapeyard.config.loader import load_config
 from scrapeyard.engine import pagination
 from scrapeyard.engine.domain_guard import (
     LocalDomainGuard,

@@ -19,7 +19,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from scrapeyard.common.settings import get_settings
 from scrapeyard.storage.database import db_transaction, get_db
 
-
 _PREFIX = "syenc:v1:"
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 

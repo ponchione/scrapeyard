@@ -19,7 +19,6 @@ from scrapeyard.main import http_exception_handler, request_validation_exception
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.database import get_db
 
-
 SECRETS = {
     "reader": "reader-secret-0000000000",
     "submitter": "submit-secret-0000000000",

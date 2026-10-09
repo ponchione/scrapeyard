@@ -8,8 +8,8 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from arq.constants import abort_jobs_ss, job_key_prefix
 from arq.connections import RedisSettings
+from arq.constants import abort_jobs_ss, job_key_prefix
 
 from scrapeyard.api.dependencies import (
     get_job_store,

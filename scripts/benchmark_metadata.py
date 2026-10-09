@@ -40,7 +40,6 @@ from scrapeyard.models.job import ActionTaken, ErrorRecord, ErrorType, Job, JobS
 from scrapeyard.storage import database
 from scrapeyard.webhook.payload import build_terminal_webhook_delivery
 
-
 LAYOUTS = ("separate", "shared_connection", "shared_file")
 CONFIG = """project: benchmark
 name: benchmark

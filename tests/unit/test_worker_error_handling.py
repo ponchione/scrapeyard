@@ -16,9 +16,9 @@ from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.error_records import TargetErrorRecorder
 from scrapeyard.queue.target_execution import TargetRuntimeContext
 from scrapeyard.queue.worker import _fetch_and_validate_target, scrape_task
-from scrapeyard.storage.types import RunOwnershipError
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.types import RunOwnershipError
 from tests.unit.worker_helpers import (
     SIMPLE_YAML,
     finalized_status,

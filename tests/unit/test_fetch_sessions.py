@@ -5,8 +5,8 @@ from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit
 
-import pytest
 import httpx
+import pytest
 from scrapling import PlayWrightFetcher
 
 from scrapeyard.common.async_tools import await_cleanup

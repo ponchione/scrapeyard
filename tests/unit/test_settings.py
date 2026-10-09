@@ -698,10 +698,11 @@ class TestInitRateLimiter:
 
     def test_returns_local_when_shared_disabled(self, monkeypatch):
         monkeypatch.setenv("SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED", "false")
+        from unittest.mock import MagicMock
+
         from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
         from scrapeyard.common.settings import get_settings
         from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
-        from unittest.mock import MagicMock
 
         get_settings.cache_clear()
         try:
@@ -712,9 +713,10 @@ class TestInitRateLimiter:
             get_settings.cache_clear()
 
     def test_returns_redis_when_shared_and_redis_provided(self):
+        from unittest.mock import MagicMock
+
         from scrapeyard.api.dependencies import init_rate_limiter, reset_rate_limiter
         from scrapeyard.engine.rate_limiter import RedisDomainRateLimiter
-        from unittest.mock import MagicMock
 
         try:
             limiter = init_rate_limiter(redis=MagicMock())

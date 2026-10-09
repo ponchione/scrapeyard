@@ -573,8 +573,8 @@ history is compacted.
 
 ## Settings
 
-All service settings use the `SCRAPEYARD_` prefix. The most commonly changed
-settings are:
+All service settings use the `SCRAPEYARD_` prefix and are listed below with
+their code defaults.
 
 The base Compose deployment passes every runtime setting through from the shell
 or `.env` while retaining its checked-in default. The three
@@ -590,6 +590,8 @@ profile.
 | `SCRAPEYARD_ENCRYPTION_KEYS` | empty | Required JSON key-ID to base64 32-byte AES key map for persisted secrets; startup fails while empty |
 | `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID` | empty | Required key ID used for new writes and startup rotation |
 | `SCRAPEYARD_HEALTH_PROBE_TIMEOUT_SECONDS` | `2` | Per-operation timeout for detailed readiness probes and metric snapshots |
+| `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB` | `100` | Minimum free MiB on the result storage volume; readiness fails below it |
+| `SCRAPEYARD_HEALTH_INCLUDE_PROJECTS` | `false` | Include per-project job counts in `/health/ready` |
 | `SCRAPEYARD_UNTRUSTED_SUBMISSIONS` | `false` (`true` in production Compose) | Require the operator proxy and policy probe; restrict submitted proxy/CDP overrides to `transport-admin` callers |
 | `SCRAPEYARD_PROXY_URL` | empty | Operator-controlled default proxy; required and cannot be `direct` in untrusted-submission mode. `{session}` in the credentials becomes one random token per run |
 | `SCRAPEYARD_EGRESS_POLICY_PROBE_HOST` | empty (`172.30.0.248` in production Compose) | Controlled non-public numeric address hosting the two-channel policy probe |
@@ -601,14 +603,19 @@ profile.
 | `SCRAPEYARD_QUEUE_NAME` | `scrapeyard` | Base arq execution queue; priority intake queues append `:priority:high`, `:priority:normal`, and `:priority:low` |
 | `SCRAPEYARD_DB_DIR` | `/data/db` | SQLite database directory |
 | `SCRAPEYARD_STORAGE_RESULTS_DIR` | `/data/results` | Result artifact directory |
+| `SCRAPEYARD_STORAGE_RETENTION_DAYS` | `30` | Age after which stored result artifacts become eligible for deletion |
+| `SCRAPEYARD_STORAGE_MAX_RESULTS_PER_JOB` | `100` | Newest result artifacts kept per job |
+| `SCRAPEYARD_STORAGE_CLEANUP_INTERVAL_SECONDS` | `21600` | Interval between storage cleanup and reconciliation cycles |
 | `SCRAPEYARD_STORAGE_CLEANUP_BATCH_SIZE` | `500` | Maximum result metadata rows or filesystem entries processed per bounded transaction/reconciliation cursor page |
 | `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_ITEMS_PER_PHASE` | `10000` | Maximum eligible items drained per retention category in one maintenance cycle |
 | `SCRAPEYARD_STORAGE_CLEANUP_CYCLE_MAX_SECONDS` | `60` | Shared elapsed-time ceiling for one cleanup cycle |
 | `SCRAPEYARD_STORAGE_CLEANUP_CATCHUP_DELAY_SECONDS` | `5` | Delay before another cycle when a cleanup budget is saturated |
 | `SCRAPEYARD_STORAGE_ORPHAN_GRACE_SECONDS` | `86400` | Minimum artifact age before orphan/temp removal eligibility |
 | `SCRAPEYARD_STORAGE_RECONCILIATION_DRY_RUN` | `true` | Report eligible orphan/temp removals without changing files |
+| `SCRAPEYARD_STORAGE_RECONCILIATION_MAX_ENTRIES_PER_RUN` | `10000` | Maximum filesystem entries in one run's artifact tree before reconciliation records a scan failure and leaves it untouched |
 | `SCRAPEYARD_ADAPTIVE_DIR` | `/data/adaptive` | Scrapling adaptive state directory |
 | `SCRAPEYARD_LOG_DIR` | `/data/logs` | Log directory |
+| `SCRAPEYARD_LOG_LEVEL` | `INFO` | Python logging level name, such as `DEBUG` or `WARNING` |
 | `SCRAPEYARD_SYNC_TIMEOUT_SECONDS` | `15` | Max wait for sync scrape responses |
 | `SCRAPEYARD_SYNC_POLL_DELAY_SECONDS` | `0.5` | Sync response polling interval |
 | `SCRAPEYARD_IDEMPOTENCY_KEY_MAX_BYTES` | `128` | Maximum visible-ASCII idempotency key length |
@@ -617,6 +624,8 @@ profile.
 | `SCRAPEYARD_RATE_LIMIT_REQUESTS` | `600` | Maximum API requests per caller in one sliding window; `0` disables the limiter |
 | `SCRAPEYARD_RATE_LIMIT_WINDOW_SECONDS` | `60` | API sliding-window length in seconds |
 | `SCRAPEYARD_RATE_LIMIT_MAX_KEYS` | `10000` | Maximum live API-key/client-IP rate-limit buckets; new identities are refused at saturation |
+| `SCRAPEYARD_ADMIN_READ_DEFAULT_LIMIT` | `100` | Page size for `GET /jobs` and `GET /errors` without a `limit` |
+| `SCRAPEYARD_ADMIN_READ_MAX_LIMIT` | `500` | Largest accepted `limit` for `GET /jobs` and `GET /errors`; larger values return 400 |
 | `SCRAPEYARD_DOMAIN_RATE_LIMIT_SHARED` | `true` | Use Redis for cross-job domain pacing when the queue connection is available |
 | `SCRAPEYARD_DOMAIN_RATE_LIMIT_MAX_DOMAINS` | `10000` | Maximum process-local domain pacing entries when shared pacing is disabled |
 | `SCRAPEYARD_DOMAIN_DAILY_PAGE_LIMIT` | `0` | Top-level page attempts per host per UTC day across all runs; `0` is unlimited (pages are still counted) |
@@ -631,9 +640,13 @@ profile.
 | `SCRAPEYARD_HISTORY_SCHEDULED_RUN_CLEANUP_BATCH_SIZE` | `500` | Maximum scheduled runs selected per bounded cleanup transaction |
 | `SCRAPEYARD_HISTORY_ERROR_CLEANUP_BATCH_SIZE` | `1000` | Maximum error rows removed per cleanup operation |
 | `SCRAPEYARD_SCHEDULER_MISFIRE_GRACE_SECONDS` | `60` | Maximum lateness for one coalesced in-process cron fire |
+| `SCRAPEYARD_SCHEDULER_JITTER_MAX_SECONDS` | `120` | Maximum random delay added to each cron fire |
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |
+| `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` | `4096` (`3072` in production Compose) | Memory ceiling for starting jobs and browser targets; `0` disables memory admission |
 | `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait for cancellation |
+| `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` | `30` | Shutdown grace shared by worker and webhook shutdown; running jobs drain until a quarter of it (at most 5 s) remains, then are cancelled and record their failure |
+| `SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for the worker pool's Redis connection at startup |
 | `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` | `300` | Age after which an unclaimed queued delivery may be replaced |
 | `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` | `604800` | Redis payload lifetime and maximum uninterrupted priority-queue residence before repair |
 | `SCRAPEYARD_WORKERS_QUEUED_RECONCILIATION_INTERVAL_SECONDS` | `60` | Interval between bounded repairs of stale accepted queue deliveries |
@@ -642,12 +655,14 @@ profile.
 | `SCRAPEYARD_WORKERS_RUNNING_RECONCILIATION_INTERVAL_SECONDS` | `60` | Interval between bounded stale-running and terminal-intent repair passes |
 | `SCRAPEYARD_WORKERS_RUNNING_RECONCILIATION_BATCH_SIZE` | `100` | Maximum stale-running and terminal-intent rows processed per repair pass |
 | `SCRAPEYARD_WORKERS_HEARTBEAT_INTERVAL_SECONDS` | `30` | Monotonic interval between persisted run heartbeats; at most one third of the running timeout |
+| `SCRAPEYARD_BASIC_FETCH_TIMEOUT_SECONDS` | `30` | Basic-fetch timeout for each connect, write and read, and for each request through its last body byte |
 | `SCRAPEYARD_RUN_MAX_DURATION_SECONDS` | `900` | Overall monotonic deadline for one run |
 | `SCRAPEYARD_RUN_MAX_REQUESTS` | `10000` | Aggregate admitted source HTTP requests, including redirects and retries |
 | `SCRAPEYARD_RUN_MAX_FETCHED_BYTES` | `104857600` | Aggregate decoded basic bodies and rendered browser UTF-8 HTML; not browser wire bytes |
 | `SCRAPEYARD_RUN_MAX_EXTRACTED_RECORDS` | `100000` | Aggregate extracted records across targets, pages, and validation retries |
 | `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` | `52428800` | Aggregate extracted JSON growth ceiling plus exact maximum UTF-8 bytes for persisted result JSON |
 | `SCRAPEYARD_RUN_MAX_BROWSER_DEBUG_BYTES` | `26214400` | Aggregate browser excerpt and screenshot bytes per run |
+| `SCRAPEYARD_BROWSER_DEBUG_ENABLED` | `false` | Also save full-page screenshots of captured browser pages under each run's `artifacts/` directory, within the browser-debug byte budget |
 | `SCRAPEYARD_RUN_THREAD_MAX_WORKERS` | `4` | Dedicated bounded capacity for run-scoped selector, validation, and DNS thread work |
 | `SCRAPEYARD_WORKERS_MAX_ACCEPTED_RUNS` | `100` | Atomic cap on queued plus running owners; overload returns 503 with Retry-After |
 | `SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB` | `512` | Additional memory headroom reserved per active browser target |
@@ -669,9 +684,12 @@ profile.
 | `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS` | `7` | Full delivered-row inspection window before secret scrubbing |
 | `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS` | `30` | Full failed-row inspection window before secret scrubbing |
 | `SCRAPEYARD_MAX_REQUEST_BYTES` | `262144` | Max request body size |
+| `SCRAPEYARD_QUALIFICATION_MODE` | `false` | Local release qualification only: enables the destructive crash checkpoints |
+| `SCRAPEYARD_QUALIFICATION_CRASH_POINT` | empty | Local release qualification only: the checkpoint at which the process blocks for the runner's SIGKILL; requires qualification mode |
+| `SCRAPEYARD_QUALIFICATION_MARKER_DIR` | `/run/scrapeyard-qualification` | Local release qualification only: directory holding the runner-created sentinel |
 
-See [src/scrapeyard/common/settings.py](src/scrapeyard/common/settings.py) for
-the full settings surface.
+Validation rules for each setting live in
+[src/scrapeyard/common/settings.py](src/scrapeyard/common/settings.py).
 
 Circuit breakers count connection/network errors, timeouts, HTTP 429, and HTTP
 5xx responses. Selector, validation, budget, cancellation, local browser, and
@@ -761,7 +779,7 @@ for exact boundaries, dead-letter reasons, restart semantics, and limitations.
 Fast checks:
 
 ```bash
-poetry run ruff check src tests
+poetry run ruff check src tests scripts security
 poetry run pytest
 ```
 

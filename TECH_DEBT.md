@@ -52,7 +52,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 5. **Run the checks locally.** CI is disabled until TD-26 lands.
 
    ```sh
-   poetry run ruff check src tests scripts
+   poetry run ruff check src tests scripts security
    poetry run mypy src
    poetry run pytest -W error
    ```
@@ -101,7 +101,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | `ruff check src tests scripts` | Passed |
 | `mypy src` (strict) | Passed, 101 source files |
 | `pytest -W error` | On a WSL host: 150 failed, 2,206 passed (TD-25). With `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=0`: 2,355 passed, 17 skipped (live Redis), and 1 expected failure (the test asserting the default). 90% branch coverage, 76 s. |
-| `ruff format --check` | 160 files would change; the formatter is not adopted (TD-44) |
+| `ruff format --check` | 160 files would change; on 2026-10-09 the formatter was deliberately not adopted |
 | GitHub Actions | Disabled for the repository. The last runs on `main` (2026-09-07) failed in CI, Dependency audit, and Container security (TD-26). |
 | `pip-audit` on pip 26.1.2 | PYSEC-2026-3721, fixed in 26.2 (TD-26) |
 | Eyebox configs vs. schema | 56 of 56 validate |
@@ -230,16 +230,15 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-44 | P3 | lint, docs | low | none | |
-| 2 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 3 | TD-52 | P2 | worker | low | none | |
-| 4 | TD-53 | P3 | engine | low | none | |
-| 5 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 6 | TD-55 | P2 | URL guard, API | low | none | |
-| 7 | TD-56 | P3 | redaction | low | none | |
-| 8 | TD-57 | P3 | storage | low | none | |
-| 9 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 10 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 1 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-52 | P2 | worker | low | none | |
+| 3 | TD-53 | P3 | engine | low | none | |
+| 4 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 5 | TD-55 | P2 | URL guard, API | low | none | |
+| 6 | TD-56 | P3 | redaction | low | none | |
+| 7 | TD-57 | P3 | storage | low | none | |
+| 8 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 9 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -270,7 +269,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-44 | P3 | ready | Lint configuration is partly inert, and README omits settings |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-46 | P2 | coordinated | Subrequest DNS failures and IPv6 gaps in the browser guard |
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
@@ -333,29 +331,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-44 — Lint configuration is partly inert, and README omits settings
-
-**Priority:** P3 · **Area:** tooling, docs · **Risk:** low · **Contract:** none · **Depends on:** —
-
-- **a. Import sorting is switched off.** `"I"` is selected but `I001` is
-  ignored, so import sorting is dead config with 110 hidden violations. Ruff is
-  pinned at `^0.9` (0.9.10), and `security/*.py` isn't linted (CI runs
-  `ruff check src tests scripts`). **Fix:** bump ruff, enable `I001` with
-  `--fix`, and add `security`.
-- **b. `ruff format` isn't adopted.** It would rewrite 160 files, about 4.6k
-  lines (58 of them `src` files, about 1.25k lines). Either adopt it together
-  with (a), in its own commit listed in `.git-blame-ignore-revs` and with
-  `ruff format --check` in CI, or decide not to and delete this sub-item.
-- **c. The extended rule scan is informational only** (`ruff check --select
-  PERF,RUF,PL,ASYNC,PTH,RET,TRY,S src`). The findings worth acting on have
-  been fixed. Two kinds of hit are expected and should be left alone:
-  - `S506` on `ScrapeyardSafeLoader` is a false positive, because it subclasses
-    `yaml.SafeLoader`.
-  - `PLC0414` on `import x as x` marks intentional re-exports for mypy.
-- **d. The README settings table is incomplete.** It omits
-  `WORKERS_MEMORY_LIMIT_MB` and 17 other settings. **Fix:** fill it in, and add
-  a test that checks the table against `ServiceSettings`.
 
 ### TD-51 — Shutdown ends in SIGKILL while a run or result thread is still active
 

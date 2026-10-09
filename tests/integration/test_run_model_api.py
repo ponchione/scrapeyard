@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.integration.conftest import poll_until_ready
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.storage.database import get_db
+from tests.integration.conftest import poll_until_ready
 
 
 def _adhoc_yaml() -> str:

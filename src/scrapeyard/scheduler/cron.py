@@ -19,8 +19,6 @@ from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.runtime.metrics import mark_last_success
-
 from scrapeyard.queue.delivery import queue_delivery_metadata
 from scrapeyard.queue.job_state import run_lease_is_active
 from scrapeyard.queue.pool import WorkerPool
@@ -29,8 +27,9 @@ from scrapeyard.queue.reconciliation import (
     reconcile_stale_queued_job,
 )
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
-from scrapeyard.storage.protocols import JobStore, ResultStore
+from scrapeyard.runtime.metrics import mark_last_success
 from scrapeyard.storage.job_store import AdmissionCapacityError
+from scrapeyard.storage.protocols import JobStore, ResultStore
 from scrapeyard.storage.secret_envelope import (
     SecretDecryptionError,
     SecretKeyConfigurationError,

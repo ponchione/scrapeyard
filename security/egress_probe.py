@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import suppress
 import secrets
 import socket
-
+from contextlib import suppress
 
 REQUEST = "SCRAPEYARD-EGRESS-PROBE/1"
 RESPONSE = "SCRAPEYARD-EGRESS-LIVE/1"

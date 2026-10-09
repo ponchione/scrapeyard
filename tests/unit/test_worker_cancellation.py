@@ -16,7 +16,7 @@ from scrapeyard.config.schema import (
 )
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
-from scrapeyard.engine.resilience import RetryHandler, RetryableError
+from scrapeyard.engine.resilience import RetryableError, RetryHandler
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
 from scrapeyard.models.job import JobRun, JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter

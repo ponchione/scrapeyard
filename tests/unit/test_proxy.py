@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import httpx
+import pytest
 from scrapling.engines.toolbelt.navigation import construct_proxy_dict
 
 from scrapeyard.config.schema import ProxyConfig, TargetConfig
 from scrapeyard.engine.proxy import normalize_proxy_url, redact_proxy_url, resolve_proxy
-
 
 # --- Helpers ---
 

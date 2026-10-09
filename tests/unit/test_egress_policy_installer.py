@@ -8,7 +8,6 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-
 _IPTABLES_SHIM = r"""
 #!/usr/bin/env python3
 import json

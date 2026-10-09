@@ -10,7 +10,6 @@ import yaml
 
 from scrapeyard.common.settings import ServiceSettings
 
-
 _QUALIFICATION_ONLY_SETTINGS = frozenset(
     {
         "SCRAPEYARD_QUALIFICATION_MODE",

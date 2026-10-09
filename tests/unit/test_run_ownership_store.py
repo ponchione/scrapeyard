@@ -14,7 +14,6 @@ from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import RunOwnershipError
 
-
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 CONFIG_YAML = "project: test"
 CONFIG_HASH = hashlib.sha256(CONFIG_YAML.encode()).hexdigest()

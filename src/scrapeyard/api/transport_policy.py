@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scrapeyard.api.auth import AuthScope, AuthenticatedCaller
+from scrapeyard.api.auth import AuthenticatedCaller, AuthScope
 from scrapeyard.api.response_utils import raise_json_error
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import PageCacheMode, ScrapeConfig

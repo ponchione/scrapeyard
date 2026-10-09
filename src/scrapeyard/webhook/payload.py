@@ -11,7 +11,6 @@ from scrapeyard.engine.url_guard import redact_sensitive_mapping
 from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
 
-
 _DELIVERY_ID_PREFIX = "whv1_"
 _DELIVERY_ID_DOMAIN = b"scrapeyard:webhook-delivery:v1"
 

@@ -10,10 +10,13 @@ from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import ScrapeConfig, TargetConfig
 from scrapeyard.engine.proxy import apply_proxy_session, redact_proxy_url, resolve_proxy
-from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError
-from scrapeyard.engine.resilience import CircuitProbe
+from scrapeyard.engine.resilience import CircuitBreaker, CircuitOpenError, CircuitProbe
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url, url_host_label
+from scrapeyard.engine.url_guard import (
+    redact_userinfo_in_text,
+    redact_userinfo_in_url,
+    url_host_label,
+)
 from scrapeyard.models.job import ActionTaken, ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
 

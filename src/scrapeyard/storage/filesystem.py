@@ -8,13 +8,12 @@ import os
 import shutil
 import stat
 import uuid
-from contextlib import suppress
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
 from scrapeyard.common.json_encoding import compact_json_bytes, iter_json_bytes
-
 
 T = TypeVar("T")
 _READ_CHUNK_SIZE = 64 * 1024

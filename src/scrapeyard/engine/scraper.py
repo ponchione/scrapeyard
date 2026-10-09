@@ -27,8 +27,6 @@ from scrapeyard.config.schema import (
 )
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
 from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE, BasicSession
-from scrapeyard.engine.browser_pool import current_browser_pool
-from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.browser_debug import (
     browser_fetch_kwargs,
     default_debug_blob,
@@ -36,12 +34,14 @@ from scrapeyard.engine.browser_debug import (
     fetch_browser_response,
     populate_fetch_debug,
 )
+from scrapeyard.engine.browser_pool import current_browser_pool
+from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.detection import enrich_item_detection
 from scrapeyard.engine.domain_guard import admit_page
 from scrapeyard.engine.fetch_classifier import (
     ACCESS_DENIAL_TYPES,
-    classify_page_signals,
     classify_fetch_exception,
+    classify_page_signals,
     classify_rendered_outcome,
     page_shows_expected_content,
 )
@@ -53,7 +53,7 @@ from scrapeyard.engine.page_cache import (
 )
 from scrapeyard.engine.pagination import paginate_target
 from scrapeyard.engine.rate_limiter import DomainRateLimiter
-from scrapeyard.engine.resilience import RetryHandler, RetryableError
+from scrapeyard.engine.resilience import RetryableError, RetryHandler
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
@@ -70,16 +70,16 @@ from scrapeyard.engine.selectors import (
     extract_selectors_strict,
     select_items_strict,
 )
-from scrapeyard.models.job import ErrorType
-from scrapeyard.queue.cancellation import (
-    CancellationCheckpoint,
-    cancellation_checkpoint,
-)
 from scrapeyard.engine.url_guard import (
     assert_public_url,
     redact_userinfo_in_text,
     resolve_public_url,
     url_host_label,
+)
+from scrapeyard.models.job import ErrorType
+from scrapeyard.queue.cancellation import (
+    CancellationCheckpoint,
+    cancellation_checkpoint,
 )
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}

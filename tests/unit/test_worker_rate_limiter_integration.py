@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.config.schema import FetcherType
+from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.queue.worker import scrape_task
 from tests.unit.worker_helpers import make_job, make_settings_mock
 

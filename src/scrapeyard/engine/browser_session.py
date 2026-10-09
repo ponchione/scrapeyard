@@ -22,6 +22,7 @@ from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.traffic import url_site
 from scrapeyard.engine.asset_cache import AssetCache, CachedAsset
 from scrapeyard.engine.basic_fetch import generate_convincing_referer
+from scrapeyard.engine.domain_guard import admit_page
 from scrapeyard.engine.scrape_models import (
     CLICK_PAGINATION_ATTRIBUTE,
     ClickPaginationResult,
@@ -29,7 +30,6 @@ from scrapeyard.engine.scrape_models import (
     ClickSnapshot,
     ScrapeStop,
 )
-from scrapeyard.engine.domain_guard import admit_page
 from scrapeyard.engine.url_guard import UnsafeURLError
 
 logger = logging.getLogger(__name__)

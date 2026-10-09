@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -19,14 +19,13 @@ from scrapeyard.engine.resilience import (
     CircuitProbe,
     CircuitState,
     ResultValidator,
-    RetryHandler,
     RetryableError,
+    RetryHandler,
 )
 from scrapeyard.engine.scraper import TargetResult
-from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
+from scrapeyard.engine.url_guard import UnsafeURLError, URLResolutionError
 from scrapeyard.models.job import ErrorType
 from scrapeyard.queue.error_records import TargetErrorRecorder
-
 
 # --- RetryHandler ---
 

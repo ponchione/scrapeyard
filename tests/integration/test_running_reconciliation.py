@@ -13,7 +13,6 @@ from scrapeyard.storage.database import init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 
-
 CONFIG_YAML = """
 project: recovery
 name: failed-terminalization

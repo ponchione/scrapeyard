@@ -14,15 +14,15 @@ from collections.abc import Callable, Iterable
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from scrapeyard.api.response_utils import error_content
 from scrapeyard.api.auth import (
-    APICredential,
-    AuthenticatedCaller,
     LOCAL_DEVELOPMENT_CALLER,
     PUBLIC_CALLER,
+    APICredential,
+    AuthenticatedCaller,
     authenticate_api_key,
     parse_api_credentials,
 )
+from scrapeyard.api.response_utils import error_content
 from scrapeyard.runtime.metrics import observe_api_request, observe_rate_limit_state
 
 logger = logging.getLogger(__name__)

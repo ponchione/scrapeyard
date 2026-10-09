@@ -11,7 +11,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 PUBLIC_ORIGIN = "http://fixture.public.test:8080"
 PRIVATE_ORIGIN = "http://fixture.private.test:8080"
 PRIVATE_LITERAL_ORIGIN = "http://10.77.14.2:8080"

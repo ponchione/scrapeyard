@@ -41,7 +41,7 @@ local equivalents of the CI gates are:
 ```bash
 poetry check --lock
 poetry sync --no-interaction
-poetry run ruff check src tests scripts
+poetry run ruff check src tests scripts security
 poetry run mypy src
 poetry run pytest -W error
 rm -rf dist
@@ -310,7 +310,7 @@ for seven days only when the lane fails.
 Run the fast checks before merging changes:
 
 ```bash
-poetry run ruff check src tests
+poetry run ruff check src tests scripts security
 poetry run pytest
 ```
 
