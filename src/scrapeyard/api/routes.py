@@ -60,6 +60,7 @@ from scrapeyard.api.job_lifecycle import (
     delete_reserved_job,
 )
 from scrapeyard.api.serializers import (
+    redact_job_config,
     serialize_error_record,
     serialize_job_created,
     serialize_job_detail,
@@ -74,7 +75,7 @@ from scrapeyard.api.transport_policy import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.common.yaml import MAX_YAML_NESTING
-from scrapeyard.config.loader import load_config, load_config_project
+from scrapeyard.config.loader import load_config_mapping, parse_config_project
 from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.engine.domain_guard import DomainGuard, normalize_guard_host
 from scrapeyard.engine.url_guard import redact_userinfo_in_text
@@ -206,9 +207,9 @@ async def _read_valid_yaml_config(
     try:
         body = await request.body()
         config_yaml = body.decode("utf-8")
-        project = await asyncio.to_thread(load_config_project, config_yaml)
+        data, project = await asyncio.to_thread(parse_config_project, config_yaml)
         caller = authorize_request(request, scope, project=project)
-        config = await asyncio.to_thread(load_config, config_yaml)
+        config = await asyncio.to_thread(load_config_mapping, data)
         enforce_submission_transport_policy(
             config,
             caller=caller,
@@ -606,14 +607,17 @@ async def get_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Any:
     """Get a single job by ID."""
-    job = await _get_job_or_404(job_store, job_id)
+    try:
+        job, run_count, last_run_at = await job_store.get_job_with_stats(job_id)
+    except KeyError:
+        raise_json_error(404, f"Job {job_id!r} not found")
     authorize_request(request, AuthScope.read, project=job.project)
 
     runs = await job_store.get_job_runs(job_id, limit=10)
-    run_count, last_run_at = await job_store.get_job_run_stats(job_id)
     next_run_at = scheduler.get_next_run_time(job_id)
     return serialize_job_detail(
         job,
+        redacted_config_yaml=await redact_job_config(job.config_yaml),
         runs=runs,
         run_count=run_count,
         last_run_at=last_run_at,
@@ -629,8 +633,11 @@ async def get_exact_run(
     job_store: JobStore = Depends(get_job_store),
 ) -> Any:
     """Read one immutable accepted run; unavailable history returns 404."""
-    job = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.read, project=job.project)
+    try:
+        project = await job_store.get_job_project(job_id)
+    except KeyError:
+        raise_json_error(404, f"Job {job_id!r} not found")
+    authorize_request(request, AuthScope.read, project=project)
     state = await job_store.get_job_run_state(job_id, run_id)
     if state is None:
         raise_json_error(404, "Exact run identity is unavailable")

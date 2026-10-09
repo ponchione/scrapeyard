@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
 from scrapeyard.common.dt import parse_dt
-from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
 from scrapeyard.storage.secret_envelope import reveal_text
 
 
@@ -21,28 +21,45 @@ def _optional_row_value(row: RowMapping, key: str) -> object | None:
         return None
 
 
-def row_to_job(row: RowMapping) -> Job:
+def _job_summary_fields(row: RowMapping) -> dict[str, Any]:
     created_at = parse_dt(cast(str | None, row["created_at"]))
     if created_at is None:
         raise ValueError("Job row is missing created_at")
-    job_id = cast(str, row["job_id"])
-    return Job(
-        job_id=job_id,
-        project=cast(str, row["project"]),
-        name=cast(str, row["name"]),
-        status=JobStatus(cast(str, row["status"])),
-        config_yaml=reveal_text(
-            cast(str, row["config_yaml"]),
-            purpose=f"jobs.config_yaml:{job_id}",
-        ),
-        created_at=created_at,
-        updated_at=parse_dt(cast(str | None, row["updated_at"])),
-        schedule_cron=cast(str | None, row["schedule_cron"]),
-        schedule_timezone=cast(
+    return {
+        "job_id": cast(str, row["job_id"]),
+        "project": cast(str, row["project"]),
+        "name": cast(str, row["name"]),
+        "status": JobStatus(cast(str, row["status"])),
+        "created_at": created_at,
+        "updated_at": parse_dt(cast(str | None, row["updated_at"])),
+        "schedule_cron": cast(str | None, row["schedule_cron"]),
+        "schedule_timezone": cast(
             str,
             _optional_row_value(row, "schedule_timezone") or "UTC",
         ),
-        schedule_enabled=bool(row["schedule_enabled"]),
+        "schedule_enabled": bool(row["schedule_enabled"]),
+        "schedule_failure_at": parse_dt(
+            cast(str | None, _optional_row_value(row, "schedule_failure_at"))
+        ),
+        "schedule_failure_code": cast(
+            str | None,
+            _optional_row_value(row, "schedule_failure_code"),
+        ),
+        "schedule_consecutive_failures": cast(
+            int,
+            _optional_row_value(row, "schedule_consecutive_failures") or 0,
+        ),
+    }
+
+
+def row_to_job(row: RowMapping) -> Job:
+    fields = _job_summary_fields(row)
+    return Job(
+        **fields,
+        config_yaml=reveal_text(
+            cast(str, row["config_yaml"]),
+            purpose=f"jobs.config_yaml:{fields['job_id']}",
+        ),
         current_run_id=cast(str | None, row["current_run_id"]),
         current_trigger=cast(
             str | None,
@@ -55,17 +72,6 @@ def row_to_job(row: RowMapping) -> Job:
             None
             if _optional_row_value(row, "delete_results_on_delete") is None
             else bool(_optional_row_value(row, "delete_results_on_delete"))
-        ),
-        schedule_failure_at=parse_dt(
-            cast(str | None, _optional_row_value(row, "schedule_failure_at"))
-        ),
-        schedule_failure_code=cast(
-            str | None,
-            _optional_row_value(row, "schedule_failure_code"),
-        ),
-        schedule_consecutive_failures=cast(
-            int,
-            _optional_row_value(row, "schedule_consecutive_failures") or 0,
         ),
     )
 
@@ -99,6 +105,15 @@ def row_to_job_with_stats(
     run_count = cast(int, row["run_count"])
     last_run_at = parse_dt(cast(str | None, row["last_run_at"]))
     return job, run_count, last_run_at
+
+
+def row_to_job_summary_with_stats(
+    row: RowMapping,
+) -> tuple[JobSummary, int, datetime | None]:
+    summary = JobSummary(**_job_summary_fields(row))
+    run_count = cast(int, row["run_count"])
+    last_run_at = parse_dt(cast(str | None, row["last_run_at"]))
+    return summary, run_count, last_run_at
 
 
 def row_to_project_summary(row: RowMapping) -> tuple[str, str, int]:

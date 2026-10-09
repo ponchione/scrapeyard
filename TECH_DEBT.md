@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-55**) and use this template:
+7. **New findings** take the next free ID (**TD-56**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,20 +230,20 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-35 | P3 | API, job store | low | none | |
-| 2 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 3 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 4 | TD-38 | P3 | result store | low | none | |
-| 5 | TD-39 | P3 | click pagination | medium | timing only | |
-| 6 | TD-40 | P3 | API | low | `offset` bound | |
-| 7 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 8 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 9 | TD-43 | P3 | image, dependencies | low | none | |
-| 10 | TD-44 | P3 | lint, docs | low | none | |
-| 11 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 12 | TD-52 | P2 | worker | low | none | |
-| 13 | TD-53 | P3 | engine | low | none | |
-| 14 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 1 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 2 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 3 | TD-38 | P3 | result store | low | none | |
+| 4 | TD-39 | P3 | click pagination | medium | timing only | |
+| 5 | TD-40 | P3 | API | low | `offset` bound | |
+| 6 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 7 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 8 | TD-43 | P3 | image, dependencies | low | none | |
+| 9 | TD-44 | P3 | lint, docs | low | none | |
+| 10 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 11 | TD-52 | P2 | worker | low | none | |
+| 12 | TD-53 | P3 | engine | low | none | |
+| 13 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 14 | TD-55 | P2 | URL guard, API | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -274,7 +274,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-35 | P3 | ready | API handlers decrypt, hash and parse YAML on the event loop |
 | TD-36 | P3 | ready | Worker output processing and the poll loop repeat avoidable work |
 | TD-37 | P3 | ready | Periodic SQLite queries scan history, and the index set is unbalanced |
 | TD-38 | P3 | ready | Result-store deletes hold the metadata lock during `rmtree` |
@@ -293,6 +292,7 @@ qualification workflows passing.
 | TD-52 | P2 | ready | A cancellation during run-budget handling skips cancellation recovery |
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 | TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
+| TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
 
 ## Ready to implement
 
@@ -340,54 +340,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-35 — API handlers decrypt, hash and parse YAML on the event loop
-
-**Priority:** P3 · **Area:** API, job store · **Risk:** low · **Contract:** none · **Depends on:** —
-
-- **a. Eyebox's main status poll** (`get_exact_run`,
-  `GET /jobs/{id}/runs/{run_id}`).
-  - Eyebox polls this per in-flight run every `INGEST_SCRAPEYARD_POLL_SECONDS`
-    (5 s by default in code, 15 s in Eyebox's Compose).
-  - `SQLiteJobStore.get_job_run_state` decrypts the config, hashes it and fully
-    parses the YAML on the event loop just to read `name`. That costs 41 ms per
-    poll for a 110 KB config and 17 ms for 35 KB.
-  - The route also makes a separate `get_job` call (another decrypt) on the
-    single locked jobs.db connection.
-  - **Fix:** a bounded cache of the name keyed by the verified `config_hash`
-    (run configs never change), or parse in a thread.
-- **b. `GET /jobs/{id}`** (`get_job`).
-  - `serialize_job_detail` calls `redact_sensitive_config_text`, which parses
-    and re-dumps the YAML on the event loop: 79 ms at 110 KB.
-  - The route makes 3 jobs.db round trips, and `get_job_run_stats` re-reads the
-    row `get_job` just read.
-  - Eyebox's price check and accuracy runs poll this every 2 s, though their
-    configs are small (1–3 ms).
-  - **Fix:** move the redaction to a thread or cache it by the config's
-    SHA-256, and fold `lifetime_run_count` and `last_run_at` into one query.
-- **c. `POST /scrape` parses the YAML twice.**
-  - `_read_valid_yaml_config` calls `load_config_project` and then
-    `load_config`, adding 41 ms of CPU per 110 KB submission.
-  - **Fix:** parse once with `load_yaml_mapping`, authorize on the literal
-    project, then validate that mapping. Authorization must still happen before
-    secrets are resolved, and `config_hash` must stay the hash of the raw body
-    bytes.
-- **d. `GET /jobs` decrypts configs it never returns** (`list_jobs`).
-  - `build_list_jobs_with_stats_query` selects `config_yaml`, which
-    `row_to_job` decrypts and the summary throws away. That is 0.35 ms per
-    110 KB row, or about 175 ms and 74 MB fetched for a 501-row page.
-  - Only operators call it.
-  - **Fix:** select only the summary columns.
-
-**Code:**
-- `api/routes.py`
-- `api/serializers.py`
-- `storage/job_store.py`
-- `storage/job_queries.py`
-- `storage/job_rows.py`
-
-**Done when:** the timings for each route are recorded before and after, and
-the response bodies are unchanged.
 
 ### TD-36 — Worker output processing and the poll loop repeat avoidable work
 
@@ -621,7 +573,7 @@ deleting.
 
 ### TD-42 — `job_store.py` (2.5k lines) mixes five concerns
 
-**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-35, TD-37 and TD-41 (to avoid conflicts)
+**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-37 and TD-41 (to avoid conflicts)
 
 **Fix:** keep `SQLiteJobStore` as a thin facade and move the code into module
 functions that take `db`. Approximate line ranges at `b0b285e`:
@@ -783,6 +735,27 @@ content error instead of `http_error`.
 **Done when:** a config with a lone surrogate in a field name, transform
 argument, selector or URL gets a 422, and a test shows no run can complete
 with a record that `/results` cannot encode.
+
+### TD-55 — URL redaction in text is quadratic on long URL-like tokens
+
+**Priority:** P2 · **Area:** engine URL guard, API · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `_URL_IN_TEXT_RE` (`[a-z][a-z0-9+.-]*://[^\s"']+`) backtracks from every
+  start position across a long run of `[a-z0-9+.-]` that contains no `://`.
+- Measured on `main`: 4,000 characters take 33 ms, 8,000 take 127 ms and
+  16,000 take 0.51 s. A 256 KiB config, within
+  `SCRAPEYARD_MAX_REQUEST_BYTES`, holding one such token would cost about two
+  minutes of CPU per call, holding the GIL.
+- `redact_userinfo_in_text` has 19 call sites, including YAML and validation
+  error text, error records and `GET /jobs/{id}` config redaction, so one
+  authenticated submission could stall the service.
+
+**Code:** `engine/url_guard.py` (`_URL_IN_TEXT_RE`, `redact_userinfo_in_text`).
+**Fix:** bound the scheme (`[a-z][a-z0-9+.-]{0,31}://`) or anchor it at a word
+boundary, keeping today's matches.
+**Done when:** a test redacts a 256 KiB token in well under 100 ms, and the
+existing redaction tests pass unchanged.
 
 ## Coordinated
 

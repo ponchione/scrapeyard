@@ -69,15 +69,24 @@ def _require_literal_name(data: dict[str, Any]) -> None:
         )
 
 
-def load_config_project(yaml_str: str) -> str:
-    """Read the literal project namespace without resolving any secret values."""
+def parse_config_project(yaml_str: str) -> tuple[dict[str, Any], str]:
+    """Parse a config once and read its literal project namespace.
 
-    return _literal_project(load_yaml_mapping(yaml_str))
+    No secret reference is resolved, so the caller can authorize the project
+    before validating the mapping with :func:`load_config_mapping`.
+    """
+
+    data = load_yaml_mapping(yaml_str)
+    return data, _literal_project(data)
 
 
 def load_config(yaml_str: str) -> ScrapeConfig:
     """Parse a YAML string into a validated ScrapeConfig."""
-    data = load_yaml_mapping(yaml_str)
+    return load_config_mapping(load_yaml_mapping(yaml_str))
+
+
+def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
+    """Validate a parsed YAML mapping into a ScrapeConfig."""
     references = _secret_references(data)
     resolved_secrets: dict[str, str] = {}
     if references:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scrapeyard.storage.job_sql import JOB_COLUMNS, select_columns
+from scrapeyard.storage.job_sql import JOB_SUMMARY_COLUMNS, select_columns
 
 
 def build_list_jobs_with_stats_query(
@@ -10,7 +10,7 @@ def build_list_jobs_with_stats_query(
     limit: int | None,
     offset: int,
 ) -> tuple[str, list[object]]:
-    job_cols = select_columns(JOB_COLUMNS, table_alias="j")
+    job_cols = select_columns(JOB_SUMMARY_COLUMNS, table_alias="j")
     params: list[object] = []
     sql = (
         f"SELECT {job_cols}, "

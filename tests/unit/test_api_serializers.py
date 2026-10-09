@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime, timezone
 
+from scrapeyard.api import serializers
 from scrapeyard.api.serializers import (
+    redact_job_config,
     serialize_error_record,
     serialize_job_detail,
     serialize_job_summary,
@@ -16,6 +19,7 @@ from scrapeyard.models.job import (
     JobRun,
     JobStatus,
 )
+from scrapeyard.engine.url_guard import redact_sensitive_config_text
 from tests.unit.worker_helpers import make_job
 
 
@@ -74,6 +78,7 @@ def test_serialize_job_detail_embeds_serialized_runs():
 
     payload = serialize_job_detail(
         job,
+        redacted_config_yaml="project: integ\n",
         runs=[run],
         run_count=1,
         last_run_at=completed_at,
@@ -81,16 +86,16 @@ def test_serialize_job_detail_embeds_serialized_runs():
     )
 
     assert payload["job_id"] == "job-1"
+    assert payload["config_yaml"] == "project: integ\n"
     assert payload["runs"] == [serialize_job_run(run)]
     assert payload["runs"][0]["heartbeat_at"] == started_at.isoformat()
     assert payload["next_run_at"] == next_run_at.isoformat()
     assert payload["last_run_at"] == completed_at.isoformat()
 
 
-def test_serialize_job_detail_redacts_config_secrets():
-    job = make_job(
-        job_id="job-1",
-        config_yaml="""
+async def test_redact_job_config_redacts_config_secrets(monkeypatch):
+    monkeypatch.setattr(serializers, "_redacted_configs", OrderedDict())
+    config_yaml = """
 project: integ
 name: secret-job
 proxy:
@@ -106,22 +111,45 @@ target:
       X-API-Key: browser-secret
   selectors:
     title: h1
-""",
-    )
+"""
 
-    payload = serialize_job_detail(
-        job,
-        runs=[],
-        run_count=0,
-        last_run_at=None,
-        next_run_at=None,
-    )
+    redacted = await redact_job_config(config_yaml)
 
-    assert "webhook-secret" not in payload["config_yaml"]
-    assert "browser-secret" not in payload["config_yaml"]
-    assert "target-secret" not in payload["config_yaml"]
-    assert "user:pass" not in payload["config_yaml"]
-    assert payload["config_yaml"].count("<redacted>") == 4
+    assert "webhook-secret" not in redacted
+    assert "browser-secret" not in redacted
+    assert "target-secret" not in redacted
+    assert "user:pass" not in redacted
+    assert redacted.count("<redacted>") == 4
+    assert redacted == redact_sensitive_config_text(config_yaml)
+
+
+async def test_redact_job_config_caches_small_configs_by_content(monkeypatch):
+    monkeypatch.setattr(serializers, "_redacted_configs", OrderedDict())
+    calls: list[str] = []
+
+    def _redact(text: str) -> str:
+        calls.append(text)
+        return redact_sensitive_config_text(text)
+
+    monkeypatch.setattr(serializers, "redact_sensitive_config_text", _redact)
+    small = "project: a\nwebhook:\n  headers:\n    Authorization: secret\n"
+    large = small + "".join(f"key{index}: value\n" for index in range(6000))
+    assert len(redact_sensitive_config_text(large)) > serializers._REDACTED_CONFIG_CACHE_MAX_CHARS
+
+    assert await redact_job_config(small) == await redact_job_config(small)
+    assert await redact_job_config(small + "name: b\n") != await redact_job_config(small)
+    await redact_job_config(large)
+    await redact_job_config(large)
+
+    assert calls == [small, small + "name: b\n", large, large]
+
+
+async def test_redact_job_config_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(serializers, "_redacted_configs", OrderedDict())
+    for index in range(serializers._REDACTED_CONFIG_CACHE_ENTRIES + 5):
+        await redact_job_config(f"project: p{index}\n")
+
+    assert len(serializers._redacted_configs) == serializers._REDACTED_CONFIG_CACHE_ENTRIES
 
 
 def test_serialize_error_record_formats_enum_and_datetime_fields():

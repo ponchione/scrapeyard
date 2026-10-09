@@ -7,9 +7,10 @@ from datetime import datetime
 
 import pytest
 
-from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.secret_envelope import SecretDecryptionError
 
 
 @pytest.fixture()
@@ -187,6 +188,52 @@ async def test_get_job_run_stats_only_counts_target_job(store):
 
 
 # ---------------------------------------------------------------------------
+# get_job_with_stats and get_job_project
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_with_stats_matches_separate_reads(store):
+    await store.save_job(_make_job())
+    await _insert_run("r-1", "j-1", "complete", "adhoc", "aaa", "2026-03-01T10:00:00")
+    await _insert_run("r-2", "j-1", "failed", "adhoc", "aaa", "2026-03-04T10:00:00")
+
+    assert await store.get_job_with_stats("j-1") == (
+        await store.get_job("j-1"),
+        *await store.get_job_run_stats("j-1"),
+    )
+
+
+async def test_get_job_with_stats_and_project_reject_unknown_jobs(store):
+    with pytest.raises(KeyError):
+        await store.get_job_with_stats("missing")
+    with pytest.raises(KeyError):
+        await store.get_job_project("missing")
+
+
+async def test_get_job_project_does_not_decrypt_the_config(store):
+    await store.save_job(_make_job())
+    async with get_db("jobs.db") as db:
+        await db.execute("UPDATE jobs SET config_yaml = 'syenc:v1:test-v1:AAAA'")
+        await db.commit()
+
+    assert await store.get_job_project("j-1") == "acme"
+    with pytest.raises(SecretDecryptionError):
+        await store.get_job("j-1")
+
+
+async def test_list_jobs_with_stats_does_not_decrypt_configs(store):
+    await store.save_job(_make_job())
+    async with get_db("jobs.db") as db:
+        await db.execute("UPDATE jobs SET config_yaml = 'syenc:v1:test-v1:AAAA'")
+        await db.commit()
+
+    [(summary, run_count, last_run_at)] = await store.list_jobs_with_stats()
+
+    assert summary.job_id == "j-1"
+    assert (run_count, last_run_at) == (0, None)
+
+
+# ---------------------------------------------------------------------------
 # list_jobs_with_stats
 # ---------------------------------------------------------------------------
 
@@ -219,7 +266,7 @@ async def test_list_jobs_with_stats_returns_tuples(store):
     assert len(results) == 1
 
     job, run_count, last_run_at = results[0]
-    assert isinstance(job, Job)
+    assert isinstance(job, JobSummary)
     assert job.job_id == "j-1"
     assert run_count == 1
     assert last_run_at == datetime(2026, 3, 1, 10, 0, 0)

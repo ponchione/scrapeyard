@@ -58,6 +58,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- The exact-run poll (`GET /jobs/{id}/runs/{run_id}`), `GET /jobs/{id}`,
+  `GET /jobs` and `POST /scrape` no longer decrypt, hash or parse configs on
+  the event loop beyond what each needs. An exact-run poll parses each run's
+  config once, off the event loop, while still verifying it against its hash
+  on every read. Job detail redacts in a thread and caches small results.
+  Submissions parse their YAML once, and job listings no longer read stored
+  configs. At 110 KB, event-loop time per exact-run poll fell from 43 ms to
+  under 1 ms, and per job-detail read from 83 ms to 2 ms. Response bodies are
+  unchanged.
 - Result JSON is now encoded by the C JSON encoder, one record at a time,
   instead of a pure-Python walk of the whole document. Writing a 10 MB
   result took 327 ms and now takes 30 ms, and rendering a 16.8 MB

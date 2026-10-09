@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 from datetime import datetime
 import hashlib
 from typing import Any
@@ -11,8 +13,14 @@ from scrapeyard.engine.url_guard import (
     redact_userinfo_in_text,
     redact_userinfo_in_url,
 )
-from scrapeyard.models.job import ErrorRecord, Job, JobRun
+from scrapeyard.models.job import ErrorRecord, Job, JobRun, JobSummary
 from scrapeyard.api.response_models import APICompatibility
+
+# Redacted job configs remembered by the SHA-256 of the stored config. Only
+# configs up to the size limit are kept, so the cache stays under ~2 MiB.
+_REDACTED_CONFIG_CACHE_ENTRIES = 32
+_REDACTED_CONFIG_CACHE_MAX_CHARS = 64 * 1024
+_redacted_configs: OrderedDict[str, str] = OrderedDict()
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -41,7 +49,7 @@ def serialize_job_run(run: JobRun) -> dict[str, Any]:
 
 
 def serialize_job_summary(
-    job: Job,
+    job: Job | JobSummary,
     *,
     run_count: int,
     last_run_at: datetime | None,
@@ -64,9 +72,30 @@ def serialize_job_summary(
     }
 
 
+async def redact_job_config(config_yaml: str) -> str:
+    """Return the stored config with secrets redacted, as GET /jobs/{id} shows it.
+
+    Redaction parses and re-dumps the whole YAML (about 80 ms at 110 KB), so it
+    runs in a thread. Clients poll this route, so small results are cached by
+    the config's SHA-256; redaction depends on nothing else.
+    """
+    digest = hashlib.sha256(config_yaml.encode("utf-8")).hexdigest()
+    cached = _redacted_configs.get(digest)
+    if cached is not None:
+        _redacted_configs.move_to_end(digest)
+        return cached
+    redacted = await asyncio.to_thread(redact_sensitive_config_text, config_yaml)
+    if len(redacted) <= _REDACTED_CONFIG_CACHE_MAX_CHARS:
+        _redacted_configs[digest] = redacted
+        if len(_redacted_configs) > _REDACTED_CONFIG_CACHE_ENTRIES:
+            _redacted_configs.popitem(last=False)
+    return redacted
+
+
 def serialize_job_detail(
     job: Job,
     *,
+    redacted_config_yaml: str,
     runs: list[JobRun],
     run_count: int,
     last_run_at: datetime | None,
@@ -77,7 +106,7 @@ def serialize_job_detail(
         "project": job.project,
         "name": job.name,
         "status": job.status.value,
-        "config_yaml": redact_sensitive_config_text(job.config_yaml),
+        "config_yaml": redacted_config_yaml,
         "created_at": job.created_at.isoformat(),
         "updated_at": _isoformat(job.updated_at),
         "schedule_cron": job.schedule_cron,

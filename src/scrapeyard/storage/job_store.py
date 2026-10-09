@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import hashlib
 import re
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import NoReturn, cast
@@ -15,7 +17,7 @@ from scrapeyard.common.dt import fmt_dt, parse_dt
 from scrapeyard.common.qualification import qualification_checkpoint
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.yaml import load_yaml_mapping
-from scrapeyard.models.job import Job, JobRun, JobStatus
+from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
 from scrapeyard.queue.memory import memory_headroom_mb
 from scrapeyard.runtime.metrics import ADMISSION_REJECTIONS
 from scrapeyard.storage.database import db_transaction, get_db
@@ -27,6 +29,7 @@ from scrapeyard.storage.job_queries import (
 from scrapeyard.storage.job_rows import (
     row_to_job,
     row_to_job_run,
+    row_to_job_summary_with_stats,
     row_to_job_with_stats,
     row_to_project_summary,
     row_to_schedule_state,
@@ -70,6 +73,8 @@ _TERMINAL_RUN_STATUSES = {
 }
 logger = logging.getLogger(__name__)
 _SCHEDULE_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# Exact-run identities remembered by verified config hash (see get_job_run_state).
+_RUN_IDENTITY_CACHE_ENTRIES = 256
 
 
 class DuplicateJobError(Exception):
@@ -100,6 +105,10 @@ def is_duplicate_job_integrity_error(error: str | Exception) -> bool:
 
 class SQLiteJobStore:
     """SQLite implementation of :class:`~scrapeyard.storage.protocols.JobStore`."""
+
+    def __init__(self) -> None:
+        # config_hash -> (project, name) as parsed from that exact config.
+        self._run_identities: OrderedDict[str, tuple[object, object]] = OrderedDict()
 
     async def _execute_write(
         self,
@@ -854,6 +863,29 @@ class SQLiteJobStore:
             raise KeyError(f"Job not found: {job_id!r}")
         return row_to_job(cast(Mapping[str, object], row))
 
+    async def get_job_project(self, job_id: str) -> str:
+        """Return a job's project without reading or decrypting its config."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute("SELECT project FROM jobs WHERE job_id = ?", (job_id,))
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Job not found: {job_id!r}")
+        return cast(str, row["project"])
+
+    async def get_job_with_stats(self, job_id: str) -> tuple[Job, int, datetime | None]:
+        """Return a job with its lifetime run count and last start in one read."""
+        async with get_db("jobs.db") as db:
+            cursor = await db.execute(
+                f"SELECT {select_columns(JOB_COLUMNS)}, "
+                "lifetime_run_count AS run_count, last_run_at "
+                "FROM jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Job not found: {job_id!r}")
+        return row_to_job_with_stats(cast(Mapping[str, object], row))
+
     async def cancel_job(
         self,
         job_id: str,
@@ -1233,12 +1265,25 @@ class SQLiteJobStore:
         config_yaml = reveal_text(
             str(state.pop("config_yaml")), purpose=f"{state.pop('origin')}.config_yaml:{run_id}",
         )
-        if hashlib.sha256(config_yaml.encode()).hexdigest() != state["config_hash"]:
+        config_hash = cast(str, state["config_hash"])
+        if hashlib.sha256(config_yaml.encode()).hexdigest() != config_hash:
             raise ValueError("Exact run configuration hash mismatch")
-        config = load_yaml_mapping(config_yaml)
-        if config.get("project") != state["project"] or not isinstance(config.get("name"), str):
+        # Callers poll this per in-flight run, and finding the name means
+        # parsing the whole YAML (about 45 ms at 110 KB). A run's config never
+        # changes, so parse each verified config once, off the event loop.
+        identity = self._run_identities.get(config_hash)
+        if identity is None:
+            config = await asyncio.to_thread(load_yaml_mapping, config_yaml)
+            identity = (config.get("project"), config.get("name"))
+            self._run_identities[config_hash] = identity
+            if len(self._run_identities) > _RUN_IDENTITY_CACHE_ENTRIES:
+                self._run_identities.popitem(last=False)
+        else:
+            self._run_identities.move_to_end(config_hash)
+        project, name = identity
+        if project != state["project"] or not isinstance(name, str):
             raise ValueError("Exact run configuration identity mismatch")
-        state["name"] = config["name"]
+        state["name"] = name
         return state
 
     async def get_job_run_stats(
@@ -1264,13 +1309,13 @@ class SQLiteJobStore:
         project: str | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[tuple[Job, int, datetime | None]]:
+    ) -> list[tuple[JobSummary, int, datetime | None]]:
         """List jobs with lifetime run summaries, newest activity first."""
         sql, params = build_list_jobs_with_stats_query(project, limit, offset)
         async with get_db("jobs.db") as db:
             cursor = await db.execute(sql, params)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
-        return [row_to_job_with_stats(row) for row in rows]
+        return [row_to_job_summary_with_stats(row) for row in rows]
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]:
         """Return grouped job counts by project and status."""

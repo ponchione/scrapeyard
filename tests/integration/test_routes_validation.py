@@ -57,7 +57,7 @@ async def test_scrape_defensively_translates_parser_recursion_error(
     def _raise_recursion(_text: str) -> str:
         raise RecursionError("interpreter detail must not escape")
 
-    monkeypatch.setattr("scrapeyard.api.routes.load_config_project", _raise_recursion)
+    monkeypatch.setattr("scrapeyard.api.routes.parse_config_project", _raise_recursion)
     response = await client.post(
         "/scrape",
         content="project: test\n",

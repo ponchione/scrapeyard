@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from scrapeyard.common.budgets import RunBudget
-from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun
+from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun, JobSummary
 from scrapeyard.storage.types import (
     CancellationOutcome,
     CleanupBacklogSnapshot,
@@ -141,6 +141,14 @@ class JobStore(Protocol):
 
     async def get_job(self, job_id: str) -> Job: ...
 
+    async def get_job_project(self, job_id: str) -> str:
+        """Return a job's project without reading its config."""
+        ...
+
+    async def get_job_with_stats(self, job_id: str) -> tuple[Job, int, datetime | None]:
+        """Return a job with its lifetime run count and last start."""
+        ...
+
     async def rollback_queued_submission(self, job_id: str, run_id: str) -> bool:
         """Remove only a never-accepted queued submission after enqueue failure."""
         ...
@@ -204,7 +212,7 @@ class JobStore(Protocol):
         project: str | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[tuple[Job, int, datetime | None]]: ...
+    ) -> list[tuple[JobSummary, int, datetime | None]]: ...
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]: ...
 

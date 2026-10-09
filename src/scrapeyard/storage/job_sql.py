@@ -20,6 +20,23 @@ JOB_COLUMNS = (
     "schedule_consecutive_failures",
 )
 
+# The columns GET /jobs lists. Leaving out config_yaml saves fetching and
+# decrypting every row's whole config.
+JOB_SUMMARY_COLUMNS = (
+    "job_id",
+    "project",
+    "name",
+    "status",
+    "created_at",
+    "updated_at",
+    "schedule_cron",
+    "schedule_timezone",
+    "schedule_enabled",
+    "schedule_failure_at",
+    "schedule_failure_code",
+    "schedule_consecutive_failures",
+)
+
 JOB_RUN_COLUMNS = (
     "run_id",
     "job_id",

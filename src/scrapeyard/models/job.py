@@ -104,6 +104,23 @@ class Job(BaseModel):
     )
 
 
+class JobSummary(BaseModel):
+    """The listed fields of a job, read without its stored config."""
+
+    job_id: str
+    project: str
+    name: str
+    status: JobStatus
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    schedule_cron: Optional[str] = None
+    schedule_timezone: str = "UTC"
+    schedule_enabled: bool = True
+    schedule_failure_at: Optional[datetime] = None
+    schedule_failure_code: Optional[str] = None
+    schedule_consecutive_failures: int = 0
+
+
 class JobRun(BaseModel):
     """Represents a single execution of a scrape job."""
 
