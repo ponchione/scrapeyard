@@ -423,6 +423,55 @@ async def test_stop_cancels_pending_tasks_after_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_keeps_part_of_the_grace_for_cancelled_jobs_to_finish(monkeypatch):
+    loop = asyncio.get_running_loop()
+    finalized = asyncio.Event()
+
+    async def _job_with_slow_cancellation_handler() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Stands in for scrape_task's ownership check and crash
+            # finalization, which take several database round trips.
+            for _ in range(5):
+                await asyncio.sleep(0.01)
+            finalized.set()
+            raise
+
+    pending = asyncio.create_task(_job_with_slow_cancellation_handler())
+    await asyncio.sleep(0)
+    close_calls = 0
+
+    async def _close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+
+    worker = SimpleNamespace(
+        allow_pick_jobs=True,
+        tasks={"one": pending},
+        main_task=None,
+        close=_close,
+    )
+    pool = _make_pool()
+    pool._started = True
+    pool._worker = worker
+    pool._runner_task = asyncio.create_task(asyncio.sleep(0))
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: MagicMock(workers_shutdown_grace_seconds=1),
+    )
+    started = loop.time()
+
+    await pool.stop()
+
+    assert loop.time() - started < 1
+    assert finalized.is_set()
+    assert pending.cancelled()
+    assert close_calls == 1
+    assert pool.shutdown_pending is False
+
+
+@pytest.mark.asyncio
 async def test_stop_reports_active_job_that_resists_cancellation(monkeypatch):
     cancellation_requested = asyncio.Event()
     release = asyncio.Event()

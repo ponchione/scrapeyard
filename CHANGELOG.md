@@ -83,6 +83,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A restart or deploy during a run no longer leaves that run `running` for
+  about ten minutes. Shutdown used to spend its whole grace draining active
+  jobs and then gave cancelled runs no time to record their failure, so they
+  waited for the 600 s heartbeat timeout. Draining now stops when a quarter
+  of the grace (at most 5 s) remains, and cancelled runs are marked `failed`
+  within that remainder before shutdown continues.
 - A cancelled database open or close no longer leaves behind an aiosqlite
   thread that blocks process exit. That could hang shutdown until the
   container was killed, and occasionally hung the test suite after every test

@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-51**) and use this template:
+7. **New findings** take the next free ID (**TD-52**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,21 +230,21 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-30 | P2 | pool, lifespan | medium | none | |
-| 2 | TD-31 | P2 | queue, runtime | low | none | Six small fixes |
-| 3 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
-| 4 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
-| 5 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 6 | TD-35 | P3 | API, job store | low | none | |
-| 7 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 8 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 9 | TD-38 | P3 | result store | low | none | |
-| 10 | TD-39 | P3 | click pagination | medium | timing only | |
-| 11 | TD-40 | P3 | API | low | `offset` bound | |
-| 12 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 13 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 14 | TD-43 | P3 | image, dependencies | low | none | |
-| 15 | TD-44 | P3 | lint, docs | low | none | |
+| 1 | TD-31 | P2 | queue, runtime | low | none | Six small fixes |
+| 2 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
+| 3 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
+| 4 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
+| 5 | TD-35 | P3 | API, job store | low | none | |
+| 6 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 7 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 8 | TD-38 | P3 | result store | low | none | |
+| 9 | TD-39 | P3 | click pagination | medium | timing only | |
+| 10 | TD-40 | P3 | API | low | `offset` bound | |
+| 11 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 12 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 13 | TD-43 | P3 | image, dependencies | low | none | |
+| 14 | TD-44 | P3 | lint, docs | low | none | |
+| 15 | TD-51 | P3 | lifespan | medium | none | Found during TD-30; needs a design decision |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -275,7 +275,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-30 | P2 | ready | Shutdown drain leaves cancelled runs `running` for about ten minutes |
 | TD-31 | P2 | ready | Worker and runtime error paths have small correctness gaps |
 | TD-32 | P2 | ready | Outbound HTTP has no total deadline, and webhook retry handling has gaps |
 | TD-33 | P2 | ready | Retryable HTTP failures lose their diagnostics and challenge classification |
@@ -295,6 +294,7 @@ qualification workflows passing.
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
+| TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 
 ## Ready to implement
 
@@ -342,36 +342,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-30 — Shutdown drain leaves cancelled runs `running` for about ten minutes
-
-**Priority:** P2 · **Area:** worker pool, lifespan · **Risk:** medium · **Contract:** none (the 40 s Compose `stop_grace_period` is unchanged; jobs get slightly less drain time) · **Depends on:** —
-
-**Problem:** `WorkerPool.stop` spends the whole grace deadline draining.
-- **Not enough time to cancel.** After it cancels active jobs, the runner and
-  the jobs' crash handlers get about one event-loop turn. `scrape_task`'s
-  cancellation handler needs several database round trips, so `stop()` raises
-  with `runner` and `active_jobs` unresolved.
-- **Cleanup is skipped.** The lifespan then skips closing webhooks and
-  databases, and `asyncio.run` cancels the shielded crash-finalization tasks.
-- **Runs get stuck.** They stay `running` until the 600 s heartbeat timeout,
-  plus up to 60 s of reconciliation. This happens on any deploy or restart
-  during a run longer than about 30 s. Eyebox sees `running` for about 10
-  minutes and then `failed`.
-
-**Code:** `queue/pool.py` (`WorkerPool.stop`), `main.py` (lifespan shutdown),
-`queue/worker.py` (the `scrape_task` cancellation path).
-
-**Fix:**
-- Keep part of the grace period, for example `min(5 s, grace/4)`, for
-  cancellation and crash finalization to finish, staying within the Compose
-  stop grace.
-- Have the lifespan still close the stores when the pool reports unresolved
-  phases.
-
-**Done when:** a test that stops the pool in the middle of a run shows the run
-reaching its terminal status (`cancelled` or `failed`, per policy) before
-`stop()` returns and within the grace period.
 
 ### TD-31 — Worker and runtime error paths have small correctness gaps
 
@@ -866,6 +836,34 @@ recorded before and after.
 - **d. The README settings table is incomplete.** It omits
   `WORKERS_MEMORY_LIMIT_MB` and 17 other settings. **Fix:** fill it in, and add
   a test that checks the table against `ServiceSettings`.
+
+### TD-51 — Shutdown ends in SIGKILL while a run or result thread is still active
+
+**Priority:** P3 · **Area:** lifespan · **Risk:** medium · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `_shutdown_runtime_services` keeps every shared store open while any owned
+  phase is still live. That includes an active run thread or result-response
+  thread, even after the worker pool has stopped cleanly.
+- aiosqlite's connection threads are non-daemon, so the interpreter waits for
+  them at exit and Compose kills the container at its 40 s `stop_grace_period`.
+- This is the documented trade-off: unresolved work "remains tracked and the
+  runtime reports shutdown failure instead of silently abandoning it", and two
+  tests enforce it (`test_shutdown_retains_shared_services_for_unresolved_worker`,
+  `test_lifespan_retains_instance_guard_for_unresolved_worker`). SQLite stays
+  consistent, but every such shutdown ends in SIGKILL.
+- Found while fixing TD-30, which kept this design. Once the pool has used its
+  cancellation reserve, no grace is left to close the stores anyway.
+
+**Code:** `main.py` (`_shutdown_runtime_services`, `live_owned_phases`,
+`retain_shared_services`).
+**Fix:** decide whether a thread that ignores cancellation should keep the
+stores open. Either close the stores once only lingering threads remain, or
+give the thread pools a checkpoint that stops their threads before exit, and
+update the two tests and `docs/DEPLOYMENT.md` to match.
+**Done when:** a test with a stuck run thread shows shutdown closing the stores
+and the process exiting within the grace, or the trade-off is accepted and this
+entry deleted.
 
 ## Coordinated
 

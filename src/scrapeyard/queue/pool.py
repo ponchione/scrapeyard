@@ -33,6 +33,11 @@ from scrapeyard.queue.priority import (
 
 _ARQ_FUNCTION_NAME = "scrape_job"
 _KEEP_RESULT_SECONDS = 3600
+# Shutdown stops draining active jobs this far before its grace expires, so
+# cancelled runs can record their terminal state instead of staying running
+# until the heartbeat timeout.
+_CANCELLATION_RESERVE_MAX_SECONDS = 5.0
+_CANCELLATION_RESERVE_FRACTION = 0.25
 logger = logging.getLogger(__name__)
 
 _ATOMIC_ENQUEUE_LUA = """
@@ -371,6 +376,11 @@ class WorkerPool:
             else max(0.0, timeout)
         )
         deadline = MonotonicDeadline(grace_seconds)
+        cancellation_reserve = min(
+            _CANCELLATION_RESERVE_MAX_SECONDS,
+            grace_seconds * _CANCELLATION_RESERVE_FRACTION,
+        )
+        drain_seconds = grace_seconds - cancellation_reserve
         drain_timed_out = False
         unresolved_phases: list[str] = []
         pending = [
@@ -378,19 +388,16 @@ class WorkerPool:
             if not task.done()
         ]
         if pending:
-            try:
-                await deadline.run(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
-            except asyncio.TimeoutError:
+            # asyncio.wait never cancels on timeout, so each job is cancelled
+            # exactly once and its cancellation handler is not interrupted.
+            _done, still_running = await asyncio.wait(pending, timeout=drain_seconds)
+            if still_running:
                 drain_timed_out = True
-                for task in pending:
-                    if not task.done():
-                        task.cancel()
-
-        # Let cancellation reach active jobs before deciding whether their
-        # Redis and worker dependencies are safe to close.
-        await asyncio.sleep(0)
+                for task in still_running:
+                    task.cancel()
+                # Cancelled jobs record their terminal state within the
+                # reserve, before Redis and the worker are closed.
+                await asyncio.wait(still_running, timeout=deadline.remaining)
 
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
@@ -409,7 +416,7 @@ class WorkerPool:
         if unresolved_phases:
             if drain_timed_out and active_jobs_unresolved:
                 logger.warning(
-                    "Worker shutdown grace expired; active-job cancellation "
+                    "Worker shutdown drain window expired; active-job cancellation "
                     "remains unresolved"
                 )
             raise asyncio.TimeoutError(
@@ -431,7 +438,7 @@ class WorkerPool:
         self._stopping = False
         if drain_timed_out:
             logger.info(
-                "Worker shutdown grace expired; active-job cancellation completed"
+                "Worker shutdown drain window expired; active-job cancellation completed"
             )
 
     async def enqueue(

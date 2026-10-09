@@ -402,7 +402,9 @@ Set limits to match host capacity:
 - `SCRAPEYARD_WORKERS_MAX_ACCEPTED_RUNS` (default `100`, queued plus running owners)
 - `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB`
 - `SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB` (default `512`, per active browser target)
-- `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` (default `30`, shared by worker and webhook shutdown)
+- `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` (default `30`, shared by worker and webhook shutdown;
+  running jobs drain until a quarter of it, at most 5 s, remains, then are
+  cancelled and record their failure in that remainder)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
 - `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` (default `604800`)
