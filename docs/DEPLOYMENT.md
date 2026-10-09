@@ -13,6 +13,13 @@ assumption at the network layer.
 - Scrapeyard runs exactly one application process and one replica. Keep
   Uvicorn/Gunicorn workers and orchestrator replicas at `1`; use
   `SCRAPEYARD_WORKERS_MAX_CONCURRENT` for in-process scrape concurrency.
+- Scrapeyard runs under an init process as PID 1 (`init: true` in
+  `docker-compose.yml`; `docker run --init` or an equivalent elsewhere). The
+  image's entrypoint execs Uvicorn, which never reaps processes it did not
+  start, and browser runs leave orphaned Chromium and crashpad children that
+  are re-parented to PID 1. Without an init they stay as zombies: one
+  development container without an init accumulated 7,468 in 16 hours, enough
+  to exhaust the Compose `pids_limit` of 512 many times over.
 - Browser scraping egress is controlled by the host, orchestrator, proxy
   gateway, or firewall policy and attested before the application starts.
 

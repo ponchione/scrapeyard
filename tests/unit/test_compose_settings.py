@@ -103,3 +103,17 @@ def test_trusted_compose_overlays_explicitly_disable_production_attestation() ->
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == ""
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT"] == "0"
         assert environment["SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT"] == "0"
+
+
+def test_scrapeyard_service_runs_under_an_init_in_every_compose_file() -> None:
+    # Browser runs leave orphaned Chromium children that only PID 1 can reap;
+    # under Uvicorn as PID 1 they stay as zombies until pids_limit is exhausted.
+    base = yaml.load(Path("docker-compose.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert base["services"]["scrapeyard"]["init"] == "true"
+    for path in (
+        "docker-compose.local.yml",
+        "docker-compose.qualification.yml",
+        "docker-compose.smoke.yml",
+    ):
+        overlay = yaml.load(Path(path).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        assert overlay["services"]["scrapeyard"].get("init", "true") == "true"
