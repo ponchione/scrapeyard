@@ -58,6 +58,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Result JSON is now encoded by the C JSON encoder, one record at a time,
+  instead of a pure-Python walk of the whole document. Writing a 10 MB
+  result took 327 ms and now takes 30 ms, and rendering a 16.8 MB
+  `/results` response took 480 ms and now takes 55-71 ms. The bytes are
+  unchanged.
 - Click pagination now waits in the page for the items to change (checked every
   50 ms) instead of sleeping in 250 ms steps, so each click resolves as soon
   as the next page renders.

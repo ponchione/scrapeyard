@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-54**) and use this template:
+7. **New findings** take the next free ID (**TD-55**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,20 +230,20 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 2 | TD-35 | P3 | API, job store | low | none | |
-| 3 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 4 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 5 | TD-38 | P3 | result store | low | none | |
-| 6 | TD-39 | P3 | click pagination | medium | timing only | |
-| 7 | TD-40 | P3 | API | low | `offset` bound | |
-| 8 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 9 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 10 | TD-43 | P3 | image, dependencies | low | none | |
-| 11 | TD-44 | P3 | lint, docs | low | none | |
-| 12 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 13 | TD-52 | P2 | worker | low | none | |
-| 14 | TD-53 | P3 | engine | low | none | |
+| 1 | TD-35 | P3 | API, job store | low | none | |
+| 2 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 3 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 4 | TD-38 | P3 | result store | low | none | |
+| 5 | TD-39 | P3 | click pagination | medium | timing only | |
+| 6 | TD-40 | P3 | API | low | `offset` bound | |
+| 7 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 8 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 9 | TD-43 | P3 | image, dependencies | low | none | |
+| 10 | TD-44 | P3 | lint, docs | low | none | |
+| 11 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 12 | TD-52 | P2 | worker | low | none | |
+| 13 | TD-53 | P3 | engine | low | none | |
+| 14 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -274,7 +274,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-34 | P3 | ready | Result JSON is encoded with Python's pure-Python encoder |
 | TD-35 | P3 | ready | API handlers decrypt, hash and parse YAML on the event loop |
 | TD-36 | P3 | ready | Worker output processing and the poll loop repeat avoidable work |
 | TD-37 | P3 | ready | Periodic SQLite queries scan history, and the index set is unbalanced |
@@ -293,6 +292,7 @@ qualification workflows passing.
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-52 | P2 | ready | A cancellation during run-budget handling skips cancellation recovery |
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
+| TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
 
 ## Ready to implement
 
@@ -340,33 +340,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-34 — Result JSON is encoded with Python's pure-Python encoder
-
-**Priority:** P3 · **Area:** JSON encoding, API, result storage · **Risk:** low · **Contract:** none (output must be byte-identical) · **Depends on:** —
-
-**Problem:**
-- `iter_json_bytes` streams through `JSONEncoder.iterencode()`, which uses the
-  pure-Python encoder. The C encoder is only used for one-shot `dumps`.
-- Measured: a 9.9 MB result takes 365 ms; a 16.6 MB result takes 393 ms against
-  45 ms for `json.dumps`. A 50 MiB result is projected at about 1.2 s. All of
-  this holds the GIL.
-- Every Eyebox `/results` download and every result write goes through it.
-
-**Code:** `common/json_encoding.py` (`iter_json_bytes`), called from
-`api/result_responses.py` (`_render_result_response`) and
-`storage/filesystem.py` (`write_json_file_bounded`).
-
-**Fix:**
-- Walk only the outer dicts and lists in Python, and C-encode each list element
-  with `json.dumps` using the same options.
-- Keep the chunking, the cancellation checks and the byte ceiling.
-- A prototype produced byte-identical output for both option sets in 75 ms,
-  against 365 ms today.
-
-**Done when:** a property test over representative envelopes shows
-byte-for-byte equality with the current encoder for both option sets, and the PR
-includes before and after timings.
 
 ### TD-35 — API handlers decrypt, hash and parse YAML on the event loop
 
@@ -783,6 +756,33 @@ and grep for other places that catch only one of the two.
 **Done when:** a test raising `BrowserTransportTimeout` through
 `classify_fetch_exception` expects `navigation_timeout`, and it runs on 3.10 in
 CI.
+
+### TD-54 — A lone surrogate in a selector field name makes that run's `GET /results` fail with 500
+
+**Priority:** P3 · **Area:** config validation, API · **Risk:** low · **Contract:** new 422s only for configs that already break; no Eyebox config contains a surrogate · **Depends on:** —
+
+**Problem:**
+- YAML `"\ud800"` loads as a lone surrogate. Used as a `selectors` key, it
+  reaches records and `targets[].debug.selector_counts`.
+- The run ends `complete` and the artifact writes, ASCII-escaped. But
+  `_render_result_response` encodes with `ensure_ascii=False`, so every
+  `GET /results` for that run raises `UnicodeEncodeError` and returns a generic
+  500. Reproduced on `a36c0a7` through `POST /scrape` and the real worker.
+- Lone surrogates in transform arguments, selector queries or target URLs fail
+  the target inside the engine instead, reported as `error_type: http_error`.
+- Page content can't produce one: basic fetch decodes with `errors="replace"`,
+  Chromium delivers U+FFFD, and a server-declared `unicode_escape` or `utf-7`
+  charset fails in Scrapling's `Adaptor`, also as `http_error`.
+
+**Code:** `config/schema.py`, `config/loader.py`, `api/result_responses.py`
+(`_render_result_response`), `engine/fetch_classifier.py`
+(`classify_fetch_exception`).
+**Fix:** reject strings containing U+D800–U+DFFF anywhere in a submitted config
+with 422. Optionally, classify a `UnicodeError` raised while parsing as a
+content error instead of `http_error`.
+**Done when:** a config with a lone surrogate in a field name, transform
+argument, selector or URL gets a 422, and a test shows no run can complete
+with a record that `/results` cannot encode.
 
 ## Coordinated
 
