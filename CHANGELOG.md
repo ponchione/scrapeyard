@@ -58,6 +58,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Removed fetch code paths and helpers that only tests reached, and merged
+  duplicated decrypt-and-verify and thread-pool code. Behavior is unchanged.
 - A result response now counts against `SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS`
   until its body has been sent, not just while it renders, so slow downloads
   no longer keep up to 100 MiB per response in memory uncounted. The body is

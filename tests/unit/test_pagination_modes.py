@@ -26,6 +26,7 @@ from scrapeyard.engine.scrape_models import (
     FetchOutcome,
     TargetResult,
 )
+from tests.unit.browser_fakes import ScriptedBrowserSession
 
 
 def _target(pagination_config: dict[str, Any], *, fetcher: str = "basic", **extra: Any) -> TargetConfig:
@@ -85,11 +86,19 @@ def test_click_pagination_spec_uses_next_and_item_selectors():
 
 
 @pytest.mark.asyncio
-async def test_click_pagination_rejects_a_non_session_browser_fetch():
+async def test_click_pagination_spec_is_handed_to_the_browser_session():
     target = _target({"mode": "click", "next": "button.next"}, fetcher="dynamic")
+    seen: dict[str, Any] = {}
 
-    with pytest.raises(ValueError, match="browser session"):
-        await fetch_browser_response(object(), target.url, target, FetcherType.dynamic, {}, None)
+    async def fetch(url: str, kwargs: dict[str, Any], _route_handler: Any) -> Any:
+        seen.update(kwargs)
+        return MagicMock(status=200, url=url)
+
+    await fetch_browser_response(
+        ScriptedBrowserSession(fetch), target.url, target, FetcherType.dynamic, {}, None,
+    )
+
+    assert seen["click_pagination"] == click_pagination_spec(target)
 
 
 # --- page parameter URLs ----------------------------------------------------

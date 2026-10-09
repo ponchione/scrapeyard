@@ -14,9 +14,7 @@ from typing import Any, cast
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from rebrowser_playwright.async_api import TimeoutError as RebrowserPlaywrightTimeoutError
-from scrapling import Fetcher, PlayWrightFetcher, StealthyFetcher
-from scrapling.engines import camo as scrapling_camo_engine
-from scrapling.engines import pw as scrapling_pw_engine
+from scrapling import PlayWrightFetcher, StealthyFetcher
 from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
 from scrapling.engines.toolbelt.custom import ResponseEncoding
 from scrapling.engines.toolbelt.navigation import (
@@ -45,7 +43,7 @@ from scrapeyard.engine.url_guard import (
     redact_sensitive_mapping,
 )
 from scrapeyard.engine.url_guard import redact_userinfo_in_text, redact_userinfo_in_url
-from scrapeyard.engine.basic_fetch import BasicSession, fetch_streaming_response
+from scrapeyard.engine.basic_fetch import fetch_streaming_response
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.scrape_models import ClickPaginationSpec
 from scrapeyard.engine.subrequest_filter import SubrequestFilter
@@ -230,21 +228,6 @@ async def _guarded_async_intercept_route(route: Any) -> None:
     await route.continue_()
 
 
-def _install_browser_route_guard() -> None:
-    # Scrapling exposes these runtime hook points without declaring them in its
-    # package surface, so contain the dynamic mutation at this adapter boundary.
-    _set_dynamic_attribute(
-        scrapling_pw_engine,
-        "async_intercept_route",
-        _guarded_async_intercept_route,
-    )
-    _set_dynamic_attribute(
-        scrapling_camo_engine,
-        "async_intercept_route",
-        _guarded_async_intercept_route,
-    )
-
-
 def _uncache_response_encoding() -> None:
     # Scrapling memoizes ResponseEncoding.get_value(content_type, text) in an
     # lru_cache(128) keyed by each page's full text, so the process kept the
@@ -263,7 +246,6 @@ def _set_dynamic_attribute(target: object, name: str, value: object) -> None:
     setattr(target, name, value)
 
 
-_install_browser_route_guard()
 _uncache_response_encoding()
 
 
@@ -412,20 +394,6 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-async def _close_page_safely(page: Any) -> None:
-    close = getattr(page, "close", None)
-    if not callable(close):
-        return
-    try:
-        await _maybe_await(close())
-    except Exception as exc:
-        logger.debug(
-            "Failed to close unsafe browser page: %s: %s",
-            type(exc).__name__,
-            _exception_text(exc),
-        )
 
 
 async def _click_selector(page: Any, selector: str, timeout_ms: int | None) -> None:
@@ -785,23 +753,16 @@ async def fetch_basic_response(
     *,
     budget: RunBudget | None = None,
 ) -> Any:
-    if fetcher_cls is Fetcher or isinstance(fetcher_cls, BasicSession):
-        return await fetch_streaming_response(
-            fetcher_cls,
-            url,
-            call_kwargs,
-            budget=budget,
-        )
-    return await run_thread_work(
-        fetcher_cls.get,
+    return await fetch_streaming_response(
+        fetcher_cls,
         url,
-        run_budget=budget,
-        **call_kwargs,
+        call_kwargs,
+        budget=budget,
     )
 
 
 async def fetch_browser_response(
-    fetcher_cls: Any,
+    fetcher_cls: BrowserSession,
     url: str,
     target: TargetConfig,
     fetcher_type: FetcherType,
@@ -831,8 +792,6 @@ async def fetch_browser_response(
             )
         except BudgetExceeded as exc:
             capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
-            if not isinstance(fetcher_cls, BrowserSession):
-                await _close_page_safely(page)
             raise
         except Exception as exc:
             message = truncate_text(_exception_text(exc), _EVENT_TEXT_CHARS)
@@ -842,8 +801,6 @@ async def fetch_browser_response(
             }
             if isinstance(exc, UnsafeURLError):
                 capture[_PAGE_ACTION_EXCEPTION_KEY] = exc
-                if not isinstance(fetcher_cls, BrowserSession):
-                    await _close_page_safely(page)
                 raise
             action_exc = BrowserPageActionError(
                 f"Browser page action failed: {message}",
@@ -856,8 +813,6 @@ async def fetch_browser_response(
     call_kwargs["disable_resources"] = True
     click_spec = click_pagination_spec(target)
     if click_spec is not None:
-        if not isinstance(fetcher_cls, BrowserSession):
-            raise ValueError("click pagination requires a browser session fetch")
         call_kwargs["click_pagination"] = click_spec
     blocked_requests: list[dict[str, str]] = []
     guard_token = _BROWSER_BLOCK_RESOURCES.set(browser.disable_resources)
@@ -870,13 +825,9 @@ async def fetch_browser_response(
     )
     filter_token = _BROWSER_SUBREQUEST_FILTER.set(SubrequestFilter.for_target(browser, target.url))
     try:
-        fetch = (
-            fetcher_cls.fetch(
-                url, call_kwargs, _guarded_async_intercept_route,
-                budget=budget, site=url_site(target.url),
-            )
-            if isinstance(fetcher_cls, BrowserSession)
-            else fetcher_cls.async_fetch(url, **call_kwargs)
+        fetch = fetcher_cls.fetch(
+            url, call_kwargs, _guarded_async_intercept_route,
+            budget=budget, site=url_site(target.url),
         )
         try:
             response = await fetch if budget is None else await budget.wait_for_owned(fetch)
@@ -892,8 +843,12 @@ async def fetch_browser_response(
                 capture["blocked_requests"] = blocked_requests
                 try:
                     cast(Any, exc).debug = capture
-                except Exception:
-                    pass
+                except Exception as attach_exc:
+                    logger.debug(
+                        "Could not attach blocked-request diagnostics to %s: %s",
+                        type(exc).__name__,
+                        type(attach_exc).__name__,
+                    )
             raise
     finally:
         _BROWSER_SUBREQUEST_FILTER.reset(filter_token)

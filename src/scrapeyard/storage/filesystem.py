@@ -79,11 +79,6 @@ def write_bytes_file(path: str | Path, payload: bytes) -> None:
             tmp.unlink()
 
 
-def write_json_file(path: str | Path, data: Any) -> None:
-    """Atomically serialize compact JSON to *path*."""
-    write_bytes_file(path, serialize_json_bytes(data))
-
-
 def write_json_file_bounded(
     path: str | Path,
     data: Any,
@@ -152,12 +147,6 @@ async def cleanup_safe_to_thread(
     if cancellation_requested:
         raise asyncio.CancelledError
     return result
-
-
-def read_json_file(path: str | Path) -> Any:
-    """Load JSON data from *path*."""
-    target = Path(path)
-    return json.loads(target.read_text(encoding="utf-8"))
 
 
 def _read_bytearray_file_no_follow(

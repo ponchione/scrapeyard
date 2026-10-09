@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import AsyncIterator, Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from typing import Any, TypeVar
@@ -17,7 +16,7 @@ from starlette.types import Receive, Scope, Send
 from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.api.serializers import serialize_result_response
 from scrapeyard.common.json_encoding import iter_json_bytes
-from scrapeyard.runtime.metrics import ACTIVE_WORK, WORK_CAPACITY
+from scrapeyard.common.run_threads import OwnedThreadPool
 
 
 T = TypeVar("T")
@@ -100,35 +99,17 @@ class ResultResponse(Response):
             self._slot.release()
 
 
-class ResultResponseThreadPool:
+class ResultResponseThreadPool(OwnedThreadPool):
     """Dedicated bounded executor with cooperative cancellation ownership."""
 
     def __init__(self, max_workers: int) -> None:
-        if max_workers < 1:
-            raise ValueError("Result response thread capacity must be positive")
-        self.max_workers = max_workers
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
+        super().__init__(
+            max_workers,
+            label="result_response_threads",
             thread_name_prefix="scrapeyard-result-response",
+            capacity_error="Result response thread capacity must be positive",
         )
-        self._slots = asyncio.Semaphore(max_workers)
         self._request_slots = asyncio.Semaphore(max_workers)
-        self._state_lock = threading.Lock()
-        self._active = 0
-        self._lingering = 0
-        WORK_CAPACITY.labels("result_response_threads").set(max_workers)
-        ACTIVE_WORK.labels("result_response_threads").set(0)
-        ACTIVE_WORK.labels("lingering_result_response_threads").set(0)
-
-    @property
-    def active(self) -> int:
-        with self._state_lock:
-            return self._active
-
-    @property
-    def lingering(self) -> int:
-        with self._state_lock:
-            return self._lingering
 
     @asynccontextmanager
     async def request_capacity(self) -> AsyncIterator[ResultRequestSlot]:
@@ -157,61 +138,18 @@ class ResultResponseThreadPool:
     ) -> T:
         """Render with one owned slot and signal cancellation to the worker."""
 
-        await self._slots.acquire()
-        loop = asyncio.get_running_loop()
         stop = threading.Event()
-        lingering = False
-        try:
-            future = self._executor.submit(
+        return await self._run_owned(
+            lambda executor: executor.submit(
                 partial(
                     function,
                     *args,
                     stop_requested=stop.is_set,
                     **kwargs,
                 )
-            )
-        except BaseException:
-            self._slots.release()
-            raise
-
-        with self._state_lock:
-            self._active += 1
-            ACTIVE_WORK.labels("result_response_threads").set(self._active)
-
-        def release_slot(completed: Future[T]) -> None:
-            del completed
-            with self._state_lock:
-                self._active -= 1
-                if lingering:
-                    self._lingering -= 1
-                ACTIVE_WORK.labels("result_response_threads").set(self._active)
-                ACTIVE_WORK.labels("lingering_result_response_threads").set(
-                    self._lingering
-                )
-            try:
-                loop.call_soon_threadsafe(self._slots.release)
-            except RuntimeError:
-                pass
-
-        future.add_done_callback(release_slot)
-        wrapped = asyncio.wrap_future(future, loop=loop)
-        try:
-            return await asyncio.shield(wrapped)
-        except asyncio.CancelledError:
-            stop.set()
-            with self._state_lock:
-                if not future.done():
-                    lingering = True
-                    self._lingering += 1
-                    ACTIVE_WORK.labels("lingering_result_response_threads").set(
-                        self._lingering
-                    )
-            raise
-
-    def shutdown(self) -> None:
-        """Wait for owned renderers and reject future submissions."""
-
-        self._executor.shutdown(wait=True, cancel_futures=True)
+            ),
+            on_cancel=stop.set,
+        )
 
 
 def _render_result_response(

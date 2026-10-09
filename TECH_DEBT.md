@@ -230,19 +230,18 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 2 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 3 | TD-43 | P3 | image, dependencies | low | none | |
-| 4 | TD-44 | P3 | lint, docs | low | none | |
-| 5 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 6 | TD-52 | P2 | worker | low | none | |
-| 7 | TD-53 | P3 | engine | low | none | |
-| 8 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 9 | TD-55 | P2 | URL guard, API | low | none | |
-| 10 | TD-56 | P3 | redaction | low | none | |
-| 11 | TD-57 | P3 | storage | low | none | |
-| 12 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 13 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 1 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 2 | TD-43 | P3 | image, dependencies | low | none | |
+| 3 | TD-44 | P3 | lint, docs | low | none | |
+| 4 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 5 | TD-52 | P2 | worker | low | none | |
+| 6 | TD-53 | P3 | engine | low | none | |
+| 7 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 8 | TD-55 | P2 | URL guard, API | low | none | |
+| 9 | TD-56 | P3 | redaction | low | none | |
+| 10 | TD-57 | P3 | storage | low | none | |
+| 11 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 12 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -273,7 +272,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-41 | P3 | ready | Dead code and duplicated helpers |
 | TD-42 | P3 | ready | `job_store.py` (2.5k lines) mixes five concerns |
 | TD-43 | P3 | ready | The runtime image and dependency declarations carry waste |
 | TD-44 | P3 | ready | Lint configuration is partly inert, and README omits settings |
@@ -339,64 +337,9 @@ security, so nothing gates merges.
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
 
-### TD-41 — Dead code and duplicated helpers
-
-**Priority:** P3 · **Area:** mixed · **Risk:** low (a is medium because tests need rewriting) · **Contract:** none · **Depends on:** do before TD-42
-
-Everything here was grepped across `src/` and `tests/`. Grep again before
-deleting.
-
-- **a. The legacy non-session browser fetch path.**
-  - `_prepare_scrape_context` always wraps fetchers in sessions, so production
-    never reaches these:
-    - the module-level Scrapling monkeypatch `_install_browser_route_guard()`
-    - `browser_debug._close_page_safely`
-    - the non-session branches of `fetch_basic_response`,
-      `fetch_browser_response`, `scraper._measured_response_body_bytes` and
-      `_fetch_basic_with_safe_redirects`
-  - **`_guarded_async_intercept_route` itself is live and must stay.** The
-    session path passes it to `BrowserSession` as `route_handler`.
-  - Keep `_uncache_response_encoding`.
-  - **Confirm with coverage.** The legacy path is driven by tests that call
-    `fetch_browser_response` without a session and rely on the patched
-    `scrapling_pw_engine.async_intercept_route`, at least
-    `test_subrequest_filter.py` and `test_browser_debug_observability.py`. Run
-    the suite without them, delete only the lines that become uncovered, and
-    rewrite those tests onto the session path.
-  - The remaining Scrapling coupling is the name-mangled private calls in
-    `browser_session.py`. That is fine while the version is pinned below 0.3;
-    0.2.99 is the last 0.2 release.
-- **b. A risky default.** `submit_scrape_job(load_result=True)` and
-  `ScrapeSubmission.results` are used only by tests; the route always passes
-  `False`. The default of `True` would load a 50 MiB artifact without the
-  result pool's concurrency limit. Remove the parameter, or default it to
-  `False`.
-- **c. Used only by tests or never imported:**
-  - `RunBudget.consume_extracted_records`
-  - `SQLiteErrorStore.delete_errors_for_run` and its `ErrorStore` protocol
-    method (no callers at all)
-  - `WebhookOutboxStore.enqueue_delivery`, `get_delivery` and `list_pending`
-  - `filesystem.read_json_file` and `write_json_file`
-  - the re-exports in `webhook/__init__.py`
-- **d. Decrypt-then-verify is written out six times.** The pattern appears in
-  `job_store.py` in `get_job_run_state`, `get_queued_run_config` (twice),
-  `_insert_failed_queued_run`, `claim_run` and `queue_run`. Add one
-  `_reveal_verified(value, purpose, expected_hash)` helper.
-- **e. Two copies of the same thread pool.** `api/result_responses.py`
-  (`ResultResponseThreadPool`) and `common/run_threads.py` (`RunThreadPool`)
-  duplicate the slot, lingering-thread and metrics logic. Share a base class
-  parameterized by the metrics label. This one is medium risk.
-- **f. Duplicated cleanup call.** `storage/cleanup.py`
-  (`start_cleanup_loop._loop`) repeats the whole `run_cleanup` call in two
-  branches that differ only in the webhook arguments. Its `getattr(settings, …)`
-  fallbacks cover settings fields that always exist.
-- **g. Small lint findings.** Two `TRY203` handlers that only re-raise in
-  `scheduler/cron.py`, an unused `noqa` in `common/logging.py`, and a silent
-  `try`/`except`/`pass` in `browser_debug.py` (log it).
-
 ### TD-42 — `job_store.py` (2.5k lines) mixes five concerns
 
-**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-41 (to avoid conflicts)
+**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** —
 
 **Fix:** keep `SQLiteJobStore` as a thin facade and move the code into module
 functions that take `db`. Approximate line ranges at `b0b285e`:
@@ -452,8 +395,8 @@ recorded before and after.
   with (a), in its own commit listed in `.git-blame-ignore-revs` and with
   `ruff format --check` in CI, or decide not to and delete this sub-item.
 - **c. The extended rule scan is informational only** (`ruff check --select
-  PERF,RUF,PL,ASYNC,PTH,RET,TRY,S src`). The findings worth acting on are in
-  TD-41g. Two kinds of hit are expected and should be left alone:
+  PERF,RUF,PL,ASYNC,PTH,RET,TRY,S src`). The findings worth acting on have
+  been fixed. Two kinds of hit are expected and should be left alone:
   - `S506` on `ScrapeyardSafeLoader` is a false positive, because it subclasses
     `yaml.SafeLoader`.
   - `PLC0414` on `import x as x` marks intentional re-exports for mypy.
@@ -676,8 +619,9 @@ data before any code.
 - rebrowser-playwright 1.52 ships Chromium 136.0.7103, which the dynamic and
   stealthy fetchers use. Playwright 1.58 ships Chromium 145.
 - Scrapeyard loads hostile pages with the older build.
-- The Scrapling `<0.3` pin limits the options (see TD-41a on the private-API
-  coupling).
+- The Scrapling `<0.3` pin limits the options: `browser_session.py` calls
+  name-mangled Scrapling internals, which is fine only while the version stays
+  below 0.3 (0.2.99 is the last 0.2 release).
 
 **Fix:** plan a bump, or route stealth through upstream Playwright.
 

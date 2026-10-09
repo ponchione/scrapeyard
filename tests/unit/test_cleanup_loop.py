@@ -84,6 +84,8 @@ async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
                 storage_max_results_per_job=20,
                 storage_cleanup_batch_size=50,
                 storage_orphan_grace_seconds=3600,
+                storage_cleanup_cycle_max_items_per_phase=100,
+                storage_cleanup_cycle_max_seconds=30,
                 storage_reconciliation_dry_run=True,
             ),
             SimpleNamespace(
@@ -91,6 +93,8 @@ async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
                 storage_max_results_per_job=40,
                 storage_cleanup_batch_size=75,
                 storage_orphan_grace_seconds=7200,
+                storage_cleanup_cycle_max_items_per_phase=100,
+                storage_cleanup_cycle_max_seconds=30,
                 storage_reconciliation_dry_run=False,
             ),
         ]
@@ -113,6 +117,10 @@ async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
     assert [call["result_cleanup_batch_size"] for call in calls] == [50, 75]
     assert [call["orphan_grace_seconds"] for call in calls] == [3600, 7200]
     assert [call["reconciliation_dry_run"] for call in calls] == [True, False]
+    assert [call["cycle_max_items_per_phase"] for call in calls] == [100, 100]
+    assert [call["cycle_max_seconds"] for call in calls] == [30, 30]
+    # Without an outbox, webhook retention is left to run_cleanup's defaults.
+    assert all("webhook_outbox_store" not in call for call in calls)
 
 
 @pytest.mark.asyncio
@@ -126,6 +134,8 @@ async def test_cleanup_loop_wires_webhook_retention_settings(monkeypatch):
         webhook_failed_retention_days=14,
         webhook_dispatch_batch_size=25,
         storage_orphan_grace_seconds=86400,
+        storage_cleanup_cycle_max_items_per_phase=100,
+        storage_cleanup_cycle_max_seconds=30,
         storage_reconciliation_dry_run=True,
     )
 
@@ -158,6 +168,8 @@ async def test_cleanup_loop_wires_durable_history_policy(monkeypatch):
         storage_max_results_per_job=20,
         storage_cleanup_batch_size=50,
         storage_orphan_grace_seconds=86400,
+        storage_cleanup_cycle_max_items_per_phase=100,
+        storage_cleanup_cycle_max_seconds=30,
         storage_reconciliation_dry_run=True,
         idempotency_cleanup_batch_size=30,
         history_adhoc_job_retention_days=31,

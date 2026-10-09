@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from scrapeyard.common.budgets import RunBudget
-from scrapeyard.common.traffic import HostTraffic, registrable_domain, url_site
-from scrapeyard.engine.basic_fetch import BasicSession
+from scrapeyard.common.traffic import HostTraffic, registrable_domain, url_hostname, url_site
+from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE, BasicSession
 from scrapeyard.engine.scraper import _fetch_basic_with_safe_redirects
 from scrapeyard.engine.url_guard import ResolvedPublicURL
 
@@ -137,22 +137,28 @@ def test_run_budget_snapshot_includes_the_traffic_report() -> None:
 
 
 async def test_basic_redirects_are_counted_per_host(monkeypatch) -> None:
+    # The streaming transport reports each response's received bytes.
     responses = iter([
         SimpleNamespace(status=302, headers={"location": "https://shop.example-mall.test/final"},
-                        body=b"abc", url="https://www.example.test/start"),
-        SimpleNamespace(status=200, headers={}, body=b"defgh", url="https://shop.example-mall.test/final"),
+                        url="https://www.example.test/start", **{RECEIVED_BYTES_ATTRIBUTE: 3}),
+        SimpleNamespace(status=200, headers={}, url="https://shop.example-mall.test/final",
+                        **{RECEIVED_BYTES_ATTRIBUTE: 5}),
     ])
 
-    class Fetcher:
-        @staticmethod
-        def get(*_args, **_kwargs):
-            return next(responses)
+    def resolve(url: str) -> ResolvedPublicURL:
+        host = url_hostname(url)
+        assert host is not None
+        return ResolvedPublicURL(url, host, host)
 
-    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.fetch_basic_response",
+        AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
+    )
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", resolve)
     budget = _budget()
 
     await _fetch_basic_with_safe_redirects(
-        Fetcher, "https://www.example.test/start", {}, {}, budget=budget, site="example.test",
+        BasicSession(), "https://www.example.test/start", {}, {}, budget=budget, site="example.test",
     )
 
     hosts = {row["host"]: row for row in budget.snapshot()["traffic"]["hosts"]}

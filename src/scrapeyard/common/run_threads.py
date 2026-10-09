@@ -17,24 +17,38 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-class RunThreadPool:
-    """Bound submissions and retain capacity until underlying threads quiesce."""
+class OwnedThreadPool:
+    """Bound submissions and retain capacity until underlying threads quiesce.
 
-    def __init__(self, max_workers: int) -> None:
+    Cancelling the awaiting coroutine never releases a slot early: the work
+    counts as lingering until its thread returns. *label* names the
+    capacity and active-work metrics.
+    """
+
+    def __init__(
+        self,
+        max_workers: int,
+        *,
+        label: str,
+        thread_name_prefix: str,
+        capacity_error: str,
+    ) -> None:
         if max_workers < 1:
-            raise ValueError("Run thread worker capacity must be positive")
+            raise ValueError(capacity_error)
         self.max_workers = max_workers
+        self._label = label
+        self._lingering_label = f"lingering_{label}"
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix="scrapeyard-run",
+            thread_name_prefix=thread_name_prefix,
         )
         self._slots = asyncio.Semaphore(max_workers)
         self._state_lock = threading.Lock()
         self._active = 0
         self._lingering = 0
-        WORK_CAPACITY.labels("run_threads").set(max_workers)
-        ACTIVE_WORK.labels("run_threads").set(0)
-        ACTIVE_WORK.labels("lingering_run_threads").set(0)
+        WORK_CAPACITY.labels(label).set(max_workers)
+        ACTIVE_WORK.labels(label).set(0)
+        ACTIVE_WORK.labels(self._lingering_label).set(0)
 
     @property
     def active(self) -> int:
@@ -46,26 +60,26 @@ class RunThreadPool:
         with self._state_lock:
             return self._lingering
 
-    async def run(
+    async def _run_owned(
         self,
-        function: Callable[..., T],
-        *args: Any,
-        **kwargs: Any,
+        submit: Callable[[ThreadPoolExecutor], Future[T]],
+        *,
+        on_cancel: Callable[[], None] | None = None,
     ) -> T:
-        """Run blocking work without releasing its slot on coroutine cancellation."""
+        """Await submitted work without releasing its slot on cancellation."""
 
         await self._slots.acquire()
         loop = asyncio.get_running_loop()
         lingering = False
         try:
-            future = self._executor.submit(copy_context().run, function, *args, **kwargs)
+            future = submit(self._executor)
         except BaseException:
             self._slots.release()
             raise
 
         with self._state_lock:
             self._active += 1
-            ACTIVE_WORK.labels("run_threads").set(self._active)
+            ACTIVE_WORK.labels(self._label).set(self._active)
 
         def release_slot(completed: Future[T]) -> None:
             del completed
@@ -73,8 +87,8 @@ class RunThreadPool:
                 self._active -= 1
                 if lingering:
                     self._lingering -= 1
-                ACTIVE_WORK.labels("run_threads").set(self._active)
-                ACTIVE_WORK.labels("lingering_run_threads").set(self._lingering)
+                ACTIVE_WORK.labels(self._label).set(self._active)
+                ACTIVE_WORK.labels(self._lingering_label).set(self._lingering)
             try:
                 loop.call_soon_threadsafe(self._slots.release)
             except RuntimeError:
@@ -87,17 +101,43 @@ class RunThreadPool:
         try:
             return await asyncio.shield(wrapped)
         except asyncio.CancelledError:
+            if on_cancel is not None:
+                on_cancel()
             with self._state_lock:
                 if not future.done():
                     lingering = True
                     self._lingering += 1
-                    ACTIVE_WORK.labels("lingering_run_threads").set(self._lingering)
+                    ACTIVE_WORK.labels(self._lingering_label).set(self._lingering)
             raise
 
     def shutdown(self) -> None:
         """Wait for owned work and reject future submissions."""
 
         self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+class RunThreadPool(OwnedThreadPool):
+    """Owned executor for run-scoped blocking work."""
+
+    def __init__(self, max_workers: int) -> None:
+        super().__init__(
+            max_workers,
+            label="run_threads",
+            thread_name_prefix="scrapeyard-run",
+            capacity_error="Run thread worker capacity must be positive",
+        )
+
+    async def run(
+        self,
+        function: Callable[..., T],
+        *args: Any,
+        **kwargs: Any,
+    ) -> T:
+        """Run blocking work without releasing its slot on coroutine cancellation."""
+
+        return await self._run_owned(
+            lambda executor: executor.submit(copy_context().run, function, *args, **kwargs)
+        )
 
 
 async def run_thread_work(

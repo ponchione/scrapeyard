@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, call
+from urllib.parse import urlparse
 
 import pytest
 
 from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine.scraper import scrape_target
+from scrapeyard.engine.url_guard import ResolvedPublicURL
+
+
+def _resolve_in_place(url: str) -> ResolvedPublicURL:
+    """Connect to the logical URL itself, so the fake transport sees logical URLs."""
+    host = urlparse(url).hostname
+    assert host is not None
+    return ResolvedPublicURL(url, host, host)
 
 
 class _Node:
@@ -67,8 +76,7 @@ async def test_retry_acquires_once_for_each_network_attempt(monkeypatch, tmp_pat
         "scrapeyard.engine.scraper.fetch_basic_response",
         AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
     )
-    monkeypatch.setattr("scrapeyard.engine.scraper._get_fetcher", lambda _fetcher: object())
-    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.resilience.asyncio.sleep", AsyncMock())
 
     result = await scrape_target(
@@ -111,8 +119,7 @@ async def test_pagination_acquires_for_initial_and_cross_origin_pages(monkeypatc
         "scrapeyard.engine.scraper.fetch_basic_response",
         AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
     )
-    monkeypatch.setattr("scrapeyard.engine.scraper._get_fetcher", lambda _fetcher: object())
-    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr(
         "scrapeyard.engine.pagination._pagination_url_is_safe",
         AsyncMock(return_value=True),

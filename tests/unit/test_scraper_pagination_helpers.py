@@ -416,7 +416,7 @@ async def test_paginate_target_enforces_aggregate_record_budget_across_pages():
         max_serialized_result_bytes=4096,
         max_browser_debug_bytes=1000,
     )
-    await budget.consume_extracted_records(2)
+    budget.reserve_extracted_records(2)
     fetch_page = AsyncMock(
         return_value=FetchOutcome(
             page=_Page([]),

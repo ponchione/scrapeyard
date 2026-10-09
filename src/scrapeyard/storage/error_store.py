@@ -159,12 +159,6 @@ class SQLiteErrorStore:
         async with get_db("errors.db") as db, db_transaction(db):
             await db.execute("DELETE FROM errors WHERE job_id=?", (job_id,))
 
-    async def delete_errors_for_run(self, run_id: str) -> None:
-        """Delete all error records for one run as an idempotent cleanup phase."""
-
-        async with get_db("errors.db") as db, db_transaction(db):
-            await db.execute("DELETE FROM errors WHERE run_id = ?", (run_id,))
-
     @staticmethod
     async def _delete_error_batch(
         column: str,

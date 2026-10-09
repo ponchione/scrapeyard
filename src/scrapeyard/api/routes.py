@@ -51,7 +51,6 @@ from scrapeyard.api.auth import AuthScope, authorize_request
 from scrapeyard.api.scrape_submission import (
     IdempotencyConflictError,
     IdempotencyContext,
-    ResultArtifactUnavailableError,
     submit_scrape_job,
 )
 from scrapeyard.api.job_lifecycle import (
@@ -351,18 +350,14 @@ async def scrape(
             config_yaml=config_yaml,
             config=config,
             job_store=job_store,
-            result_store=result_store,
             worker_pool=worker_pool,
             sync_timeout_seconds=settings.sync_timeout_seconds,
             sync_poll_delay_seconds=settings.sync_poll_delay_seconds,
             idempotency=idempotency,
             idempotency_retention_hours=settings.idempotency_retention_hours,
-            load_result=False,
         )
     except IdempotencyConflictError:
         raise_json_error(409, "Idempotency-Key was already used with different request content")
-    except ResultArtifactUnavailableError:
-        raise_json_error(404, "Completed result artifact is no longer available")
     except (AdmissionCapacityError, MemoryError):
         raise HTTPException(
             503, "Server at capacity — try again later", headers={"Retry-After": "5"},

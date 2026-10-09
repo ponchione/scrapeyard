@@ -8,7 +8,6 @@ import pytest
 from arq.jobs import ResultNotFound
 
 from scrapeyard.api.scrape_submission import (
-    ResultArtifactUnavailableError,
     submit_scrape_job,
     wait_for_persisted_job,
     wait_for_queued_job,
@@ -16,7 +15,6 @@ from scrapeyard.api.scrape_submission import (
 from scrapeyard.config.schema import ExecutionMode, FailStrategy, FetcherType
 from scrapeyard.models.job import JobStatus
 from scrapeyard.storage.job_store import DuplicateJobError
-from scrapeyard.storage.types import ResultPayload
 
 
 @dataclass
@@ -118,11 +116,9 @@ async def test_wait_for_persisted_job_stops_for_non_result_terminal_status(statu
 
 
 @pytest.mark.asyncio
-async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
+async def test_submit_scrape_job_reports_sync_completion():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
-    result_store.get_result.return_value = ResultPayload(run_id="run-1", data={"status": "complete"})
     saved_job = None
 
     async def _save_job(job):
@@ -140,7 +136,6 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
         config_yaml="project: integ",
         config=_config(ExecutionMode.sync),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,
@@ -148,7 +143,6 @@ async def test_submit_scrape_job_returns_terminal_payload_for_sync_completion():
 
     assert submission.completed is True
     assert submission.status == "complete"
-    assert submission.results == {"status": "complete"}
 
 
 @pytest.mark.asyncio
@@ -157,7 +151,6 @@ async def test_queue_handler_completion_does_not_complete_an_active_durable_run(
     durable_status,
 ):
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     saved_job = None
 
@@ -176,7 +169,6 @@ async def test_queue_handler_completion_does_not_complete_an_active_durable_run(
         config_yaml="project: integ",
         config=_config(ExecutionMode.sync),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,
@@ -185,13 +177,11 @@ async def test_queue_handler_completion_does_not_complete_an_active_durable_run(
     assert submission.completed is False
     assert submission.status == durable_status.value
     assert submission.run_id == saved_job.current_run_id
-    result_store.get_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_queue_handler_completion_never_reads_artifact_for_replacement_run():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     saved_job = None
 
@@ -216,7 +206,6 @@ async def test_queue_handler_completion_never_reads_artifact_for_replacement_run
         config_yaml="project: integ",
         config=_config(ExecutionMode.sync),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,
@@ -225,77 +214,11 @@ async def test_queue_handler_completion_never_reads_artifact_for_replacement_run
     assert submission.completed is False
     assert submission.status == "running"
     assert submission.run_id == saved_job.current_run_id
-    result_store.get_result.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_submit_scrape_job_rejects_durable_failed_state_without_artifact():
-    job_store = AsyncMock()
-    result_store = AsyncMock()
-    worker_pool = AsyncMock()
-    saved_job = None
-
-    async def _save_job(job):
-        nonlocal saved_job
-        saved_job = job
-
-    async def _get_job(_job_id: str):
-        return saved_job.model_copy(update={"status": JobStatus.failed})
-
-    job_store.save_job.side_effect = _save_job
-    job_store.get_job.side_effect = _get_job
-    result_store.get_result.side_effect = KeyError("no preclaim artifact")
-    worker_pool.enqueue.return_value = _QueuedJob()
-
-    with pytest.raises(ResultArtifactUnavailableError):
-        await submit_scrape_job(
-            config_yaml="project: integ",
-            config=_config(ExecutionMode.sync),
-            job_store=job_store,
-            result_store=result_store,
-            worker_pool=worker_pool,
-            sync_timeout_seconds=5,
-            sync_poll_delay_seconds=0.1,
-        )
-
-    result_store.get_result.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_submit_scrape_job_rejects_terminal_run_with_missing_artifact():
-    job_store = AsyncMock()
-    result_store = AsyncMock()
-    worker_pool = AsyncMock()
-    result_store.get_result.side_effect = KeyError("missing")
-    saved_job = None
-
-    async def _save_job(job):
-        nonlocal saved_job
-        saved_job = job
-
-    async def _get_job(_job_id: str):
-        return saved_job.model_copy(update={"status": JobStatus.complete})
-
-    job_store.save_job.side_effect = _save_job
-    job_store.get_job.side_effect = _get_job
-    worker_pool.enqueue.return_value = _QueuedJob()
-
-    with pytest.raises(ResultArtifactUnavailableError):
-        await submit_scrape_job(
-            config_yaml="project: integ",
-            config=_config(ExecutionMode.sync),
-            job_store=job_store,
-            result_store=result_store,
-            worker_pool=worker_pool,
-            sync_timeout_seconds=5,
-            sync_poll_delay_seconds=0.1,
-        )
 
 
 @pytest.mark.asyncio
 async def test_submit_scrape_job_returns_queued_when_sync_wait_times_out():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob(should_timeout=True)
     saved_job = None
@@ -314,7 +237,6 @@ async def test_submit_scrape_job_returns_queued_when_sync_wait_times_out():
         config_yaml="project: integ",
         config=_config(ExecutionMode.sync),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=0,
         sync_poll_delay_seconds=0.25,
@@ -323,13 +245,11 @@ async def test_submit_scrape_job_returns_queued_when_sync_wait_times_out():
     assert submission.completed is False
     assert submission.status == "queued"
     assert submission.run_id == saved_job.current_run_id
-    assert submission.results is None
 
 
 @pytest.mark.asyncio
 async def test_sync_timeout_reports_current_persisted_running_status():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob(should_timeout=True)
     saved_job = None
@@ -348,7 +268,6 @@ async def test_sync_timeout_reports_current_persisted_running_status():
         config_yaml="project: integ",
         config=_config(ExecutionMode.sync),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=0,
         sync_poll_delay_seconds=0.25,
@@ -361,7 +280,6 @@ async def test_sync_timeout_reports_current_persisted_running_status():
 @pytest.mark.asyncio
 async def test_submit_scrape_job_prefers_async_response_for_non_basic_targets():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob()
 
@@ -369,7 +287,6 @@ async def test_submit_scrape_job_prefers_async_response_for_non_basic_targets():
         config_yaml="project: integ",
         config=_config(ExecutionMode.auto, fetcher=FetcherType.dynamic),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,
@@ -377,13 +294,11 @@ async def test_submit_scrape_job_prefers_async_response_for_non_basic_targets():
 
     assert submission.completed is False
     assert submission.status == "queued"
-    result_store.get_result.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_submit_scrape_job_removes_job_when_enqueue_fails():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.side_effect = RuntimeError("redis unavailable")
 
@@ -392,8 +307,7 @@ async def test_submit_scrape_job_removes_job_when_enqueue_fails():
             config_yaml="project: integ",
             config=_config(ExecutionMode.async_),
             job_store=job_store,
-            result_store=result_store,
-            worker_pool=worker_pool,
+                worker_pool=worker_pool,
             sync_timeout_seconds=5,
             sync_poll_delay_seconds=0.1,
         )
@@ -408,7 +322,6 @@ async def test_submit_scrape_job_removes_job_when_enqueue_fails():
 @pytest.mark.asyncio
 async def test_submit_scrape_job_retries_ad_hoc_name_collision(monkeypatch):
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob()
     generated_names = iter(["duplicate", "unique"])
@@ -427,7 +340,6 @@ async def test_submit_scrape_job_retries_ad_hoc_name_collision(monkeypatch):
         config_yaml="project: integ",
         config=_config(ExecutionMode.async_),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,
@@ -443,7 +355,6 @@ async def test_submit_scrape_job_retries_ad_hoc_name_collision(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_scrape_job_keeps_generated_name_within_path_limit():
     job_store = AsyncMock()
-    result_store = AsyncMock()
     worker_pool = AsyncMock()
     worker_pool.enqueue.return_value = _QueuedJob()
 
@@ -451,7 +362,6 @@ async def test_submit_scrape_job_keeps_generated_name_within_path_limit():
         config_yaml="project: integ",
         config=_config(ExecutionMode.async_, name="x" * 255),
         job_store=job_store,
-        result_store=result_store,
         worker_pool=worker_pool,
         sync_timeout_seconds=5,
         sync_poll_delay_seconds=0.1,

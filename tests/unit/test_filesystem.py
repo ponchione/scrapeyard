@@ -12,10 +12,10 @@ from scrapeyard.storage.filesystem import (
     FilesystemDeadlineReached,
     ensure_directory,
     read_bytes_file_no_follow,
-    read_json_file,
     read_json_file_no_follow,
     remove_directories,
-    write_json_file,
+    serialize_json_bytes,
+    write_bytes_file,
 )
 
 
@@ -56,20 +56,20 @@ def test_incremental_json_encoder_bounds_escaped_and_multibyte_byte_chunks():
 def test_write_and_read_json_round_trip(tmp_path):
     filepath = tmp_path / "data.json"
     data = {"key": "value", "numbers": [1, 2, 3]}
-    write_json_file(filepath, data)
-    result = read_json_file(filepath)
+    write_bytes_file(filepath, serialize_json_bytes(data))
+    result = read_json_file_no_follow(filepath)
     assert result == data
 
 
-def test_write_json_non_serializable_uses_default_str(tmp_path):
+def test_serialized_json_non_serializable_uses_default_str(tmp_path):
     filepath = tmp_path / "dates.json"
     dt = datetime(2024, 1, 15, 10, 30, 0)
-    write_json_file(filepath, {"ts": dt})
-    result = read_json_file(filepath)
+    write_bytes_file(filepath, serialize_json_bytes({"ts": dt}))
+    result = read_json_file_no_follow(filepath)
     assert result["ts"] == str(dt)
 
 
-def test_write_json_file_uses_unique_temp_paths(tmp_path, monkeypatch):
+def test_write_bytes_file_uses_unique_temp_paths(tmp_path, monkeypatch):
     filepath = tmp_path / "data.json"
     seen_sources = []
 
@@ -83,16 +83,16 @@ def test_write_json_file_uses_unique_temp_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(filesystem.os, "replace", recording_replace)
 
-    write_json_file(filepath, {"value": 1})
-    write_json_file(filepath, {"value": 2})
+    write_bytes_file(filepath, b'{"value":1}')
+    write_bytes_file(filepath, b'{"value":2}')
 
     assert len(seen_sources) == 2
     assert seen_sources[0] != seen_sources[1]
     assert filepath.with_name(filepath.name + ".tmp") not in seen_sources
-    assert read_json_file(filepath) == {"value": 2}
+    assert read_json_file_no_follow(filepath) == {"value": 2}
 
 
-def test_write_json_file_fsyncs_file_and_parent_directory(tmp_path, monkeypatch):
+def test_write_bytes_file_fsyncs_file_and_parent_directory(tmp_path, monkeypatch):
     filepath = tmp_path / "data.json"
     fsynced: list[int] = []
 
@@ -106,12 +106,12 @@ def test_write_json_file_fsyncs_file_and_parent_directory(tmp_path, monkeypatch)
 
     monkeypatch.setattr(filesystem.os, "fsync", recording_fsync)
 
-    write_json_file(filepath, {"durable": True})
+    write_bytes_file(filepath, b'{"durable":true}')
 
     assert len(fsynced) == 2
 
 
-def test_write_json_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypatch):
+def test_write_bytes_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypatch):
     filepath = tmp_path / "data.json"
 
     from scrapeyard.storage import filesystem
@@ -122,7 +122,7 @@ def test_write_json_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypat
     monkeypatch.setattr(filesystem.os, "replace", failing_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        write_json_file(filepath, {"value": 1})
+        write_bytes_file(filepath, b'{"value":1}')
 
     assert list(tmp_path.iterdir()) == []
 
@@ -130,7 +130,7 @@ def test_write_json_file_cleans_temp_file_on_replace_failure(tmp_path, monkeypat
 def test_read_json_missing_file_raises(tmp_path):
     missing = tmp_path / "no_such_file.json"
     with pytest.raises(FileNotFoundError):
-        read_json_file(missing)
+        read_json_file_no_follow(missing)
 
 
 def test_read_json_no_follow_rejects_symlink(tmp_path):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -65,9 +65,7 @@ async def test_scrape_target_flattens_item_scoped_records(tmp_path):
         ),
     )
 
-    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
-        mock_fetcher = get_fetcher.return_value
-        mock_fetcher.get.return_value = page
+    with patch("scrapeyard.engine.scraper.fetch_basic_response", AsyncMock(return_value=page)):
         result = await scrape_target(
             target,
             adaptive=False,
@@ -125,9 +123,7 @@ async def test_scrape_target_preserves_legacy_stock_status_selector_as_stock_sig
         ),
     )
 
-    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
-        mock_fetcher = get_fetcher.return_value
-        mock_fetcher.get.return_value = page
+    with patch("scrapeyard.engine.scraper.fetch_basic_response", AsyncMock(return_value=page)):
         result = await scrape_target(
             target,
             adaptive=False,
@@ -179,9 +175,7 @@ async def test_scrape_target_item_scoped_extracted_signal_drives_stock_status_wh
         ),
     )
 
-    with patch("scrapeyard.engine.scraper._get_fetcher") as get_fetcher:
-        mock_fetcher = get_fetcher.return_value
-        mock_fetcher.get.return_value = page
+    with patch("scrapeyard.engine.scraper.fetch_basic_response", AsyncMock(return_value=page)):
         result = await scrape_target(
             target,
             adaptive=False,

@@ -19,6 +19,8 @@ from scrapeyard.api.result_responses import (
     encoded_result_response,
 )
 from scrapeyard.api.serializers import serialize_result_response
+from scrapeyard.common.run_threads import RunThreadPool
+from scrapeyard.runtime.metrics import REGISTRY
 
 
 def _artifact(*, grouped: bool = True) -> dict:
@@ -368,4 +370,48 @@ async def test_request_capacity_releases_a_handed_off_slot_when_the_request_fail
                 raise RuntimeError("handler failed after rendering")
         assert _free_request_slots(pool) == 1
     finally:
+        pool.shutdown()
+
+
+def _work_gauge(name: str, kind: str) -> float | None:
+    return REGISTRY.get_sample_value(name, {"kind": kind})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pool_type", "kind"),
+    [(RunThreadPool, "run_threads"), (ResultResponseThreadPool, "result_response_threads")],
+)
+async def test_owned_thread_pools_report_capacity_and_lingering_work(pool_type, kind) -> None:
+    pool = pool_type(1)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_work(**_kwargs) -> None:
+        started.set()
+        release.wait()
+
+    try:
+        assert _work_gauge("scrapeyard_work_capacity", kind) == 1
+        task = asyncio.create_task(pool.run(blocking_work))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert (pool.active, pool.lingering) == (1, 1)
+        assert _work_gauge("scrapeyard_active_work", kind) == 1
+        assert _work_gauge("scrapeyard_active_work", f"lingering_{kind}") == 1
+
+        release.set()
+        for _ in range(50):
+            if pool.active == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert (pool.active, pool.lingering) == (0, 0)
+        assert _work_gauge("scrapeyard_active_work", kind) == 0
+        assert _work_gauge("scrapeyard_active_work", f"lingering_{kind}") == 0
+    finally:
+        release.set()
         pool.shutdown()

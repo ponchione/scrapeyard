@@ -90,7 +90,7 @@ webhook:
 """
 
     async def consume_two(target, *_args, budget, **_kwargs):
-        await budget.consume_extracted_records(2)
+        budget.reserve_extracted_records(2)
         return TargetResult(
             url=target.url,
             status="success",
@@ -336,7 +336,7 @@ target:
 """
 
     async def exceed_record_budget(*_args, budget, **_kwargs):
-        await budget.consume_extracted_records(4)
+        budget.reserve_extracted_records(4)
         raise AssertionError("unreachable")
 
     real_checkpoint = RunActivityGuard.checkpoint

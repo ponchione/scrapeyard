@@ -267,10 +267,7 @@ class SchedulerService:
     async def trigger_job_now(self, job_id: str) -> tuple[str, str]:
         """Queue one manual run and return its run/config version identity."""
 
-        try:
-            job = await self._job_store.get_job(job_id)
-        except KeyError:
-            raise
+        job = await self._job_store.get_job(job_id)
         if job.schedule_cron is None:
             raise ScheduledJobLifecycleError("Job is not scheduled")
         if job.status in {JobStatus.cancelled, JobStatus.deleting}:
@@ -328,11 +325,8 @@ class SchedulerService:
             return None
 
         now = utc_now()
-        try:
-            if await self._job_has_active_run(job, now=now):
-                return None
-        except SchedulerUnavailableError:
-            raise
+        if await self._job_has_active_run(job, now=now):
+            return None
 
         if job.status == JobStatus.running:
             run_id = job.current_run_id

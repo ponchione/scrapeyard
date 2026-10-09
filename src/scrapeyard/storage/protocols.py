@@ -487,8 +487,6 @@ class ErrorStore(Protocol):
 
     async def delete_errors_for_job(self, job_id: str) -> None: ...
 
-    async def delete_errors_for_run(self, run_id: str) -> None: ...
-
     async def delete_errors_for_job_batch(
         self,
         job_id: str,

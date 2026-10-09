@@ -5,12 +5,12 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import BrowserConfig, FetcherType, TargetConfig
 from scrapeyard.engine import browser_debug
 from scrapeyard.engine.browser_debug import fetch_browser_response
 from scrapeyard.engine.subrequest_filter import SubrequestFilter, glob_matches
+from tests.unit.browser_fakes import ScriptedBrowserSession
 
 TARGET = "https://www.example.test/catalog"
 
@@ -128,13 +128,13 @@ async def _route_through_guard(route: _Route, monkeypatch: pytest.MonkeyPatch) -
         browser={"block_third_party": True, "block_url_patterns": ["*/beacon*"]},
     )
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **_kwargs: Any) -> Any:
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, _kwargs: dict[str, Any], route_handler) -> Any:
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
-    await fetch_browser_response(RouteFetcher, TARGET, target, FetcherType.dynamic, {}, None)
+    await fetch_browser_response(
+        ScriptedBrowserSession(route_fetch), TARGET, target, FetcherType.dynamic, {}, None,
+    )
     return checked
 
 

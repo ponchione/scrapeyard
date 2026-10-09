@@ -27,19 +27,15 @@ def _budget(**overrides) -> RunBudget:
     return RunBudget(**values)
 
 
-@pytest.mark.asyncio
-async def test_record_budget_is_aggregate_and_concurrency_safe_at_exact_boundary():
+def test_record_budget_is_aggregate_at_exact_boundary():
     budget = _budget(max_extracted_records=6)
 
-    await asyncio.gather(
-        budget.consume_extracted_records(2),
-        budget.consume_extracted_records(1),
-        budget.consume_extracted_records(3),
-    )
+    for amount in (2, 1, 3):
+        budget.reserve_extracted_records(amount)
 
     assert budget.extracted_records == 6
     with pytest.raises(BudgetExceeded) as exc_info:
-        await budget.consume_extracted_records(1)
+        budget.reserve_extracted_records(1)
     assert exc_info.value.limit_name is BudgetLimitName.extracted_records
     assert exc_info.value.configured_limit == 6
     assert exc_info.value.observed_amount == 7

@@ -349,11 +349,6 @@ class RunBudget:
                 raise self._exhausted
             self._fetched_bytes = observed
 
-    async def consume_extracted_records(self, amount: int) -> None:
-        """Compatibility wrapper for synchronous record reservation."""
-
-        self.reserve_extracted_records(amount)
-
     def reserve_extracted_records(self, amount: int) -> None:
         """Synchronously reserve records before worker-thread extraction.
 

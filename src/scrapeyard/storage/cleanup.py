@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from typing import Any
 
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
@@ -774,66 +775,38 @@ def start_cleanup_loop(
                     ),
                     error_batch_size=settings.history_error_cleanup_batch_size,
                 ) if job_store is not None and error_store is not None else None
-                if webhook_outbox_store is None:
-                    outcome = await run_cleanup(
-                        result_store=result_store,
-                        retention_days=settings.storage_retention_days,
-                        max_results_per_job=settings.storage_max_results_per_job,
-                        result_cleanup_batch_size=settings.storage_cleanup_batch_size,
-                        orphan_grace_seconds=settings.storage_orphan_grace_seconds,
-                        reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
-                        job_store=job_store,
-                        idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
-                        if job_store is not None
-                        else 1000,
-                        error_store=error_store,
-                        history_policy=history_policy,
-                        cycle_max_items_per_phase=(
-                            getattr(
-                                settings,
-                                "storage_cleanup_cycle_max_items_per_phase",
-                                _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
-                            )
-                        ),
-                        cycle_max_seconds=getattr(
-                            settings,
-                            "storage_cleanup_cycle_max_seconds",
-                            _DEFAULT_CYCLE_MAX_SECONDS,
-                        ),
-                    )
-                else:
-                    outcome = await run_cleanup(
-                        result_store=result_store,
-                        retention_days=settings.storage_retention_days,
-                        max_results_per_job=settings.storage_max_results_per_job,
-                        result_cleanup_batch_size=settings.storage_cleanup_batch_size,
-                        webhook_outbox_store=webhook_outbox_store,
-                        webhook_delivered_retention_days=(
+                # Webhook retention applies only when the loop owns an outbox.
+                webhook_retention: dict[str, Any] = (
+                    {}
+                    if webhook_outbox_store is None
+                    else {
+                        "webhook_outbox_store": webhook_outbox_store,
+                        "webhook_delivered_retention_days": (
                             settings.webhook_delivered_retention_days
                         ),
-                        webhook_failed_retention_days=(settings.webhook_failed_retention_days),
-                        webhook_cleanup_batch_size=(settings.webhook_dispatch_batch_size),
-                        orphan_grace_seconds=settings.storage_orphan_grace_seconds,
-                        reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
-                        job_store=job_store,
-                        idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
-                        if job_store is not None
-                        else 1000,
-                        error_store=error_store,
-                        history_policy=history_policy,
-                        cycle_max_items_per_phase=(
-                            getattr(
-                                settings,
-                                "storage_cleanup_cycle_max_items_per_phase",
-                                _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
-                            )
-                        ),
-                        cycle_max_seconds=getattr(
-                            settings,
-                            "storage_cleanup_cycle_max_seconds",
-                            _DEFAULT_CYCLE_MAX_SECONDS,
-                        ),
-                    )
+                        "webhook_failed_retention_days": settings.webhook_failed_retention_days,
+                        "webhook_cleanup_batch_size": settings.webhook_dispatch_batch_size,
+                    }
+                )
+                outcome = await run_cleanup(
+                    result_store=result_store,
+                    retention_days=settings.storage_retention_days,
+                    max_results_per_job=settings.storage_max_results_per_job,
+                    result_cleanup_batch_size=settings.storage_cleanup_batch_size,
+                    orphan_grace_seconds=settings.storage_orphan_grace_seconds,
+                    reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
+                    job_store=job_store,
+                    idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
+                    if job_store is not None
+                    else 1000,
+                    error_store=error_store,
+                    history_policy=history_policy,
+                    cycle_max_items_per_phase=(
+                        settings.storage_cleanup_cycle_max_items_per_phase
+                    ),
+                    cycle_max_seconds=settings.storage_cleanup_cycle_max_seconds,
+                    **webhook_retention,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

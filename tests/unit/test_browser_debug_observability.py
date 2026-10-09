@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from scrapling.engines import pw as scrapling_pw_engine
 
 from scrapeyard.config.schema import FetcherType, TargetConfig
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
@@ -23,6 +22,7 @@ from scrapeyard.engine.browser_debug import (
 )
 from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
+from tests.unit.browser_fakes import ScriptedBrowserSession
 
 
 def _debug_budget(max_bytes: int) -> RunBudget:
@@ -44,14 +44,12 @@ async def test_browser_timeout_translation_preserves_cause_and_debug() -> None:
     upstream = PlaywrightTimeoutError("page.goto timed out")
     upstream.debug = {"navigation_stage": "goto"}
 
-    class TimeoutFetcher:
-        @classmethod
-        async def async_fetch(cls, _url, **_kwargs):
-            raise upstream
+    async def timeout_fetch(_url, _kwargs, _route_handler):
+        raise upstream
 
     with pytest.raises(BrowserTransportTimeout) as exc_info:
         await fetch_browser_response(
-            TimeoutFetcher,
+            ScriptedBrowserSession(timeout_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -379,18 +377,16 @@ async def test_fetch_browser_response_raises_required_action_failures_swallowed_
     page = MagicMock()
     page.locator.return_value.click = AsyncMock(side_effect=RuntimeError("button missing"))
 
-    class SwallowingFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            try:
-                await kwargs["page_action"](page)
-            except Exception:
-                pass
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def swallowing_fetch(url: str, kwargs, _route_handler):
+        try:
+            await kwargs["page_action"](page)
+        except Exception:
+            pass
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     with pytest.raises(BrowserPageActionError, match="button missing") as exc_info:
         await fetch_browser_response(
-            SwallowingFetcher,
+            ScriptedBrowserSession(swallowing_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -414,18 +410,16 @@ async def test_fetch_browser_response_redacts_page_action_exception_text() -> No
         side_effect=RuntimeError("failed https://user:pass@example.com/hook?api_key=secret")
     )
 
-    class SwallowingFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            try:
-                await kwargs["page_action"](page)
-            except Exception:
-                pass
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def swallowing_fetch(url: str, kwargs, _route_handler):
+        try:
+            await kwargs["page_action"](page)
+        except Exception:
+            pass
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     with pytest.raises(BrowserPageActionError) as exc_info:
         await fetch_browser_response(
-            SwallowingFetcher,
+            ScriptedBrowserSession(swallowing_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -452,16 +446,14 @@ async def test_fetch_browser_response_blocks_non_public_browser_routes() -> None
     )
     route = FakeRoute("http://127.0.0.1/private", "document")
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            assert kwargs["disable_resources"] is True
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, kwargs, route_handler):
+        assert kwargs["disable_resources"] is True
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     with pytest.raises(UnsafeURLError, match="non-public"):
         await fetch_browser_response(
-            RouteFetcher,
+            ScriptedBrowserSession(route_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -512,14 +504,12 @@ async def test_browser_extra_headers_are_scoped_to_exact_target_origin(
         },
     )
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, _kwargs, route_handler):
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(
-        RouteFetcher,
+        ScriptedBrowserSession(route_fetch),
         target.url,
         target,
         FetcherType.dynamic,
@@ -567,14 +557,12 @@ async def test_browser_extra_headers_use_canonical_idna_target_origin(
         },
     )
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, _kwargs, route_handler):
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(
-        RouteFetcher,
+        ScriptedBrowserSession(route_fetch),
         target.url,
         target,
         FetcherType.dynamic,
@@ -605,21 +593,19 @@ async def test_blocked_browser_request_diagnostics_are_bounded_and_redacted() ->
         for index in range(25)
     ]
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            last_error: UnsafeURLError | None = None
-            for route in routes:
-                try:
-                    await scrapling_pw_engine.async_intercept_route(route)
-                except UnsafeURLError as exc:
-                    last_error = exc
-            assert last_error is not None
-            raise last_error
+    async def route_fetch(url: str, kwargs, route_handler):
+        last_error: UnsafeURLError | None = None
+        for route in routes:
+            try:
+                await route_handler(route)
+            except UnsafeURLError as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     with pytest.raises(UnsafeURLError) as exc_info:
         await fetch_browser_response(
-            RouteFetcher,
+            ScriptedBrowserSession(route_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -648,17 +634,15 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
     def _raise_gaierror(*_args, **_kwargs):
         raise socket.gaierror
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, kwargs, route_handler):
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
 
     with pytest.raises(URLResolutionError, match="could not be resolved"):
         await fetch_browser_response(
-            RouteFetcher,
+            ScriptedBrowserSession(route_fetch),
             target.url,
             target,
             FetcherType.dynamic,
@@ -693,14 +677,12 @@ async def test_fetch_browser_response_applies_configured_resource_blocking(
         **target_kwargs,
     )
 
-    class RouteFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            await scrapling_pw_engine.async_intercept_route(route)
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def route_fetch(url: str, kwargs, route_handler):
+        await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     await fetch_browser_response(
-        RouteFetcher,
+        ScriptedBrowserSession(route_fetch),
         target.url,
         target,
         FetcherType.dynamic,
@@ -713,7 +695,8 @@ async def test_fetch_browser_response_applies_configured_resource_blocking(
 
 
 @pytest.mark.asyncio
-async def test_fetch_browser_response_closes_page_after_unsafe_final_url() -> None:
+async def test_fetch_browser_response_raises_unsafe_final_url_swallowed_by_session() -> None:
+    # The session closes its own pages; the scraper must still fail the fetch.
     target = TargetConfig(
         url="https://example.com",
         fetcher=FetcherType.dynamic,
@@ -721,28 +704,23 @@ async def test_fetch_browser_response_closes_page_after_unsafe_final_url() -> No
     )
     page = MagicMock()
     page.url = "http://127.0.0.1/private"
-    page.close = AsyncMock(return_value=None)
 
-    class SwallowingFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **kwargs):
-            try:
-                await kwargs["page_action"](page)
-            except Exception:
-                pass
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def swallowing_fetch(url: str, kwargs, _route_handler):
+        try:
+            await kwargs["page_action"](page)
+        except Exception:
+            pass
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     with pytest.raises(UnsafeURLError, match="non-public"):
         await fetch_browser_response(
-            SwallowingFetcher,
+            ScriptedBrowserSession(swallowing_fetch),
             target.url,
             target,
             FetcherType.dynamic,
             {},
             artifacts_dir=None,
         )
-
-    page.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -921,20 +899,18 @@ async def test_browser_budget_retains_limiter_until_cancellation_acknowledged() 
     release_fetch = asyncio.Event()
     second_acquired = asyncio.Event()
 
-    class CancellationResistantFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancellation_seen.set()
-                await release_fetch.wait()
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def cancellation_resistant_fetch(url: str, _kwargs, _route_handler):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_fetch.wait()
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     async def first_browser() -> None:
         async with limiter.slot():
             await fetch_browser_response(
-                CancellationResistantFetcher,
+                ScriptedBrowserSession(cancellation_resistant_fetch),
                 target.url,
                 target,
                 FetcherType.dynamic,
@@ -985,21 +961,19 @@ async def test_browser_limiter_survives_repeated_outer_cancellation() -> None:
     release_fetch = asyncio.Event()
     second_acquired = asyncio.Event()
 
-    class CancellationResistantFetcher:
-        @staticmethod
-        async def async_fetch(url: str, **_kwargs):
-            fetch_started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancellation_seen.set()
-                await release_fetch.wait()
-            return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+    async def cancellation_resistant_fetch(url: str, _kwargs, _route_handler):
+        fetch_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_fetch.wait()
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
 
     async def first_browser() -> None:
         async with limiter.slot():
             await fetch_browser_response(
-                CancellationResistantFetcher,
+                ScriptedBrowserSession(cancellation_resistant_fetch),
                 target.url,
                 target,
                 FetcherType.dynamic,

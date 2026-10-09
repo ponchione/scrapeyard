@@ -226,23 +226,6 @@ def _response_header(response: Any, name: str) -> str | None:
     return None
 
 
-def _measured_response_body_bytes(response: Any) -> int | None:
-    """Return the byte size of the body representation exposed by a fetcher."""
-
-    body = getattr(response, "body", None)
-    if isinstance(body, (bytes, bytearray, memoryview)):
-        return len(body)
-    if not isinstance(body, str):
-        return None
-    encoding = getattr(response, "encoding", None)
-    if not isinstance(encoding, str) or not encoding:
-        encoding = "utf-8"
-    try:
-        return len(body.encode(encoding))
-    except (LookupError, UnicodeEncodeError):
-        return len(body.encode("utf-8"))
-
-
 async def _fetch_basic_with_safe_redirects(
     fetcher_cls: Any,
     url: str,
@@ -265,8 +248,7 @@ async def _fetch_basic_with_safe_redirects(
     for _ in range(_MAX_BASIC_REDIRECTS + 1):
         request_url = current_url
         request_kwargs = dict(call_kwargs)
-        production_stream = fetcher_cls is Fetcher or isinstance(fetcher_cls, BasicSession)
-        if production_stream and request_kwargs.get("proxy") is None:
+        if request_kwargs.get("proxy") is None:
             resolved = await run_thread_work(
                 resolve_public_url,
                 current_url,
@@ -295,18 +277,15 @@ async def _fetch_basic_with_safe_redirects(
         if budget is not None:
             await budget.reserve_requests()
             budget.traffic.request(current_url, site, "document")
-        if production_stream:
-            request_kwargs["cookie_jar"] = cookie_jar
-            request_kwargs["cookie_url"] = current_url
-            request_kwargs["header_url"] = current_url
-            response = await fetch_basic_response(
-                fetcher_cls,
-                request_url,
-                request_kwargs,
-                budget=budget,
-            )
-        else:
-            response = await fetch_basic_response(fetcher_cls, request_url, request_kwargs)
+        request_kwargs["cookie_jar"] = cookie_jar
+        request_kwargs["cookie_url"] = current_url
+        request_kwargs["header_url"] = current_url
+        response = await fetch_basic_response(
+            fetcher_cls,
+            request_url,
+            request_kwargs,
+            budget=budget,
+        )
         if response_observer is not None:
             response_observer()
         if request_url != current_url:
@@ -317,14 +296,9 @@ async def _fetch_basic_with_safe_redirects(
             cancellation_guard,
             "after_fetch",
         )
-        if budget is not None and not production_stream:
-            measured_bytes = _measured_response_body_bytes(response)
-            if measured_bytes is not None:
-                await budget.consume_fetched_bytes(measured_bytes)
-                budget.traffic.received(current_url, site, measured_bytes, "document")
-            else:
-                budget.check_deadline()
-        elif budget is not None:
+        if budget is not None:
+            # The streaming transport has already counted the body against
+            # the run's fetched-byte budget.
             received = getattr(response, RECEIVED_BYTES_ATTRIBUTE, None)
             if isinstance(received, int):
                 budget.traffic.received(current_url, site, received, "document")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 from urllib.parse import urlparse
 
 import pytest
@@ -16,14 +16,22 @@ from scrapeyard.engine.adaptive_diagnostics import (
     missing_adaptive_selectors,
 )
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
-from scrapeyard.engine.basic_fetch import _request_headers
+from scrapeyard.engine.basic_fetch import BasicSession, _request_headers
 from scrapeyard.engine.resilience import RetryHandler
 from scrapeyard.engine.scraper import (
     _fetch_basic_with_safe_redirects,
     _fetch_page,
     _fetch_target_page,
 )
-from scrapeyard.engine.url_guard import URLResolutionError, UnsafeURLError
+from scrapeyard.engine.url_guard import ResolvedPublicURL, URLResolutionError, UnsafeURLError
+from tests.unit.browser_fakes import ScriptedBrowserSession
+
+
+def _resolve_in_place(url: str) -> ResolvedPublicURL:
+    """Connect to the logical URL itself, so a fake transport sees logical URLs."""
+    host = urlparse(url).hostname
+    assert host is not None
+    return ResolvedPublicURL(url, host, host)
 
 
 @pytest.mark.asyncio
@@ -35,7 +43,7 @@ async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
     )
     captured_kwargs: dict[str, object] = {}
 
-    async def _fetch_basic_response(_fetcher_cls, url, call_kwargs):
+    async def _fetch_basic_response(_fetcher_cls, url, call_kwargs, **_options):
         captured_kwargs.update(call_kwargs)
         return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
 
@@ -46,7 +54,7 @@ async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
     await _fetch_page(
-        object(),
+        BasicSession(),
         target.url,
         target,
         FetcherType.basic,
@@ -67,17 +75,18 @@ async def test_fetch_page_records_basic_final_url_from_response(monkeypatch):
         selectors={"title": "h1"},
     )
 
-    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs, **_options):
         return SimpleNamespace(status=200, url=f"{url}/canonical", text="<h1>ok</h1>")
 
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
         lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
     )
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
     outcome = await _fetch_page(
-        object(),
+        BasicSession(),
         target.url,
         target,
         FetcherType.basic,
@@ -98,7 +107,7 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
     )
     seen_urls: list[str] = []
 
-    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs, **_options):
         seen_urls.append(url)
         if len(seen_urls) == 1:
             return SimpleNamespace(
@@ -113,10 +122,11 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
         "scrapeyard.engine.scraper.get_settings",
         lambda: SimpleNamespace(basic_fetch_timeout_seconds=12.5),
     )
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
     outcome = await _fetch_page(
-        object(),
+        BasicSession(),
         target.url,
         target,
         FetcherType.basic,
@@ -151,10 +161,10 @@ async def test_basic_redirect_hops_rate_limit_actual_destination_hosts(monkeypat
         "scrapeyard.engine.scraper.fetch_basic_response",
         AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
     )
-    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
 
     await _fetch_basic_with_safe_redirects(
-        object(),
+        BasicSession(),
         "https://example.com/start",
         {},
         {},
@@ -188,18 +198,18 @@ async def test_basic_redirect_validates_each_requested_url_once(monkeypatch):
     async def fetch_response(*_args, **_kwargs):
         return next(responses)
 
-    validate = AsyncMock()
+    validate = MagicMock(side_effect=_resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch_response)
-    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", validate)
+    monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", validate)
 
     await _fetch_basic_with_safe_redirects(
-        object(),
+        BasicSession(),
         "https://example.com/start",
         {},
         {},
     )
 
-    assert [call.args[0] for call in validate.await_args_list] == [
+    assert [call.args[0] for call in validate.call_args_list] == [
         "https://example.com/start",
         "https://example.com/next",
     ]
@@ -337,7 +347,7 @@ async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monk
         selectors={"title": "h1"},
     )
 
-    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
+    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs, **_options):
         return SimpleNamespace(
             status=302,
             url=url,
@@ -353,7 +363,7 @@ async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monk
 
     with pytest.raises(UnsafeURLError, match="non-public"):
         await _fetch_page(
-            object(),
+            BasicSession(),
             target.url,
             target,
             FetcherType.basic,
@@ -399,7 +409,7 @@ async def test_fetch_page_requires_resolved_dns_when_proxy_can_resolve_remotely(
 
 
 @pytest.mark.asyncio
-async def test_fetch_page_still_allows_unresolved_dns_for_direct_basic_fetch(monkeypatch):
+async def test_fetch_page_requires_resolved_dns_to_pin_a_direct_basic_fetch(monkeypatch):
     target = TargetConfig(
         url="https://unresolved.example",
         fetcher=FetcherType.basic,
@@ -409,23 +419,22 @@ async def test_fetch_page_still_allows_unresolved_dns_for_direct_basic_fetch(mon
     def _raise_gaierror(*_args, **_kwargs):
         raise socket.gaierror
 
-    async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs):
-        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
-
+    fetch = AsyncMock()
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
-    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
 
-    outcome = await _fetch_page(
-        object(),
-        target.url,
-        target,
-        FetcherType.basic,
-        adaptive=False,
-        retryable_status={500},
-        adaptive_dir="/tmp/adaptive",
-    )
+    with pytest.raises(URLResolutionError, match="could not be resolved"):
+        await _fetch_page(
+            BasicSession(),
+            target.url,
+            target,
+            FetcherType.basic,
+            adaptive=False,
+            retryable_status={500},
+            adaptive_dir="/tmp/adaptive",
+        )
 
-    assert outcome.debug["final_url"] == target.url
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -515,20 +524,18 @@ async def test_browser_navigation_timeout_retries_the_complete_adapter_boundary(
     limiter = AsyncMock()
     attempts = 0
 
-    class TimeoutThenSuccessFetcher:
-        @classmethod
-        async def async_fetch(cls, url, **_kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise PlaywrightTimeoutError("page.goto timed out")
-            return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+    async def timeout_then_success_fetch(url, _kwargs, _route_handler):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PlaywrightTimeoutError("page.goto timed out")
+        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
 
     monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
 
     outcome = await _fetch_target_page(
         RetryHandler(RetryConfig(max_attempts=2, backoff_max=0)),
-        TimeoutThenSuccessFetcher,
+        ScriptedBrowserSession(timeout_then_success_fetch),
         target.url,
         target,
         adaptive=False,

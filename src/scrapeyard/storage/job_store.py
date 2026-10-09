@@ -77,6 +77,15 @@ _SCHEDULE_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RUN_IDENTITY_CACHE_ENTRIES = 256
 
 
+def _reveal_verified(value: str, *, purpose: str, expected_hash: str) -> str | None:
+    """Decrypt a stored config and return it only if it hashes to *expected_hash*."""
+
+    config_yaml = reveal_text(value, purpose=purpose)
+    if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != expected_hash:
+        return None
+    return config_yaml
+
+
 class DuplicateJobError(Exception):
     """Raised when a job name already exists within a project namespace."""
 
@@ -1267,11 +1276,13 @@ class SQLiteJobStore:
         if row is None or row["config_yaml"] is None:
             return None  # Historical missing snapshots remain unavailable evidence.
         state = dict(row)
-        config_yaml = reveal_text(
-            str(state.pop("config_yaml")), purpose=f"{state.pop('origin')}.config_yaml:{run_id}",
-        )
         config_hash = cast(str, state["config_hash"])
-        if hashlib.sha256(config_yaml.encode()).hexdigest() != config_hash:
+        config_yaml = _reveal_verified(
+            str(state.pop("config_yaml")),
+            purpose=f"{state.pop('origin')}.config_yaml:{run_id}",
+            expected_hash=config_hash,
+        )
+        if config_yaml is None:
             raise ValueError("Exact run configuration hash mismatch")
         # Callers poll this per in-flight run, and finding the name means
         # parsing the whole YAML (about 45 ms at 110 KB). A run's config never
@@ -1346,11 +1357,12 @@ class SQLiteJobStore:
             )
             row = await cursor.fetchone()
             if row is not None:
-                config_yaml = reveal_text(
+                config_yaml = _reveal_verified(
                     cast(str, row["config_yaml"]),
                     purpose=f"queued_run_snapshots.config_yaml:{run_id}",
+                    expected_hash=cast(str, row["config_hash"]),
                 )
-                if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != row["config_hash"]:
+                if config_yaml is None:
                     raise ValueError("Queued run configuration hash mismatch")
                 return config_yaml
 
@@ -1364,11 +1376,12 @@ class SQLiteJobStore:
             legacy = await cursor.fetchone()
             if legacy is None:
                 raise RunOwnershipError("load queued config", job_id, run_id)
-            config_yaml = reveal_text(
+            config_yaml = _reveal_verified(
                 cast(str, legacy["config_yaml"]),
                 purpose=f"jobs.config_yaml:{job_id}",
+                expected_hash=cast(str, legacy["config_hash"]),
             )
-            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != legacy["config_hash"]:
+            if config_yaml is None:
                 raise ValueError("Legacy queued configuration hash mismatch")
             return config_yaml
 
@@ -1518,11 +1531,12 @@ class SQLiteJobStore:
             if config_row is None or config_row["config_hash"] != config_hash:
                 await db.rollback()
                 return False
-            config_yaml = reveal_text(
+            config_yaml = _reveal_verified(
                 cast(str, config_row["config_yaml"]),
                 purpose=config_purpose,
+                expected_hash=config_hash,
             )
-            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != config_hash:
+            if config_yaml is None:
                 await db.rollback()
                 return False
             await db.execute(
@@ -2222,12 +2236,13 @@ class SQLiteJobStore:
             ).fetchone()
             if row is None:  # pragma: no cover - transaction invariant
                 raise RuntimeError("Queued parent disappeared inside its transaction")
-            config_yaml = reveal_text(
+            config_hash = cast(str, row["config_hash"])
+            config_yaml = _reveal_verified(
                 cast(str, row["config_yaml"]),
                 purpose=f"jobs.config_yaml:{job_id}",
+                expected_hash=config_hash,
             )
-            config_hash = cast(str, row["config_hash"])
-            if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != config_hash:
+            if config_yaml is None:
                 raise ValueError("Queued parent configuration hash mismatch")
             await db.execute(
                 """INSERT INTO queued_run_snapshots
