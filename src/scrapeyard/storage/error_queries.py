@@ -33,7 +33,9 @@ def build_query_errors_query(
     params: list[object] = []
 
     if filters.project is not None:
-        clauses.append("project = ?")
+        # With a job_id, the unary + keeps the planner on the narrower
+        # (job_id, timestamp) index instead of scanning the whole project.
+        clauses.append("+project = ?" if filters.job_id is not None else "project = ?")
         params.append(filters.project)
     if filters.job_id is not None:
         clauses.append("job_id = ?")

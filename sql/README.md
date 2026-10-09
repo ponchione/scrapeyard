@@ -50,6 +50,9 @@ objects are verified.
 | `019_create_queued_run_snapshots.sql` | Persist an encrypted immutable configuration snapshot for each accepted delivery before it enters Redis. |
 | `020_create_result_reconciliation_state.sql` | Persist metadata and filesystem keyset cursors so artifact scans remain fair across process restarts. |
 | `021_add_admission_index.sql` | Index current queued/running owners for atomic admission counting, without scanning terminal history. |
+| `022_add_retention_lookup_indexes.sql` | Index idempotency records by job and the scheduled jobs, so retention, deletion and submission rollback stop scanning history; drop two redundant run indexes. |
+| `023_drop_redundant_error_indexes.sql` | Drop the single-column error indexes that the composite (`job_id`, `timestamp`) and (`project`, `timestamp`) indexes already cover. |
+| `024_drop_redundant_result_indexes.sql` | Drop the single-column result metadata indexes that composite indexes already cover. |
 
 The filesystem cursor uses empty trailing strings for project/job namespace
 entries without runs; all three `NULL` values mean the scan has reset. This fits

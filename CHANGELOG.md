@@ -58,6 +58,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Periodic reconciliation, retention and backlog queries no longer scan
+  retained history while holding the shared jobs.db connection. At 25,000
+  jobs, terminal webhook reconciliation went from 63 ms to under 0.1 ms,
+  stale-queue recovery from 17 ms to under 0.1 ms, scheduled-run retention
+  from 67 ms to 3 ms, and ad-hoc retention eligibility from 448 ms to
+  10 ms. `GET /errors` filtered by both project and job no longer scans the
+  project's errors. Migrations `022`–`024` add an idempotency-by-job index
+  and a scheduled-jobs index, and drop six single-column indexes that
+  composite indexes already cover. A binary older than this change refuses
+  to start on an upgraded database, so rolling back means restoring the
+  pre-upgrade backup.
 - Result redaction builds each run's secret variants once instead of for
   every string, and leaves records uncopied when the config references no
   secrets. Redacting 100k records took 0.72 s with no secrets and 7.9 s with

@@ -58,14 +58,20 @@ REQUIRED_MIGRATION_FILES = {
         "018_add_run_snapshots_and_schedule_health.sql",
         "019_create_queued_run_snapshots.sql",
         "021_add_admission_index.sql",
+        "022_add_retention_lookup_indexes.sql",
     ),
-    "errors.db": ("002_create_errors.sql", "007_add_errors_indexes.sql"),
+    "errors.db": (
+        "002_create_errors.sql",
+        "007_add_errors_indexes.sql",
+        "023_drop_redundant_error_indexes.sql",
+    ),
     "results_meta.db": (
         "003_create_results_meta.sql",
         "006_add_results_meta_indexes.sql",
         "008_results_meta_unique_job_run.sql",
         "011_add_results_artifact_lookup_index.sql",
         "020_create_result_reconciliation_state.sql",
+        "024_drop_redundant_result_indexes.sql",
     ),
 }
 _DEFAULT_SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
@@ -193,11 +199,11 @@ REQUIRED_COLUMNS = {
 REQUIRED_INDEXES = {
     "jobs.db": {
         "idx_jobs_project",
-        "idx_job_runs_job_id",
-        "idx_job_runs_started_at",
+        "idx_jobs_scheduled",
         "idx_job_runs_job_started",
         "idx_job_runs_terminal_reconciliation",
         "idx_scrape_idempotency_expires",
+        "idx_scrape_idempotency_job",
         "idx_webhook_deliveries_due",
         "idx_webhook_deliveries_created",
         "idx_webhook_deliveries_job_run",
@@ -209,16 +215,12 @@ REQUIRED_INDEXES = {
         "idx_queued_run_snapshots_job_id",
     },
     "errors.db": {
-        "idx_errors_project",
-        "idx_errors_job_id",
         "idx_errors_run_id",
         "idx_errors_timestamp",
         "idx_errors_job_timestamp",
         "idx_errors_project_timestamp",
     },
     "results_meta.db": {
-        "idx_results_meta_job_id",
-        "idx_results_meta_project",
         "idx_results_meta_created_at",
         "idx_results_meta_job_created",
         "idx_results_meta_job_run",

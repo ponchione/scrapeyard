@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-57**) and use this template:
+7. **New findings** take the next free ID (**TD-58**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,20 +230,20 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 2 | TD-38 | P3 | result store | low | none | |
-| 3 | TD-39 | P3 | click pagination | medium | timing only | |
-| 4 | TD-40 | P3 | API | low | `offset` bound | |
-| 5 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 6 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 7 | TD-43 | P3 | image, dependencies | low | none | |
-| 8 | TD-44 | P3 | lint, docs | low | none | |
-| 9 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 10 | TD-52 | P2 | worker | low | none | |
-| 11 | TD-53 | P3 | engine | low | none | |
-| 12 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 13 | TD-55 | P2 | URL guard, API | low | none | |
-| 14 | TD-56 | P3 | redaction | low | none | |
+| 1 | TD-38 | P3 | result store | low | none | |
+| 2 | TD-39 | P3 | click pagination | medium | timing only | |
+| 3 | TD-40 | P3 | API | low | `offset` bound | |
+| 4 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 5 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 6 | TD-43 | P3 | image, dependencies | low | none | |
+| 7 | TD-44 | P3 | lint, docs | low | none | |
+| 8 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 9 | TD-52 | P2 | worker | low | none | |
+| 10 | TD-53 | P3 | engine | low | none | |
+| 11 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 12 | TD-55 | P2 | URL guard, API | low | none | |
+| 13 | TD-56 | P3 | redaction | low | none | |
+| 14 | TD-57 | P3 | storage | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -274,7 +274,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-37 | P3 | ready | Periodic SQLite queries scan history, and the index set is unbalanced |
 | TD-38 | P3 | ready | Result-store deletes hold the metadata lock during `rmtree` |
 | TD-39 | P3 | ready | Click pagination keeps every parse tree and repeats the full wait per click |
 | TD-40 | P3 | ready | API edge cases: unbounded offsets, unlogged failures, uncounted response memory |
@@ -293,6 +292,7 @@ qualification workflows passing.
 | TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
 | TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
+| TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 
 ## Ready to implement
 
@@ -340,56 +340,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-37 — Periodic SQLite queries scan history, and the index set is unbalanced
-
-**Priority:** P3 · **Area:** storage, `sql/` · **Risk:** low–medium · **Contract:** none (migrations must work on deployed databases) · **Depends on:** —
-
-All of these run on the shared jobs.db or errors.db connection under its asyncio
-lock, so a slow query blocks heartbeats, claims and API polls. Timings are for
-6,600 jobs (realistic Eyebox volume) and 25k jobs.
-
-- **a. Three timer queries can't use their partial indexes.**
-
-  | Query | Runs | Now (realistic / 25k) | After (realistic / 25k) | Fix |
-  | --- | --- | --- | --- | --- |
-  | `list_terminal_webhook_candidates` | every 60 s | 13 / 64 ms | 0.06 / 0.16 ms | The OR clause blocks the partial indexes. Select candidates in a `UNION` subquery: unreconciled runs, plus running parents via `idx_jobs_admission`. Results were identical on seeded edge rows. |
-  | `list_stale_queued_jobs` | every 60 s | – / 15 ms | – / 0.03 ms | Add a redundant `jobs.status IN ('queued','running')` so the partial index applies. |
-  | `summarize_cleanup_backlog`, `list_scheduled_runs_for_retention` | metrics refresh, cleanup | 20 / 70 ms | 3.6 / 26 ms | Read the few scheduled jobs first (`FROM jobs CROSS JOIN job_runs`). Same results. |
-
-- **b. `scrape_idempotency` has no `job_id` index.**
-  - `_adhoc_retention_eligibility_sql` scans every unexpired key for each
-    candidate job: 113 ms at realistic volume, 1.58 s at 24k jobs, against
-    2.9 ms with an index.
-  - It sorts before `LIMIT`, so draining a backlog in batches of 100 takes
-    roughly quadratic time.
-  - `finalize_job_deletion`, `rollback_queued_submission` and the foreign-key
-    cascade also scan the table.
-  - **Fix:** migration `022` adding an index on `(job_id, expires_at)`.
-- **c. Seven indexes are redundant.** Dropping all of them changed no query
-  plans: `idx_errors_project`, `idx_errors_job_id`, `idx_results_meta_job_id`,
-  `idx_results_meta_project`, `idx_job_runs_job_id`, `idx_job_runs_started_at`
-  and `idx_jobs_project`.
-  - **Keep `idx_jobs_project`**, because `_migration_is_reflected` (in
-    `storage/database.py`) checks for it in the pre-ledger baseline.
-  - Error inserts then maintain 4 indexes instead of 6.
-- **d. `/errors` with both filters scans the whole project.**
-  - `build_query_errors_query` with both `project` and `job_id` lets the planner
-    scan all of the project's errors: 34.6 ms at 500k errors.
-  - Project-scoped credentials always send both, because they get a 403
-    without a project filter.
-  - **Fix:** emit `+project = ?` when `job_id` is given (0.02 ms).
-
-**Code:**
-- `storage/job_store.py`
-- `storage/error_queries.py`
-- `storage/database.py`
-- `sql/` (the latest migration is `021_add_admission_index.sql`)
-
-**Done when:**
-- There is an EXPLAIN QUERY PLAN assertion for each changed query.
-- Results are unchanged on seeded edge rows.
-- The migration applies to a copy of a deployed database.
 
 ### TD-38 — Result-store deletes hold the metadata lock during `rmtree`
 
@@ -512,7 +462,7 @@ deleting.
 
 ### TD-42 — `job_store.py` (2.5k lines) mixes five concerns
 
-**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-37 and TD-41 (to avoid conflicts)
+**Priority:** P3 · **Area:** storage · **Risk:** low (mechanical) · **Contract:** none · **Depends on:** TD-41 (to avoid conflicts)
 
 **Fix:** keep `SQLiteJobStore` as a thin facade and move the code into module
 functions that take `db`. Approximate line ranges at `b0b285e`:
@@ -714,6 +664,26 @@ existing redaction tests pass unchanged.
 one redaction span.
 **Done when:** a test with overlapping equal-length secrets gives the same
 output under different `PYTHONHASHSEED` values.
+
+### TD-57 — Stale-running recovery scans every job under the write lock
+
+**Priority:** P3 · **Area:** storage · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:**
+- `recover_stale_running_jobs` runs inside `BEGIN IMMEDIATE` every
+  `workers_running_reconciliation_interval_seconds` (60 s) and plans as
+  `SCAN jobs`: 5.3 ms at 6,600 jobs and 16.7 ms at 25,000, on the shared
+  jobs.db connection.
+- It can't use the partial `idx_jobs_admission`, because it deliberately
+  includes `running` rows whose `current_run_id` is NULL.
+
+**Code:** `storage/job_store.py` (`recover_stale_running_jobs`).
+**Fix:** split it into a `UNION`: an indexed branch for running rows with a
+`current_run_id`, plus a branch for running rows without one, backed by a small
+partial index (for example `(job_id) WHERE status = 'running' AND
+current_run_id IS NULL`) or by proof that the state can't exist.
+**Done when:** the plan has no `SCAN jobs`, and results are unchanged on seeded
+edge rows.
 
 ## Coordinated
 

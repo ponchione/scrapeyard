@@ -124,7 +124,9 @@ async def test_admission_index_upgrade_preserves_accepted_runs(tmp_path):
     ))
     async with get_db("jobs.db") as db, db_transaction(db):
         await db.execute("DROP INDEX idx_jobs_admission")
-        await db.execute("DELETE FROM schema_migrations WHERE migration_id = '021'")
+        await db.execute("DROP INDEX idx_scrape_idempotency_job")
+        await db.execute("DROP INDEX idx_jobs_scheduled")
+        await db.execute("DELETE FROM schema_migrations WHERE migration_id IN ('021', '022')")
     await close_db()
     await init_db(db_dir)
     await init_db(db_dir)
@@ -134,6 +136,75 @@ async def test_admission_index_upgrade_preserves_accepted_runs(tmp_path):
         plan = await (await db.execute("EXPLAIN QUERY PLAN " + query)).fetchall()
         assert any("idx_jobs_admission" in row[3] for row in plan)
         assert (await (await db.execute("SELECT run_id FROM queued_run_snapshots")).fetchone())[0] == "run"
+
+
+async def test_index_migrations_upgrade_existing_databases(tmp_path):
+    from scrapeyard.models.job import Job
+
+    db_dir = str(tmp_path / "db")
+    await init_db(db_dir)
+    await SQLiteJobStore().save_job(Job(
+        job_id="job", project="test", name="job", config_yaml="{}", current_run_id="run",
+    ))
+    # Return each database to its state before migrations 022, 023 and 024.
+    downgrades = {
+        "jobs.db": (
+            "022",
+            """INSERT INTO scrape_idempotency
+                   (caller_scope, key_digest, request_hash, job_id, run_id,
+                    response_mode, created_at, expires_at)
+                   VALUES ('caller', 'key', 'hash', 'job', 'run', 'async', 'now', 'later');
+               DROP INDEX idx_scrape_idempotency_job;
+               DROP INDEX idx_jobs_scheduled;
+               CREATE INDEX idx_job_runs_job_id ON job_runs (job_id);
+               CREATE INDEX idx_job_runs_started_at ON job_runs (started_at);""",
+        ),
+        "errors.db": (
+            "023",
+            """CREATE INDEX idx_errors_project ON errors (project);
+               CREATE INDEX idx_errors_job_id ON errors (job_id);""",
+        ),
+        "results_meta.db": (
+            "024",
+            """CREATE INDEX idx_results_meta_job_id ON results_meta (job_id);
+               CREATE INDEX idx_results_meta_project ON results_meta (project);""",
+        ),
+    }
+    for db_name, (migration_id, script) in downgrades.items():
+        async with get_db(db_name) as db:
+            await db.executescript(script)
+            await db.execute(
+                "DELETE FROM schema_migrations WHERE migration_id = ?", (migration_id,)
+            )
+            await db.commit()
+    await close_db()
+
+    await init_db(db_dir)
+    await init_db(db_dir)
+
+    expected = {
+        "jobs.db": (
+            {"idx_scrape_idempotency_job", "idx_jobs_scheduled", "idx_job_runs_job_started"},
+            {"idx_job_runs_job_id", "idx_job_runs_started_at"},
+        ),
+        "errors.db": (
+            {"idx_errors_job_timestamp", "idx_errors_project_timestamp"},
+            {"idx_errors_project", "idx_errors_job_id"},
+        ),
+        "results_meta.db": (
+            {"idx_results_meta_job_run", "idx_results_meta_project_run"},
+            {"idx_results_meta_job_id", "idx_results_meta_project"},
+        ),
+    }
+    for db_name, (present, dropped) in expected.items():
+        async with get_db(db_name) as db:
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+            indexes = {str(row[0]) for row in await cursor.fetchall()}
+        assert present <= indexes
+        assert not dropped & indexes
+    async with get_db("jobs.db") as db:
+        cursor = await db.execute("SELECT job_id, run_id FROM scrape_idempotency")
+        assert [tuple(row) for row in await cursor.fetchall()] == [("job", "run")]
 
 
 async def test_init_db_records_ordered_migration_history_once(tmp_path):
@@ -166,14 +237,16 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
             "018",
             "019",
             "021",
+            "022",
         ]
-    assert [row[0] for row in histories["errors.db"]] == ["002", "007"]
+    assert [row[0] for row in histories["errors.db"]] == ["002", "007", "023"]
     assert [row[0] for row in histories["results_meta.db"]] == [
         "003",
         "006",
         "008",
         "011",
         "020",
+        "024",
     ]
     async with get_db("jobs.db") as db:
         cursor = await db.execute(

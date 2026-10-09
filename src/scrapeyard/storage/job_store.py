@@ -455,7 +455,7 @@ class SQLiteJobStore:
                 "SELECT COUNT(*) AS eligible_count, "
                 "MIN(COALESCE(job_runs.completed_at, job_runs.started_at)) "
                 "AS oldest_eligible_at "
-                "FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id WHERE "
+                "FROM jobs CROSS JOIN job_runs ON job_runs.job_id = jobs.job_id WHERE "
                 + self._scheduled_history_eligibility_sql(),
                 (
                     fmt_dt(tombstone_expired_before),
@@ -550,6 +550,11 @@ class SQLiteJobStore:
 
     @staticmethod
     def _scheduled_history_eligibility_sql() -> str:
+        """Scheduled runs safe to prune; parameters: tombstone, expired, count.
+
+        Callers join ``FROM jobs CROSS JOIN job_runs`` so the scan starts from
+        the few scheduled jobs instead of every terminal run.
+        """
         return """
             jobs.schedule_cron IS NOT NULL
             AND job_runs.status IN ('complete', 'partial', 'failed')
@@ -597,7 +602,7 @@ class SQLiteJobStore:
             raise ValueError("Scheduled run retention bounds must be positive")
         query = (
             "SELECT job_runs.job_id, job_runs.run_id "
-            "FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id WHERE "
+            "FROM jobs CROSS JOIN job_runs ON job_runs.job_id = jobs.job_id WHERE "
             + self._scheduled_history_eligibility_sql()
             + " ORDER BY COALESCE(job_runs.completed_at, job_runs.started_at), "
             "job_runs.job_id, job_runs.run_id LIMIT ?"
@@ -1876,6 +1881,9 @@ class SQLiteJobStore:
     ) -> list[TerminalWebhookCandidate]:
         """Return terminal runs and their current logical outbox state."""
 
+        # The OR in the WHERE clause keeps SQLite off the partial indexes, so
+        # candidate_runs finds each branch's runs through its index first; the
+        # WHERE clause still decides which of them are returned.
         async with get_db("jobs.db") as db:
             query = """SELECT job_runs.job_id,
                           job_runs.run_id,
@@ -1896,7 +1904,20 @@ class SQLiteJobStore:
                           webhook_deliveries.delivery_id AS existing_delivery_id,
                           webhook_deliveries.status AS existing_delivery_status,
                           webhook_deliveries.scrubbed_at AS existing_delivery_scrubbed_at
-                   FROM job_runs
+                   FROM (
+                       SELECT run_id FROM job_runs
+                       WHERE webhook_reconciled_at IS NULL
+                         AND status IN ('complete', 'partial', 'failed')
+                       UNION
+                       SELECT job_runs.run_id FROM jobs
+                       JOIN job_runs
+                         ON job_runs.job_id = jobs.job_id
+                        AND job_runs.run_id = jobs.current_run_id
+                       WHERE jobs.status IN ('queued', 'running')
+                         AND jobs.current_run_id IS NOT NULL
+                         AND jobs.status = 'running'
+                   ) AS candidate_runs
+                   CROSS JOIN job_runs ON job_runs.run_id = candidate_runs.run_id
                    JOIN jobs ON jobs.job_id = job_runs.job_id
                    LEFT JOIN webhook_deliveries
                      ON webhook_deliveries.delivery_id = (
@@ -2268,6 +2289,7 @@ class SQLiteJobStore:
         submission, scheduling, or an earlier recovery reservation. Rows with
         no owned run or no queued timestamp are deliberately excluded.
         """
+        # The redundant status IN (...) lets the partial idx_jobs_admission apply.
         async with get_db("jobs.db") as db:
             query = """SELECT jobs.job_id, jobs.current_run_id,
                           jobs.current_trigger,
@@ -2280,6 +2302,7 @@ class SQLiteJobStore:
                      ON queued_run_snapshots.job_id = jobs.job_id
                     AND queued_run_snapshots.run_id = jobs.current_run_id
                    WHERE jobs.status = 'queued'
+                     AND jobs.status IN ('queued', 'running')
                      AND jobs.current_run_id IS NOT NULL
                      AND jobs.updated_at IS NOT NULL
                      AND jobs.updated_at <= ?
