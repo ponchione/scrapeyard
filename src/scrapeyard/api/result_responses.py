@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -11,7 +12,7 @@ from typing import Any, TypeVar
 
 from fastapi import Request, Response
 from starlette.requests import ClientDisconnect
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.api.serializers import serialize_result_response
@@ -20,14 +21,23 @@ from scrapeyard.common.run_threads import OwnedThreadPool
 
 T = TypeVar("T")
 
+logger = logging.getLogger(__name__)
+
 # A rendered body is sent in pieces of this size, so the server's flow control
 # paces it to the client instead of copying it whole into the transport buffer.
+# Each piece is a copy: a transport still holding an unsent view of the body
+# would keep all of it alive.
 _RESPONSE_SEND_CHUNK_BYTES = 256 * 1024
 # A body still unsent after this long stops counting against request capacity,
-# so a stalled connection cannot hold a slot until TCP gives up on it; the
-# transfer itself continues. It is below Eyebox's 30 s request timeout, so a
-# download waiting behind stalled ones still gets a slot in time.
+# so a stalled connection cannot hold a slot; the transfer itself continues
+# until _RESPONSE_SEND_STALL_SECONDS. It is below Eyebox's 30 s request
+# timeout, so a download waiting behind stalled ones still gets a slot in time.
 _RESPONSE_SLOT_HOLD_SECONDS = 20.0
+# A transfer whose next message the server can't accept for this long, because
+# its client stopped reading, is abandoned and its connection closed, which
+# releases the body instead of keeping it until TCP gives up. Eyebox abandons
+# a whole download after 30 s, so this never cuts off one it still waits for.
+_RESPONSE_SEND_STALL_SECONDS = 30.0
 
 
 class ResultResponseEncodingCancelled(RuntimeError):
@@ -70,32 +80,53 @@ class ResultResponse(Response):
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        body = memoryview(self.body)
+        size = len(body)
+        start = 0
         try:
-            await send(
+            if not await _send_unless_stalled(
+                send,
                 {
                     "type": "http.response.start",
                     "status": self.status_code,
                     "headers": self.raw_headers,
-                }
-            )
-            body = memoryview(self.body)
-            size = len(body)
-            start = 0
+                },
+            ):
+                return
             while True:
                 end = min(start + _RESPONSE_SEND_CHUNK_BYTES, size)
-                await send(
+                if not await _send_unless_stalled(
+                    send,
                     {
                         "type": "http.response.body",
-                        "body": body[start:end],
+                        "body": bytes(body[start:end]),
                         "more_body": end < size,
-                    }
-                )
+                    },
+                ):
+                    return
                 if end == size:
                     break
                 start = end
         finally:
             self._hold_timer.cancel()
             self._slot.release()
+
+
+async def _send_unless_stalled(send: Send, message: Message) -> bool:
+    """Send *message*, or give up once the client has stopped reading.
+
+    Returning with the body incomplete makes the server close the connection.
+    """
+
+    try:
+        await asyncio.wait_for(send(message), timeout=_RESPONSE_SEND_STALL_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Abandoned a result response its client stopped reading stall_seconds=%s",
+            _RESPONSE_SEND_STALL_SECONDS,
+        )
+        return False
+    return True
 
 
 class ResultResponseThreadPool(OwnedThreadPool):

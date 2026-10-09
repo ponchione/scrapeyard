@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import socket
 import threading
+import weakref
 from collections.abc import AsyncIterator
 
 import pytest
+import uvicorn
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.requests import ClientDisconnect
@@ -12,6 +16,7 @@ from starlette.requests import ClientDisconnect
 import scrapeyard.api.result_responses as response_module
 from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.api.result_responses import (
+    ResultRequestSlot,
     ResultResponse,
     ResultResponseSizeExceeded,
     ResultResponseThreadPool,
@@ -358,6 +363,67 @@ async def test_stalled_or_unsent_result_response_releases_its_slot_after_the_hol
         assert _free_request_slots(pool) == 1
     finally:
         pool.shutdown()
+
+
+class _Body(bytearray):
+    """A bytearray that can be weakly referenced."""
+
+
+@pytest.mark.parametrize("http", ["httptools", "h11"])
+async def test_stalled_result_download_is_closed_and_releases_its_body(monkeypatch, http):
+    monkeypatch.setattr(response_module, "_RESPONSE_SEND_STALL_SECONDS", 0.3)
+    size = 16 * 1024 * 1024
+    bodies = [_Body(size)]
+    body_ref = weakref.ref(bodies[0])
+    slot_released = asyncio.Event()
+
+    async def app(scope, receive, send) -> None:
+        response = ResultResponse(memoryview(bodies.pop()), ResultRequestSlot(slot_released.set))
+        await response(scope, receive, send)
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            http=http,
+            ws="none",
+            lifespan="off",
+            log_level="critical",
+        )
+    )
+    serving = asyncio.create_task(server.serve())
+    client = socket.socket()
+    try:
+        while not server.started:
+            assert not serving.done(), serving.exception()
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.setblocking(False)
+        loop = asyncio.get_running_loop()
+        await loop.sock_connect(client, ("127.0.0.1", port))
+        await loop.sock_sendall(client, b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+        received = await loop.sock_recv(client, 4096)
+        assert received.startswith(b"HTTP/1.1 200")
+
+        # The client stops reading with almost all of the body unsent.
+        await asyncio.wait_for(slot_released.wait(), timeout=5)
+        for _ in range(100):
+            gc.collect()
+            if body_ref() is None:
+                break
+            await asyncio.sleep(0.05)
+        assert body_ref() is None
+
+        # Reading again drains what the server had buffered, then hits its close.
+        while chunk := await asyncio.wait_for(loop.sock_recv(client, 65536), timeout=5):
+            received += chunk
+        assert len(received) < size
+    finally:
+        client.close()
+        server.should_exit = server.force_exit = True
+        await asyncio.wait_for(serving, timeout=5)
 
 
 @pytest.mark.asyncio

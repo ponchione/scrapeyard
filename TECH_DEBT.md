@@ -235,13 +235,12 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 3 | TD-56 | P3 | redaction | low | none | |
-| 4 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 5 | TD-63 | P3 | worker | low | none | |
-| 6 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 7 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 8 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-56 | P3 | redaction | low | none | |
+| 3 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 4 | TD-63 | P3 | worker | low | none | |
+| 5 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 6 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 7 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -280,7 +279,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
-| TD-59 | P3 | ready | A client that stops reading a result download holds its body in memory until TCP gives up |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
@@ -417,29 +415,6 @@ delete `response.adaptor` once a page is extracted, as `ClickSnapshot.parsed()`
 does.
 **Done when:** a benchmark shows peak RSS before and after on a 50-page link
 pagination run, with identical records.
-
-### TD-59 — A client that stops reading a result download holds its body in memory until TCP gives up
-
-**Priority:** P3 · **Area:** API · **Risk:** low · **Contract:** stalled downloads would be disconnected; Eyebox reads at full speed · **Depends on:** —
-
-**Problem:**
-- uvicorn has no response send timeout. A `/results` client that stops
-  reading keeps its connection open, and the response keeps the rendered body
-  (up to `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` plus envelope) referenced,
-  until TCP gives up, which can take minutes.
-- The result request slot stops counting such a response after 20 s, so
-  stalled clients can't block other downloads, but their memory is uncounted
-  from then on.
-- Production ingress admits only Eyebox, which reads at full speed, so this
-  needs a misbehaving or hostile client that holds a credential.
-
-**Code:** `api/result_responses.py` (`ResultResponse`,
-`_RESPONSE_SLOT_HOLD_SECONDS`).
-**Fix:** abort a result transfer that makes no progress for a bounded time
-(for example, wrap each chunk send in a timeout and close the connection), or
-document the reliance on ingress restrictions.
-**Done when:** a test with a client that stops reading shows the connection
-closed and the body released within the bound.
 
 ### TD-62 — Pinned GitHub actions run on Node 20
 

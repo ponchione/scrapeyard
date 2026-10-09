@@ -424,7 +424,8 @@ Set limits to match host capacity:
   from artifact load through rendering and sending, so at most this many
   rendered bodies are in memory at once; a body still unsent after 20 s, such
   as one to a stalled client, stops counting so it cannot hold a slot
-  indefinitely)
+  indefinitely, and a transfer that makes no progress for 30 s is abandoned
+  and its connection closed, which frees the body)
 - `SCRAPEYARD_TRANSFORM_REGEX_TIMEOUT_SECONDS` (default `0.1` per operation)
 - `SCRAPEYARD_TRANSFORM_REGEX_MAX_PATTERN_BYTES` (default `2048` UTF-8 bytes)
 - `SCRAPEYARD_TRANSFORM_MAX_PIPELINE_STEPS` (default `32`)

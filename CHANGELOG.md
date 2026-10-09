@@ -170,6 +170,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A result download whose client stops reading is abandoned after 30 s
+  without progress, and its connection closed, which frees the rendered body.
+  It used to stay in memory until TCP gave up, which can take minutes, and
+  uncounted against `SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS` after 20 s.
+  Eyebox gives up on a whole download after 30 s, so this never cuts one off
+  that it is still waiting for.
 - On Python 3.10, a browser navigation timeout is now reported as
   `navigation_timeout`, and a builtin `TimeoutError` from a basic fetch as
   `timeout`, as on 3.11 and later. They used to come out as `browser_error`
