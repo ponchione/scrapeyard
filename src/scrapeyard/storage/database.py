@@ -14,6 +14,8 @@ import re
 
 import aiosqlite
 
+from scrapeyard.common.async_tools import await_cleanup
+
 # Mapping of database filename to its forward-only migration history.
 _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
     "jobs.db": (
@@ -480,6 +482,42 @@ async def _ensure_jobs_item07_columns(db: aiosqlite.Connection) -> None:
         )
 
 
+async def _connect(path: Path) -> aiosqlite.Connection:
+    """Open a connection whose worker thread cannot outlive a cancelled open.
+
+    aiosqlite starts a non-daemon thread before connecting and stops it only
+    when connecting raises ``Exception``. A cancellation would leave the thread
+    waiting forever, and the interpreter waits for it at exit, so an interrupted
+    open finishes and closes its connection before the cancellation propagates.
+    """
+    opening = asyncio.ensure_future(aiosqlite.connect(path))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        await await_cleanup(_close_when_opened(opening))
+        raise
+
+
+async def _close_when_opened(opening: asyncio.Future[aiosqlite.Connection]) -> None:
+    try:
+        connection = await opening
+    except Exception:
+        return  # aiosqlite stopped the thread itself.
+    await connection.close()
+
+
+async def _close_all(connections: list[aiosqlite.Connection]) -> None:
+    """Close every connection, then raise the first failure."""
+    failures: list[Exception] = []
+    for connection in connections:
+        try:
+            await connection.close()
+        except Exception as exc:
+            failures.append(exc)
+    if failures:
+        raise failures[0]
+
+
 class DatabaseManager:
     """Encapsulates database directory, cached connections, and re-entrant locks.
 
@@ -495,8 +533,9 @@ class DatabaseManager:
     async def _close_cached_connections(self) -> None:
         connections = list(self._connections.values())
         self._connections.clear()
-        for conn in connections:
-            await conn.close()
+        # Every connection owns a thread that blocks interpreter exit until it
+        # closes, so finish closing all of them even if this is cancelled.
+        await await_cleanup(_close_all(connections))
 
     async def close(self) -> None:
         """Close cached SQLite connections and clear state."""
@@ -516,18 +555,25 @@ class DatabaseManager:
         migrations = _load_migrations(sql_dir)
 
         for db_name in _DB_MIGRATIONS:
-            async with aiosqlite.connect(db_path / db_name) as db:
+            db = await _connect(db_path / db_name)
+            try:
                 await _apply_connection_pragmas(db)
                 await _migrate_database(db_name, db, migrations[db_name])
+            finally:
+                await await_cleanup(db.close())
 
     async def _get_cached_connection(self, db_name: str) -> aiosqlite.Connection:
         connection = self._connections.get(db_name)
         if connection is None:
             if self._db_dir is None:
                 raise RuntimeError("Database not initialised — call init_db() first")
-            connection = await aiosqlite.connect(self._db_dir / db_name)
-            connection.row_factory = aiosqlite.Row
-            await _apply_connection_pragmas(connection)
+            connection = await _connect(self._db_dir / db_name)
+            try:
+                connection.row_factory = aiosqlite.Row
+                await _apply_connection_pragmas(connection)
+            except BaseException:
+                await await_cleanup(connection.close())
+                raise
             self._connections[db_name] = connection
         return connection
 

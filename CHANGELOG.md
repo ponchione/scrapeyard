@@ -83,6 +83,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A cancelled database open or close no longer leaves behind an aiosqlite
+  thread that blocks process exit. That could hang shutdown until the
+  container was killed, and occasionally hung the test suite after every test
+  had passed.
 - Startup no longer loads every stored config into memory to verify and
   rotate its encryption: the migration pages through the rows. A steady-state
   startup with 1,000 stored jobs peaked at 135.6 MiB and now peaks at 15.6

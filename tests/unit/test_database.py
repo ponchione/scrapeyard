@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -769,3 +770,51 @@ async def test_init_db_switches_cached_connections_for_new_path(tmp_path):
 
     assert first is not second
     await close_db()
+
+
+def _sqlite_threads() -> set[threading.Thread]:
+    return {t for t in threading.enumerate() if isinstance(t, aiosqlite.Connection)}
+
+
+def _assert_no_new_sqlite_threads(before: set[threading.Thread]) -> None:
+    leaked = []
+    for thread in _sqlite_threads() - before:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            leaked.append(thread)
+            thread._stop_running()  # Keep a regression from hanging the suite at exit.
+    assert leaked == [], "an aiosqlite thread outlived its connection and blocks exit"
+
+
+async def test_cancelled_first_connection_does_not_leak_its_thread(tmp_path):
+    await init_db(str(tmp_path))
+    before = _sqlite_threads()
+
+    async def use():
+        async with get_db("jobs.db") as db:
+            await db.execute("SELECT 1")
+
+    task = asyncio.ensure_future(use())
+    await asyncio.sleep(0)  # suspended inside aiosqlite's connect
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await close_db()
+
+    _assert_no_new_sqlite_threads(before)
+
+
+async def test_cancelled_close_still_closes_every_connection(tmp_path):
+    await init_db(str(tmp_path))
+    before = _sqlite_threads()
+    for name in ("jobs.db", "errors.db", "results_meta.db"):
+        async with get_db(name) as db:
+            await db.execute("SELECT 1")
+
+    closing = asyncio.ensure_future(close_db())
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    _assert_no_new_sqlite_threads(before)
