@@ -118,3 +118,27 @@ async def test_errors_list_returns_newest_first_with_pagination_headers(client):
     assert page_two.status_code == 200
     assert [item["job_id"] for item in page_two.json()] == ["job-1"]
     assert page_two.headers["X-Scrapeyard-Has-More"] == "false"
+
+
+# SQLite binds integers as signed 64-bit values.
+_SQLITE_MAX_INTEGER = 2**63 - 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/jobs", "/errors"])
+async def test_list_offset_beyond_sqlite_integers_is_a_validation_error(client, path):
+    await get_job_store().save_job(_make_job(job_id="job-offset"))
+    await get_error_store().log_errors([_make_error(job_id="job-offset")])
+
+    largest = await client.get(f"{path}?project=integ&offset={_SQLITE_MAX_INTEGER}")
+    too_large = await client.get(f"{path}?project=integ&offset={_SQLITE_MAX_INTEGER + 1}")
+
+    assert largest.status_code == 200
+    assert largest.json() == []
+    assert largest.headers["X-Scrapeyard-Offset"] == str(_SQLITE_MAX_INTEGER)
+    assert largest.headers["X-Scrapeyard-Has-More"] == "false"
+    assert too_large.status_code == 422
+    body = too_large.json()
+    assert body["code"] == "validation_error"
+    assert body["status_code"] == 422
+    assert body["details"][0]["location"] == ["query", "offset"]

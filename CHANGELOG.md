@@ -58,6 +58,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- A result response now counts against `SCRAPEYARD_API_RESULT_THREAD_MAX_WORKERS`
+  until its body has been sent, not just while it renders, so slow downloads
+  no longer keep up to 100 MiB per response in memory uncounted. The body is
+  sent in 256 KiB pieces paced to the client; a body still unsent after 20 s
+  stops counting. Response bytes and headers are unchanged.
 - Click pagination keeps each captured page as compressed HTML and parses it
   only while extracting it, instead of holding every page's parse tree until
   the target ends: a 70-page listing replayed from real recordings peaked
@@ -136,6 +141,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `GET /jobs` and `GET /errors` reject an `offset` above 2^63-1 with a 422
+  validation error instead of failing with a 500.
+- A schedule update, scheduled job creation or manual trigger that fails and
+  is rolled back now logs the cause (job ID and error type) instead of
+  returning a bare 503. A manual trigger that hits an encryption key failure
+  reports it like every other route.
 - A target that fails on a status listed in `retry.retryable_status` now
   reports the last response's `main_document_status`, page title and HTML
   excerpt in `debug`, as other HTTP failures do; it used to report an empty

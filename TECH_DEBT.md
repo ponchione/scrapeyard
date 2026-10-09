@@ -79,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-59**) and use this template:
+7. **New findings** take the next free ID (**TD-60**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -230,19 +230,19 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-40 | P3 | API | low | `offset` bound | |
-| 2 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 3 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 4 | TD-43 | P3 | image, dependencies | low | none | |
-| 5 | TD-44 | P3 | lint, docs | low | none | |
-| 6 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
-| 7 | TD-52 | P2 | worker | low | none | |
-| 8 | TD-53 | P3 | engine | low | none | |
-| 9 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 10 | TD-55 | P2 | URL guard, API | low | none | |
-| 11 | TD-56 | P3 | redaction | low | none | |
-| 12 | TD-57 | P3 | storage | low | none | |
-| 13 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 1 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 2 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 3 | TD-43 | P3 | image, dependencies | low | none | |
+| 4 | TD-44 | P3 | lint, docs | low | none | |
+| 5 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 6 | TD-52 | P2 | worker | low | none | |
+| 7 | TD-53 | P3 | engine | low | none | |
+| 8 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 9 | TD-55 | P2 | URL guard, API | low | none | |
+| 10 | TD-56 | P3 | redaction | low | none | |
+| 11 | TD-57 | P3 | storage | low | none | |
+| 12 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 13 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -273,7 +273,6 @@ qualification workflows passing.
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-40 | P3 | ready | API edge cases: unbounded offsets, unlogged failures, uncounted response memory |
 | TD-41 | P3 | ready | Dead code and duplicated helpers |
 | TD-42 | P3 | ready | `job_store.py` (2.5k lines) mixes five concerns |
 | TD-43 | P3 | ready | The runtime image and dependency declarations carry waste |
@@ -291,6 +290,7 @@ qualification workflows passing.
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
+| TD-59 | P3 | ready | A client that stops reading a result download holds its body in memory until TCP gives up |
 
 ## Ready to implement
 
@@ -338,26 +338,6 @@ security, so nothing gates merges.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-40 — API edge cases: unbounded offsets, unlogged failures, uncounted response memory
-
-**Priority:** P3 · **Area:** API · **Risk:** low (a, b), medium (c) · **Contract:** sub-item a only, on `GET /jobs` and `/errors`, which Eyebox doesn't use · **Depends on:** —
-
-- **a. Huge offsets cause a 500.** `?offset=9223372036854775808` on `list_jobs`
-  or `get_errors` makes SQLite raise `OverflowError`, which becomes a 500.
-  **Fix:** add `le=` to the `Query` so these return 422.
-- **b. Some failures are returned without being logged.**
-  - In `_apply_scheduler_mutation`, `create_job` and `trigger_job`, a successful
-    compensation or rollback returns 503 but never logs the original exception.
-  - `trigger_job`'s `except Exception` swallows everything, including
-    `SecretKeyConfigurationError`, which has its own handler.
-  - **Fix:** log `error_type` before raising, and narrow the catch.
-- **c. Response memory outlives the result slot.**
-  - `get_results` releases its result slot when the handler returns, but the
-    rendered body (up to 100 MiB) stays in memory while slow clients download
-    it. That memory isn't counted against `api_result_thread_max_workers`.
-  - **Fix:** hold the slot until the body has been sent (a small `Response`
-    subclass), keeping `Content-Length`.
 
 ### TD-41 — Dead code and duplicated helpers
 
@@ -659,6 +639,29 @@ delete `response.adaptor` once a page is extracted, as `ClickSnapshot.parsed()`
 does.
 **Done when:** a benchmark shows peak RSS before and after on a 50-page link
 pagination run, with identical records.
+
+### TD-59 — A client that stops reading a result download holds its body in memory until TCP gives up
+
+**Priority:** P3 · **Area:** API · **Risk:** low · **Contract:** stalled downloads would be disconnected; Eyebox reads at full speed · **Depends on:** —
+
+**Problem:**
+- uvicorn has no response send timeout. A `/results` client that stops
+  reading keeps its connection open, and the response keeps the rendered body
+  (up to `SCRAPEYARD_RUN_MAX_SERIALIZED_RESULT_BYTES` plus envelope) referenced,
+  until TCP gives up, which can take minutes.
+- The result request slot stops counting such a response after 20 s, so
+  stalled clients can't block other downloads, but their memory is uncounted
+  from then on.
+- Production ingress admits only Eyebox, which reads at full speed, so this
+  needs a misbehaving or hostile client that holds a credential.
+
+**Code:** `api/result_responses.py` (`ResultResponse`,
+`_RESPONSE_SLOT_HOLD_SECONDS`).
+**Fix:** abort a result transfer that makes no progress for a bounded time
+(for example, wrap each chunk send in a timeout and close the connection), or
+document the reliance on ingress restrictions.
+**Done when:** a test with a client that stops reading shows the connection
+closed and the body released within the bound.
 
 ## Coordinated
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from scrapeyard.api.dependencies import get_job_store, get_scheduler, get_worker_pool
 from scrapeyard.scheduler.cron import SchedulerService
+from scrapeyard.storage.secret_envelope import SecretKeyConfigurationError
 from scrapeyard.engine.scraper import TargetResult
 from tests.integration.conftest import poll_until_ready
 
@@ -431,6 +433,7 @@ async def test_manual_trigger_returns_503_when_redis_inspection_fails(
 async def test_failed_scheduler_update_restores_database_state(
     client,
     monkeypatch,
+    caplog,
 ):
     created = await client.post(
         "/jobs",
@@ -450,9 +453,12 @@ async def test_failed_scheduler_update_restores_database_state(
         return original_register(*args, **kwargs)
 
     monkeypatch.setattr(scheduler, "register_job", _fail_once)
-    failed = await client.post(f"/jobs/{job_id}/pause")
+    with caplog.at_level(logging.ERROR, logger="scrapeyard.api.routes"):
+        failed = await client.post(f"/jobs/{job_id}/pause")
 
     assert failed.status_code == 503
+    assert failed.json()["error"] == "Schedule update failed; persisted state was restored"
+    assert f"job_id={job_id} error_type=RuntimeError" in caplog.text
     stored = await get_job_store().get_job(job_id)
     assert stored.schedule_enabled is True
     assert scheduler._scheduler.get_job(job_id).next_run_time is not None
@@ -462,6 +468,7 @@ async def test_failed_scheduler_update_restores_database_state(
 async def test_failed_initial_registration_rolls_back_job_creation(
     client,
     monkeypatch,
+    caplog,
 ):
     scheduler = get_scheduler()
     monkeypatch.setattr(
@@ -469,11 +476,59 @@ async def test_failed_initial_registration_rolls_back_job_creation(
         "register_job",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unavailable")),
     )
-    response = await client.post(
-        "/jobs",
-        content=_managed_yaml(),
-        headers={"content-type": "application/x-yaml"},
-    )
+    with caplog.at_level(logging.ERROR, logger="scrapeyard.api.routes"):
+        response = await client.post(
+            "/jobs",
+            content=_managed_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
     assert response.status_code == 503
+    assert response.json()["error"] == (
+        "Schedule registration failed; job creation was rolled back"
+    )
+    assert "Scheduled creation failed and was compensated" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+    assert "unavailable" not in caplog.text
     jobs = await get_job_store().list_jobs_with_stats(project="integ")
     assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_failed_manual_trigger_logs_the_cause(client, monkeypatch, caplog):
+    created = await client.post(
+        "/jobs",
+        content=_managed_yaml(enabled=False),
+        headers={"content-type": "application/x-yaml"},
+    )
+    job_id = created.json()["job_id"]
+
+    async def _failure(_job_id: str):
+        raise RuntimeError("secret-bearing detail")
+
+    monkeypatch.setattr(get_scheduler(), "trigger_job_now", _failure)
+    with caplog.at_level(logging.ERROR, logger="scrapeyard.api.routes"):
+        triggered = await client.post(f"/jobs/{job_id}/trigger")
+
+    assert triggered.status_code == 503
+    assert triggered.json()["error"] == "Manual trigger could not be enqueued"
+    assert f"Manual trigger failed job_id={job_id} error_type=RuntimeError" in caplog.text
+    assert "secret-bearing detail" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_reports_encryption_configuration_failure(client, monkeypatch):
+    created = await client.post(
+        "/jobs",
+        content=_managed_yaml(enabled=False),
+        headers={"content-type": "application/x-yaml"},
+    )
+    job_id = created.json()["job_id"]
+
+    async def _failure(_job_id: str):
+        raise SecretKeyConfigurationError("key unavailable")
+
+    monkeypatch.setattr(get_scheduler(), "trigger_job_now", _failure)
+    triggered = await client.post(f"/jobs/{job_id}/trigger")
+
+    assert triggered.status_code == 503
+    assert triggered.json()["error"] == "Service encryption configuration is unavailable"

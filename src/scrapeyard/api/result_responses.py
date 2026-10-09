@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 
 from fastapi import Request, Response
 from starlette.requests import ClientDisconnect
+from starlette.types import Receive, Scope, Send
 
 from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.api.serializers import serialize_result_response
@@ -21,6 +22,15 @@ from scrapeyard.runtime.metrics import ACTIVE_WORK, WORK_CAPACITY
 
 T = TypeVar("T")
 
+# A rendered body is sent in pieces of this size, so the server's flow control
+# paces it to the client instead of copying it whole into the transport buffer.
+_RESPONSE_SEND_CHUNK_BYTES = 256 * 1024
+# A body still unsent after this long stops counting against request capacity,
+# so a stalled connection cannot hold a slot until TCP gives up on it; the
+# transfer itself continues. It is below Eyebox's 30 s request timeout, so a
+# download waiting behind stalled ones still gets a slot in time.
+_RESPONSE_SLOT_HOLD_SECONDS = 20.0
+
 
 class ResultResponseEncodingCancelled(RuntimeError):
     """Raised inside a renderer after its client or request disappears."""
@@ -28,6 +38,66 @@ class ResultResponseEncodingCancelled(RuntimeError):
 
 class ResultResponseSizeExceeded(ValueError):
     """Raised before a rendered result response crosses its byte ceiling."""
+
+
+class ResultRequestSlot:
+    """One request-capacity slot, released exactly once."""
+
+    def __init__(self, release: Callable[[], None]) -> None:
+        self._release = release
+        self._released = False
+        self.handed_off = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._release()
+
+
+class ResultResponse(Response):
+    """Rendered result JSON that keeps its request slot until it has been sent.
+
+    The bytes and headers, including ``Content-Length``, are those of a plain
+    ``Response`` with the same body.
+    """
+
+    def __init__(self, body: memoryview, slot: ResultRequestSlot) -> None:
+        super().__init__(content=body, media_type="application/json")
+        slot.handed_off = True
+        self._slot = slot
+        # Also releases the slot of a response that is never sent.
+        self._hold_timer = asyncio.get_running_loop().call_later(
+            _RESPONSE_SLOT_HOLD_SECONDS,
+            slot.release,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status_code,
+                    "headers": self.raw_headers,
+                }
+            )
+            body = memoryview(self.body)
+            size = len(body)
+            start = 0
+            while True:
+                end = min(start + _RESPONSE_SEND_CHUNK_BYTES, size)
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": body[start:end],
+                        "more_body": end < size,
+                    }
+                )
+                if end == size:
+                    break
+                start = end
+        finally:
+            self._hold_timer.cancel()
+            self._slot.release()
 
 
 class ResultResponseThreadPool:
@@ -61,14 +131,23 @@ class ResultResponseThreadPool:
             return self._lingering
 
     @asynccontextmanager
-    async def request_capacity(self) -> AsyncIterator[None]:
-        """Bound result artifact loading and rendering as one request unit."""
+    async def request_capacity(self) -> AsyncIterator[ResultRequestSlot]:
+        """Bound result artifact loading, rendering and sending as one unit.
+
+        A ``ResultResponse`` built with the slot takes it over and releases it
+        once its body has been sent, so a rendered body in transit still
+        counts against this capacity.
+        """
 
         await self._request_slots.acquire()
+        slot = ResultRequestSlot(self._request_slots.release)
         try:
-            yield
-        finally:
-            self._request_slots.release()
+            yield slot
+        except BaseException:
+            slot.release()
+            raise
+        if not slot.handed_off:
+            slot.release()
 
     async def run(
         self,
@@ -183,6 +262,7 @@ async def encoded_result_response(
     request: Request,
     *,
     pool: ResultResponseThreadPool,
+    slot: ResultRequestSlot,
     job_id: str,
     run_id: str,
     status: str,
@@ -190,7 +270,10 @@ async def encoded_result_response(
     compatibility: APICompatibility,
     max_bytes: int,
 ) -> Response:
-    """Render result JSON off-loop and stop promptly after disconnect/cancel."""
+    """Render result JSON off-loop and stop promptly after disconnect/cancel.
+
+    The response takes over *slot* from ``pool.request_capacity()``.
+    """
 
     render_task = asyncio.create_task(
         pool.run(
@@ -225,4 +308,4 @@ async def encoded_result_response(
         disconnect_task.cancel()
         with suppress(asyncio.CancelledError):
             await disconnect_task
-    return Response(content=body, media_type="application/json")
+    return ResultResponse(body, slot)

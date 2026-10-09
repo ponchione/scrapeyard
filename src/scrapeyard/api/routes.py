@@ -89,6 +89,7 @@ from scrapeyard.scheduler.cron import (
 )
 from scrapeyard.storage.job_store import AdmissionCapacityError, DuplicateJobError
 from scrapeyard.storage.protocols import ErrorStore, JobStore, ResultStore
+from scrapeyard.storage.secret_envelope import SecretKeyConfigurationError
 from scrapeyard.storage.types import (
     ResultArtifactReadError,
     ScheduledJobMutationAction,
@@ -97,6 +98,9 @@ from scrapeyard.storage.types import (
 
 router = APIRouter(responses=ERROR_RESPONSES)
 logger = logging.getLogger(__name__)
+# SQLite binds OFFSET as a signed 64-bit integer; a larger value is a client
+# error, not a database failure.
+_MAX_LIST_OFFSET = 2**63 - 1
 
 
 def _register_schedule_snapshot(scheduler: SchedulerService, job: Job) -> None:
@@ -153,6 +157,12 @@ async def _apply_scheduler_mutation(
                 type(restore_exc).__name__,
             )
             raise_json_error(503, "Schedule update failed; restart scheduler from database state")
+        logger.error(
+            "Schedule update failed and was compensated job_id=%s "
+            "error_type=%s recovery_action=restored_persisted_state",
+            current.job_id,
+            type(exc).__name__,
+        )
         raise_json_error(503, "Schedule update failed; persisted state was restored")
     return current
 
@@ -368,7 +378,7 @@ async def scrape(
         )
 
     response_pool = get_result_response_thread_pool()
-    async with response_pool.request_capacity():
+    async with response_pool.request_capacity() as slot:
         try:
             payload = await result_store.get_result(
                 submission.job_id,
@@ -379,6 +389,7 @@ async def scrape(
         response = await encoded_result_response(
             request,
             pool=response_pool,
+            slot=slot,
             job_id=submission.job_id,
             run_id=submission.run_id,
             status=submission.status,
@@ -433,6 +444,12 @@ async def create_job(
                 type(exc).__name__,
             )
             raise_json_error(503, "Schedule registration failed and requires reconciliation")
+        logger.error(
+            "Scheduled creation failed and was compensated job_id=%s "
+            "error_type=%s recovery_action=rolled_back_creation",
+            job.job_id,
+            type(exc).__name__,
+        )
         raise_json_error(503, "Schedule registration failed; job creation was rolled back")
     return serialize_job_created(job)
 
@@ -560,7 +577,15 @@ async def trigger_job(
         raise_json_error(503, str(exc))
     except (ManualTriggerConflictError, ScheduledJobLifecycleError) as exc:
         raise_json_error(409, str(exc))
-    except Exception:
+    except SecretKeyConfigurationError:
+        # Its own handler reports the sanitized encryption failure.
+        raise
+    except Exception as exc:
+        logger.error(
+            "Manual trigger failed job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+        )
         raise_json_error(503, "Manual trigger could not be enqueued")
     return {
         "job_id": job_id,
@@ -582,7 +607,7 @@ async def list_jobs(
     response: Response,
     project: str | None = Query(None),
     limit: int | None = Query(None, ge=1),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=_MAX_LIST_OFFSET),
     job_store: JobStore = Depends(get_job_store),
 ) -> Any:
     """List jobs, optionally filtered by project."""
@@ -756,7 +781,7 @@ async def get_results(
         result_run_id = metadata.run_id
     settings = get_settings()
     response_pool = get_result_response_thread_pool()
-    async with response_pool.request_capacity():
+    async with response_pool.request_capacity() as slot:
         try:
             payload = await result_store.get_result(job_id, run_id=result_run_id)
         except (KeyError, FileNotFoundError, ResultArtifactReadError):
@@ -765,6 +790,7 @@ async def get_results(
         return await encoded_result_response(
             request,
             pool=response_pool,
+            slot=slot,
             job_id=job_id,
             run_id=payload.run_id,
             status=payload.status,
@@ -787,7 +813,7 @@ async def get_errors(
     since: str | None = Query(None),
     error_type: str | None = Query(None),
     limit: int | None = Query(None, ge=1),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=_MAX_LIST_OFFSET),
     error_store: ErrorStore = Depends(get_error_store),
 ) -> Any:
     """Query error records with optional filters."""
