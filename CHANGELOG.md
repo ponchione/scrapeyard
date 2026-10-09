@@ -83,6 +83,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A rendered listing that fails only result validation (for example one card
+  with an empty required field) is no longer classified as an access denial
+  because the page carries challenge, consent or login markers, such as the
+  Akamai bot-manager script on every MidwayUSA page. The target now reports
+  `content_empty` and follows `validation.on_empty` instead of failing as
+  `challenge_page`, skipping the host's remaining targets and starting a
+  domain cooldown. Page markers still deny a page with no item-selector
+  matches or no field-selector matches, as at fetch time.
 - The service no longer keeps the last 128 fetched pages in memory after runs:
   Scrapling's `ResponseEncoding.get_value` memoized every response's full text
   in an `lru_cache`. Scrapeyard now calls it uncached; encodings are unchanged.

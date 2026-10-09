@@ -43,6 +43,7 @@ from scrapeyard.engine.fetch_classifier import (
     classify_page_signals,
     classify_fetch_exception,
     classify_rendered_outcome,
+    page_shows_expected_content,
 )
 from scrapeyard.engine.page_cache import (
     CachedPage,
@@ -679,7 +680,7 @@ async def _fetch_page(
     # normal catalogue can contain account/consent text alongside valid cards.
     if classify_page_signals(debug) in ACCESS_DENIAL_TYPES:
         counts = await run_thread_work(_selector_debug, response, target, run_budget=budget)
-        if counts["item_selector_count"] == 0 or not any(counts["selector_counts"].values()):
+        if not page_shows_expected_content(counts):
             debug.update(counts)
             raise FetchError(response.status, debug=debug)
     if page_cache is not None and page_cache.mode is PageCacheMode.record:

@@ -33,9 +33,9 @@ execution:
 """
 
 
-def _response(status: int, html: str) -> Response:
+def _response(status: int, html: str, url: str = URL) -> Response:
     return Response(
-        url=URL,
+        url=url,
         text=html,
         body=html.encode(),
         status=status,
@@ -169,3 +169,99 @@ async def test_replay_run_is_labeled_and_never_counts_or_contacts_the_site(tmp_p
     assert "recorded_at" in str(output["results"])
     assert output["run_budget"]["domain_guard"]["pages_admitted"] == {}
     breaker.record_success.assert_not_called()
+
+
+SECOND_URL = "https://shop.example.test/second"
+# Every MidwayUSA page embeds Akamai's bot-manager script, whose text contains
+# challenge markers ("akamai", "sec-if-cpt-container") on ordinary listings.
+AKAMAI_SCRIPT = (
+    '<script src="/akam/13/7d1c">/* Akamai bot manager */ '
+    "var container = 'sec-if-cpt-container';</script>"
+)
+
+
+def _listing(*names: str) -> str:
+    cards = "".join(
+        f'<li class="product"><h2>{name}</h2><span class="price">$10.00</span></li>'
+        for name in names
+    )
+    return (
+        f"<html><head><title>Scopes | Shop</title>{AKAMAI_SCRIPT}</head>"
+        f"<body><ol>{cards}</ol></body></html>"
+    )
+
+
+CHALLENGE = (
+    f"<html><head><title>Access Denied</title>{AKAMAI_SCRIPT}</head>"
+    '<body><div id="sec-if-cpt-container">Press &amp; Hold to confirm you are a human</div>'
+    "</body></html>"
+)
+
+
+def _listing_config(on_empty: str) -> str:
+    target = """
+  - url: {url}
+    fetcher: basic
+    item_selector: li.product
+    selectors:
+      name: h2
+      price: .price"""
+    return f"""
+project: demo
+name: guard-job
+targets:{target.format(url=URL)}{target.format(url=SECOND_URL)}
+validation:
+  required_fields: [name, price]
+  min_results: 1
+  on_empty: {on_empty}
+"""
+
+
+class _Pages:
+    def __init__(self, pages: dict[str, str]) -> None:
+        self.pages = pages
+        self.requests: list[str] = []
+
+    async def __call__(self, _fetcher_cls, url, _call_kwargs, **_kwargs):
+        self.requests.append(url)
+        return _response(200, self.pages[url], url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_empty", ["warn", "fail"])
+async def test_validation_failure_on_a_rendered_listing_is_not_an_access_denial(tmp_path, on_empty):
+    """Midway 2026-10-09: one blank card name on a normal page that carries
+    Akamai's script must stay a validation outcome, not a host-wide challenge."""
+    guard = LocalDomainGuard()
+    site = _Pages({URL: _listing("Scope A", "", "Scope C"), SECOND_URL: _listing("Scope D")})
+    output, errors, _breaker = await _run(
+        tmp_path, _listing_config(on_empty), site, guard, "run-validation",
+    )
+
+    assert site.requests == [URL, SECOND_URL]
+    assert output["run_budget"]["domain_guard"]["cooldowns_started"] == []
+    assert (await guard.status("shop.example.test")).cooldown_remaining_seconds == 0
+    first = errors[0]
+    assert first.error_type == ErrorType.content_empty
+    assert first.error_message == "Required field 'name' is empty in record 1"
+    assert first.action_taken == ActionTaken(on_empty)
+    results = str(output["results"])
+    assert "challenge_page" not in results
+    assert "Scope D" in results
+    if on_empty == "warn":
+        assert "Scope A" in results and "Scope C" in results
+
+
+@pytest.mark.asyncio
+async def test_challenge_page_without_items_still_denies_the_host(tmp_path):
+    guard = LocalDomainGuard()
+    site = _Pages({URL: CHALLENGE, SECOND_URL: _listing("Scope D")})
+    output, errors, _breaker = await _run(
+        tmp_path, _listing_config("warn"), site, guard, "run-challenge",
+    )
+
+    assert site.requests == [URL]
+    assert output["run_budget"]["domain_guard"]["cooldowns_started"] == ["shop.example.test"]
+    assert (await guard.status("shop.example.test")).cooldown_remaining_seconds > 0
+    assert [e.error_type for e in errors] == [ErrorType.challenge_page]
+    assert "earlier target on this host was denied or challenged" in str(output["results"])

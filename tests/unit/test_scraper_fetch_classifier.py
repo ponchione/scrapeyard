@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 
 from scrapeyard.config.schema import FetcherType
 from scrapeyard.engine.fetch_classifier import (
@@ -102,3 +103,58 @@ def test_classify_rendered_outcome_prefers_challenge_for_akamai_interstitial_ove
     result = classify_rendered_outcome(debug, data=[], has_item_selector=True)
 
     assert result == ErrorType.challenge_page
+
+
+_AKAMAI_BOT_MANAGER = (
+    "<script>/* Akamai bot manager */ var container = 'sec-if-cpt-container';</script>"
+)
+
+
+def test_classify_rendered_outcome_ignores_access_markers_on_a_page_with_rendered_items():
+    # MidwayUSA 2026-10-09: a normal listing embeds Akamai's bot-manager script.
+    debug = {
+        "page_title": "Scopes | MidwayUSA",
+        "main_document_status": 200,
+        "html_excerpt": f"<html><head>{_AKAMAI_BOT_MANAGER}</head><body><ol>...",
+        "item_selector_count": 60,
+        "selector_counts": {"name": 1, "price": 1, "url": 1},
+    }
+    data = [{"name": "Scope", "price": "$10"}, {"name": "", "price": "$20"}]
+
+    assert classify_page_signals(debug) == ErrorType.challenge_page
+    assert classify_rendered_outcome(debug, data, has_item_selector=True) is None
+
+
+def test_classify_rendered_outcome_ignores_access_markers_when_selectors_match_without_items():
+    debug = {
+        "page_title": "Product | Shop",
+        "html_excerpt": f"<html><head>{_AKAMAI_BOT_MANAGER}</head><nav>My account</nav>",
+        "item_selector_count": None,
+        "selector_counts": {"name": 1, "price": 0},
+    }
+
+    assert classify_rendered_outcome(debug, [{"name": "Scope"}], has_item_selector=False) is None
+
+
+@pytest.mark.parametrize(
+    ("counts", "has_item_selector"),
+    [
+        ({"item_selector_count": 0, "selector_counts": {"name": 0}}, True),
+        ({"item_selector_count": 3, "selector_counts": {"name": 0, "price": 0}}, True),
+        ({"item_selector_count": None, "selector_counts": {"name": 0}}, False),
+        ({}, True),
+    ],
+)
+def test_classify_rendered_outcome_keeps_access_markers_when_expected_content_is_missing(
+    counts,
+    has_item_selector,
+):
+    debug = {
+        "page_title": "Access Denied",
+        "html_excerpt": f"{_AKAMAI_BOT_MANAGER}<p>Press &amp; Hold to confirm you are a human</p>",
+        **counts,
+    }
+
+    assert classify_rendered_outcome(debug, [], has_item_selector=has_item_selector) == (
+        ErrorType.challenge_page
+    )

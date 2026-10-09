@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -124,6 +125,21 @@ def classify_page_signals(debug: dict[str, Any]) -> ErrorType | None:
     return None
 
 
+def page_shows_expected_content(debug: Mapping[str, Any]) -> bool:
+    """Whether a page's selector counts show the content its target expects.
+
+    Access markers also appear on ordinary pages: every MidwayUSA page embeds
+    Akamai's bot-manager script ("akamai", "sec-if-cpt-container"), and listings
+    link to "my account" or show cookie banners. A page signal is an access
+    denial only on a page without that content: no item matched the item
+    selector, or no field selector matched.
+    """
+    if debug.get("item_selector_count") == 0:
+        return False
+    selector_counts = debug.get("selector_counts") or {}
+    return any(count > 0 for count in selector_counts.values())
+
+
 def classify_rendered_outcome(
     debug: dict[str, Any],
     data: list[dict[str, Any]],
@@ -131,7 +147,9 @@ def classify_rendered_outcome(
     has_item_selector: bool,
 ) -> ErrorType | None:
     signal_classification = classify_page_signals(debug)
-    if signal_classification is not None:
+    # Same rule as the fetch-time check: a rendered page that later fails
+    # result validation is a validation failure, not a host-wide denial.
+    if signal_classification is not None and not page_shows_expected_content(debug):
         return signal_classification
 
     selector_counts = debug.get("selector_counts") or {}
