@@ -55,8 +55,13 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
 )
 
 # URLs embedded in free-form text that we scrub before returning stored config
-# YAML, logs, or result metadata to clients.
-_URL_IN_TEXT_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"']+", re.IGNORECASE)
+# YAML, logs, or result metadata to clients. A URL starts at the first letter
+# of a run of scheme characters that ends in "://". The lookbehind tries only
+# the start of each run (group 1 skips its leading non-letters), so a long run
+# with no "://" costs linear time instead of a backtrack from every position.
+_URL_IN_TEXT_RE = re.compile(
+    r"(?<![a-z0-9+.-])([0-9+.-]*)([a-z][a-z0-9+.-]*://[^\s\"']+)", re.IGNORECASE
+)
 _URL_AUTHORITY_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)([^/?#]*)(.*)$", re.IGNORECASE)
 _QUERY_SEPARATOR_RE = re.compile(r"([&;])")
 
@@ -447,7 +452,9 @@ def redact_userinfo_in_text(text: str) -> str:
     """
 
     redacted = redact_deployment_secrets(text)
-    return _URL_IN_TEXT_RE.sub(lambda match: redact_userinfo_in_url(match.group(0)), redacted)
+    return _URL_IN_TEXT_RE.sub(
+        lambda match: match.group(1) + redact_userinfo_in_url(match.group(2)), redacted
+    )
 
 
 def _is_sensitive_key(key: str) -> bool:

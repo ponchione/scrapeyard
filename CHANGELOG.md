@@ -163,6 +163,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Redacting URLs in error text, YAML errors and `GET /jobs/{id}` configs no
+  longer takes quadratic time on a long run of letters, digits, `+`, `.` or
+  `-` with no `://`. A 256 KiB config holding one such token cost about two
+  minutes of CPU per redaction; it now takes milliseconds. The URLs found are
+  unchanged.
 - A cancellation that lands while a run-budget stop is being recorded, such as
   a shutdown cancel during its database writes, no longer leaves the run
   `running` until the heartbeat timeout. It gets the same ownership check and

@@ -235,16 +235,15 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-55 | P2 | URL guard, API | low | none | |
-| 3 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
-| 4 | TD-53 | P3 | engine | low | none | |
-| 5 | TD-57 | P3 | storage | low | none | |
-| 6 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
-| 7 | TD-56 | P3 | redaction | low | none | |
-| 8 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 9 | TD-63 | P3 | worker | low | none | |
-| 10 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 11 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-54 | P3 | config validation, API | low | new 422s for configs that already break | |
+| 3 | TD-53 | P3 | engine | low | none | |
+| 4 | TD-57 | P3 | storage | low | none | |
+| 5 | TD-59 | P3 | API | low | stalled downloads would be disconnected | |
+| 6 | TD-56 | P3 | redaction | low | none | |
+| 7 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 8 | TD-63 | P3 | worker | low | none | |
+| 9 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 10 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -283,7 +282,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-53 | P3 | ready | On Python 3.10, browser navigation timeouts are misclassified |
 | TD-54 | P3 | ready | A lone surrogate in a selector field name makes that run's `GET /results` fail with 500 |
-| TD-55 | P2 | ready | URL redaction in text is quadratic on long URL-like tokens |
 | TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-57 | P3 | ready | Stale-running recovery scans every job under the write lock |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
@@ -433,27 +431,6 @@ content error instead of `http_error`.
 **Done when:** a config with a lone surrogate in a field name, transform
 argument, selector or URL gets a 422, and a test shows no run can complete
 with a record that `/results` cannot encode.
-
-### TD-55 — URL redaction in text is quadratic on long URL-like tokens
-
-**Priority:** P2 · **Area:** engine URL guard, API · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `_URL_IN_TEXT_RE` (`[a-z][a-z0-9+.-]*://[^\s"']+`) backtracks from every
-  start position across a long run of `[a-z0-9+.-]` that contains no `://`.
-- Measured on `main`: 4,000 characters take 33 ms, 8,000 take 127 ms and
-  16,000 take 0.51 s. A 256 KiB config, within
-  `SCRAPEYARD_MAX_REQUEST_BYTES`, holding one such token would cost about two
-  minutes of CPU per call, holding the GIL.
-- `redact_userinfo_in_text` has 19 call sites, including YAML and validation
-  error text, error records and `GET /jobs/{id}` config redaction, so one
-  authenticated submission could stall the service.
-
-**Code:** `engine/url_guard.py` (`_URL_IN_TEXT_RE`, `redact_userinfo_in_text`).
-**Fix:** bound the scheme (`[a-z][a-z0-9+.-]{0,31}://`) or anchor it at a word
-boundary, keeping today's matches.
-**Done when:** a test redacts a 256 KiB token in well under 100 ms, and the
-existing redaction tests pass unchanged.
 
 ### TD-56 — Secret redaction order depends on the process hash seed for equal-length secrets
 

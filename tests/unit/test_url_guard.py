@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import random
+import re
 import socket
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, quote_plus
@@ -303,6 +305,45 @@ def test_redact_userinfo_in_text_masks_sensitive_query_values() -> None:
     assert redact_userinfo_in_text(text) == (
         "failed at https://example.com/path?access_token=<redacted>&page=<redacted>"
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("9+https://user:pass@h.example/", "9+https://h.example/"),
+        ("x_https://user:pass@h.example/", "x_https://h.example/"),
+        ("proxyhttps://user:pass@h.example/", "proxyhttps://h.example/"),
+        ("a.b-c+d://user:pass@h.example/", "a.b-c+d://h.example/"),
+        ("'ftp://user:pass@h.example' ws://t@h2.example", "'ftp://h.example' ws://h2.example"),
+        ("https:// user:pass@h.example/", "https:// user:pass@h.example/"),
+    ],
+)
+def test_redact_userinfo_in_text_finds_urls_inside_scheme_character_runs(
+    text: str, expected: str
+) -> None:
+    assert redact_userinfo_in_text(text) == expected
+
+
+def test_redact_userinfo_in_text_matches_the_backtracking_pattern() -> None:
+    # The pattern before TD-55, which was quadratic on long scheme-like runs.
+    backtracking = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"']+", re.IGNORECASE)
+    alphabet = [*"aZh1+.-:/ \"'@?=&#;_", "://", "u:p@", "?token=", "\n", "é"]
+    rng = random.Random(55)
+    for _ in range(20_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+        expected = backtracking.sub(lambda match: redact_userinfo_in_url(match.group(0)), text)
+        assert redact_userinfo_in_text(text) == expected, text
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["a" * 262_144, "a." * 131_072, "1a" * 131_072, ("a" * 64 + ":/") * 3_971],
+    ids=["letters", "dotted", "digit-letter", "almost-scheme"],
+)
+def test_redact_userinfo_in_text_is_linear_on_long_scheme_like_tokens(token: str) -> None:
+    started = time.perf_counter()
+    assert redact_userinfo_in_text(token) == token
+    assert time.perf_counter() - started < 0.1
 
 
 def test_url_host_label_strips_userinfo_and_preserves_port() -> None:
