@@ -54,8 +54,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    ```sh
    poetry run ruff check src tests scripts
    poetry run mypy src
-   # Drop the variable once TD-25 lands; until then hosts with a large cgroup fail ~150 tests.
-   SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB=0 poetry run pytest -W error
+   poetry run pytest -W error
    ```
 
    For entries that touch the contract, also run these. The second command
@@ -80,7 +79,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-50**) and use this template:
+7. **New findings** take the next free ID (**TD-51**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -106,6 +105,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | GitHub Actions | Disabled for the repository. The last runs on `main` (2026-09-07) failed in CI, Dependency audit, and Container security (TD-26). |
 | `pip-audit` on pip 26.1.2 | PYSEC-2026-3721, fixed in 26.2 (TD-26) |
 | Eyebox configs vs. schema | 56 of 56 validate |
+| `pytest -W error` after TD-25 | 2,356 passed, 17 skipped, with no env override and no network lookups; 41–54 s |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -226,29 +226,39 @@ envelope field uses up that budget.
 
 ## Roadmap
 
+**Fixed on branches, awaiting merge.** Each is verified (full suite, ruff,
+mypy) but changes runtime code, so merging it updates what Eyebox's local stack
+runs on its next restart. Merge when that is convenient, then close out the
+entry. On 2026-10-09 all four merged cleanly together on top of TD-25 and
+passed three consecutive full runs (2,366 passed, no exit hangs, no env
+override), as well as ruff and mypy.
+
+| Entry | Branch | Contract |
+| --- | --- | --- |
+| TD-27 | `td-27-unloadable-config-reconciliation` | readiness/startup only |
+| TD-28 | `td-28-browser-false-failures` | fewer false `budget_exceeded`/`http_error` failures |
+| TD-29 | `td-29-paged-secret-migration` | none |
+| TD-50 | `td-50-sqlite-thread-leaks` | none |
+
 Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-25 | P2 | tests | low | none | Unblocks reliable local verification for everything below |
-| 2 | TD-27 | P1 | reconciliation | low | readiness/startup only | |
-| 3 | TD-28 | P2 | browser session | medium | fewer false failures | Visible to Eyebox today |
-| 4 | TD-29 | P2 | storage | low–medium | none | |
-| 5 | TD-30 | P2 | pool, lifespan | medium | none | |
-| 6 | TD-31 | P2 | queue, runtime | low | none | Six small fixes |
-| 7 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
-| 8 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
-| 9 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
-| 10 | TD-35 | P3 | API, job store | low | none | |
-| 11 | TD-36 | P3 | worker, pool | low | sub-item c only | |
-| 12 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
-| 13 | TD-38 | P3 | result store | low | none | |
-| 14 | TD-39 | P3 | click pagination | medium | timing only | After TD-28 |
-| 15 | TD-40 | P3 | API | low | `offset` bound | |
-| 16 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
-| 17 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
-| 18 | TD-43 | P3 | image, dependencies | low | none | |
-| 19 | TD-44 | P3 | lint, docs | low | none | |
+| 1 | TD-30 | P2 | pool, lifespan | medium | none | |
+| 2 | TD-31 | P2 | queue, runtime | low | none | Six small fixes |
+| 3 | TD-32 | P2 | webhook, basic fetch | low | timeout semantics | |
+| 4 | TD-33 | P2 | engine | low | `debug` values, `error_type` | |
+| 5 | TD-34 | P3 | JSON encoding | low | none (byte-identical) | Largest performance win per line changed |
+| 6 | TD-35 | P3 | API, job store | low | none | |
+| 7 | TD-36 | P3 | worker, pool | low | sub-item c only | |
+| 8 | TD-37 | P3 | SQL, migration | low–medium | none | Adds migration `022` |
+| 9 | TD-38 | P3 | result store | low | none | |
+| 10 | TD-39 | P3 | click pagination | medium | timing only | After TD-28 |
+| 11 | TD-40 | P3 | API | low | `offset` bound | |
+| 12 | TD-41 | P3 | dead code, duplication | low | none | Before TD-42 |
+| 13 | TD-42 | P3 | `job_store.py` split | low | none | Last of the storage work |
+| 14 | TD-43 | P3 | image, dependencies | low | none | |
+| 15 | TD-44 | P3 | lint, docs | low | none | |
 
 **Before the first deploy:** TD-26 (CI and the pip bump). CI is GitHub Actions,
 not deployment, so local checks cover it until then. The pip vulnerability only
@@ -278,11 +288,10 @@ qualification workflows passing.
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
 | TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
-| TD-25 | P2 | ready | The test suite depends on host memory and DNS, and sleeps for real |
 | TD-26 | P1 | before first deploy | CI is disabled and red, and the pinned pip has a known vulnerability |
-| TD-27 | P1 | ready | One run whose stored config no longer loads blocks readiness and startup |
-| TD-28 | P2 | ready | Browser fetches fail for reasons unrelated to the site |
-| TD-29 | P2 | ready | Startup secret migration holds every stored config in memory |
+| TD-27 | P1 | fix on branch | One run whose stored config no longer loads blocks readiness and startup |
+| TD-28 | P2 | fix on branch | Browser fetches fail for reasons unrelated to the site |
+| TD-29 | P2 | fix on branch | Startup secret migration holds every stored config in memory |
 | TD-30 | P2 | ready | Shutdown drain leaves cancelled runs `running` for about ten minutes |
 | TD-31 | P2 | ready | Worker and runtime error paths have small correctness gaps |
 | TD-32 | P2 | ready | Outbound HTTP has no total deadline, and webhook retry handling has gaps |
@@ -303,66 +312,9 @@ qualification workflows passing.
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
+| TD-50 | P2 | fix on branch | Cancelling a SQLite open or close leaks a thread that blocks process exit |
 
 ## Ready to implement
-
-### TD-25 — The test suite depends on host memory and DNS, and sleeps for real
-
-**Priority:** P2 · **Area:** tests · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- **a. Host memory.** Scrape admission (`SQLiteJobStore._check_admission`)
-  calls `memory_headroom_mb(settings.workers_memory_limit_mb)`, which reads the
-  test process's real cgroup.
-  - On a WSL host whose cgroup (`/non-systemd`) holds about 12 GB of working set
-    against the 4,096 MiB default, every admission raises
-    `AdmissionCapacityError("memory")`, and 150 tests fail.
-  - CI runners pass only because their cgroup is small.
-- **b. Real DNS.** 23 tests resolve `example.com` and `origin.example` for real
-  (`test_scraper_decomposition.py`, `test_scraper_pagination_helpers.py`,
-  `test_scraper_adaptive.py`, `test_basic_fetch_streaming.py`). Offline or slow
-  DNS makes them fail or stall.
-- **c. Real sleeps,** about 27 of the 76 s:
-  - `test_worker_domain_guard.py` (`_listing_config`) and
-    `test_worker_budgets.py` run on the schema defaults `delay_between: 2` and
-    `domain_rate_limit: 3`. That costs 3 + 3 + 2 s and 3 × 2 s.
-  - `test_resilience.py` `TestRetryHandler` (`test_retries_on_retryable_error`,
-    `test_exhausts_retries`) uses real 1 s backoff.
-  - `test_egress_policy_installer.py::test_policy_replacement_restores_prior_deny_path_at_every_mutation_stage`
-    takes 13.6 s with no sleeps. It runs the installer 12 times, and each run
-    starts about 87 Python iptables shims.
-
-**Code:**
-- `tests/conftest.py` (`_scrapeyard_temp_dirs`)
-- `tests/unit/test_settings.py` (`test_workers_memory_limit_mb_default`)
-- `src/scrapeyard/queue/memory.py` (`memory_headroom_mb`)
-
-**Fix:**
-- **a.** In `_scrapeyard_temp_dirs`, add
-  `monkeypatch.setenv("SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB", "0")`. A limit of 0
-  returns infinity without reading `/proc`. In the test that asserts the
-  default, `monkeypatch.delenv` the variable. Confirm that memory-path tests
-  (`test_queue_memory.py` and the pool/limiter tests) pass explicit limits or
-  monkeypatch the headroom.
-- **b.** Add an autouse fake resolver (`socket.getaddrinfo`, or the `url_guard`
-  resolution seam) that maps test hostnames to a public test IP and passes IP
-  literals and localhost through. Make any test that relies on NXDOMAIN set
-  that up explicitly.
-- **c.**
-  - Set `delay_between: 0` and `domain_rate_limit: 0` (both allow `ge=0`) in
-    those configs.
-  - Use `backoff_max=0` or a fake sleep in the resilience tests.
-  - Run the installer test's independent failure points in a
-    `ThreadPoolExecutor`, for roughly 4 s.
-  - Leave two tests alone: the heartbeat test in `test_scrape_lifecycle.py`
-    (2.2 s; the interval is an integer number of seconds) and
-    `test_offline_domain_metadata` (a deliberate cold-import subprocess).
-
-**Done when:**
-- `pytest -W error` passes with no env override on a host with a large cgroup,
-  and with DNS lookups made to fail (a resolver spy, or `unshare -n`).
-- The suite runs in about 50 s or less on the same machine.
-- Remove the env-var note in [How to use this list](#how-to-use-this-list).
 
 ### TD-26 — CI is disabled and red, and the pinned pip has a known vulnerability
 
@@ -413,6 +365,8 @@ security, so nothing gates merges.
 
 **Priority:** P1 · **Area:** queue reconciliation · **Risk:** low · **Contract:** readiness and startup only (improves both) · **Depends on:** —
 
+**Status:** fixed on branch `td-27-unloadable-config-reconciliation`, awaiting merge.
+
 **Problem:** suppose a run's persisted config stops loading
 (`_load_job_execution_context` calls `load_config`, which raises).
 - **The run is left half-reconciled.** `scrape_task` records a failed run
@@ -456,6 +410,8 @@ security, so nothing gates merges.
 ### TD-28 — Browser fetches fail for reasons unrelated to the site
 
 **Priority:** P2 · **Area:** engine, browser session · **Risk:** medium (a), low (b, c) · **Contract:** fewer false `budget_exceeded` and `http_error` failures; no shape change; Eyebox benefits · **Depends on:** —
+
+**Status:** fixed on branch `td-28-browser-false-failures`, awaiting merge.
 
 - **a. The request budget is over-reserved.**
   - `BrowserSession.fetch.reserve` reserves `_MAX_REDIRECTS + 1` (21) requests
@@ -509,6 +465,8 @@ security, so nothing gates merges.
 ### TD-29 — Startup secret migration holds every stored config in memory
 
 **Priority:** P2 · **Area:** storage · **Risk:** low–medium · **Contract:** none · **Depends on:** —
+
+**Status:** fixed on branch `td-29-paged-secret-migration`, awaiting merge.
 
 **Problem:** `migrate_persisted_secrets` runs on every startup.
 - **It loads everything at once.** It calls `fetchall()` on `config_yaml` from
@@ -570,6 +528,45 @@ security, so nothing gates merges.
 **Done when:** a test that stops the pool in the middle of a run shows the run
 reaching its terminal status (`cancelled` or `failed`, per policy) before
 `stop()` returns and within the grace period.
+
+### TD-50 — Cancelling a SQLite open or close leaks a thread that blocks process exit
+
+**Priority:** P2 · **Area:** storage · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Status:** fixed on branch `td-50-sqlite-thread-leaks`, awaiting merge.
+
+**Problem:**
+- Every aiosqlite connection owns a non-daemon thread, and the interpreter waits
+  for it at exit.
+- aiosqlite 0.20 starts that thread before connecting, but only stops it when
+  the connect raises `Exception`. A cancellation during the connect leaves it
+  blocked forever, and `close()` cannot stop it, because it returns early while
+  `_connection` is still `None`.
+- In Scrapeyard:
+  - `DatabaseManager._get_cached_connection` and `init` open connections that a
+    cancellation can leak this way.
+  - `_close_cached_connections` clears the cache before closing one connection
+    at a time, so a cancellation partway through leaks the rest.
+- Effects:
+  - In the suite, an occasional run passes every test and then never exits.
+    On 2026-10-09, 3 of 13 full runs on one host hung, on branches with and
+    without the TD-25 test changes. The stack dump showed only an aiosqlite
+    thread and `threading._shutdown`.
+  - In production, a shutdown or startup cancelled at the wrong moment hangs
+    until Docker sends SIGKILL.
+- Reproduced deterministically on `7772cd9`: a cancelled first `get_db` leaked
+  1 thread, and a cancelled `close_db` leaked 2.
+
+**Code:** `storage/database.py` (`DatabaseManager._get_cached_connection`,
+`init`, `_close_cached_connections`).
+
+**Fix (on the branch):**
+- Open through `_connect`, which finishes and closes an interrupted open before
+  the cancellation propagates.
+- Close every cached connection under `await_cleanup`, then raise the first
+  failure.
+- Regression tests in `tests/unit/test_database.py` stop any leaked thread
+  themselves, so a regression fails instead of hanging.
 
 ### TD-31 — Worker and runtime error paths have small correctness gaps
 
