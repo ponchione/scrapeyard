@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,6 +145,56 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
     assert ("15 GiB free disk" in str(refused.value)) == (failure == "disk")
     assert not (tmp_path / "candidate").exists()
     assert not any(command[:3] == ["docker", "image", "save"] for command in commands)
+
+
+@pytest.mark.parametrize("random_name", ["0brntqm_", "_abc1234", "ab___cd9", "________"])
+def test_release_image_name_is_valid_whatever_the_temporary_directory_is_called(
+    tmp_path, monkeypatch, random_name
+):
+    commands = []
+    monkeypatch.setattr(
+        "scripts.release_artifact.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=16 * 1024**3),
+    )
+    # tempfile draws names from letters, digits and the underscore.
+    monkeypatch.setattr(
+        "scripts.release_artifact.tempfile._get_candidate_names", lambda: iter([random_name])
+    )
+
+    def execute(command, *, cwd, **kwargs):
+        commands.append(command)
+        if command[0] == "git":
+            return original_run(command, cwd=cwd, **kwargs)
+        if command[:3] == ["docker", "image", "save"]:
+            Path(command[4]).write_bytes(b"retained images")
+
+    def output(*args, **kwargs):
+        if args[0] == "git":
+            return original_output(*args, **kwargs)
+        if args[:3] == ("docker", "network", "ls"):
+            return ""
+        if args[:2] == ("docker", "compose"):
+            return json.dumps(
+                {
+                    "networks": {},
+                    "services": {"redis": {"image": "redis"}, "egress-probe": {"image": "probe"}},
+                }
+            )
+        return "sha256:" + "a" * 64
+
+    original_run = subprocess.run
+    original_output = release_artifact.run
+    monkeypatch.setattr(subprocess, "run", execute)
+    monkeypatch.setattr(release_artifact, "run", output)
+
+    release_artifact.create(tmp_path / "candidate", "HEAD")
+
+    build = next(command for command in commands if command[:2] == ["docker", "build"])
+    tag = build[build.index("--tag") + 1]
+    # Docker's name grammar: runs of letters and digits joined by one of
+    # ".", "_", "__" or hyphens, never an underscore beside a hyphen.
+    assert re.fullmatch(r"[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*", tag), tag
+    assert tag.startswith("scrapeyard-release-") and tag.endswith("-scrapeyard")
 
 
 def test_secure_release_deploy_is_offline_and_stops_before_policy_changes(tmp_path):

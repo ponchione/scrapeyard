@@ -17,6 +17,9 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     code, found that a boot start which had waited for a promotion deployed
     the release the link named before the wait, and several lesser gaps;
     pull request #12 fixes them, and the same reviewer checked the fixes.
+    Its own rehearsal run then failed on TD-77: `release_artifact.py create`
+    named its image after a random temporary directory, and about one name
+    in twenty is one Docker refuses. Fixed in the same pull request.
     Four of the first review's findings were in code already on `main`:
     TD-72 (the egress installer refused to run after the deployment network
     was recreated), TD-74 (its `remove` emptied a chain another interface
@@ -135,7 +138,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-77**) and use this template:
+7. **New findings** take the next free ID (**TD-78**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -166,7 +169,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the second 2026-10-09 pass (`409f08c`) | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,551 passed, 17 skipped, 90.31% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's client tests (297 passed) and 54 configs pass |
 | After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
 | After the first Actions pass (2026-10-10, `166ceac`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,614 passed, 17 skipped, 90.44% coverage. On GitHub at the same commit: CI (Quality 3.10: 2,611 passed, 20 skipped; Quality 3.12: 2,614 passed, 17 skipped, with Chromium installed for the three real-browser tests; distribution build; live Redis), Dependency audit on both legs, Container security, browser smoke (4 min; image 3.36 GB), and release qualification quick (10 min) and full (23 min) all pass, with no deprecation or runner warnings. Eyebox's client tests (299 passed) and 54 configs pass |
-| After the deployment pass (2026-10-10, `2c0f4be`; 2,691 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
+| After the deployment pass (2026-10-10, `2c0f4be`; 2,695 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
