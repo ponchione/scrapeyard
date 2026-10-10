@@ -85,12 +85,30 @@ itself resolve target names and reject private, loopback, link-local, and cloud
 metadata destinations; otherwise it becomes an SSRF relay.
 
 Config parsing performs only bounded lexical, scheme, hostname, and literal-IP
-checks; it never performs DNS resolution in Pydantic validators. Hostnames are
-resolved and checked freshly immediately before transport use. Direct basic
-HTTP requests connect to the validated address with the original Host header
-and TLS SNI. Browser navigation, redirects, subresources, service workers,
-CDP, and proxy connections may resolve independently, so only a connected-IP
-host/orchestrator boundary closes their validation-to-connection races.
+checks; it never performs DNS resolution in Pydantic validators. Every URL is
+checked lexically immediately before transport use, and its hostname is
+resolved: a name with any non-public address is refused, and so is a name
+that does not resolve when a proxy or a remote browser would resolve it
+instead (a direct fetch of such a name fails by itself).
+
+Within one run, a hostname that has just resolved to public addresses only is
+not resolved again for 30 seconds. The run's targets, redirects, pagination
+URLs, browser subrequests and its proxy or CDP endpoint share that verdict,
+and requests that arrive while a name is being resolved wait for that one
+answer, whatever it is. No other answer is remembered: a name that does not
+resolve, or that resolves to a non-public address, is resolved again by the
+next request, and it loses any verdict the run still held for it. A URL longer
+than 2,048 characters, or not written in ASCII as a browser writes its
+requests, is resolved every time. Verdicts are not shared between runs.
+
+Direct basic HTTP requests still resolve for every connection and connect to
+the validated address with the original Host header and TLS SNI. Browser
+navigation, redirects, subresources, service workers, CDP, and proxy
+connections may resolve independently, so only a connected-IP
+host/orchestrator boundary closes their validation-to-connection races. The
+remembered verdict does not change that: the browser, proxy or remote endpoint
+resolves the name again by itself after the guard, whether the guard's own
+answer is a moment or 30 seconds old.
 
 Enforce outbound network policy for the Scrapeyard container or pod:
 

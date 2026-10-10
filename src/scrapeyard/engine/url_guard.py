@@ -157,23 +157,18 @@ def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
     return ipaddress.IPv4Address(packed)
 
 
-def assert_public_url(
+def public_dns_hostname(
     url: str,
     *,
     allowed_schemes: tuple[str, ...] = ("http", "https"),
-    resolve_dns: bool = True,
-    allow_unresolved: bool = True,
-) -> None:
-    """Reject URLs that point at non-public destinations.
+) -> str | None:
+    """Run the lexical checks and return the hostname DNS has yet to confirm.
 
-    The check has two layers:
-
-    1. Lexical — reject banned scheme, banned hostnames, or literal private IPs.
-    2. DNS — when *resolve_dns* is true and the hostname resolves, ensure every
-       resolved address is public. Resolution failures are allowed by default
-       because direct fetches against non-resolving hosts fail anyway. Callers
-       using proxies or remote browsers should set *allow_unresolved* to false
-       because DNS may be resolved outside this process.
+    Rejects a banned scheme, a banned hostname or a literal non-public IP, as
+    :func:`assert_public_url` does. Returns ``None`` when the host is an IP
+    literal: the checks have then judged the destination itself, and DNS has
+    nothing to add. Otherwise returns the canonical name that function
+    resolves, which is also the key of a run's cached verdicts.
     """
 
     if "\\" in url:
@@ -209,13 +204,13 @@ def assert_public_url(
     if literal is not None:
         if _ip_is_blocked(literal):
             raise UnsafeURLError(f"URL points at non-public IP {literal}")
-        return
+        return None
 
     legacy_ipv4 = _legacy_ipv4_address(ip_host)
     if legacy_ipv4 is not None:
         if _ip_is_blocked(legacy_ipv4):
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
-        return
+        return None
 
     host = _canonical_hostname(host)
     if _hostname_is_blocked(host):
@@ -228,15 +223,38 @@ def assert_public_url(
     if literal is not None:
         if _ip_is_blocked(literal):
             raise UnsafeURLError(f"URL points at non-public IP {literal}")
-        return
+        return None
 
     legacy_ipv4 = _legacy_ipv4_address(host)
     if legacy_ipv4 is not None:
         if _ip_is_blocked(legacy_ipv4):
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
-        return
+        return None
 
-    if not resolve_dns:
+    return host
+
+
+def assert_public_url(
+    url: str,
+    *,
+    allowed_schemes: tuple[str, ...] = ("http", "https"),
+    resolve_dns: bool = True,
+    allow_unresolved: bool = True,
+) -> None:
+    """Reject URLs that point at non-public destinations.
+
+    The check has two layers:
+
+    1. Lexical — reject banned scheme, banned hostnames, or literal private IPs.
+    2. DNS — when *resolve_dns* is true and the hostname resolves, ensure every
+       resolved address is public. Resolution failures are allowed by default
+       because direct fetches against non-resolving hosts fail anyway. Callers
+       using proxies or remote browsers should set *allow_unresolved* to false
+       because DNS may be resolved outside this process.
+    """
+
+    host = public_dns_hostname(url, allowed_schemes=allowed_schemes)
+    if host is None or not resolve_dns:
         return
 
     try:

@@ -77,6 +77,7 @@ from scrapeyard.engine.url_guard import (
     resolve_public_url,
     url_host_label,
 )
+from scrapeyard.engine.url_verdicts import assert_public_url_in_run, resolve_public_url_in_run
 from scrapeyard.models.job import ErrorType
 from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
@@ -250,7 +251,7 @@ async def _fetch_basic_with_safe_redirects(
         request_url = current_url
         request_kwargs = dict(call_kwargs)
         if request_kwargs.get("proxy") is None:
-            resolved = await run_thread_work(
+            resolved = await resolve_public_url_in_run(
                 resolve_public_url,
                 current_url,
                 run_budget=budget,
@@ -325,7 +326,7 @@ async def _assert_fetch_url(
     require_resolved_dns: bool,
     budget: RunBudget | None,
 ) -> None:
-    await run_thread_work(
+    await assert_public_url_in_run(
         assert_public_url,
         url,
         run_budget=budget,
@@ -339,9 +340,9 @@ async def _assert_connection_endpoint(
     allowed_schemes: tuple[str, ...],
     budget: RunBudget | None,
 ) -> None:
-    """Resolve a remote transport endpoint immediately before it is used."""
+    """Check a remote transport endpoint before it is used; it must resolve."""
 
-    await run_thread_work(
+    await assert_public_url_in_run(
         assert_public_url,
         url,
         run_budget=budget,

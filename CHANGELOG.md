@@ -58,6 +58,20 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Within one run, the URL guard now resolves a hostname once per 30 seconds
+  instead of on every check. It used to hop to a thread and call the resolver
+  for every browser subrequest, and four to six times for each top-level
+  page. A hostname the run has just resolved to public addresses only is now
+  passed after the lexical checks alone, which still run on every URL, and
+  requests that arrive while a name is being resolved wait for that one
+  answer. A name that does not resolve, or resolves to a non-public address,
+  is never remembered, and such an answer drops the verdict the run held.
+  URLs over 2,048 characters or not in ASCII are resolved every time. Direct
+  basic fetches still resolve for, and pin, every connection. On a fixture
+  run of 5 pages and 255 browser requests to 11 hosts, lookups fell from 274
+  to 11 with the same records and traffic counts; wall time fell from 6.2 s
+  to 3.5 s with a resolver that takes 25 ms an answer (as on the development
+  host) and from 3.7 s to 3.5 s with one that takes 1 ms.
 - GitHub Actions workflows now pin the Node 24 releases of their actions by
   commit SHA: `actions/checkout` v7.0.1, `actions/setup-python` v7.0.0,
   `actions/cache` v6.1.0 and `actions/upload-artifact` v7.0.1 (from v4, v5, v4

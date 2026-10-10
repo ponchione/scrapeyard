@@ -28,6 +28,7 @@ from scrapeyard.engine.url_guard import (
     assert_public_url,
     url_host_label,
 )
+from scrapeyard.engine.url_verdicts import assert_public_url_in_run
 from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
@@ -88,7 +89,7 @@ async def _pagination_url_is_safe(
     if budget is not None:
         budget.check_deadline()
     try:
-        await run_thread_work(
+        await assert_public_url_in_run(
             assert_public_url,
             url,
             run_budget=budget,

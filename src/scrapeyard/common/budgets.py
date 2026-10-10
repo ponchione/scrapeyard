@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Awaitable, NoReturn, TypeVar
 
 from scrapeyard.common.async_tools import cancel_task_nowait
+from scrapeyard.common.host_verdicts import PublicHostVerdicts
 from scrapeyard.common.traffic import HostTraffic
 
 T = TypeVar("T")
@@ -98,6 +99,7 @@ class RunBudget:
         self._result_counter_lock = threading.Lock()
         self._exhausted: BudgetExceeded | None = None
         self.traffic = HostTraffic()
+        self.public_hosts = PublicHostVerdicts(clock=clock)
 
     @classmethod
     def from_settings(cls, settings: Any, *, execution: Any = None, clock: Any = time.monotonic) -> RunBudget:

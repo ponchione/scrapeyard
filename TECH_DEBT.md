@@ -88,7 +88,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-65**) and use this template:
+7. **New findings** take the next free ID (**TD-67**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -238,10 +238,11 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement: nothing. Every entry that could be done without a
-decision, an operator or Eyebox is done. New ready entries go in a table here,
-one PR per row, with the columns `#`, Entry, P, Scope, Risk, Contract and
-Notes.
+Ready to implement, in order. Each row is one PR.
+
+| # | Entry | P | Scope | Risk | Contract | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | TD-66 | P3 | common | low | none | Log noise only |
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -250,7 +251,9 @@ passing, which needs it.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
-- TD-23 and TD-60: one security review covering both.
+- TD-60: the owner accepted the frame-detach race on 2026-10-09; the smoke
+  assertion and the written record of that decision remain.
+- TD-65: changes what the URL guard accepts, so it needs a security review.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
 
@@ -268,13 +271,14 @@ passing, which needs it.
 | TD-20 | P1 | operational | Secure startup after host/Docker restart and runtime monitoring are unqualified |
 | TD-21 | P1 | operational | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
-| TD-23 | P3 | coordinated | The browser URL guard pays a thread hop and a DNS lookup on every subrequest |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled, and its workflows haven't run since their fixes |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-60 | P2 | coordinated | A browser subrequest can complete during the guard's async check if its frame is detached |
+| TD-65 | P3 | coordinated | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
+| TD-66 | P3 | ready | A cancelled wait on run-thread work logs "Future exception was never retrieved" |
 
 ## Ready to implement
 
@@ -321,6 +325,24 @@ causes were fixed on 2026-10-09:
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
 
+### TD-66 — A cancelled wait on run-thread work logs "Future exception was never retrieved"
+
+**Priority:** P3 · **Area:** common, run threads · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:** `OwnedThreadPool._run_owned` awaits `asyncio.shield(wrapped)`.
+When the awaiting coroutine is cancelled, Python 3.12's `shield` stops
+watching the inner future. If the thread's work then raises, nothing retrieves
+the exception, and asyncio logs `Future exception was never retrieved` at
+ERROR, with the traceback, when the future is collected. Reproduced on 3.12
+on 2026-10-09; 3.10 does not log it. The route guard does this whenever a
+page closes or a run deadline passes while `assert_public_url` is refusing a
+URL on a run thread, so an ordinary refusal is logged as an unhandled error.
+**Code:** `common/run_threads.py` (`OwnedThreadPool._run_owned`).
+**Fix:** on cancellation, add a done callback that retrieves the abandoned
+future's exception.
+**Done when:** a test cancels the awaiter, lets the work raise and collects
+garbage, and the loop's exception handler saw nothing.
+
 ## Coordinated
 
 These need a decision, a security review, an Eyebox change, or real-traffic
@@ -342,58 +364,6 @@ data before any code.
 
 **Done when:** browser smoke passes, and a qualification run on the Eyebox
 retailer set shows the same or better yield and timing.
-
-### TD-23 — The browser URL guard pays a thread hop and a DNS lookup on every subrequest
-
-**Priority/ownership:** P3; browser fetch efficiency. Measured locally; the
-guard itself must not change without a security review.
-
-**Problem:**
-- `_guarded_async_intercept_route` runs `assert_public_url` through
-  `run_thread_work` for every browser subrequest, and each call resolves the
-  host again.
-- Measured over 6,500 subrequests on 40 hosts:
-  - The lexical checks alone take 12 µs per request.
-  - The thread hop brings that to 126 µs wall and 347 µs CPU, about 0.8 s wall
-    and 2.3 s CPU per run.
-  - An uncached resolver answer costs up to 50 ms, which dominates.
-- With four run threads, slow lookups also delay page loads. A fixture page
-  with 250 subrequests to unresolvable `.test` names spends most of its 5.5 s
-  in guard lookups.
-
-**Start here:** [browser_debug.py](src/scrapeyard/engine/browser_debug.py)
-(`_guarded_async_intercept_route`),
-[url_guard.py](src/scrapeyard/engine/url_guard.py) (`assert_public_url`),
-[run_threads.py](src/scrapeyard/common/run_threads.py).
-
-**Work:**
-- Evaluate a per-run verdict cache keyed by canonical hostname, with a short
-  TTL (for example 30 to 60 seconds).
-  - Run the lexical checks inline on every request.
-  - Hop to a thread and resolve only when the host has no fresh verdict.
-  - Keep rejections uncached, or cache them only as rejections.
-  - Keep the `URLResolutionError` behavior when resolution is required (proxy
-    or remote CDP).
-- Write down the rebinding argument: in both designs the browser resolves on
-  its own after the guard.
-- Measure on real traffic first. If resolver answers are already cached
-  upstream and fast, the thread hop alone may not be worth a guard change.
-
-**Extension (2026-10-09):** each top-level page is also DNS-checked 4–6 times:
-- `_fetch_page`, before the fetch and again after it. For basic fetches the
-  second check repeats one the redirect loop already did.
-- The route guard, for the document request.
-- `capture_browser_state`.
-- `_pagination_url_is_safe`.
-- `_assert_connection_endpoint`, once per attempt for the proxy endpoint.
-
-Fold those into the same verdict cache.
-
-**Done when:**
-- A security review accepts the design.
-- The guard's existing tests pass unchanged.
-- A before/after run on the same pages shows the CPU and wall time saved, with
-  identical records and traffic counts.
 
 ### TD-24 — Browser reuse and its script cache are tuned on fixtures, not real traffic
 
@@ -444,7 +414,7 @@ measured effect instead of fixture numbers.
 
 ### TD-60 — A browser subrequest can complete during the guard's async check if its frame is detached
 
-**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** the TD-23 security review
+**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** —
 
 **Problem:**
 - A 2026-10-09 container check saw the rebrowser stealth path send a
@@ -459,26 +429,61 @@ measured effect instead of fixture numbers.
   them and aborts a non-public one. The "favicon bypasses the guard"
   hypothesis did not reproduce; favicons are routed and counted.
 - One gap remains, and it is a race, not a bypass: because the guard validates
-  asynchronously (a thread hop plus any DNS lookup — see TD-23), a request can
-  complete before the guard aborts it if the page destroys the request's frame
-  during that window. Reproduced with a cross-site iframe removed or navigated
+  asynchronously (a thread hop plus a DNS lookup, for any hostname the run
+  holds no fresh public verdict for), a request can complete before the guard
+  aborts it if the page destroys the request's frame during that window. Reproduced with a cross-site iframe removed or navigated
   away mid-check. Same-site iframe removal, popup close and top-level
   navigation did not leak, because those requests share the page's routing and
-  are aborted. Shrinking the window (the TD-23 verdict cache) does not close it.
+  are aborted. The run's verdict cache does not close it: a non-public host
+  never gets a verdict, so its requests still wait on a lookup.
 - In every case the host egress policy (iptables `DOCKER-USER`, which denies
   non-public destinations) is the backstop, as it already is for the favicon
   path.
 
 **Code:** `engine/browser_session.py`, `engine/browser_debug.py`
 (`_guarded_async_intercept_route`), `tests/smoke/verify_fetch_sessions.py`.
-**Fix (needs the security review):** decide whether the frame-detach race is
-acceptable given the egress backstop, or close it — for example by taking the
-context offline before a frame is torn down, as the fetch-failure path already
-does, rather than only aborting in the route handler. Independently, and
-without a guard change, make the smoke assertion ignore `/favicon.ico`.
-**Done when:** the security review accepts the decision, a test shows a
-cross-site frame cannot release a request to a non-public address, and the
-smoke verifier passes repeatedly.
+**Fix:** on 2026-10-09 the owner accepted the frame-detach race, given the
+egress backstop, and chose not to change the guard. What remains is to record
+that in the deployment guide and to make the smoke assertion ignore
+`/favicon.ico`.
+**Done when:** the deployment guide records the accepted race and the smoke
+verifier passes repeatedly.
+
+### TD-65 — The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names
+
+**Priority:** P3 · **Area:** engine, URL guard · **Risk:** medium · **Contract:** none (every Eyebox target host is ASCII) · **Depends on:** a security review of the guard change
+
+**Problem:**
+- `_canonical_hostname` encodes with Python's `idna` codec (IDNA 2003), which
+  maps `ß` to `ss` and `ς` to `σ`. httpx encodes with IDNA 2008, which keeps
+  them. Measured 2026-10-09: for `https://straße.test/` the guard resolves
+  `strasse.test` while httpx requests `xn--strae-oqa.test`, and for
+  `https://ς.test/` the guard resolves `xn--4xa.test` while httpx requests
+  `xn--3xa.test`.
+- Behind a proxy, a basic fetch of such a URL is therefore DNS-checked under
+  one name and requested under another. The lexical checks still apply, and
+  the proxy resolves the requested name and must refuse private destinations
+  itself, so this is a missed check, not a bypass.
+- A direct basic fetch is pinned to the address of the name the guard
+  resolved and sends that name as `Host` and SNI
+  (`host_header='strasse.test'`), so it fetches the IDNA 2003 site, not the
+  one a browser opens.
+- Browser requests are not affected: the browser gives the route guard the
+  ASCII name it is about to use.
+- Separately, a lone surrogate in a hostname makes `socket.inet_aton` raise
+  `UnicodeEncodeError` out of `public_dns_hostname`, not `UnsafeURLError`, so
+  a caller that catches the guard's errors sees a type it does not expect.
+
+**Code:** `engine/url_guard.py` (`_canonical_hostname`,
+`_legacy_ipv4_address`, `resolve_public_url`, `url_host_label`,
+`canonical_url_origin`).
+**Fix:** canonicalize with the IDNA processing the HTTP client uses (httpx
+uses the `idna` package), or refuse a hostname whose two encodings differ.
+Either changes what the guard accepts, so it needs the review. Turning the
+surrogate case into `UnsafeURLError` needs none.
+**Done when:** a test shows the guard, the `Host` header and the client's
+request name agree for `straße.test` and `ς.test` (or that both are refused),
+and a hostname with a lone surrogate raises `UnsafeURLError`.
 
 ## Operational and deployment qualification
 

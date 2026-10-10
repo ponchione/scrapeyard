@@ -22,7 +22,6 @@ from scrapling.engines.toolbelt.navigation import (
 )
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
-from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.traffic import url_hostname, url_site
 from scrapeyard.config.schema import (
     BROWSER_FETCH_KWARGS,
@@ -48,6 +47,7 @@ from scrapeyard.engine.url_guard import (
     redact_userinfo_in_text,
     redact_userinfo_in_url,
 )
+from scrapeyard.engine.url_verdicts import assert_public_url_in_run
 from scrapeyard.storage.filesystem import (
     cleanup_safe_to_thread,
     ensure_directory,
@@ -187,7 +187,7 @@ async def _guarded_async_intercept_route(route: Any) -> None:
 
     if isinstance(request_url, str) and request_url:
         try:
-            await run_thread_work(
+            await assert_public_url_in_run(
                 assert_public_url,
                 request_url,
                 run_budget=_BROWSER_RUN_BUDGET.get(),
@@ -708,7 +708,7 @@ async def capture_browser_state(
         await run_browser_actions(page, browser.actions, budget=budget)
     capture["final_url"] = getattr(page, "url", None)
     if isinstance(capture["final_url"], str) and capture["final_url"]:
-        await run_thread_work(
+        await assert_public_url_in_run(
             assert_public_url,
             capture["final_url"],
             run_budget=budget,
