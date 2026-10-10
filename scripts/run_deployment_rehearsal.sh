@@ -676,8 +676,10 @@ if ((BOOT_SERVICE == 1)); then
 
   # With no proxy in the settings file, the running application must be the
   # one it describes, and must have checked the host egress policy itself.
+  # A start that reuses its container leaves the earlier starts' lines in the
+  # log, so a start is judged by what was logged since it began.
   verify_direct_egress() {
-    local label=$1
+    local label=$1 since=${2:-0}
     python3 - "$WORK_DIR/app-inspect.json" <<'PY' || fail "[$label] the application does not run with the settings file's proxy and submission mode"
 import json
 import sys
@@ -687,7 +689,7 @@ sys.exit(
     0 if env.get("SCRAPEYARD_UNTRUSTED_SUBMISSIONS") == "false" and not env.get("SCRAPEYARD_PROXY_URL") else 1
 )
 PY
-    docker logs "$APP_CONTAINER" > "$WORK_DIR/attestation.log" 2>&1
+    docker logs --since "$since" "$APP_CONTAINER" > "$WORK_DIR/attestation.log" 2>&1
     grep -q 'Connected-IP egress policy attested' "$WORK_DIR/attestation.log" || \
       fail "[$label] the application started without checking the host egress policy"
   }
@@ -957,10 +959,11 @@ PY
   expect_refusal_without_policy unprotected-start-no-proxy
   # The boot service then starts it as it would after a boot.
   BEFORE="$(invocation)"
+  STARTED_AT="$(date +%s)"
   systemctl start "$UNIT"
   await_unit boot-no-proxy "$BEFORE"
   verify_runtime boot-no-proxy "$BOOT_CANDIDATE" candidate
-  verify_direct_egress boot-no-proxy
+  verify_direct_egress boot-no-proxy "$STARTED_AT"
   verify_api boot-no-proxy --known "$WORK_DIR/known-run.json"
 fi
 

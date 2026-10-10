@@ -374,23 +374,44 @@ def test_a_deployment_needs_a_proxy_unless_submissions_are_first_party(tmp_path)
 
 
 @pytest.mark.parametrize(
-    "setting",
-    ["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT", "SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT"],
+    ("setting", "values"),
+    [
+        # Any spelling pydantic reads as zero, a blank host, or simply another value.
+        ("SCRAPEYARD_EGRESS_POLICY_PROBE_PORT", ["0", "+0", "0.0", " 0", "0_0", "8090"]),
+        ("SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT", ["0", "-0", "8091"]),
+        ("SCRAPEYARD_EGRESS_POLICY_PROBE_HOST", [" ", "127.0.0.1", "0.0.0.0"]),
+        # A challenge that times out counts as refused, so the timeout must
+        # leave a connection time to complete.
+        ("SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS", ["0.0005", "0.5", "0", "1e-9", "soon", " 1"]),
+    ],
 )
 @pytest.mark.parametrize("mode", ["true", "false"])
-def test_a_deployment_cannot_switch_off_the_startup_check_of_the_policy(tmp_path, setting, mode):
+def test_a_deployment_cannot_weaken_the_startup_check_of_the_policy(tmp_path, setting, values, mode):
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
     env = dict(env, SCRAPEYARD_UNTRUSTED_SUBMISSIONS=mode)
+    calls = Path(env["CALLS"])
 
-    for value in ("0", "00"):
+    for value in values:
+        calls.write_text("")
         result = subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: value}), capture_output=True)
-        assert result.returncode == 2
-        assert b"would switch off the startup check of the host egress policy" in result.stderr
-        assert Path(env["CALLS"]).read_text().splitlines() == ["docker compose version"]
-        Path(env["CALLS"]).write_text("")
-    # An unset or empty value leaves Compose's default in place.
+        assert result.returncode == 2, value
+        assert setting.encode() in result.stderr
+        # Refused before the release is loaded or anything is stopped.
+        assert calls.read_text().splitlines() == ["docker compose version"]
+    # Unset or empty leaves the Compose file's value in place.
     subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: ""}), check=True, capture_output=True)
-    subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: "8090"}), check=True, capture_output=True)
+
+
+def test_a_deployment_may_lengthen_the_probe_timeout(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    for value in ("1", "2", "2.5", "10"):
+        subprocess.run(
+            command,
+            cwd=tmp_path,
+            env=dict(env, SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS=value),
+            check=True,
+            capture_output=True,
+        )
 
 
 def test_a_second_deployment_waits_for_the_first_instead_of_interleaving(tmp_path):
