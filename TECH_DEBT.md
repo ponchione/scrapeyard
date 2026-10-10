@@ -88,7 +88,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-67**) and use this template:
+7. **New findings** take the next free ID (**TD-68**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,9 +58,14 @@ def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, mon
         (bundle / "extra").unlink(missing_ok=True)
 
 
-@pytest.mark.parametrize("failure", ["scan", "qualification", "network", None])
+@pytest.mark.parametrize("failure", ["disk", "scan", "qualification", "network", None])
 def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, failure):
     commands = []
+    # The real check reads the temp filesystem, which may hold less than 15 GiB.
+    free = (15 if failure == "disk" else 16) * 1024**3 - 1
+    monkeypatch.setattr(
+        "scripts.release_artifact.shutil.disk_usage", lambda _path: SimpleNamespace(free=free)
+    )
 
     def execute(command, *, cwd, **kwargs):
         commands.append(command)
@@ -119,8 +125,9 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
             "source/security/seccomp/chromium.json",
         } <= manifest["files"].keys()
         return
-    with pytest.raises((subprocess.CalledProcessError, ValueError)):
+    with pytest.raises((subprocess.CalledProcessError, ValueError)) as refused:
         release_artifact.create(tmp_path / "candidate", "HEAD")
+    assert ("15 GiB free disk" in str(refused.value)) == (failure == "disk")
     assert not (tmp_path / "candidate").exists()
     assert not any(command[:3] == ["docker", "image", "save"] for command in commands)
 

@@ -207,6 +207,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The release-artifact unit test no longer depends on the host's free disk.
+  `release_artifact.create` refuses to run with under 15 GiB free where the
+  release is written, and the test let that check read the real temp
+  filesystem: with less free space the passing case failed, and the three
+  failure cases passed without reaching the failure they name. The test now
+  supplies the free space, covers the refusal itself, and checks that each
+  other case fails for its own reason.
 - A refused URL is no longer logged as an unhandled error when the request
   that asked about it has gone. Run-thread work whose caller was cancelled or
   ran out of budget kept running with nobody awaiting it; when it then
