@@ -102,6 +102,11 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # Bound the wait for byte counts and asset-cache stores of finished requests.
 _SIZES_SETTLE_SECONDS = 0.5
+# Releasing a page takes milliseconds. A crashed renderer can leave one of the
+# context's calls unanswered while the driver stays connected (seen with
+# Chromium 145 after Page.crash: set_offline never returned). Past this bound
+# the whole browser session is stopped instead.
+_PAGE_RELEASE_SECONDS = 10
 
 
 def _chain_root(request: Any) -> Any:
@@ -804,7 +809,8 @@ class BrowserSession:
             raise
         finally:
             stopped = False
-            try:
+
+            async def release_page() -> None:
                 if browser.is_connected():
                     await context.set_offline(True)
                 # Popups belong to this context and must not outlive a page fetch.
@@ -815,11 +821,18 @@ class BrowserSession:
                 context.remove_listener("response", observe_response)
                 context.remove_listener("requestfinished", observe_finished)
                 context.remove_listener("requestfailed", observe_failed)
+
+            try:
+                try:
+                    await asyncio.wait_for(release_page(), timeout=_PAGE_RELEASE_SECONDS)
+                except asyncio.TimeoutError as exc:
+                    raise httpx.NetworkError("Browser did not release the page") from exc
                 stopped = True
             except BaseException:
-                # A crashed page/context can reject cleanup RPCs while its driver
-                # is still connected. Stop the whole session before releasing
-                # reservations, and preserve the original fetch/budget failure.
+                # A crashed page/context can reject cleanup RPCs, or never
+                # answer them, while its driver is still connected. Stop the
+                # whole session before releasing reservations, and preserve
+                # the original fetch/budget failure.
                 await await_cleanup(self.aclose())
                 stopped = True
                 if fetch_error is None:

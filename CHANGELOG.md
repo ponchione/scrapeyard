@@ -207,6 +207,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A browser fetch no longer waits without limit for a crashed page to be
+  released. After a renderer crash Chromium 145 left the context's
+  `set_offline` call unanswered while the driver stayed connected, so the
+  fetch's cleanup, and with it the target, hung until the run's deadline.
+  Releasing a page now has 10 seconds, after which the whole browser session
+  is stopped and the fetch's own failure is reported.
 - The host egress policy now requires the kernel's bridge netfilter hook
   before it installs. The policy's `DOCKER-USER` rules see traffic between
   containers on the deployment bridge only while

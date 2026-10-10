@@ -225,6 +225,47 @@ async def test_browser_cleanup_preserves_failure_and_settles_requests(ending):
     assert budget.snapshot()["requests"] == 1
 
 
+async def test_browser_cleanup_that_is_never_answered_stops_the_session(monkeypatch):
+    monkeypatch.setattr("scrapeyard.engine.browser_session._PAGE_RELEASE_SECONDS", 0.05)
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+    page = MagicMock(frames=[])
+    page.close = AsyncMock()
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.unroute = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    async def offline(value):
+        if value:
+            # A crashed renderer: the driver stays connected and never answers.
+            await asyncio.Event().wait()
+
+    context.set_offline = AsyncMock(side_effect=offline)
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
+    stop_driver = AsyncMock()
+    session._stack.push_async_callback(stop_driver)
+    budget = RunBudget(max_duration_seconds=10, max_requests=100,
+        max_fetched_bytes=1000, max_extracted_records=100,
+        max_serialized_result_bytes=1000, max_browser_debug_bytes=1000)
+    failure = BudgetExceeded(BudgetLimitName.fetched_bytes, 1000, 1001)
+    page.goto = AsyncMock(side_effect=failure)
+
+    async def guard(route):
+        await route.continue_()
+
+    with pytest.raises(BudgetExceeded) as raised:
+        await asyncio.wait_for(
+            session.fetch("https://fixture.example/", {}, guard, budget=budget), 2
+        )
+
+    assert raised.value is failure
+    stop_driver.assert_awaited_once()
+    assert session._context is None
+    context.unroute.assert_not_awaited()
+
+
 class _Frame:
     def __init__(self, behavior: str) -> None:
         self.behavior = behavior
