@@ -18,6 +18,8 @@ CHAIN_A="${LEGACY_CHAIN}-A"
 CHAIN_B="${LEGACY_CHAIN}-B"
 POLICY_OUTPUT=""
 BRIDGE_NETFILTER_DIR=/proc/sys/net/bridge
+NETWORK_INTERFACES_DIR=/sys/class/net
+LOCK_DIR=/run/scrapeyard
 
 fail() {
   echo "scrapeyard egress policy: $*" >&2
@@ -40,17 +42,44 @@ chain_is_referenced() {
     if [[ " $rule " == *" -j $chain "* ]]; then
       return 0
     fi
-  done < <("$tool" -S DOCKER-USER)
+  done < <("$tool" -S DOCKER-USER 2>/dev/null)
   return 1
 }
 
+# Removes this deployment's jump to a chain, and the chain once nothing jumps
+# to it. A chain that another interface still jumps to keeps its rules:
+# emptied, it would leave that jump filtering nothing.
 remove_chain() {
   local tool=$1 chain=$2
   while has_jump "$tool" "$chain"; do
     "$tool" -D DOCKER-USER -i "$NETWORK_INTERFACE" -j "$chain"
   done
+  ! chain_is_referenced "$tool" "$chain" || return 1
   "$tool" -F "$chain" >/dev/null 2>&1 || true
   "$tool" -X "$chain" >/dev/null 2>&1 || true
+}
+
+# Removing the deployment network and creating it again gives it a new bridge.
+# The jump installed for the old bridge then names an interface that no longer
+# exists: it matches no packet, but it keeps its chain referenced. Remove such
+# a jump. One on an interface that still exists is left for active_chain to
+# refuse, because something else is using this policy's chain. Nothing is
+# removed unless the deployment bridge itself is visible, so a host view that
+# shows no interfaces at all cannot make a live bridge's jump look stale.
+drop_stale_jumps() {
+  local tool=$1 chain=$2 rule interface
+  local -a fields
+  [[ -e "$NETWORK_INTERFACES_DIR/$NETWORK_INTERFACE" ]] || return 0
+  while IFS= read -r rule; do
+    [[ " $rule " == *" -j $chain "* ]] || continue
+    read -r -a fields <<<"$rule"
+    [[ ${#fields[@]} -eq 6 && "${fields[2]}" == "-i" ]] || continue
+    interface=${fields[3]}
+    [[ "$interface" =~ ^[a-zA-Z0-9_.:-]{1,15}$ && "$interface" != "$NETWORK_INTERFACE" ]] || continue
+    [[ ! -e "$NETWORK_INTERFACES_DIR/$interface" ]] || continue
+    "$tool" -D DOCKER-USER -i "$interface" -j "$chain"
+    echo "Removed the $tool jump to $chain left for the removed interface $interface"
+  done < <("$tool" -S DOCKER-USER 2>/dev/null)
 }
 
 active_chain() {
@@ -115,15 +144,25 @@ done
 # missing prerequisite must never be "fixed" by temporarily removing policy.
 iptables -S DOCKER-USER >/dev/null 2>&1 || fail "iptables DOCKER-USER chain is required"
 
+# Two runs that overlap can each undo the other's switch and leave no jump.
+install -d -m 700 "$LOCK_DIR"
+exec 8>>"$LOCK_DIR/egress-policy.lock"
+flock --wait 120 8 || fail "another policy installation has held $LOCK_DIR/egress-policy.lock for two minutes"
+
 if [[ "$ACTION" == "remove" ]]; then
+  IN_USE=()
   for chain in "$LEGACY_CHAIN" "$CHAIN_A" "$CHAIN_B"; do
-    remove_chain iptables "$chain"
+    drop_stale_jumps iptables "$chain"
+    remove_chain iptables "$chain" || IN_USE+=("iptables $chain")
   done
   if command -v ip6tables >/dev/null 2>&1; then
     for chain in "$LEGACY_CHAIN" "$CHAIN_A" "$CHAIN_B"; do
-      remove_chain ip6tables "$chain"
+      drop_stale_jumps ip6tables "$chain"
+      remove_chain ip6tables "$chain" || IN_USE+=("ip6tables $chain")
     done
   fi
+  [[ ${#IN_USE[@]} -eq 0 ]] || \
+    fail "left in place, another interface still jumps to it: ${IN_USE[*]}; remove it with that interface"
   exit 0
 fi
 
@@ -198,6 +237,13 @@ require_bridge_netfilter bridge-nf-call-iptables
 if [[ -n "$APP_SOURCE_V6" ]]; then
   require_bridge_netfilter bridge-nf-call-ip6tables
 fi
+
+for chain in "$LEGACY_CHAIN" "$CHAIN_A" "$CHAIN_B"; do
+  drop_stale_jumps iptables "$chain"
+  if [[ -n "$APP_SOURCE_V6" ]]; then
+    drop_stale_jumps ip6tables "$chain"
+  fi
+done
 
 V4_OLD=$(active_chain iptables)
 V4_NEW=$(staging_chain "$V4_OLD")

@@ -1,0 +1,51 @@
+# Restore the host policy and start the promoted release after a boot and
+# whenever Docker is started or restarted. Install it as
+# /etc/systemd/system/scrapeyard.service; see docs/DEPLOYMENT.md
+# ("Boot service and promotion").
+#
+# It runs /usr/local/sbin/scrapeyard-release, an installed copy of
+# security/manage-release.sh. The copy is not read from the promoted release,
+# so the unit keeps working after a rollback to a release that has no such
+# script.
+#
+# Promotion and rollback do not go through this unit. They run
+# "scrapeyard-release promote", which leaves the running application alone
+# when a release is refused, and then repoints the link this unit starts.
+
+[Unit]
+Description=Scrapeyard host policy and promoted release
+# Wants, not Requires: when Docker fails its first start and recovers by
+# itself, a Requires would cancel this unit's start for good.
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+# A stop or restart of Docker, by an operator or by systemd after a crash,
+# stops or restarts this unit with it.
+PartOf=docker.service
+ConditionPathExists=/srv/scrapeyard-releases/current/manifest.json
+# No start limit. systemd counts successful starts towards one too, so a few
+# Docker restarts in a row would leave the application down. A failing start
+# is slowed down below instead of being abandoned.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The script reads /etc/scrapeyard/deploy.env itself. An EnvironmentFile= here
+# would have systemd log any line it cannot parse, secret included.
+ExecStart=/usr/local/sbin/scrapeyard-release start
+# Stopping the application here, before Docker stops, gives it its own grace
+# period and keeps Docker from starting it at the next boot ahead of the policy.
+ExecStop=/usr/local/sbin/scrapeyard-release stop
+# A failed start is retried after a minute, then after longer and longer
+# pauses, up to an hour. Each attempt verifies the release again, and a failed
+# one leaves the application stopped.
+Restart=on-failure
+RestartSec=60
+RestartSteps=6
+RestartMaxDelaySec=3600
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+# Started at boot, and again whenever Docker is started.
+WantedBy=multi-user.target docker.service

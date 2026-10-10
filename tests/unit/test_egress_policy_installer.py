@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -24,8 +25,10 @@ state_path = root / f"{tool}.json"
 state = (
     json.loads(state_path.read_text())
     if state_path.exists()
-    else {"chains": {"DOCKER-USER": []}, "jumps": []}
+    else {"chains": {"DOCKER-USER": []}, "jumps": [], "interfaces": {}}
 )
+interfaces = state.setdefault("interfaces", {})
+interface = args[args.index("-i") + 1] if "-i" in args else None
 mutations = {"-N", "-A", "-I", "-D", "-F", "-X"}
 if args and args[0] in mutations:
     counter_path = root / "mutation-count"
@@ -41,13 +44,14 @@ def save():
 
 if args[:2] == ["-S", "DOCKER-USER"]:
     for chain in state["jumps"]:
-        print(f"-A DOCKER-USER -i br-test -j {chain}")
+        print(f"-A DOCKER-USER -i {interfaces.get(chain, 'br-test')} -j {chain}")
     raise SystemExit(0)
 if args and args[0] == "-S":
     raise SystemExit(0 if args[1] in state["chains"] else 1)
 if args[:2] == ["-C", "DOCKER-USER"]:
     chain = args[args.index("-j") + 1]
-    raise SystemExit(0 if chain in state["jumps"] else 1)
+    present = chain in state["jumps"] and interfaces.get(chain, "br-test") == interface
+    raise SystemExit(0 if present else 1)
 if args and args[0] == "-N":
     chain = args[1]
     if chain in state["chains"]:
@@ -63,11 +67,13 @@ elif args[:2] == ["-I", "DOCKER-USER"]:
     if chain not in state["chains"]:
         raise SystemExit(1)
     state["jumps"].insert(0, chain)
+    interfaces[chain] = interface
 elif args[:2] == ["-D", "DOCKER-USER"]:
     chain = args[args.index("-j") + 1]
-    if chain not in state["jumps"]:
+    if chain not in state["jumps"] or interfaces.get(chain, "br-test") != interface:
         raise SystemExit(1)
     state["jumps"].remove(chain)
+    interfaces.pop(chain, None)
 elif args and args[0] == "-F":
     if args[1] not in state["chains"]:
         raise SystemExit(1)
@@ -84,6 +90,8 @@ save()
 
 
 _BRIDGE_NETFILTER_LINE = "BRIDGE_NETFILTER_DIR=/proc/sys/net/bridge"
+_NETWORK_INTERFACES_LINE = "NETWORK_INTERFACES_DIR=/sys/class/net"
+_LOCK_LINE = "LOCK_DIR=/run/scrapeyard"
 _MODPROBE_SHIM = """#!/bin/sh
 echo "$@" >>"$SHIM_STATE_DIR/modprobe.log"
 [ -n "$MODPROBE_LOADS_INTO" ] || exit 1
@@ -103,6 +111,12 @@ def _installer(tmp_path: Path) -> Path:
     source = source.replace(
         _BRIDGE_NETFILTER_LINE, f"BRIDGE_NETFILTER_DIR={tmp_path / 'bridge'}"
     )
+    for line, replacement in (
+        (_NETWORK_INTERFACES_LINE, f"NETWORK_INTERFACES_DIR={tmp_path / 'net'}"),
+        (_LOCK_LINE, f"LOCK_DIR={tmp_path / 'lock'}"),
+    ):
+        assert line in source
+        source = source.replace(line, replacement)
     path = tmp_path / "install-docker-egress-policy.sh"
     path.write_text(source, encoding="utf-8")
     path.chmod(0o755)
@@ -331,3 +345,109 @@ def test_ipv4_only_install_does_not_need_ip6tables_bridge_netfilter(tmp_path: Pa
 
     assert result.returncode == 0, result.stderr
     assert (bridge / "bridge-nf-call-ip6tables").read_text().strip() == "0"
+
+
+def _jumps(state_dir: Path, tool: str = "iptables") -> dict[str, str]:
+    state = json.loads((state_dir / f"{tool}.json").read_text())
+    return {chain: state["interfaces"][chain] for chain in state["jumps"]}
+
+
+def test_install_replaces_the_jump_left_for_a_removed_deployment_bridge(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    interfaces = tmp_path / "net"
+    (interfaces / "br-old").mkdir(parents=True)
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-old"
+    assert _run(installer, env).returncode == 0
+    assert _jumps(state_dir) == {"SY-EGRESS-test-A": "br-old"}
+
+    # `docker compose down` and `up` give the deployment network a new bridge.
+    (interfaces / "br-old").rmdir()
+    (interfaces / "br-new").mkdir()
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-new"
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    assert "br-old" in result.stdout
+    for tool in ("iptables", "ip6tables"):
+        (chain, interface), = _jumps(state_dir, tool).items()
+        assert interface == "br-new"
+        assert chain.startswith("SY-EGRESS-test-")
+
+
+@pytest.mark.parametrize("action", ["install", "remove"])
+def test_a_policy_chain_another_live_bridge_still_uses_is_left_as_it_is(
+    tmp_path: Path, action: str
+) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    interfaces = tmp_path / "net"
+    (interfaces / "br-old").mkdir(parents=True)
+    (interfaces / "br-new").mkdir()
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-old"
+    assert _run(installer, env).returncode == 0
+    before = {
+        tool: (state_dir / f"{tool}.json").read_text() for tool in ("iptables", "ip6tables")
+    }
+    assert "-j REJECT" in before["iptables"]
+
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-new"
+    result = subprocess.run(
+        [os.fspath(installer), action], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 2
+    expected = "unexpected jump scope" if action == "install" else "another interface still jumps"
+    assert expected in result.stderr
+    # Its jump stays, and so do the rules the jump leads to.
+    for tool, state in before.items():
+        assert (state_dir / f"{tool}.json").read_text() == state
+
+
+def test_policy_changes_wait_for_the_lock_before_touching_any_chain(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    source = installer.read_text(encoding="utf-8")
+    assert source.count("flock --wait 120 8") == 1
+    installer.write_text(source.replace("flock --wait 120 8", "flock --nonblock 8"))
+    lock_dir = tmp_path / "lock"
+    lock_dir.mkdir()
+    with (lock_dir / "egress-policy.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = _run(installer, env)
+
+    assert result.returncode == 2
+    assert "another policy installation" in result.stderr
+    assert not (state_dir / "mutation-count").exists()
+    assert _run(installer, env).returncode == 0
+
+
+def test_remove_also_clears_the_jump_left_for_a_removed_bridge(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    interfaces = tmp_path / "net"
+    (interfaces / "br-old").mkdir(parents=True)
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-old"
+    assert _run(installer, env).returncode == 0
+
+    (interfaces / "br-old").rmdir()
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-new"
+
+    def remove() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [os.fspath(installer), "remove"], env=env, capture_output=True, text=True, check=False
+        )
+
+    # Without the named bridge in view, a missing interface proves nothing,
+    # so the jump and its rules are left and the command says so.
+    refused = remove()
+    assert refused.returncode == 2
+    assert "another interface still jumps" in refused.stderr
+    assert _jumps(state_dir) == {"SY-EGRESS-test-A": "br-old"}
+    state = json.loads((state_dir / "iptables.json").read_text())
+    assert any("-j REJECT" in rule for rule in state["chains"]["SY-EGRESS-test-A"])
+
+    (interfaces / "br-new").mkdir()
+    result = remove()
+
+    assert result.returncode == 0, result.stderr
+    for tool in ("iptables", "ip6tables"):
+        state = json.loads((state_dir / f"{tool}.json").read_text())
+        assert state["jumps"] == []
+        assert set(state["chains"]) == {"DOCKER-USER"}

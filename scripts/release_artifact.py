@@ -210,6 +210,12 @@ def create(directory: Path, revision: str) -> None:
             cwd=source,
             check=True,
         )
+        # Root deploys a release and runs it at every boot, so nothing in it
+        # may be writable by anyone but its owner.
+        for path in bundle.rglob("*"):
+            mode = stat.S_IMODE(path.lstat().st_mode)
+            if not path.is_symlink() and mode & 0o022:
+                path.chmod(mode & ~0o022)
         manifest = {
             "format": "scrapeyard-release-v1",
             "revision": revision,
