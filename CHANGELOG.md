@@ -62,6 +62,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   each release's own deploy wrapper: a deployment, a refused corrupted
   release, a failed and a missing egress policy, a rollback and a roll-forward.
   A manually dispatched run uploads the rehearsed release.
+- Added a systemd unit (`security/systemd/scrapeyard.service`) that restores
+  the host egress policy and the AppArmor profile and starts the promoted
+  release after a boot and whenever Docker is started or restarted. A failed
+  start is retried with growing pauses and leaves the application stopped.
+  `security/manage-release.sh` (installed as `scrapeyard-release`) has a
+  `promote` command that deploys a retained release as one
+  systemd unit and then makes it the release the boot service starts; it
+  refuses a release root does not own and a settings file it cannot read,
+  without printing the line. The deployment rehearsal exercises both with
+  `--boot-service`.
 
 ### Changed
 - Within one run, the URL guard now resolves a hostname once per 30 seconds
@@ -227,6 +237,21 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   fetch's cleanup, and with it the target, hung until the run's deadline.
   Releasing a page now has 10 seconds, after which the whole browser session
   is stopped and the fetch's own failure is reported.
+- The host egress policy installer no longer refuses to run after the
+  deployment network has been removed and created again. The jump left for
+  the old bridge names an interface that no longer exists; `install` and
+  `remove` now delete it.
+- `install-docker-egress-policy.sh remove` no longer empties a policy chain
+  that another interface still jumps to, which left that jump filtering
+  nothing. It leaves the chain and exits with an error.
+- `deploy-secure-compose.sh` now leaves the application stopped when its start
+  fails or the deployment is interrupted. The container restarts by itself, so
+  a failed start used to leave it retrying outside any deployment.
+- Deployments and policy installations take a lock under `/run/scrapeyard`.
+  Two that overlapped could each undo the other's policy switch and leave no
+  jump installed.
+- A retained release no longer keeps files that group or others can write,
+  and the release archive records root as the owner of every file.
 - The host egress policy now requires the kernel's bridge netfilter hook
   before it installs. The policy's `DOCKER-USER` rules see traffic between
   containers on the deployment bridge only while

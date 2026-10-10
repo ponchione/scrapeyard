@@ -74,11 +74,11 @@ jobs:
           python3 scripts/release_artifact.py create
           "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
           --revision "${{ steps.revisions.outputs.candidate }}"
-      - name: Deploy the candidate, refuse bad deployments, and roll back
+      - name: Deploy the candidate, refuse bad deployments, roll back, and rehearse the boot service
         run: >-
           sudo env
           "SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR=$GITHUB_WORKSPACE/artifacts/deployment-rehearsal"
-          ./scripts/run_deployment_rehearsal.sh
+          ./scripts/run_deployment_rehearsal.sh --boot-service
           --candidate "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
           --previous "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.previous }}"
       - name: Hand the rehearsal evidence back to the runner account
@@ -95,17 +95,28 @@ jobs:
           path: artifacts/deployment-rehearsal/
           if-no-files-found: warn
           retention-days: 30
-      - name: Pack the rehearsed candidate release
-        # A pull request only proves the lane; a dispatched run hands over the release.
-        if: github.event_name == 'workflow_dispatch'
+      - name: Pack the rehearsed candidate release and check the archive
         env:
           CANDIDATE: ${{ steps.revisions.outputs.candidate }}
           PREVIOUS: ${{ steps.revisions.outputs.previous }}
           RELEASES: ${{ steps.revisions.outputs.releases }}
         run: |
           archive="scrapeyard-release-$CANDIDATE.tar.zst"
-          tar -C "$RELEASES" --zstd -cf "$archive" "scrapeyard-release-$CANDIDATE"
+          # Root runs a release, so the archive must not carry this runner's account.
+          tar -C "$RELEASES" --owner=0 --group=0 --numeric-owner --zstd -cf "$archive" \
+            "scrapeyard-release-$CANDIDATE"
           sha256sum "$archive" | tee "$archive.sha256"
+          # Extract it as the deployment guide says and check what an operator would get.
+          check="$RUNNER_TEMP/release-archive-check"
+          sudo mkdir "$check"
+          sudo tar --zstd -xpf "$archive" --no-same-owner -C "$check"
+          sudo python3 scripts/release_artifact.py verify "$check/scrapeyard-release-$CANDIDATE"
+          foreign="$(sudo find "$check" \( ! -user 0 -o -perm /022 \) -print -quit)"
+          if [ -n "$foreign" ]; then
+            echo "The extracted release has a file root does not own or others can write: $foreign" >&2
+            exit 1
+          fi
+          sudo rm -rf "$check"
           {
             echo "### Release $CANDIDATE"
             echo
@@ -116,6 +127,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the rehearsed candidate release
+        # A pull request only proves the lane; a dispatched run hands over the release.
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

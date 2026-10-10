@@ -211,11 +211,58 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
             "if deploy corrupted ",
             "if deploy policy-failure ",
             "\nremove_egress_policy\n",
+            "if deploy uncovered-bridge ",
             "\ndeploy rollback ",
             "\ndeploy roll-forward ",
+            'systemctl enable --now "$UNIT"',
+            "if promote promote-corrupted ",
+            "if promote promote-foreign-owner ",
+            "promote promote-interrupted ",
+            "systemctl restart docker.service",
+            "systemctl kill --signal=KILL --kill-whom=main docker.service",
+            "await_unit cold-start ",
+            "await_unit network-recreated ",
+            "the boot service did not recover after its setting was repaired",
+            "promote promote-rollback ",
+            "await_unit rollback-boot ",
         )
     ]
     assert steps == sorted(steps)
+
+
+def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host():
+    text = RUNNER.read_text(encoding="utf-8")
+    for contract in (
+        # The unit and the script are the candidate's, installed as documented.
+        'install -m 644 "$CANDIDATE/source/security/systemd/$UNIT" "$UNIT_FILE"',
+        'install -m 755 "$CANDIDATE/source/security/manage-release.sh" "$MANAGE"',
+        'MANAGE="/usr/local/sbin/scrapeyard-release"',
+        'ln -s -- "$CANDIDATE" "$RELEASES_ROOT/current"',
+        # A release is refused unless root owns it, as after extraction by root.
+        'chown -R 0:0 "$CANDIDATE" "$PREVIOUS"',
+        'chown -R "$RELEASE_OWNER" "$CANDIDATE" "$PREVIOUS"',
+        # A reboot loses the policy, the bridge hook and the AppArmor profile,
+        # and only Docker's own start brings the boot service back.
+        "modprobe -r br_netfilter",
+        "echo 0 > /proc/sys/net/bridge/bridge-nf-call-iptables",
+        'install-chromium-apparmor-profile.sh" remove',
+        "systemctl stop docker.socket docker.service\n",
+        "  systemctl start docker.service\n  await_unit cold-start",
+        # Only the pauses between attempts are shortened.
+        "[Service]\\nRestartSec=3\\nRestartMaxDelaySec=6\\n",
+        # Cleanup undoes what the phase did, Docker's stop included.
+        'systemctl stop "$PROMOTE_UNIT"',
+        'systemctl disable --now "$UNIT"',
+        'rm -rf -- "$UNIT_FILE" "$UNIT_DROP_IN" "$ENV_DIR" "$MANAGE" "$RELEASES_ROOT/current"',
+        "systemctl start docker.service >/dev/null 2>&1",
+        "already exists; use an isolated host",
+        "the AppArmor profile is already loaded; use an isolated host",
+    ):
+        assert contract in text, contract
+    # A promotion is never cut short by a timeout of the rehearsal's own: the
+    # deployment would go on in its unit with nobody waiting for it.
+    promote = text[text.index("  promote() {") : text.index("  echo \"Installing the boot service")]
+    assert "timeout" not in promote
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="the refusal is for an unprivileged caller")
@@ -255,11 +302,19 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     rehearsal = next(i for i, c in enumerate(commands) if "run_deployment_rehearsal.sh" in c)
     assert all(commands.index(command) < rehearsal for command in created)
     assert commands[rehearsal].startswith("sudo env ")
+    assert "run_deployment_rehearsal.sh --boot-service" in commands[rehearsal]
     uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
     evidence, release = uploads
     assert evidence["if"] == "always()"
     assert release["if"] == "github.event_name == 'workflow_dispatch'"
     assert release["with"]["if-no-files-found"] == "error"
-    pack = next(step for step in steps if step.get("name") == "Pack the rehearsed candidate release")
-    assert pack["if"] == "github.event_name == 'workflow_dispatch'"
+    pack = next(step for step in steps if step.get("name", "").startswith("Pack the rehearsed"))
+    # Every run packs the release and checks what an operator would extract.
+    assert "if" not in pack
     assert "sha256sum" in pack["run"]
+    # Root runs a release, so neither the archive nor its extraction may keep
+    # the runner's account as the owner.
+    assert "--owner=0 --group=0 --numeric-owner" in pack["run"]
+    assert "--no-same-owner" in pack["run"]
+    assert "release_artifact.py verify" in pack["run"]
+    assert "! -user 0 -o -perm /022" in pack["run"]

@@ -184,7 +184,8 @@ engines load `br_netfilter` only for a network with inter-container
 communication disabled. The installer therefore loads the module and sets the
 hook before it changes any chain, and stops if it cannot. The setting is
 host-wide and does not survive a reboot, so the policy must be installed again
-after one (TD-20). `remove` leaves the hook as it is. If startup fails with
+after one; the [boot service](#boot-service-and-promotion) does that. `remove`
+leaves the hook as it is. If startup fails with
 "controlled non-public challenge was reachable", check this setting first.
 
 The helper reports liveness only while its
@@ -253,12 +254,14 @@ gh workflow run release-rehearsal.yml --ref main \
   -f revision=<commit> -f previous_revision=<currently deployed commit>
 gh run download <run-id> -n scrapeyard-release-<commit>
 sha256sum -c scrapeyard-release-<commit>.tar.zst.sha256
-sudo tar --zstd -xpf scrapeyard-release-<commit>.tar.zst -C /srv/scrapeyard-releases
+sudo tar --zstd -xpf scrapeyard-release-<commit>.tar.zst --no-same-owner -C /srv/scrapeyard-releases
 python3 /srv/scrapeyard-releases/scrapeyard-release-<commit>/source/scripts/release_artifact.py \
   verify /srv/scrapeyard-releases/scrapeyard-release-<commit>
 ```
 
-Compare the checksum with the one in the run's summary. The artifact expires
+Compare the checksum with the one in the run's summary. `--no-same-owner`
+makes root the owner of every extracted file, which the
+[boot service](#boot-service-and-promotion) requires. The artifact expires
 after 30 days, so it is a way to move a release, not a place to keep one.
 
 The directory contains the source revision's files (including Compose, SQL,
@@ -290,15 +293,25 @@ project name** so application and Redis volumes retain their owners:
 ```bash
 export COMPOSE_PROJECT_NAME=scrapeyard
 # Run as root with the deployment environment already supplied securely.
-security/deploy-secure-compose.sh --release /srv/scrapeyard-releases/candidate
+/srv/scrapeyard-releases/candidate/source/security/deploy-secure-compose.sh \
+  --release /srv/scrapeyard-releases/candidate
 ```
+
+That is the wrapper the release retains, so no checkout is needed on the host.
+On a host with the [boot service](#boot-service-and-promotion),
+`scrapeyard-release promote` runs this command with the settings from
+`/etc/scrapeyard/deploy.env` and records the release for the next boot.
 
 The wrapper verifies and loads the bundle, checks all images before stopping
 the app, starts dependencies, installs the retained egress/AppArmor policies,
 then starts the app with `--no-build --pull never`. The source and `images.json`
 paths in the bundle are the only Compose files selected in release mode. A
-failure before stopping leaves the current app running; a policy failure
-leaves it stopped. Do not resume ingress until authenticated `/health/ready`,
+failure before stopping leaves the current app running. Any failure or
+interruption after that leaves it stopped: a policy that cannot be installed,
+and also a start that fails, whose container would otherwise go on restarting
+and could come up later. The wrapper holds a lock under `/run/scrapeyard`, so
+a second deployment waits for the first. Do not resume ingress until
+authenticated `/health/ready`,
 a known `/results/{id}` read, effective host/security policy, and exactly one
 application container/process have been verified. Compose health alone tests
 liveness. Retain redacted evidence of those checks after each transition.
@@ -326,6 +339,116 @@ capacity, ingress, monitoring or off-host backup installation. TD-22 remains
 open until candidate deployment, failed-candidate rejection and compatible
 rollback pass under the intended deployment controls without build-network
 access. Keep this operator evidence separately from automated fixture reports.
+
+## Boot service and promotion
+
+A reboot loses everything the deploy wrapper installs on the host: the
+`DOCKER-USER` policy chains, the bridge netfilter setting and the loaded
+AppArmor profile. Scrapeyard refuses to serve without them, so after a reboot
+it stays down until the wrapper runs again.
+`security/systemd/scrapeyard.service` runs it at boot and whenever Docker is
+started, for the release that was last promoted.
+
+The unit runs `/usr/local/sbin/scrapeyard-release`, an installed copy of
+`security/manage-release.sh`. It is installed once and is not read from the
+promoted release, so the unit keeps working after a rollback to a release that
+predates the script. The two expect this layout:
+
+- `/srv/scrapeyard-releases/<release>` holds each retained release, and
+  `/srv/scrapeyard-releases/current` is a link to the promoted one. Root must
+  own every file of a release and nobody else may be able to write to it,
+  because root runs it at every boot. Extracting the archive as root with
+  `tar --no-same-owner` gives that; a release that fails the check is refused.
+- `/etc/scrapeyard/deploy.env` holds the deployment settings. It is owned by
+  root with mode 600. Each line is `NAME='value'`, with the value in single
+  quotes (the JSON settings contain double quotes) and a name that starts with
+  `SCRAPEYARD_` or `COMPOSE_`. Blank lines and lines starting with `#` are
+  skipped. A value cannot contain a single quote, and nothing may follow the
+  closing quote. It needs `COMPOSE_PROJECT_NAME`, `SCRAPEYARD_PROXY_URL`,
+  `SCRAPEYARD_API_CREDENTIALS`, `SCRAPEYARD_ENCRYPTION_KEYS` and
+  `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID`, plus any other setting the Compose
+  file or the policy installer reads (`SCRAPEYARD_EGRESS_ALLOW_CIDRS`, for
+  example).
+
+`scrapeyard-release` reads that file itself; it is not a systemd
+`EnvironmentFile=`, and systemd never sees it. A line it cannot read stops the
+command with the line's number and nothing else, so a mistyped line does not
+put a secret in the journal.
+
+Install the first release:
+
+```bash
+RELEASE=/srv/scrapeyard-releases/scrapeyard-release-<commit>
+sudo install -d -m 700 /etc/scrapeyard
+sudo install -m 600 /dev/null /etc/scrapeyard/deploy.env   # then fill it in
+sudo ln -s "$RELEASE" /srv/scrapeyard-releases/current
+sudo install -m 755 "$RELEASE/source/security/manage-release.sh" /usr/local/sbin/scrapeyard-release
+sudo install -m 644 "$RELEASE/source/security/systemd/scrapeyard.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now scrapeyard.service
+```
+
+Repeat the two `install` lines and `systemctl daemon-reload` from a later
+release to take a newer script or unit.
+
+Promote a later release, or roll back to a retained one, with one command:
+
+```bash
+sudo scrapeyard-release promote /srv/scrapeyard-releases/scrapeyard-release-<commit>
+```
+
+`promote` checks the release and the settings file, then runs the deployment
+as the systemd unit `scrapeyard-promote.service`: that release's own wrapper,
+followed by moving the `current` link. Its output is printed when it ends;
+`journalctl -fu scrapeyard-promote` follows it meanwhile. How it can end:
+
+- **Promoted.** The release is running and the boot service starts it from
+  now on.
+- **Refused before anything was stopped** (the release fails verification, a
+  file in it is not root's, the settings file is malformed, an image is
+  missing). The earlier release keeps running and the link stays on it.
+- **Failed after the application was stopped** (the policy could not be
+  installed, the application did not start or did not attest the policy). The
+  wrapper leaves the application stopped, not restarting, and the link stays
+  on the earlier release. Promote that release again to return to it.
+- **Stopped** with `systemctl stop scrapeyard-promote.service`. It is reported
+  as a failure and the link is not moved. Depending on how far it had got, the
+  earlier release is still running or the application is stopped; `promote`
+  says which. Ctrl-C and a closed terminal do not stop a promotion: it
+  finishes in its unit, link included.
+
+Only one deployment runs at a time. The wrapper takes a lock, so a promotion
+waits for a start of the boot service that is under way, and the other way
+round.
+
+What the unit does:
+
+- **Boot, and every start of Docker.** After Docker starts it verifies and
+  loads the promoted release, starts Redis and the probe, installs the egress
+  policy and the AppArmor profile, and starts the application. If Docker's
+  first start fails and Docker recovers by itself, the unit still starts.
+- **Shutdown, `systemctl stop scrapeyard.service`, and `systemctl stop
+  docker`.** It stops the application container, with the container's own
+  40-second grace period, before Docker stops. Docker then does not start the
+  application by itself at the next boot, ahead of the policy. After a power
+  loss Docker does try, and the application cannot start (the AppArmor profile
+  is gone) or refuses to serve (the challenge is reachable) until the unit has
+  run.
+- **A restart of Docker**, by `systemctl restart docker` or by systemd after
+  the daemon crashed. The unit is restarted with it and deploys the promoted
+  release again, which restarts the application.
+- **A recreated deployment network** (`docker compose down`, then `systemctl
+  restart scrapeyard.service`). The network gets a new bridge. The installer
+  removes the policy jump left for the bridge that no longer exists and
+  installs the policy on the new one.
+- **A start that fails.** The application is left stopped. The unit tries
+  again after a minute and then after longer pauses, up to an hour, for as
+  long as it takes: a setting repaired in `deploy.env` is picked up by the
+  next attempt. It never refuses a start for having been started too often.
+
+`systemctl restart scrapeyard.service` deploys the promoted release again. It
+is not the way to promote another one: it stops the application before the
+wrapper has verified anything.
 
 ## Container privilege and filesystem boundary
 

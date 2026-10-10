@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+LOCK_DIR=/run/scrapeyard
+
 fail() {
   echo "scrapeyard secure compose deployment: $*" >&2
   exit 2
@@ -15,6 +17,12 @@ command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
 [[ -n "${SCRAPEYARD_PROXY_URL:-}" && "$SCRAPEYARD_PROXY_URL" != "direct" ]] || \
   fail "SCRAPEYARD_PROXY_URL must name an egress-filtering operator proxy"
+
+# One deployment at a time. A promotion that overlaps the boot service's start
+# would interleave their stop, policy and start steps.
+install -d -m 700 "$LOCK_DIR"
+exec 9>>"$LOCK_DIR/deploy.lock"
+flock --wait 600 9 || fail "another deployment has held $LOCK_DIR/deploy.lock for ten minutes"
 
 # Building cannot expose application traffic and makes the later application
 # start independent of Compose's implicit missing-image behavior.
@@ -42,6 +50,22 @@ fi
 # A redeploy must not leave an already-running untrusted-submission service
 # online if host-policy replacement encounters an unexpected tool failure.
 docker compose stop scrapeyard
+
+# From here on the application is down, and whatever fails or interrupts the
+# rest must leave it down. Its container restarts by itself (unless-stopped),
+# so one left behind by a failed start could come up later, outside any
+# deployment.
+leave_stopped() {
+  local status=$?
+  trap - EXIT
+  if ((status != 0)); then
+    docker compose stop scrapeyard >/dev/null 2>&1 || true
+    echo "scrapeyard secure compose deployment: failed; the application is left stopped" >&2
+  fi
+  exit "$status"
+}
+trap leave_stopped EXIT
+trap 'exit 143' INT TERM HUP
 
 # Start only dependencies first. The application is not allowed to start until
 # the connected-IP policy exists on the deployment bridge.

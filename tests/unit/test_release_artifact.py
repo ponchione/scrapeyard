@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -78,6 +79,7 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
             raise subprocess.CalledProcessError(1, command)
         if command[:3] == ["docker", "image", "save"]:
             Path(command[4]).write_bytes(b"retained images")
+            Path(command[4]).chmod(0o666)
 
     def output(*args, **kwargs):
         if args[0] == "git":
@@ -124,6 +126,12 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
             "source/docker-compose.yml",
             "source/security/seccomp/chromium.json",
         } <= manifest["files"].keys()
+        # Root runs what a release holds, so only its owner may write to it.
+        assert manifest["files"]["images.tar"]["mode"] == 0o644
+        assert not any(entry["mode"] & 0o022 for entry in manifest["files"].values())
+        assert not any(
+            path.stat().st_mode & 0o022 for path in (tmp_path / "candidate").rglob("*")
+        )
         return
     with pytest.raises((subprocess.CalledProcessError, ValueError)) as refused:
         release_artifact.create(tmp_path / "candidate", "HEAD")
@@ -138,7 +146,13 @@ def test_secure_release_deploy_is_offline_and_stops_before_policy_changes(tmp_pa
     security.mkdir()
     wrapper = security / "deploy-secure-compose.sh"
     text = Path("security/deploy-secure-compose.sh").read_text()
-    wrapper.write_text(text.replace("((EUID == 0)) || fail", "true || fail"))
+    for old, new in (
+        ("((EUID == 0)) || fail", "true || fail"),
+        ("LOCK_DIR=/run/scrapeyard", f"LOCK_DIR={tmp_path / 'lock'}"),
+    ):
+        assert text.count(old) == 1
+        text = text.replace(old, new)
+    wrapper.write_text(text)
     log = tmp_path / "calls"
     fake = tmp_path / "bin"
     fake.mkdir()
@@ -196,3 +210,89 @@ esac
         assert "docker compose up -d --wait --no-build --pull never\n" not in calls
         if failure != "FAIL_POLICY":
             assert "docker compose stop scrapeyard" not in calls
+        else:
+            assert "the application is left stopped" in result.stderr.decode()
+
+
+def _wrapper_with_fake_docker(tmp_path, docker_script):
+    security = tmp_path / "security"
+    security.mkdir()
+    wrapper = security / "deploy-secure-compose.sh"
+    text = Path("security/deploy-secure-compose.sh").read_text()
+    for old, new in (
+        ("((EUID == 0)) || fail", "true || fail"),
+        ("LOCK_DIR=/run/scrapeyard", f"LOCK_DIR={tmp_path / 'lock'}"),
+        ("flock --wait 600 9", "flock --nonblock 9"),
+    ):
+        assert text.count(old) == 1
+        text = text.replace(old, new)
+    wrapper.write_text(text)
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    docker = fake / "docker"
+    docker.write_text(docker_script)
+    docker.chmod(0o755)
+    python = fake / "python3"
+    python.write_text("#!/bin/bash\ntrue\n")
+    python.chmod(0o755)
+    bundle = tmp_path / "bundle"
+    source_security = bundle / "source" / "security"
+    source_security.mkdir(parents=True)
+    for name in ("install-docker-egress-policy.sh", "install-chromium-apparmor-profile.sh"):
+        installer = source_security / name
+        installer.write_text("#!/bin/bash\ntrue\n")
+        installer.chmod(0o755)
+    env = dict(
+        os.environ,
+        PATH=f"{fake}:{os.environ['PATH']}",
+        CALLS=str(tmp_path / "calls"),
+        SCRAPEYARD_PROXY_URL="https://proxy.example",
+        COMPOSE_PROJECT_NAME="existing",
+    )
+    return ["bash", str(wrapper), "--release", str(bundle)], env
+
+
+_FAKE_DOCKER = """#!/bin/bash
+echo "docker $*" >> "$CALLS"
+case "$*" in
+  "compose config --images") echo sha256:aaaaaaaa ;;
+  "compose ps -q egress-probe") echo probe ;;
+  "inspect "*) echo abcdef123456 ;;
+  "network inspect "*) echo br-release ;;
+  "compose up -d --wait --no-build --pull never") exit "${START_STATUS:-0}" ;;
+esac
+"""
+
+
+def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(command, cwd=tmp_path, env=dict(env, START_STATUS="1"), capture_output=True)
+
+    assert result.returncode == 1
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    # The container is unless-stopped: left alone it would keep restarting.
+    assert calls[-1] == "docker compose stop scrapeyard"
+    assert calls[-2] == "docker compose up -d --wait --no-build --pull never"
+    assert b"the application is left stopped" in result.stderr
+
+    Path(env["CALLS"]).write_text("")
+    subprocess.run(command, cwd=tmp_path, env=env, check=True, capture_output=True)
+    assert Path(env["CALLS"]).read_text().splitlines()[-1] == (
+        "docker compose up -d --wait --no-build --pull never"
+    )
+
+
+def test_a_second_deployment_waits_for_the_first_instead_of_interleaving(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    lock_dir = tmp_path / "lock"
+    lock_dir.mkdir()
+    with (lock_dir / "deploy.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True)
+
+    assert result.returncode == 2
+    assert b"another deployment" in result.stderr
+    # The lock is taken before the release is loaded or anything is stopped.
+    assert Path(env["CALLS"]).read_text().splitlines() == ["docker compose version"]
+    subprocess.run(command, cwd=tmp_path, env=env, check=True, capture_output=True)
