@@ -49,6 +49,7 @@ CREDENTIAL_DIR=""
 CLEANUP_COMPLETE=0
 EGRESS_POLICY_ACTIVE=0
 APPARMOR_PROFILE_ACTIVE=0
+HOST_LISTENER_PID=""
 POLICY_MODE=""
 SCRAPEYARD_EGRESS_INTERFACE=""
 SCRAPEYARD_EGRESS_POLICY_ID="smoke"
@@ -65,7 +66,7 @@ validate_integer() {
   ((value >= minimum && value <= maximum)) || fail "$label must be between $minimum and $maximum"
 }
 
-for command in docker python3 curl timeout mktemp od; do
+for command in docker python3 curl timeout mktemp od ip; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
@@ -192,6 +193,7 @@ cleanup_resources() {
 on_exit() {
   local status=$?
   trap - EXIT INT TERM HUP
+  [[ -z "$HOST_LISTENER_PID" ]] || kill "$HOST_LISTENER_PID" >/dev/null 2>&1 || true
   if ((status != 0)); then
     echo "Smoke lane failed; retaining focused diagnostics in $DIAGNOSTICS_DIR" >&2
     capture_diagnostics
@@ -303,6 +305,37 @@ if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
   'http://169.254.169.254/latest/meta-data/'; then
   fail "network policy allowed a metadata target"
 fi
+
+# The host's own addresses are input to the host, not forwarded traffic, so
+# the DOCKER-USER policy alone never sees a connection to them. A listener on
+# every host address stands in for whatever a production host listens on.
+HOST_PROBE_PORT=18999
+port_is_open "$HOST_PROBE_PORT" && fail "port $HOST_PROBE_PORT is already in use"
+python3 -c '
+import socket, sys
+server = socket.create_server(("0.0.0.0", int(sys.argv[1])))
+while True:
+    server.accept()[0].close()
+' "$HOST_PROBE_PORT" &
+HOST_LISTENER_PID=$!
+BRIDGE_GATEWAY="$(docker inspect --format \
+  "{{(index .NetworkSettings.Networks \"${PROJECT}_backend\").Gateway}}" "$(compose ps -q scrapeyard)")"
+HOST_ADDRESS="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+[[ -n "$BRIDGE_GATEWAY" && -n "$HOST_ADDRESS" ]] || fail "could not find the host's addresses"
+LISTENER_DEADLINE=$((SECONDS + 10))
+until (exec 3<>"/dev/tcp/$BRIDGE_GATEWAY/$HOST_PROBE_PORT") >/dev/null 2>&1; do
+  ((SECONDS < LISTENER_DEADLINE)) || fail "the host probe listener did not start"
+  sleep 0.2
+done
+for address in "$BRIDGE_GATEWAY" "$HOST_ADDRESS"; do
+  if compose exec -T scrapeyard python -c \
+    'import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()' \
+    "$address" "$HOST_PROBE_PORT" >/dev/null 2>&1; then
+    fail "network policy let the application reach the host's own address $address"
+  fi
+done
+kill "$HOST_LISTENER_PID" >/dev/null 2>&1 || true
+HOST_LISTENER_PID=""
 
 python3 tests/smoke/verify_api.py \
   --api-url "http://127.0.0.1:$API_PORT" \
