@@ -668,8 +668,8 @@ it refuses to start if the paths it installs already exist. Each step ends
 with the same checks as a deployment:
 
 1. Promotions that must be refused with nothing moved: a release with a
-   changed file, one with a file another account owns, and one in a directory
-   another account can write to.
+   changed file, one with a file another account owns, and one that root owns
+   throughout but that sits in a directory another account can write to.
 2. A promotion stopped early and one stopped after it had stopped the
    application. Both must be reported as failed with the link unmoved; the
    second must end with the application stopped and say so, and a new
@@ -717,7 +717,8 @@ containers, network and volumes, the rehearsal policy, the unreachable route
 and, if it loaded it, the AppArmor profile. With `--boot-service` it also
 removes the unit, the installed script, the settings file and its copies of
 the releases, starts Docker if a failed step left it stopped, and puts the
-bridge netfilter setting back as it found it. It leaves the loaded images.
+bridge netfilter module and setting back as they were before the run (a
+module the kernel will not unload stays loaded). It leaves the loaded images.
 
 The `Release artifact and deployment rehearsal` workflow builds, scans and
 qualifies both releases with `scripts/release_artifact.py create` and then

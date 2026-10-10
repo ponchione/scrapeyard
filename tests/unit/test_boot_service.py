@@ -217,6 +217,38 @@ def test_failed_promotion_leaves_the_link_and_says_what_is_running(host):
         assert message in host.run("promote", str(new), WRAPPER_FAILS="yes", **env).stderr
 
 
+def test_promoting_the_promoted_release_again_deploys_it_and_reports_truthfully(host):
+    release = host.release("new")
+    host.current.symlink_to(release)
+
+    result = host.run("promote", str(release))
+
+    assert result.returncode == 0, result.stderr
+    assert os.readlink(host.current) == str(release)
+    assert len(host.called("wrapper")) == 1
+    assert not list(host.releases.glob("current.new*"))
+
+    failed = host.run("promote", str(release), WRAPPER_FAILS="yes", RUNNING_IMAGE="sha256:new")
+    assert failed.returncode == 2
+    # It is the promoted release and it is running: neither may be denied.
+    assert "was already the release the boot service starts" in failed.stderr
+    assert "the application is running it" in failed.stderr
+    assert "was not promoted" not in failed.stderr
+    assert "next boot would replace" not in failed.stderr
+
+
+def test_promotion_goes_ahead_when_the_journal_cannot_be_read(host):
+    old, new = host.release("old"), host.release("new")
+    host.current.symlink_to(old)
+    host.tool("journalctl", 'echo "journalctl $*" >> "$CALLS"\nexit 1\n')
+
+    result = host.run("promote", str(new))
+
+    assert result.returncode == 0, result.stderr
+    assert os.readlink(host.current) == str(new)
+    assert "--since @" in host.called("journalctl")[-1]
+
+
 def test_promotion_is_not_believed_unless_the_link_moved(host):
     old, new = host.release("old"), host.release("new")
     host.current.symlink_to(old)
@@ -409,7 +441,14 @@ def test_settings_file_must_be_private_and_name_the_project(host, problem):
 
 @pytest.mark.parametrize(
     "problem",
-    ["group-writable", "symlink-inside", "writable-parent", "not-a-release", "current-is-a-directory"],
+    [
+        "group-writable",
+        "symlink-inside",
+        "writable-parent",
+        "linked-from-a-writable-directory",
+        "not-a-release",
+        "current-is-a-directory",
+    ],
 )
 @pytest.mark.parametrize("action", ["promote", "start"])
 def test_a_tree_root_should_not_run_is_refused(host, problem, action):
@@ -422,6 +461,17 @@ def test_a_tree_root_should_not_run_is_refused(host, problem, action):
     elif problem == "writable-parent":
         # Whoever can write to the directory can swap the release after the check.
         host.releases.chmod(0o777)
+    elif problem == "linked-from-a-writable-directory":
+        # The releases are root's alone, but they are reached through a link
+        # in a directory someone else can write to, who could repoint it.
+        public = host.root / "public"
+        public.mkdir(mode=0o777)
+        public.chmod(0o777)
+        (public / "releases").symlink_to(host.releases)
+        script = host.script.read_text()
+        host.script.write_text(
+            script.replace(f"CURRENT={host.current}", f"CURRENT={public / 'releases' / 'current'}")
+        )
     elif problem == "not-a-release":
         target = host.releases
     else:

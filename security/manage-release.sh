@@ -73,15 +73,21 @@ load_project_name() {
 
 # Whoever can write to a directory can replace what is in it, so every
 # directory above a path must be root's alone, up to the filesystem root.
+# Both the path as it is written and the path it resolves to are walked: a
+# directory that only holds a link on the way is as good as the link's target
+# to whoever can replace the link.
 check_ancestors() {
-  local path offender
-  path=$(realpath -- "$(dirname -- "$1")")
-  while :; do
-    offender=$(find "$path" -maxdepth 0 \( ! -user "$TRUSTED_OWNER" -o -perm /022 \) -print)
-    [[ -z "$offender" ]] || \
-      fail "$offender is not owned by root, or others can write to it, so what it holds cannot be trusted"
-    [[ "$path" != "$TRUSTED_ROOT" && "$path" != / ]] || break
-    path=$(dirname -- "$path")
+  local start path offender
+  for start in "$(dirname -- "$1")" "$(realpath -- "$(dirname -- "$1")")"; do
+    path=$start
+    while :; do
+      # -H: judge the directory a link on the way points to, not the link.
+      offender=$(find -H "$path" -maxdepth 0 \( ! -user "$TRUSTED_OWNER" -o -perm /022 \) -print)
+      [[ -z "$offender" ]] || \
+        fail "$offender is not owned by root, or others can write to it, so what it holds cannot be trusted"
+      [[ "$path" != "$TRUSTED_ROOT" && "$path" != / ]] || break
+      path=$(dirname -- "$path")
+    done
   done
 }
 
@@ -130,21 +136,30 @@ promotion_is_under_way() {
   esac
 }
 
-# What an operator has to know after a promotion that did not complete.
-describe_application() {
-  local release=$1 containers image
+# What an operator has to know after a promotion that did not complete: what
+# the boot service starts, and what is running now.
+describe_outcome() {
+  local release=$1 promoted containers image running
+  promoted=$(readlink -- "$CURRENT" 2>/dev/null || true)
   if ! containers=$(application_containers 2>/dev/null); then
-    echo "Docker did not answer, so the application's state is unknown"
+    running="Docker did not answer, so the application's state is unknown"
   elif [[ -z "$containers" ]]; then
-    echo "the application is stopped; promote a retained release to start it"
+    running="the application is stopped; promote a retained release to start it"
   else
     # shellcheck disable=SC2086
     image=$(docker inspect --format '{{.Image}}' $containers 2>/dev/null | head -n 1)
-    if [[ -n "$image" ]] && grep -q -F -- "\"scrapeyard\": \"$image\"" "$release/manifest.json"; then
-      echo "the application is running the release that was not promoted, which the next boot would replace; promote a retained release to settle it"
+    if [[ -z "$image" ]] || ! grep -q -F -- "\"scrapeyard\": \"$image\"" "$release/manifest.json"; then
+      running="the application is still running the earlier release"
+    elif [[ "$promoted" == "$release" ]]; then
+      running="the application is running it"
     else
-      echo "the application is still running the earlier release"
+      running="the application is running the release that was not promoted, which the next boot would replace; promote a retained release to settle it"
     fi
+  fi
+  if [[ "$promoted" == "$release" ]]; then
+    echo "$release was already the release the boot service starts, and deploying it again did not complete; $running"
+  else
+    echo "$release was not promoted and the boot service still starts ${promoted:-nothing}; $running"
   fi
 }
 
@@ -173,7 +188,7 @@ case "$ACTION" in
     trap '' INT HUP
     # Print this promotion's output only; an earlier one may have ended
     # within the same second.
-    cursor=$(journalctl --lines 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p')
+    cursor=$({ journalctl --lines 0 --show-cursor 2>/dev/null || true; } | sed -n 's/^-- cursor: //p')
     output_since=(--since "@$(date +%s)")
     [[ -z "$cursor" ]] || output_since=(--after-cursor "$cursor")
     echo "Deploying $release as $PROMOTE_UNIT.service (journalctl -fu $PROMOTE_UNIT to follow)..."
@@ -189,7 +204,7 @@ case "$ACTION" in
     done
     journalctl --no-pager --output cat --unit "$PROMOTE_UNIT.service" "${output_since[@]}" || true
     if ((status != 0)) || [[ "$(readlink -- "$CURRENT" 2>/dev/null)" != "$release" ]]; then
-      fail "$release was not promoted and the boot service still starts $(readlink -- "$CURRENT" 2>/dev/null || echo nothing); $(describe_application "$release")"
+      fail "$(describe_outcome "$release")"
     fi
     echo "Promoted $release; the boot service starts it from now on"
     ;;
@@ -202,6 +217,11 @@ case "$ACTION" in
     load_settings
     [[ ! -e "$CURRENT" || -L "$CURRENT" ]] || fail "$CURRENT exists and is not a link"
     check_ancestors "$CURRENT"
+    if [[ "$(readlink -- "$CURRENT" 2>/dev/null)" == "$release" ]]; then
+      # Promoting the promoted release again deploys it; the link stays.
+      deploy "$release"
+      exit 0
+    fi
     # Write the new link beside the old one before anything is stopped, so a
     # directory that cannot be written to refuses the promotion up front.
     [[ ! -e "$CURRENT.new" || -L "$CURRENT.new" ]] || fail "$CURRENT.new exists and is not a link"

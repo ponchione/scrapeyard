@@ -92,6 +92,7 @@ for release in "$CANDIDATE" "$PREVIOUS"; do
     fail "not a verified release: $release"
 done
 
+BRIDGE_HOOK_BEFORE=""
 UNIT="scrapeyard.service"
 UNIT_FILE="/etc/systemd/system/$UNIT"
 UNIT_DROP_IN="/etc/systemd/system/$UNIT.d"
@@ -114,6 +115,8 @@ if ((BOOT_SERVICE == 1)); then
     fail "the AppArmor profile is already loaded; use an isolated host"
   [[ "$(systemctl is-active docker.service || true)" == "active" ]] || \
     fail "docker.service must be running under systemd"
+  # Read before anything is deployed: the first deployment switches the hook on.
+  BRIDGE_HOOK_BEFORE="$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo unloaded)"
 fi
 
 WORK_DIR=""
@@ -123,7 +126,7 @@ CANDIDATE_OWNER=""
 PREVIOUS_OWNER=""
 BOOT_CANDIDATE=""
 BOOT_PREVIOUS=""
-BRIDGE_HOOK_BEFORE=""
+UNTRUSTED=""
 PROMOTE_UNIT="scrapeyard-promote.service"
 CORRUPTED=""
 APP_CONTAINER=""
@@ -234,12 +237,17 @@ cleanup_resources() {
     # The copies share their files with the releases, so the files' owners
     # go back to what each release had.
     [[ -z "$CORRUPTED" ]] || rm -rf -- "$CORRUPTED"
+    [[ -z "$UNTRUSTED" ]] || rm -rf -- "$UNTRUSTED"
     [[ -z "$BOOT_CANDIDATE" ]] || rm -rf -- "$BOOT_CANDIDATE"
     [[ -z "$BOOT_PREVIOUS" ]] || rm -rf -- "$BOOT_PREVIOUS"
     [[ -z "$CANDIDATE_OWNER" ]] || chown -R "$CANDIDATE_OWNER" "$CANDIDATE" >/dev/null 2>&1
     [[ -z "$PREVIOUS_OWNER" ]] || chown -R "$PREVIOUS_OWNER" "$PREVIOUS" >/dev/null 2>&1
-    # The simulated reboot unloads the bridge hook; put it back as it was.
-    if [[ -n "$BRIDGE_HOOK_BEFORE" ]]; then
+    # The simulated reboot unloads the bridge hook, and every deployment
+    # switches it on. Put it back as it was before the run; a module the
+    # kernel will not unload stays loaded.
+    if [[ "$BRIDGE_HOOK_BEFORE" == "unloaded" ]]; then
+      modprobe -r br_netfilter >/dev/null 2>&1
+    elif [[ -n "$BRIDGE_HOOK_BEFORE" ]]; then
       modprobe br_netfilter >/dev/null 2>&1
       echo "$BRIDGE_HOOK_BEFORE" > /proc/sys/net/bridge/bridge-nf-call-iptables
     fi
@@ -642,7 +650,6 @@ if ((BOOT_SERVICE == 1)); then
 
   echo "Installing the boot service as the deployment guide does..."
   BOOT_SERVICE_ACTIVE=1
-  BRIDGE_HOOK_BEFORE="$(</proc/sys/net/bridge/bridge-nf-call-iptables)"
   if [[ ! -d "$RELEASES_ROOT" ]]; then
     install -d -m 755 -o 0 -g 0 "$RELEASES_ROOT"
     RELEASES_ROOT_CREATED=1
@@ -655,8 +662,16 @@ if ((BOOT_SERVICE == 1)); then
   PREVIOUS_OWNER="$(stat -c '%u:%g' "$PREVIOUS")"
   BOOT_CANDIDATE="$RELEASES_ROOT/$(basename -- "$CANDIDATE")"
   BOOT_PREVIOUS="$RELEASES_ROOT/$(basename -- "$PREVIOUS")"
-  cp -al "$CANDIDATE" "$BOOT_CANDIDATE" 2>/dev/null || cp -a "$CANDIDATE" "$BOOT_CANDIDATE"
-  cp -al "$PREVIOUS" "$BOOT_PREVIOUS" 2>/dev/null || cp -a "$PREVIOUS" "$BOOT_PREVIOUS"
+  copy_release() {
+    # A hard-link copy that fails across filesystems leaves a skeleton behind,
+    # which a plain copy would then nest the release into.
+    if ! cp -al "$1" "$2" 2>/dev/null; then
+      rm -rf -- "$2"
+      cp -a "$1" "$2"
+    fi
+  }
+  copy_release "$CANDIDATE" "$BOOT_CANDIDATE"
+  copy_release "$PREVIOUS" "$BOOT_PREVIOUS"
   chown -R 0:0 "$BOOT_CANDIDATE" "$BOOT_PREVIOUS"
   install -d -m 700 "$ENV_DIR"
   write_deploy_env
@@ -697,13 +712,19 @@ if ((BOOT_SERVICE == 1)); then
 
   if [[ -n "$(find "$(dirname -- "$PREVIOUS")" -maxdepth 0 \( ! -user 0 -o -perm /022 \) -print)" ]]; then
     echo "Promoting a release from a directory another account can write to; it must be refused..."
-    if promote promote-untrusted-directory "$PREVIOUS"; then
+    # Root owns every file and directory of this copy. Only the directory
+    # that holds it is someone else's, and that someone could swap the copy.
+    UNTRUSTED="$(dirname -- "$PREVIOUS")/.rehearsal-untrusted.$$"
+    copy_release "$BOOT_PREVIOUS" "$UNTRUSTED"
+    if promote promote-untrusted-directory "$UNTRUSTED"; then
       fail "a release that another account could replace was promoted"
     fi
-    grep -q -F 'not owned by root, or others can write to it' \
+    grep -q -F 'so what it holds cannot be trusted' \
       "$DIAGNOSTICS_DIR/promote-untrusted-directory-promote.log" || \
       fail "the release in an untrusted directory was refused for another reason"
     [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "a refused promotion moved the release link"
+    rm -rf -- "$UNTRUSTED"
+    UNTRUSTED=""
   fi
 
   echo "Stopping a promotion halfway; it must be reported as failed, with the link unmoved..."
