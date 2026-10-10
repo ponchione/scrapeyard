@@ -238,10 +238,9 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-63 | P3 | worker | low | none | |
-| 2 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 3 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 4 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 1 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 2 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 3 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -280,7 +279,6 @@ passing, which needs it.
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
-| TD-63 | P3 | ready | A cancellation during crash recording leaves the run `running` |
 | TD-64 | P3 | ready | A page whose declared charset decodes to a surrogate fails as `http_error` |
 
 ## Ready to implement
@@ -360,29 +358,6 @@ GitHub runs them on Node 24 and only warns for now.
 **Code:** `.github/workflows/*.yml`.
 **Fix:** move to their Node 24 releases, pinned by SHA as today.
 **Done when:** the workflows run without the Node 20 deprecation warning.
-
-### TD-63 — A cancellation during crash recording leaves the run `running`
-
-**Priority:** P3 · **Area:** worker · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `scrape_task`'s `except Exception` handler records a crash with
-  `_handle_execution_crash`. A `CancelledError` raised there, for example a
-  shutdown cancel during its database writes, propagates out unshielded and
-  never reaches the sibling `except asyncio.CancelledError` handler.
-- The run then stays `running` until the heartbeat timeout. Reproduced on
-  2026-10-09 by blocking `count_errors_for_run` after a crash and cancelling
-  the task. The run-budget path already sends such a cancellation through
-  `_handle_worker_cancellation`, which shields its own crash finalization.
-- It needs a cancel within the few milliseconds a crash takes to record, so
-  it is rare.
-
-**Code:** `queue/worker.py` (`scrape_task`, `_handle_execution_crash`).
-**Fix:** route a cancellation raised during crash recording through
-`_handle_worker_cancellation`, as the run-budget path does, or shield the
-crash finalization there.
-**Done when:** a test that cancels the task while a crash is being recorded
-shows the run reaching `failed` before the task ends.
 
 ### TD-64 — A page whose declared charset decodes to a surrogate fails as `http_error`
 

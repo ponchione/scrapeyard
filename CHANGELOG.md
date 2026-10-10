@@ -181,6 +181,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A cancellation that lands while a crash is being recorded, such as a
+  shutdown cancel during its database writes, no longer leaves the run
+  `running` until the heartbeat timeout. It gets the same recovery as any
+  other cancellation, so the run ends `failed`.
 - Deployment secret redaction orders equal-length secret variants by value,
   so overlapping ones redact the same way in every process. The order used
   to follow the per-process string hash seed.

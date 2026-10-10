@@ -131,6 +131,64 @@ async def test_persisted_surrogate_config_fails_before_any_record_is_written(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_write", ["count_errors_for_run", "delete_result"])
+async def test_cancellation_while_a_crash_is_recorded_still_fails_the_run(tmp_path, blocked_write):
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    await job_store.save_job(
+        Job(
+            job_id="crash-job",
+            project="test",
+            name="crash-job",
+            config_yaml=SIMPLE_YAML,
+            current_run_id="crash-run",
+            current_trigger="adhoc",
+        )
+    )
+    error_store = AsyncMock()
+    result_store = AsyncMock()
+    blocked = asyncio.Event()
+
+    async def block_once(*_args, **_kwargs):
+        # Only the crash handler's own write stalls; recovery's goes through.
+        if blocked.is_set():
+            return 0
+        blocked.set()
+        await asyncio.Event().wait()
+
+    store = error_store if blocked_write == "count_errors_for_run" else result_store
+    getattr(store, blocked_write).side_effect = block_once
+    if blocked_write != "count_errors_for_run":
+        error_store.count_errors_for_run.return_value = 0
+
+    with patch(
+        "scrapeyard.queue.worker._process_all_targets",
+        side_effect=RuntimeError("engine crashed"),
+    ):
+        task = asyncio.create_task(
+            scrape_task(
+                "crash-job",
+                SIMPLE_YAML,
+                run_id="crash-run",
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
+            )
+        )
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run = await job_store.get_job_run("crash-job", "crash-run")
+    assert run is not None
+    assert run.status is JobStatus.failed
+    assert (await job_store.get_job("crash-job")).status is JobStatus.failed
+
+
+@pytest.mark.asyncio
 async def test_scrape_task_marks_job_failed_on_missing_job():
     """If job_store.get_job raises KeyError, job should still be marked failed."""
     job_store = AsyncMock()

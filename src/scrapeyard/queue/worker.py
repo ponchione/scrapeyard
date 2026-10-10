@@ -294,23 +294,41 @@ async def scrape_task(
         await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
     except Exception as exc:
         metric_status = "failed"
-        if heartbeat is not None:
-            await heartbeat.stop()
-        logger.error(
-            "scrape_task crashed for job_id=%s run_id=%s: %s",
-            job_id,
-            active_run_id,
-            _exception_detail(exc),
-        )
-        await _discard_unowned_result(result_store, job_id, active_run_id, job_store=job_store)
-        await _handle_execution_crash(
-            context=context,
-            job_id=job_id,
-            run_id=active_run_id,
-            job_store=job_store,
-            error_store=error_store,
-            webhook_dispatcher=webhook_dispatcher,
-        )
+        try:
+            if heartbeat is not None:
+                await heartbeat.stop()
+            logger.error(
+                "scrape_task crashed for job_id=%s run_id=%s: %s",
+                job_id,
+                active_run_id,
+                _exception_detail(exc),
+            )
+            await _discard_unowned_result(
+                result_store, job_id, active_run_id, job_store=job_store
+            )
+            await _handle_execution_crash(
+                context=context,
+                job_id=job_id,
+                run_id=active_run_id,
+                job_store=job_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+            )
+        except asyncio.CancelledError:
+            # As in the budget handler: raised inside this except block, the
+            # cancellation would skip the cancellation handler above.
+            metric_status = "cancelled"
+            if await _handle_worker_cancellation(
+                job_id=job_id,
+                run_id=active_run_id,
+                context=context,
+                heartbeat=heartbeat,
+                job_store=job_store,
+                result_store=result_store,
+                error_store=error_store,
+                webhook_dispatcher=webhook_dispatcher,
+            ):
+                raise
     finally:
         if heartbeat is not None:
             await heartbeat.stop()
