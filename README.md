@@ -274,6 +274,15 @@ source labels share one canonical URL identity. Hostnames are lowercased and
 IDNA-encoded, trailing dots and explicit default HTTP/HTTPS ports are removed,
 and non-default ports remain separate origins.
 
+A non-ASCII hostname is accepted only when IDNA 2003 and strict IDNA 2008
+encode it to the same name; otherwise it is rejected as an unsafe URL, because
+the URL guard and the client would disagree about which site it names.
+`straße.example` is rejected: it is `strasse.example` under IDNA 2003 and
+`xn--strae-oqa.example` under IDNA 2008. So are names IDNA 2008 does not
+allow, such as `☃.example` or one spelled with fullwidth letters. Write such a
+host in its ASCII `xn--` form. Names like `bücher.example` are accepted as
+before. An ASCII hostname containing `<`, `>` or `^` is rejected too.
+
 Configuration YAML rejects aliases, duplicate keys, and collection nesting
 beyond 50 levels. Excessive nesting is reported as a sanitized HTTP 422 rather
 than an internal parser error.

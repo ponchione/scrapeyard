@@ -294,7 +294,6 @@ envelope field uses up that budget.
 Nothing is ready to implement as a single pull request.
 
 **In review, waiting for the owner:**
-- TD-65 is pull request #3. It changes what the URL guard accepts.
 - TD-73 is pull request #10. It changes how Chromium starts on fetches
   without `stealth`.
 
@@ -327,7 +326,6 @@ and rehearses it; dispatch it on the commit to release.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-65 | P3 | in review | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
 | TD-73 | P1 | in review | Chromium runs without its sandbox on dynamic fetches without `stealth` |
 
 ## Ready to implement
@@ -474,37 +472,6 @@ usable sandbox" where it used to run unsandboxed; the CI runner needed
 Fetches with `stealth` already behave that way.
 **Done when:** #10 is merged with browser smoke passing, and one run of
 non-stealth browser targets on Eyebox's local stack gives the same results.
-
-### TD-65 — The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names
-
-**Priority:** P3 · **Area:** engine, URL guard · **Risk:** medium · **Contract:** none (every Eyebox target host is ASCII) · **Depends on:** a security review of the guard change
-
-**Problem:**
-- `_canonical_hostname` encodes with Python's `idna` codec (IDNA 2003), which
-  maps `ß` to `ss` and `ς` to `σ`. httpx encodes with IDNA 2008, which keeps
-  them. Measured 2026-10-09: for `https://straße.test/` the guard resolves
-  `strasse.test` while httpx requests `xn--strae-oqa.test`, and for
-  `https://ς.test/` the guard resolves `xn--4xa.test` while httpx requests
-  `xn--3xa.test`.
-- Behind a proxy, a basic fetch of such a URL is therefore DNS-checked under
-  one name and requested under another. The lexical checks still apply, and
-  the proxy resolves the requested name and must refuse private destinations
-  itself, so this is a missed check, not a bypass.
-- A direct basic fetch is pinned to the address of the name the guard
-  resolved and sends that name as `Host` and SNI
-  (`host_header='strasse.test'`), so it fetches the IDNA 2003 site, not the
-  one a browser opens.
-- Browser requests are not affected: the browser gives the route guard the
-  ASCII name it is about to use.
-
-**Code:** `engine/url_guard.py` (`_canonical_hostname`, `resolve_public_url`,
-`url_host_label`, `canonical_url_origin`).
-**Fix:** canonicalize with the IDNA processing the HTTP client uses (httpx
-uses the `idna` package), or refuse a hostname whose two encodings differ.
-Either changes what the guard accepts, so it needs the review.
-**Done when:** a test shows the guard, the `Host` header and the client's
-request name agree for `straße.test` and `ς.test` (or that both are refused).
-The lone-surrogate half of this entry was fixed on 2026-10-10.
 
 ## Operational and deployment qualification
 

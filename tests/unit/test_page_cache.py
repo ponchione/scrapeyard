@@ -201,6 +201,26 @@ async def test_replay_miss_fails_first_page_and_stops_pagination_gracefully(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("next_href", ["https://straße.test/list?page=2", "https://a..b/list"])
+async def test_replay_stops_at_a_refused_next_link_as_the_live_run_does(
+    tmp_path, monkeypatch, next_href
+):
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _no_network)
+    monkeypatch.setattr(pagination, "_pagination_url_is_safe", _REAL_PAGINATION_URL_CHECK)
+    monkeypatch.setattr("scrapeyard.engine.pagination.assert_public_url", _no_network)
+    cache = _cache(tmp_path, PageCacheMode.replay)
+    cache.store(BASE, "basic", html=_page_html(["A", "B"], next_href), final_url=BASE,
+                status=200, content_type="text/html")
+
+    with activate_page_cache(cache):
+        result = await _scrape(_target(), tmp_path)
+
+    assert result.is_success
+    assert _names(result) == ["A", "B"]
+    assert result.pagination_stop_reason == "unsafe_next_url"
+
+
+@pytest.mark.asyncio
 async def test_unconfigured_cache_fails_instead_of_fetching(tmp_path, monkeypatch):
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _no_network)
     with activate_page_cache(None, unavailable=True):
