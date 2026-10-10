@@ -1,0 +1,50 @@
+# Temporary, for the TD-71 diagnosis only. This branch is never merged.
+name: TD-71 renderer crash diagnostic (temporary)
+
+on:
+  pull_request:
+    paths:
+      - tests/diag/**
+      - .github/workflows/td71-diagnostic.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: td71-diagnostic-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.group }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [restrictions, handling, kinds]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the production image
+        env:
+          SCRAPEYARD_API_CREDENTIALS: "{}"
+          SCRAPEYARD_ENCRYPTION_KEYS: "{}"
+          SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID: build
+        run: docker compose -p td71 -f docker-compose.yml -f docker-compose.smoke.yml build scrapeyard
+      - name: Run the renderer-death probes
+        run: bash tests/diag/td71_matrix.sh "${{ matrix.group }}"
+      - name: Pack the probe output
+        if: always()
+        run: |
+          if [ -d artifacts/td71 ]; then
+            tar -C artifacts -czf "td71-${{ matrix.group }}.tar.gz" td71
+          fi
+      - name: Upload the probe output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: td71-${{ matrix.group }}
+          path: td71-${{ matrix.group }}.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
