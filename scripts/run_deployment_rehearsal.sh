@@ -404,6 +404,34 @@ verify_api() {
     "$@" > "$DIAGNOSTICS_DIR/$label-api.json"
 }
 
+# Started by Docker with no host egress policy, the application must report
+# the reachable challenge and never serve. Its container is left stopped. The
+# container is replaced by the next deployment, so its log is kept as evidence.
+expect_refusal_without_policy() {
+  local label=$1 since deadline
+  remove_egress_policy
+  [[ -z "$(policy_jumps)" ]] || fail "the egress policy could not be removed"
+  since=$(date +%s)
+  docker start "$APP_CONTAINER" >/dev/null
+  deadline=$((SECONDS + 60))
+  until docker logs --since "$since" "$APP_CONTAINER" > "$DIAGNOSTICS_DIR/$label.log" 2>&1 && \
+    grep -q 'controlled non-public challenge was reachable' "$DIAGNOSTICS_DIR/$label.log"; do
+    if curl --silent --output /dev/null --max-time 2 "$API_URL/health"; then
+      fail "[$label] the application served without the host egress policy"
+    fi
+    ((SECONDS < deadline)) || fail "[$label] the application did not report the missing egress policy"
+    sleep 1
+  done
+  # It is restarted by Docker until the policy is back; it must never serve.
+  for _ in 1 2 3 4 5; do
+    if curl --silent --output /dev/null --max-time 2 "$API_URL/health"; then
+      fail "[$label] the application served without the host egress policy"
+    fi
+    sleep 1
+  done
+  docker stop -t 40 "$APP_CONTAINER" >/dev/null
+}
+
 # Everything a deployment must leave true, checked from outside the application.
 verify_runtime() {
   local label=$1 release=$2 name=$3 service container network_id
@@ -516,6 +544,16 @@ python3 tests/rehearsal/verify_deployment.py record \
   --job-timeout "$JOB_TIMEOUT" > "$DIAGNOSTICS_DIR/known-run.json"
 verify_api candidate-known --known "$WORK_DIR/known-run.json"
 
+echo "Deploying without a proxy while submissions are untrusted; it must be refused before anything is stopped..."
+RUNNING_BEFORE="$APP_CONTAINER"
+if deploy no-proxy "$CANDIDATE" SCRAPEYARD_PROXY_URL=; then
+  fail "a deployment of untrusted submissions without an operator proxy went ahead"
+fi
+grep -q -F 'must name an egress-filtering operator proxy' "$DIAGNOSTICS_DIR/no-proxy-deploy.log" || \
+  fail "the deployment without a proxy was refused for another reason"
+[[ "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && app_is_running || \
+  fail "refusing the deployment without a proxy disturbed the running application"
+
 echo "Offering a corrupted candidate; the running release must be left alone..."
 # Hard links keep the copy cheap, so it sits beside the release it copies.
 CORRUPTED="$(dirname "$CANDIDATE")/.rehearsal-corrupted.$$"
@@ -545,27 +583,7 @@ app_is_running && fail "the application is running after a failed policy install
   fail "a failed policy installation changed the active policy"
 
 echo "Starting the application without the host egress policy; it must refuse to serve..."
-remove_egress_policy
-[[ -z "$(policy_jumps)" ]] || fail "the egress policy could not be removed"
-docker start "$APP_CONTAINER" >/dev/null
-REFUSAL_DEADLINE=$((SECONDS + 60))
-# This container is replaced by the rollback, so its log is kept as evidence.
-until docker logs --tail 200 "$APP_CONTAINER" > "$DIAGNOSTICS_DIR/unprotected-start.log" 2>&1 && \
-  grep -q 'controlled non-public challenge was reachable' "$DIAGNOSTICS_DIR/unprotected-start.log"; do
-  if curl --silent --output /dev/null --max-time 2 "$API_URL/health"; then
-    fail "the application served without the host egress policy"
-  fi
-  ((SECONDS < REFUSAL_DEADLINE)) || fail "the application did not report the missing egress policy"
-  sleep 1
-done
-# It is restarted by Docker until the policy is back; it must never serve.
-for _ in 1 2 3 4 5; do
-  if curl --silent --output /dev/null --max-time 2 "$API_URL/health"; then
-    fail "the application served without the host egress policy"
-  fi
-  sleep 1
-done
-docker stop -t 40 "$APP_CONTAINER" >/dev/null
+expect_refusal_without_policy unprotected-start
 
 echo "Deploying with the policy on another bridge; the start must fail and leave the application stopped..."
 if deploy uncovered-bridge "$CANDIDATE" SCRAPEYARD_EGRESS_INTERFACE=docker0; then
@@ -622,13 +640,21 @@ if ((BOOT_SERVICE == 1)); then
       sleep 2
     done
   }
+  # Most of this phase runs with an operator proxy set, because the previous
+  # release may predate deployments without one. The last steps switch to none.
+  EGRESS="proxy"
   write_deploy_env() {
     # The form the deployment guide prescribes: one single-quoted value a line.
     (
       umask 077
       {
         printf "COMPOSE_PROJECT_NAME='%s'\n" "$PROJECT"
-        printf "SCRAPEYARD_PROXY_URL='%s'\n" "$SCRAPEYARD_PROXY_URL"
+        if [[ "$EGRESS" == "direct" ]]; then
+          # No operator proxy: the one submitter is the operator's own service.
+          printf "SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'\n"
+        else
+          printf "SCRAPEYARD_PROXY_URL='%s'\n" "$SCRAPEYARD_PROXY_URL"
+        fi
         printf "SCRAPEYARD_EGRESS_POLICY_ID='%s'\n" "$POLICY_ID"
         printf "SCRAPEYARD_API_CREDENTIALS='%s'\n" "$SCRAPEYARD_API_CREDENTIALS"
         printf "SCRAPEYARD_ENCRYPTION_KEYS='%s'\n" "$SCRAPEYARD_ENCRYPTION_KEYS"
@@ -646,6 +672,24 @@ if ((BOOT_SERVICE == 1)); then
       -u SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID -u SCRAPEYARD_PROXY_URL \
       -u SCRAPEYARD_EGRESS_POLICY_ID -u COMPOSE_PROJECT_NAME \
       "$MANAGE" promote "$release" > "$DIAGNOSTICS_DIR/$label-promote.log" 2>&1
+  }
+
+  # With no proxy in the settings file, the running application must be the
+  # one it describes, and must have checked the host egress policy itself.
+  verify_direct_egress() {
+    local label=$1
+    python3 - "$WORK_DIR/app-inspect.json" <<'PY' || fail "[$label] the application does not run with the settings file's proxy and submission mode"
+import json
+import sys
+
+env = dict(item.split("=", 1) for item in json.load(open(sys.argv[1], encoding="utf-8"))[0]["Config"]["Env"])
+sys.exit(
+    0 if env.get("SCRAPEYARD_UNTRUSTED_SUBMISSIONS") == "false" and not env.get("SCRAPEYARD_PROXY_URL") else 1
+)
+PY
+    docker logs "$APP_CONTAINER" > "$WORK_DIR/attestation.log" 2>&1
+    grep -q 'Connected-IP egress policy attested' "$WORK_DIR/attestation.log" || \
+      fail "[$label] the application started without checking the host egress policy"
   }
 
   echo "Installing the boot service as the deployment guide does..."
@@ -898,6 +942,26 @@ if ((BOOT_SERVICE == 1)); then
   await_unit rollback-boot "$BEFORE"
   verify_runtime rollback-boot "$BOOT_PREVIOUS" previous
   verify_api rollback-boot --known "$WORK_DIR/known-run.json"
+
+  echo "Switching the settings to no operator proxy and promoting the candidate with them..."
+  EGRESS="direct"
+  write_deploy_env
+  promote promote-no-proxy "$BOOT_CANDIDATE"
+  [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "the promotion without a proxy did not select the candidate"
+  verify_runtime promote-no-proxy "$BOOT_CANDIDATE" candidate
+  verify_direct_egress promote-no-proxy
+  verify_api promote-no-proxy --known "$WORK_DIR/known-run.json"
+
+  echo "Starting the application without the egress policy and without a proxy; it must still refuse to serve..."
+  systemctl stop "$UNIT"
+  expect_refusal_without_policy unprotected-start-no-proxy
+  # The boot service then starts it as it would after a boot.
+  BEFORE="$(invocation)"
+  systemctl start "$UNIT"
+  await_unit boot-no-proxy "$BEFORE"
+  verify_runtime boot-no-proxy "$BOOT_CANDIDATE" candidate
+  verify_direct_egress boot-no-proxy
+  verify_api boot-no-proxy --known "$WORK_DIR/known-run.json"
 fi
 
 # Promotion and rollback must work from the retained archives alone.

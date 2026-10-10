@@ -15,8 +15,21 @@ fail() {
 ((EUID == 0)) || fail "run as root so the host egress policy can be installed"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
-[[ -n "${SCRAPEYARD_PROXY_URL:-}" && "$SCRAPEYARD_PROXY_URL" != "direct" ]] || \
-  fail "SCRAPEYARD_PROXY_URL must name an egress-filtering operator proxy"
+# Compose defaults to untrusted submissions, which the application accepts
+# only behind an operator proxy that filters destinations. A deployment whose
+# only submitter is its operator's own service may set
+# SCRAPEYARD_UNTRUSTED_SUBMISSIONS=false and fetch directly.
+if [[ "${SCRAPEYARD_UNTRUSTED_SUBMISSIONS:-true}" != "false" ]]; then
+  [[ -n "${SCRAPEYARD_PROXY_URL:-}" && "$SCRAPEYARD_PROXY_URL" != "direct" ]] || \
+    fail "SCRAPEYARD_PROXY_URL must name an egress-filtering operator proxy, unless SCRAPEYARD_UNTRUSTED_SUBMISSIONS is false"
+fi
+# With or without a proxy, the host egress policy is the boundary for browser
+# traffic, and the application checks it at startup only while its probe is
+# configured. A port of 0 would switch that check off without a word.
+for setting in SCRAPEYARD_EGRESS_POLICY_PROBE_PORT SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT; do
+  [[ ! "${!setting:-}" =~ ^0+$ ]] || \
+    fail "$setting=0 would switch off the startup check of the host egress policy"
+done
 
 # One deployment at a time. A promotion that overlaps the boot service's start
 # would interleave their stop, policy and start steps.

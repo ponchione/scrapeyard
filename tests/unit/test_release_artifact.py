@@ -340,6 +340,59 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
     )
 
 
+def test_a_deployment_needs_a_proxy_unless_submissions_are_first_party(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    calls = Path(env["CALLS"])
+    env.pop("SCRAPEYARD_PROXY_URL")
+
+    # Compose's default is untrusted submissions, which need the proxy.
+    for untrusted in (None, "true", "0", "False", "no"):
+        calls.write_text("")
+        mode = {} if untrusted is None else {"SCRAPEYARD_UNTRUSTED_SUBMISSIONS": untrusted}
+        result = subprocess.run(command, cwd=tmp_path, env=dict(env, **mode), capture_output=True)
+        assert result.returncode == 2, untrusted
+        assert b"must name an egress-filtering operator proxy" in result.stderr
+        # Refused before the release is loaded or anything is stopped.
+        assert calls.read_text().splitlines() == ["docker compose version"]
+    refused = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, SCRAPEYARD_UNTRUSTED_SUBMISSIONS="true", SCRAPEYARD_PROXY_URL="direct"),
+        capture_output=True,
+    )
+    assert refused.returncode == 2
+
+    calls.write_text("")
+    subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, SCRAPEYARD_UNTRUSTED_SUBMISSIONS="false"),
+        check=True,
+        capture_output=True,
+    )
+    assert calls.read_text().splitlines()[-1] == "docker compose up -d --wait --no-build --pull never"
+
+
+@pytest.mark.parametrize(
+    "setting",
+    ["SCRAPEYARD_EGRESS_POLICY_PROBE_PORT", "SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT"],
+)
+@pytest.mark.parametrize("mode", ["true", "false"])
+def test_a_deployment_cannot_switch_off_the_startup_check_of_the_policy(tmp_path, setting, mode):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    env = dict(env, SCRAPEYARD_UNTRUSTED_SUBMISSIONS=mode)
+
+    for value in ("0", "00"):
+        result = subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: value}), capture_output=True)
+        assert result.returncode == 2
+        assert b"would switch off the startup check of the host egress policy" in result.stderr
+        assert Path(env["CALLS"]).read_text().splitlines() == ["docker compose version"]
+        Path(env["CALLS"]).write_text("")
+    # An unset or empty value leaves Compose's default in place.
+    subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: ""}), check=True, capture_output=True)
+    subprocess.run(command, cwd=tmp_path, env=dict(env, **{setting: "8090"}), check=True, capture_output=True)
+
+
 def test_a_second_deployment_waits_for_the_first_instead_of_interleaving(tmp_path):
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
     lock_dir = tmp_path / "lock"
