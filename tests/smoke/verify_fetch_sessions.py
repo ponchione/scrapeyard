@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import threading
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -240,6 +242,33 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
         await session.aclose()
 
 
+MODE_TIMEOUT_SECONDS = 180
+
+
+async def verify_within_timeout(fetcher, fetcher_type, data_dir, *, stealth):
+    """Run one mode, or say where it is stuck and stop the process.
+
+    Every step waits on a browser or a driver. One that never answers would
+    otherwise hold the lane until the CI job is killed, with nothing in the log.
+    """
+    task = asyncio.create_task(verify(fetcher, fetcher_type, data_dir, stealth=stealth))
+    done, _ = await asyncio.wait({task}, timeout=MODE_TIMEOUT_SECONDS)
+    if done:
+        task.result()
+        return
+    print(
+        f"fetch-session checks for {fetcher_type} stealth={stealth} did not finish "
+        f"within {MODE_TIMEOUT_SECONDS}s; pending tasks:",
+        file=sys.stderr,
+    )
+    for pending in asyncio.all_tasks():
+        if pending is not asyncio.current_task():
+            pending.print_stack(file=sys.stderr)
+    sys.stderr.flush()
+    # Cleanup would wait on the same browser, so leave without it.
+    os._exit(3)
+
+
 async def main():
     server = ThreadingHTTPServer(("0.0.0.0", 8080), Fixture)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -251,7 +280,7 @@ async def main():
                 (PlayWrightFetcher, "dynamic", True),
                 (StealthyFetcher, "stealthy", False),
             ):
-                await verify(fetcher, name, data_dir, stealth=stealth)
+                await verify_within_timeout(fetcher, name, data_dir, stealth=stealth)
                 print(json.dumps({"fetcher": name, "stealth": stealth, "session_checks": "passed"}), flush=True)
     finally:
         server.shutdown()
