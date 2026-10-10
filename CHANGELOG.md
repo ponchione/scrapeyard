@@ -58,6 +58,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Updated locked dependencies with known advisories: aiohttp 3.14.4, anyio
+  4.15.1, cryptography 50.0.2, multidict 6.9.1, PyJWT 2.15.1 and urllib3
+  2.8.0 (with yarl 1.25.1 and typing-extensions 4.16.0). `cryptography` is
+  now constrained to `>=50.0.2,<51.0.0`; its 49 and 50 releases change
+  nothing in the AES-GCM API that secret storage uses. Both dependency
+  audits and the container scan are clean, with no exceptions.
 - Each fetched page is now freed as soon as the engine drops it, instead of
   waiting for the cyclic garbage collector, so parsed pages no longer pile up
   during pagination. On a 50-page link pagination run with 265 KiB pages,

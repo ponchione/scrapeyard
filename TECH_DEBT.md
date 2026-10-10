@@ -112,7 +112,8 @@ Measured on 2026-10-09 at `b0b285e`.
 | `pip-audit` on pip 26.1.2 | PYSEC-2026-3721, fixed in 26.2 (TD-26) |
 | Eyebox configs vs. schema | 56 of 56 validate |
 | `pytest -W error` after TD-25 | 2,356 passed, 17 skipped, with no env override and no network lookups; 41–54 s |
-| After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages (TD-61) |
+| After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages |
+| After the second 2026-10-09 pass | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,521 passed, 17 skipped, 90.2% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's 54 configs validate |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -237,16 +238,15 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-63 | P3 | worker | low | none | |
-| 3 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 4 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 5 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 1 | TD-63 | P3 | worker | low | none | |
+| 2 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 3 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 4 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
-**Before the first deploy:** TD-61 (dependency advisories), then TD-26
-(re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
-deployment, so local checks cover it until then. A release (TD-22) needs the
-container scan and qualification workflows passing, which needs both.
+**Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
+passes). CI is GitHub Actions, not deployment, so local checks cover it until
+then. A release (TD-22) needs the container scan and qualification workflows
+passing, which needs it.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
@@ -279,7 +279,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
-| TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 | TD-63 | P3 | ready | A cancellation during crash recording leaves the run `running` |
 | TD-64 | P3 | ready | A page whose declared charset decodes to a surrogate fails as `http_error` |
@@ -288,7 +287,7 @@ container scan and qualification workflows passing, which needs both.
 
 ### TD-26 — CI is disabled, and its workflows haven't run since their fixes
 
-**Priority:** P1 · **Area:** CI, build · **Risk:** low · **Contract:** none · **Depends on:** an operator re-enabling Actions; TD-61
+**Priority:** P1 · **Area:** CI, build · **Risk:** low · **Contract:** none · **Depends on:** an operator re-enabling Actions
 
 **Problem:** Actions is disabled for the repository
 (`gh api repos/{owner}/{repo}/actions/permissions` returns `enabled: false`),
@@ -306,10 +305,11 @@ causes were fixed on 2026-10-09:
   1000.
 - mypy runs on one matrix leg, and browser smoke also triggers on model and SQL
   changes.
+- The locked Python packages with advisories were updated. Both `pip-audit`
+  lanes and a local run of `scripts/run_container_security_scan.sh` are clean,
+  with no audit exceptions.
 
 **Remaining:**
-- **a. Fix TD-61.** Dependency audit and Container security fail on the locked
-  Python packages until it lands.
 - **b. Re-enable Actions,** then confirm on `main` that CI (both quality legs,
   build, live-redis), Dependency audit (both legs), Container security,
   Container and browser smoke, and Release qualification (quick and full)
@@ -321,31 +321,6 @@ causes were fixed on 2026-10-09:
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-61 — Locked Python dependencies have known vulnerabilities
-
-**Priority:** P1 · **Area:** dependencies · **Risk:** medium · **Contract:** none; Eyebox's hard-test venv is separate and doesn't follow the lock · **Depends on:** —
-
-**Problem:**
-- On 2026-10-09, `pip-audit` reported 32 advisories in the production lock and
-  34 in the development lock, and the image scan reported 12 HIGH/CRITICAL
-  findings, all in locked Python packages. Dependency audit and Container
-  security fail on them, so TD-26 can't close until they're fixed.
-- Affected, with the fixed version: aiohttp 3.14.1 (3.14.3), anyio 4.12.1
-  (4.14.2), multidict 6.7.1 (6.9.1), urllib3 2.7.0 (2.8.0), pyjwt 2.13.0
-  (2.15.0), and cryptography 48.0.1 (49 or 50, but `pyproject.toml` pins
-  `<49`).
-- PYSEC-2026-4146 in pyjwt has no fixed release. pyjwt comes in through
-  `redis` 5.3.1, so it needs a reviewed entry in
-  `security/dependency-audit-exceptions.json` or a way to drop it.
-
-**Code:** `pyproject.toml`, `poetry.lock`,
-`security/dependency-audit-exceptions.json`, `scripts/audit_dependencies.py`.
-**Fix:** update the lock to the fixed versions, review the cryptography 49/50
-changes against `storage/secret_envelope.py` before widening its constraint,
-decide the pyjwt exception, then rebuild the image and rerun the scan.
-**Done when:** `scripts/audit_dependencies.py all` and the container scan are
-clean, with the full suite passing.
 
 ### TD-51 — Shutdown ends in SIGKILL while a run or result thread is still active
 
