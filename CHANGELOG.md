@@ -207,6 +207,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The host egress policy now requires the kernel's bridge netfilter hook
+  before it installs. The policy's `DOCKER-USER` rules see traffic between
+  containers on the deployment bridge only while
+  `net.bridge.bridge-nf-call-iptables` is on, and Docker Engine has not
+  turned it on by default since 27.4. On such a host the chains installed
+  cleanly and filtered nothing on the bridge; the startup attestation caught
+  it and refused to start ("controlled non-public challenge was reachable").
+  `install-docker-egress-policy.sh` now loads `br_netfilter` and sets the
+  hook before it changes any chain, and stops if it cannot.
+- The browser smoke lane finds the image it built by name. It looked for
+  Compose's labels, which Compose 2.38 no longer puts on a built image, and
+  stopped with "Compose did not produce a Scrapeyard image".
 - The release-artifact unit test no longer depends on the host's free disk.
   `release_artifact.create` refuses to run with under 15 GiB free where the
   release is written, and the test let that check read the real temp

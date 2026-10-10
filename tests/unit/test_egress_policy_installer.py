@@ -8,6 +8,8 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 _IPTABLES_SHIM = r"""
 #!/usr/bin/env python3
 import json
@@ -81,16 +83,42 @@ save()
 """
 
 
+_BRIDGE_NETFILTER_LINE = "BRIDGE_NETFILTER_DIR=/proc/sys/net/bridge"
+_MODPROBE_SHIM = """#!/bin/sh
+echo "$@" >>"$SHIM_STATE_DIR/modprobe.log"
+[ -n "$MODPROBE_LOADS_INTO" ] || exit 1
+mkdir -p "$MODPROBE_LOADS_INTO"
+echo 1 >"$MODPROBE_LOADS_INTO/bridge-nf-call-iptables"
+echo 1 >"$MODPROBE_LOADS_INTO/bridge-nf-call-ip6tables"
+"""
+
+
 def _installer(tmp_path: Path) -> Path:
     source = Path("security/install-docker-egress-policy.sh").read_text(encoding="utf-8")
     source = source.replace(
         '((EUID == 0)) || fail "host root privileges are required"',
         ': # root check disabled only in the copied test script',
     )
+    assert _BRIDGE_NETFILTER_LINE in source
+    source = source.replace(
+        _BRIDGE_NETFILTER_LINE, f"BRIDGE_NETFILTER_DIR={tmp_path / 'bridge'}"
+    )
     path = tmp_path / "install-docker-egress-policy.sh"
     path.write_text(source, encoding="utf-8")
     path.chmod(0o755)
+    _bridge_netfilter(tmp_path, iptables="1", ip6tables="1")
     return path
+
+
+def _bridge_netfilter(tmp_path: Path, **settings: str) -> Path:
+    """Stand in for /proc/sys/net/bridge; no arguments means the module is unloaded."""
+    bridge = tmp_path / "bridge"
+    shutil.rmtree(bridge, ignore_errors=True)
+    if settings:
+        bridge.mkdir()
+    for family, value in settings.items():
+        (bridge / f"bridge-nf-call-{family}").write_text(f"{value}\n")
+    return bridge
 
 
 def _shim_bin(tmp_path: Path) -> Path:
@@ -100,6 +128,9 @@ def _shim_bin(tmp_path: Path) -> Path:
     shim.write_text(textwrap.dedent(_IPTABLES_SHIM).lstrip(), encoding="utf-8")
     shim.chmod(0o755)
     (bin_dir / "ip6tables").symlink_to(shim)
+    modprobe = bin_dir / "modprobe"
+    modprobe.write_text(_MODPROBE_SHIM, encoding="utf-8")
+    modprobe.chmod(0o755)
     return bin_dir
 
 
@@ -227,3 +258,76 @@ def test_wrong_address_family_fails_before_firewall_mutation(tmp_path: Path) -> 
 
     assert result.returncode != 0
     assert not (state_dir / "mutation-count").exists()
+
+
+def _fresh_install(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    installer = _installer(tmp_path)
+    bin_dir = _shim_bin(tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    return installer, state_dir, _environment(bin_dir, state_dir)
+
+
+def test_install_turns_on_bridge_netfilter_that_is_off(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    bridge = _bridge_netfilter(tmp_path, iptables="0", ip6tables="0")
+
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    assert (bridge / "bridge-nf-call-iptables").read_text().strip() == "1"
+    assert (bridge / "bridge-nf-call-ip6tables").read_text().strip() == "1"
+    assert "Enabled net.bridge.bridge-nf-call-iptables" in result.stdout
+    assert not (state_dir / "modprobe.log").exists()
+    _assert_old_policy_active(state_dir)
+
+
+def test_install_loads_the_bridge_netfilter_module_when_it_is_absent(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    bridge = _bridge_netfilter(tmp_path)
+    env["MODPROBE_LOADS_INTO"] = os.fspath(bridge)
+
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    assert (state_dir / "modprobe.log").read_text().split() == ["br_netfilter"]
+    _assert_old_policy_active(state_dir)
+
+
+def test_install_refuses_before_firewall_mutation_without_bridge_netfilter(
+    tmp_path: Path,
+) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    _bridge_netfilter(tmp_path)
+
+    result = _run(installer, env)
+
+    assert result.returncode == 2
+    assert "br_netfilter" in result.stderr
+    assert "same-bridge traffic would bypass the policy" in result.stderr
+    assert not (state_dir / "mutation-count").exists()
+
+
+def test_install_refuses_when_bridge_netfilter_cannot_be_turned_on(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    bridge = _bridge_netfilter(tmp_path, iptables="0", ip6tables="1")
+    (bridge / "bridge-nf-call-iptables").chmod(0o444)
+    if os.access(bridge / "bridge-nf-call-iptables", os.W_OK):
+        pytest.skip("root can write the read-only stand-in")
+
+    result = _run(installer, env)
+
+    assert result.returncode == 2
+    assert "net.bridge.bridge-nf-call-iptables must be 1" in result.stderr
+    assert not (state_dir / "mutation-count").exists()
+
+
+def test_ipv4_only_install_does_not_need_ip6tables_bridge_netfilter(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    bridge = _bridge_netfilter(tmp_path, iptables="1", ip6tables="0")
+    env["SCRAPEYARD_EGRESS_SOURCE_V6"] = ""
+
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    assert (bridge / "bridge-nf-call-ip6tables").read_text().strip() == "0"

@@ -17,6 +17,7 @@ LEGACY_CHAIN="SY-EGRESS-${POLICY_ID}"
 CHAIN_A="${LEGACY_CHAIN}-A"
 CHAIN_B="${LEGACY_CHAIN}-B"
 POLICY_OUTPUT=""
+BRIDGE_NETFILTER_DIR=/proc/sys/net/bridge
 
 fail() {
   echo "scrapeyard egress policy: $*" >&2
@@ -75,6 +76,27 @@ staging_chain() {
     printf '%s' "$CHAIN_B"
   else
     printf '%s' "$CHAIN_A"
+  fi
+}
+
+# The application reaches Redis, the probe and every other peer on the
+# deployment bridge at layer 2. Those frames pass iptables, and so this policy,
+# only while the kernel's bridge netfilter hook is on. Docker Engine turned it
+# on for every host until 27.4; since then it loads br_netfilter only for a
+# network with inter-container communication disabled. With the hook off the
+# chains install cleanly and filter nothing on the bridge.
+require_bridge_netfilter() {
+  local key=$1 setting="$BRIDGE_NETFILTER_DIR/$1"
+  if [[ ! -e "$setting" ]]; then
+    modprobe br_netfilter >/dev/null 2>&1 || true
+  fi
+  [[ -e "$setting" ]] || \
+    fail "bridge netfilter (br_netfilter) is unavailable; same-bridge traffic would bypass the policy"
+  if [[ "$(<"$setting")" != 1 ]]; then
+    echo 1 >"$setting" 2>/dev/null || true
+    [[ "$(<"$setting")" == 1 ]] || \
+      fail "net.bridge.$key must be 1; same-bridge traffic would bypass the policy"
+    echo "Enabled net.bridge.$key so the policy sees same-bridge traffic"
   fi
 }
 
@@ -171,6 +193,11 @@ while IFS=$'\t' read -r family action cidr extra; do
 done <"$POLICY_OUTPUT"
 [[ ${#POLICY_V4_DENY[@]} -gt 0 && ${#POLICY_V6_DENY[@]} -gt 0 ]] || \
   fail "address policy renderer returned an empty deny policy"
+
+require_bridge_netfilter bridge-nf-call-iptables
+if [[ -n "$APP_SOURCE_V6" ]]; then
+  require_bridge_netfilter bridge-nf-call-ip6tables
+fi
 
 V4_OLD=$(active_chain iptables)
 V4_NEW=$(staging_chain "$V4_OLD")

@@ -175,6 +175,18 @@ reinserts the prior jump before withdrawing the replacement if any later IPv4
 or IPv6 mutation fails. Address families, tools, Docker chain prerequisites,
 and rendered rules are validated before the active policy is changed.
 
+The policy depends on the kernel's bridge netfilter hook
+(`net.bridge.bridge-nf-call-iptables`, and `bridge-nf-call-ip6tables` for an
+IPv6 source). Redis, the probe and any other container on the deployment
+bridge are reached at layer 2, and those frames pass `DOCKER-USER` only while
+the hook is on. Docker Engine turned it on for every host until 27.4; newer
+engines load `br_netfilter` only for a network with inter-container
+communication disabled. The installer therefore loads the module and sets the
+hook before it changes any chain, and stops if it cannot. The setting is
+host-wide and does not survive a reboot, so the policy must be installed again
+after one (TD-20). `remove` leaves the hook as it is. If startup fails with
+"controlled non-public challenge was reachable", check this setting first.
+
 The helper reports liveness only while its
 challenge listener is serving, so connection refusal or timeout is accepted as
 policy proof only between two valid liveness exchanges. A hostname that returns
