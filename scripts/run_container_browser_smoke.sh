@@ -234,10 +234,11 @@ echo "Building the production Dockerfile (no_cache=$NO_CACHE)..."
 timeout "$BUILD_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" "${BUILD_ARGS[@]}"
 BUILD_DURATION=$((SECONDS - BUILD_STARTED_AT))
 
-IMAGE_ID="$(docker image ls -q \
-  --filter "label=com.docker.compose.project=$PROJECT" \
-  --filter "label=com.docker.compose.service=scrapeyard" | head -n 1)"
-[[ -n "$IMAGE_ID" ]] || fail "Compose did not produce a Scrapeyard image"
+# Find the image by the name Compose gives a built service. Compose 2.38 on
+# the GitHub runner builds through Bake and left the com.docker.compose labels
+# off the image, so a label filter found nothing (2026-10-10).
+IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PROJECT-scrapeyard" 2>/dev/null || true)"
+[[ -n "$IMAGE_ID" ]] || fail "Compose did not produce the image $PROJECT-scrapeyard"
 IMAGE_SIZE="$(docker image inspect --format '{{.Size}}' "$IMAGE_ID")"
 while IFS='=' read -r label expected; do
   actual="$(docker image inspect --format "{{index .Config.Labels \"$label\"}}" "$IMAGE_ID")"

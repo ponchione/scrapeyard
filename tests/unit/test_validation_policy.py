@@ -260,8 +260,10 @@ async def test_validation_retry_passes_budget_to_request_boundary():
     )
     rate_limiter = AsyncMock()
 
+    # Validation runs on a run thread under this budget, so the duration must
+    # outlast a slow CI runner; this test is not about the deadline.
     budget = RunBudget(
-        max_duration_seconds=0.01,
+        max_duration_seconds=60,
         max_fetched_bytes=1000,
         max_extracted_records=100,
         max_serialized_result_bytes=4096,

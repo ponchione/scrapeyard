@@ -519,14 +519,18 @@ async def test_missing_envelope_key_id_fails_closed(tmp_path, monkeypatch):
         await migrate_persisted_secrets()
 
 
-async def _secure_delete(db) -> int:
-    async with db.execute("PRAGMA secure_delete") as cursor:
+async def _secure_delete(db, set_to: int | None = None) -> int:
+    # The default belongs to the SQLite build (Ubuntu's is on, python.org's is
+    # off), so a test sets the value it then expects to find again.
+    sql = "PRAGMA secure_delete" if set_to is None else f"PRAGMA secure_delete = {set_to}"
+    async with db.execute(sql) as cursor:
         row = await cursor.fetchone()
     return int(row[0])
 
 
+@pytest.mark.parametrize("before", [0, 1])
 async def test_migration_pages_through_legacy_rows_and_restores_secure_delete(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, before
 ):
     import scrapeyard.storage.secret_envelope as envelope
 
@@ -537,7 +541,7 @@ async def test_migration_pages_through_legacy_rows_and_restores_secure_delete(
     await init_db(str(db_dir))
     job_ids = [f"legacy-job-{n}" for n in range(5)]
     async with get_db("jobs.db") as db:
-        assert await _secure_delete(db) == 0
+        assert await _secure_delete(db, set_to=before) == before
         for job_id in job_ids:
             plaintext = _job(job_id).config_yaml
             config_hash = hashlib.sha256(plaintext.encode()).hexdigest()
@@ -560,7 +564,7 @@ async def test_migration_pages_through_legacy_rows_and_restores_secure_delete(
     keyring = EncryptionKeyring.from_settings(required=True)
     assert keyring is not None
     async with get_db("jobs.db") as db:
-        assert await _secure_delete(db) == 0
+        assert await _secure_delete(db) == before
         async with db.execute(
             "SELECT run_id, job_id, config_yaml FROM job_runs ORDER BY run_id"
         ) as cursor:
@@ -580,6 +584,8 @@ async def test_migration_pages_through_legacy_rows_and_restores_secure_delete(
 async def test_migration_with_nothing_to_rewrite_leaves_secure_delete_off(tmp_path):
     await init_db(str(tmp_path / "db"))
     await SQLiteJobStore().save_job(_job())
+    async with get_db("jobs.db") as db:
+        assert await _secure_delete(db, set_to=0) == 0
 
     await migrate_persisted_secrets()
 
