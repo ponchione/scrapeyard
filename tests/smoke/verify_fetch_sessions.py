@@ -100,6 +100,13 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             assert first.page.css("h1::text").get() == "empty"
             context = session._context
             browser = context.browser
+            # TD-45 spike: record which driver and browser build serve this mode,
+            # as soon as it is known, so a later hang still leaves the record.
+            print(json.dumps({
+                "fetcher": fetcher_type, "stealth": stealth,
+                "driver": type(context).__module__.split(".")[0],
+                "browser_version": browser.version,
+            }), flush=True)
             second = await fetch(ORIGIN + "/second", second_budget)
             assert second.page.css("h1::text").get() == "present"
             assert session._context is context
