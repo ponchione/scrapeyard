@@ -1,0 +1,129 @@
+name: Release artifact and deployment rehearsal
+
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - scripts/release_artifact.py
+      - scripts/run_deployment_rehearsal.sh
+      - security/**
+      - tests/rehearsal/**
+      - tests/unit/test_deployment_rehearsal.py
+      - .github/workflows/release-rehearsal.yml
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Commit to release (default, the selected branch's head)
+        required: false
+        type: string
+      previous_revision:
+        description: Commit to roll back to (default, the release commit's parent)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rehearsal-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release-rehearsal:
+    name: Retained release / deploy and roll back
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Both releases are built from commits, not from the working tree.
+          fetch-depth: 0
+      - name: Select the candidate and the previous revision
+        id: revisions
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+          REQUESTED_PREVIOUS: ${{ inputs.previous_revision }}
+          PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          candidate="${REQUESTED_REVISION:-${PULL_REQUEST_HEAD:-$GITHUB_SHA}}"
+          candidate="$(git rev-parse --verify "${candidate}^{commit}")"
+          previous="${REQUESTED_PREVIOUS:-${PULL_REQUEST_BASE:-${candidate}~1}}"
+          previous="$(git rev-parse --verify "${previous}^{commit}")"
+          if [ "$candidate" = "$previous" ]; then
+            echo "The candidate and the previous revision are the same commit" >&2
+            exit 2
+          fi
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "releases=$RUNNER_TEMP/scrapeyard-releases" >> "$GITHUB_OUTPUT"
+      - name: Show Docker runner capacity
+        run: |
+          docker version
+          docker compose version
+          df -h . /var/lib/docker "$RUNNER_TEMP" || true
+          free -h
+      - name: Build, scan and qualify the previous release
+        run: >-
+          python3 scripts/release_artifact.py create
+          "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.previous }}"
+          --revision "${{ steps.revisions.outputs.previous }}"
+      - name: Build, scan and qualify the candidate release
+        run: >-
+          python3 scripts/release_artifact.py create
+          "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
+          --revision "${{ steps.revisions.outputs.candidate }}"
+      - name: Deploy the candidate, refuse bad deployments, and roll back
+        run: >-
+          sudo env
+          "SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR=$GITHUB_WORKSPACE/artifacts/deployment-rehearsal"
+          ./scripts/run_deployment_rehearsal.sh
+          --candidate "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
+          --previous "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.previous }}"
+      - name: Hand the rehearsal evidence back to the runner account
+        if: always()
+        run: |
+          if [ -d artifacts ]; then
+            sudo chown -R "$(id -u):$(id -g)" artifacts
+          fi
+      - name: Upload the rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-rehearsal-${{ github.run_attempt }}
+          path: artifacts/deployment-rehearsal/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Pack the rehearsed candidate release
+        # A pull request only proves the lane; a dispatched run hands over the release.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CANDIDATE: ${{ steps.revisions.outputs.candidate }}
+          PREVIOUS: ${{ steps.revisions.outputs.previous }}
+          RELEASES: ${{ steps.revisions.outputs.releases }}
+        run: |
+          archive="scrapeyard-release-$CANDIDATE.tar.zst"
+          tar -C "$RELEASES" --zstd -cf "$archive" "scrapeyard-release-$CANDIDATE"
+          sha256sum "$archive" | tee "$archive.sha256"
+          {
+            echo "### Release $CANDIDATE"
+            echo
+            echo "Built, scanned, qualified, deployed and rolled back to \`$PREVIOUS\` on this runner."
+            echo
+            echo '```'
+            cat "$archive.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the rehearsed candidate release
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scrapeyard-release-${{ steps.revisions.outputs.candidate }}
+          path: |
+            scrapeyard-release-${{ steps.revisions.outputs.candidate }}.tar.zst
+            scrapeyard-release-${{ steps.revisions.outputs.candidate }}.tar.zst.sha256
+          # The archive is already compressed.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
