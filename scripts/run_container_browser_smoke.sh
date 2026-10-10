@@ -246,8 +246,8 @@ while IFS='=' read -r label expected; do
 done <<'EOF'
 org.scrapeyard.browser.playwright.version=1.58.0
 org.scrapeyard.browser.playwright.chromium-revision=1208
-org.scrapeyard.browser.rebrowser-playwright.version=1.52.0
-org.scrapeyard.browser.rebrowser-playwright.chromium-revision=1169
+org.scrapeyard.browser.patchright.version=1.63.0
+org.scrapeyard.browser.patchright.chromium-revision=1243
 org.scrapeyard.browser.camoufox-package.version=0.4.11
 org.scrapeyard.browser.camoufox.version=135.0.1
 org.scrapeyard.browser.camoufox.release=beta.24

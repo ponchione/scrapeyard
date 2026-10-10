@@ -39,8 +39,8 @@ def _assert_writable(path: Path) -> None:
 
 
 def main() -> None:
+    import patchright
     import playwright
-    import rebrowser_playwright
     from camoufox.pkgman import Version, launch_path
 
     uid = os.getuid()
@@ -73,10 +73,10 @@ def main() -> None:
             )
 
     playwright_version = importlib.metadata.version("playwright")
-    rebrowser_version = importlib.metadata.version("rebrowser-playwright")
+    patchright_version = importlib.metadata.version("patchright")
     camoufox_package_version = importlib.metadata.version("camoufox")
     playwright_revision = _chromium_revision(playwright)
-    rebrowser_revision = _chromium_revision(rebrowser_playwright)
+    patchright_revision = _chromium_revision(patchright)
 
     browser_root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
     stock_browser = browser_root / f"chromium-{playwright_revision}"
@@ -84,8 +84,8 @@ def main() -> None:
 
     bundled_sandbox = (
         browser_root
-        / f"chromium-{rebrowser_revision}"
-        / "chrome-linux"
+        / f"chromium-{patchright_revision}"
+        / "chrome-linux64"
         / "chrome_sandbox"
     )
     assert bundled_sandbox.is_file() and os.access(bundled_sandbox, os.X_OK)
@@ -145,8 +145,8 @@ def main() -> None:
             "playwright_version": playwright_version,
             "playwright_chromium_revision": playwright_revision,
             "playwright_chromium_path": str(stock_browser),
-            "rebrowser_playwright_version": rebrowser_version,
-            "rebrowser_chromium_revision": rebrowser_revision,
+            "patchright_version": patchright_version,
+            "patchright_chromium_revision": patchright_revision,
             "bundled_sandbox_path": str(bundled_sandbox),
             "sandbox_strategy": "unprivileged-user-namespace",
             "camoufox_package_version": camoufox_package_version,

@@ -12,8 +12,8 @@ from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
+from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from rebrowser_playwright.async_api import TimeoutError as RebrowserPlaywrightTimeoutError
 from scrapling import PlayWrightFetcher, StealthyFetcher
 from scrapling.engines.constants import DEFAULT_DISABLED_RESOURCES
 from scrapling.engines.toolbelt.custom import ResponseEncoding
@@ -111,7 +111,7 @@ class BrowserTransportTimeout(TimeoutError):
         super().__init__(message)
 
 
-_BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, RebrowserPlaywrightTimeoutError)
+_BROWSER_TIMEOUT_ERRORS = (PlaywrightTimeoutError, PatchrightTimeoutError)
 
 
 async def _request_header_mapping(request: Any) -> dict[str, str] | None:

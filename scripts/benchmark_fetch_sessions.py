@@ -66,10 +66,10 @@ async def benchmark(args):
     thread.start()
     try:
         with ExitStack() as stack, TemporaryDirectory() as data_dir:
+            from patchright.async_api import BrowserType as PatchrightType
             from playwright.async_api import BrowserType
-            from rebrowser_playwright.async_api import BrowserType as RebrowserType
 
-            for browser_type in (BrowserType, RebrowserType):
+            for browser_type in (BrowserType, PatchrightType):
                 stack.enter_context(patch.object(
                     browser_type, "launch", count_launch(browser_type.launch),
                 ))

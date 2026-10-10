@@ -159,7 +159,7 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             # Interrupt startup after launch, before the adapter receives the
             # browser/context. The registered manager must still stop the driver.
             if stealth:
-                from rebrowser_playwright.async_api import BrowserType
+                from patchright.async_api import BrowserType
             else:
                 from playwright.async_api import BrowserType
             launch = BrowserType.launch

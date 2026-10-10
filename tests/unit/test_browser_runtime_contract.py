@@ -4,13 +4,15 @@ import re
 from pathlib import Path
 
 
-def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
+def test_dockerfile_installs_patchright_chromium_for_dynamic_stealth() -> None:
     dockerfile = Path("Dockerfile").read_text()
 
     assert "python -m playwright install --with-deps --no-shell chromium" in dockerfile
-    assert "python -m rebrowser_playwright install --no-shell chromium" in dockerfile
+    # TD-45 spike, route P: patchright's Chromium replaces rebrowser's.
+    assert "python -m patchright install --no-shell chromium" in dockerfile
+    assert "rebrowser" not in dockerfile.lower()
     assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1208" in dockerfile
-    assert "ARG REBROWSER_CHROMIUM_REVISION=1169" in dockerfile
+    assert "ARG PATCHRIGHT_CHROMIUM_REVISION=1243" in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
     assert "XDG_CACHE_HOME=/opt/scrapeyard-cache" in dockerfile
     assert "HOME=/home/scrapeyard" in dockerfile
@@ -48,7 +50,7 @@ def test_browser_driver_pins_match_the_versions_the_image_asserts() -> None:
 
     for package, arg in (
         ("playwright", "PLAYWRIGHT_VERSION"),
-        ("rebrowser-playwright", "REBROWSER_PLAYWRIGHT_VERSION"),
+        ("patchright", "PATCHRIGHT_VERSION"),
         ("camoufox", "CAMOUFOX_PACKAGE_VERSION"),
     ):
         match = re.search(rf"(?m)^ARG {arg}=(\S+)$", dockerfile)

@@ -245,7 +245,8 @@ class BrowserSession:
                 from playwright import async_api
                 runtime_manager: Any = async_api.async_playwright()
             else:
-                from rebrowser_playwright.async_api import async_playwright
+                # TD-45 spike, route P: patchright replaces rebrowser-playwright.
+                from patchright.async_api import async_playwright
                 runtime_manager = async_playwright()
 
             # Register before startup: cancellation can interrupt __aenter__
