@@ -6,6 +6,24 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-10** (`2f6b70f` to `2c0f4be`): deployment pass, begun because the
+  owner is provisioning the production host.
+  - A rehearsal lane now builds retained releases on a GitHub runner and
+    deploys, refuses and rolls them back through the production wrapper, in
+    untrusted mode, which no lane had run before (TD-22).
+  - A boot service and a promotion command were added and rehearsed there
+    (TD-20). An independent review of their first version found twelve
+    problems, all fixed before the merge. Four were in code already on `main`:
+    TD-72 (the egress installer refused to run after the deployment network
+    was recreated), TD-74 (its `remove` emptied a chain another interface
+    still used), TD-75 (a failed start left the application container
+    restarting) and TD-76 (nothing kept two deployments, or two policy
+    installations, from interleaving).
+  - TD-71 was diagnosed and fixed: no container restriction hung the crashed
+    renderer; the kernel was holding it while its core was dumped.
+  - TD-73 (Chromium ran without its sandbox on fetches without `stealth`) was
+    found on the way and is pull request #10, awaiting the owner.
+  - TD-22 and TD-20 stay open for their checks on the production host.
 - **2026-10-10** (`12a23e6` to `166ceac`): first Actions pass. The owner
   re-enabled Actions and `main` was pushed for the first time since
   2026-09-25. On the first runs Dependency audit, Container security, the
@@ -113,7 +131,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-72**) and use this template:
+7. **New findings** take the next free ID (**TD-77**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -144,6 +162,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the second 2026-10-09 pass (`409f08c`) | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,551 passed, 17 skipped, 90.31% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's client tests (297 passed) and 54 configs pass |
 | After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
 | After the first Actions pass (2026-10-10, `166ceac`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,614 passed, 17 skipped, 90.44% coverage. On GitHub at the same commit: CI (Quality 3.10: 2,611 passed, 20 skipped; Quality 3.12: 2,614 passed, 17 skipped, with Chromium installed for the three real-browser tests; distribution build; live Redis), Dependency audit on both legs, Container security, browser smoke (4 min; image 3.36 GB), and release qualification quick (10 min) and full (23 min) all pass, with no deprecation or runner warnings. Eyebox's client tests (299 passed) and 54 configs pass |
+| After the deployment pass (2026-10-10, `2c0f4be`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -265,23 +284,23 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement, one PR per row:
+Nothing is ready to implement as a single pull request.
 
-| # | Entry | P | Scope | Risk | Contract | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-71 | P3 | container hardening, browsers | low | none | Needs the smoke lane, so a GitHub runner or an isolated Docker host |
+**In review, waiting for the owner:**
+- TD-65 is pull request #3. It changes what the URL guard accepts.
+- TD-73 is pull request #10. It changes how Chromium starts on fetches
+  without `stealth`.
 
-**In review:** TD-65 is pull request #3. It changes what the URL guard
-accepts, so it waits for the owner's security review.
-
-CI gates pull requests since 2026-10-10. A release (TD-22) needs the container
-scan and both qualification profiles passing on its revision; they pass on
-`main` as of this pass.
+CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
+`Release artifact and deployment rehearsal` workflow, which scans, qualifies
+and rehearses it; dispatch it on the commit to release.
 
 **Coordinated:**
-- TD-45: needs Eyebox to move with it.
+- TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
-- TD-17 to TD-22: deployment qualification; not single PRs.
+- TD-17 to TD-22: deployment qualification; not single PRs. TD-18, TD-19 and
+  TD-21 each wait on a choice only the owner can make (the forward proxy, the
+  DNS name and how its certificate is issued, the off-host backup store).
 
 **Deferred:** TD-48 and TD-49.
 
@@ -302,42 +321,11 @@ scan and both qualification profiles passing on its revision; they pass on
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-65 | P3 | in review | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
-| TD-71 | P3 | ready | In the production container a crashed renderer hangs instead of being reported |
+| TD-73 | P1 | in review | Chromium runs without its sandbox on dynamic fetches without `stealth` |
 
 ## Ready to implement
 
-### TD-71 — In the production container a crashed renderer hangs instead of being reported
-
-**Priority:** P3 · **Area:** browsers, container hardening · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- In the production image under the Compose security options, on a GitHub
-  runner (Ubuntu 24.04, Docker 28.0.4), `Page.crash` over CDP left the
-  renderer unresponsive. Playwright fired no `crash` event within 10 seconds,
-  for upstream Chromium 145 and for rebrowser's Chromium 136, and
-  `context.set_offline(True)` was then never answered (smoke runs
-  38052739287 and 38053605687, 2026-10-10).
-- Outside the container the same check saw the `crash` event: both Chromium
-  modes of the fetch-session check passed on a development host on
-  2026-10-09, when the check still required the event.
-- Since TD-70 the session is stopped after 10 seconds, so the fetch no longer
-  hangs. Such a page still costs that wait, and the target reports a network
-  error instead of a crash.
-- Not known: whether a real renderer crash (out of memory, a segfault)
-  behaves like the deliberate `Page.crash`, and which of seccomp, AppArmor,
-  the dropped capabilities or the PID limit is responsible.
-
-**Code:** `tests/smoke/verify_fetch_sessions.py` (the `crash` ending),
-`security/seccomp/chromium.json`, `security/apparmor/`, `docker-compose.yml`
-(`security_opt`, `cap_drop`, `pids_limit`), `engine/browser_session.py`
-(`_PAGE_RELEASE_SECONDS`).
-**Fix:** rerun the smoke lane with each restriction lifted in turn, and read
-the kernel and audit logs for a seccomp or AppArmor denial when the renderer
-crashes. Then allow what Chromium needs to report the crash, or record why
-the hang is accepted.
-**Done when:** the smoke check's crash case sees the `crash` event in the
-production container, or this entry records the cause and the decision to
-keep the 10-second bound as the handling.
+Nothing at present.
 
 ## Coordinated
 
@@ -449,6 +437,36 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
+
+### TD-73 — Chromium runs without its sandbox on dynamic fetches without `stealth`
+
+**Priority:** P1 · **Area:** engine, browsers · **Risk:** medium · **Contract:** none (no config key changes; non-stealth browser targets start differently) · **Depends on:** the owner's review of pull request #10
+
+**Problem:**
+- Scrapling 0.2.99 passes `chromium_sandbox: True` to Playwright only when
+  `stealth` is on (`scrapling/engines/pw.py`, `__launch_kwargs`), and
+  Playwright adds `--no-sandbox` unless it is asked for the sandbox.
+- A `fetcher: dynamic` target without `browser.stealth` therefore loads pages
+  in renderers that have no Chromium sandbox. Measured 2026-10-10 on a
+  development host with a real browser: 8 of 8 Chromium processes carried
+  `--no-sandbox` without `stealth`, and 0 of 9 with it. The flag was also
+  seen in the production container's process list.
+- The container's seccomp and AppArmor profiles, the dropped capabilities
+  and the egress policy still apply, so this is a missing layer, not an open
+  door.
+
+**Code:** `engine/browser_session.py` (`BrowserSession._open`).
+**Fix:** pull request #10 adds `chromium_sandbox: True` to the launch options
+on both paths and makes the smoke check fail on any Chromium process started
+with `--no-sandbox`. Browser smoke passes with it in the production container.
+**Cost:** the sandbox needs unprivileged user namespaces. The production
+AppArmor profile grants them. A bare Ubuntu 23.10 or later host denies them,
+so outside the container a non-stealth browser fetch then fails with "No
+usable sandbox" where it used to run unsandboxed; the CI runner needed
+`kernel.apparmor_restrict_unprivileged_userns=0` for the real-browser tests.
+Fetches with `stealth` already behave that way.
+**Done when:** #10 is merged with browser smoke passing, and one run of
+non-stealth browser targets on Eyebox's local stack gives the same results.
 
 ### TD-65 — The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names
 
@@ -588,6 +606,25 @@ Redis and an egress probe but no filtering forward proxy. The HTTPS ingress
 proxy in TD-19 does not satisfy this requirement. A commercial scraping proxy
 is not automatically evidence of safe destination filtering.
 
+**Checked 2026-10-10:**
+- The operator proxy must be at a public address, and its name must resolve,
+  when the service starts (`normalize_service_proxy_url`). A proxy on a
+  private or loopback address, or on the deployment bridge, is refused at
+  startup, so a forward proxy hosted beside Scrapeyard has to be reached at a
+  public address.
+- `SCRAPEYARD_EGRESS_ALLOW_CIDRS` changes the host policy only; the
+  application never reads it. The example in `docs/DEPLOYMENT.md`
+  (`scrape-proxy.example` with an allowed documentation address) therefore
+  cannot start as written.
+- In untrusted mode every target inherits that one proxy. A target bypasses
+  it (`proxy: direct`) or names another only when the submitting credential
+  has `transport-admin`. Sending some targets through a paid proxy and the
+  rest directly therefore needs that scope on the submitting credential, or
+  trusted mode. Either gives up part of what untrusted mode is for, so it is
+  the owner's decision.
+- No lane runs a successful scrape through an operator proxy. The deployment
+  rehearsal runs untrusted mode with a proxy address that is made unreachable.
+
 **Start here:** [egress contract](docs/DEPLOYMENT.md#egress),
 [Compose](docker-compose.yml), [deploy wrapper](security/deploy-secure-compose.sh),
 [IP policy](src/scrapeyard/engine/ip_policy.py),
@@ -669,9 +706,42 @@ and [Caddy certificate challenges](https://caddyserver.com/docs/automatic-https)
 **Priority/ownership:** P1; Scrapeyard host supervision. Coordinate with TD-19's
 ingress and TD-22's release artifact selection.
 
+**Implementation update (2026-10-10):**
+- `security/systemd/scrapeyard.service` and `security/manage-release.sh`
+  (installed as `scrapeyard-release`) are checked in;
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#boot-service-and-promotion) has the
+  layout and the commands.
+- Rehearsed on a GitHub runner (Ubuntu 24.04, systemd 255, Docker 28.0.4; run
+  38073376177), each step ending with the images, confinement, policy, single
+  instance and a known run verified:
+  - installation as the guide describes it;
+  - a promotion refused for a changed file and for a file root does not own,
+    and one stopped halfway, each leaving the link and the running release;
+  - a Docker restart, and a killed Docker daemon (back in 3 seconds);
+  - Docker stopped, the policy removed, `br_netfilter` unloaded and the
+    AppArmor profile unloaded, then Docker started: that start alone brought
+    the unit and the application back;
+  - the containers and the network removed: the policy followed the new
+    bridge and the known run was still readable;
+  - a broken setting: three retries with nothing serving, then recovery
+    without an operator command once the file was repaired;
+  - a promoted rollback to a release from before the boot service existed,
+    started through the unit.
+- A failed start is retried with growing pauses and is never abandoned. A
+  systemd start limit also counts successful starts, so "retries stay
+  bounded" is met by slowing them down, not by giving up.
+
+**Still open:**
+- A real reboot and a power loss on the production host. A runner cannot be
+  rebooted; the rehearsal removes what a reboot loses.
+- All of the monitoring work below: readiness and metrics collection, and
+  alerts. It needs the owner's choice of a monitoring service.
+- The health check Compose runs is still process liveness only.
+
 **Problem:**
-- `security/deploy-secure-compose.sh` installs policy during a deploy, but no
-  checked-in boot service restores it after a host or Docker restart.
+- Before 2026-10-10, `security/deploy-secure-compose.sh` installed policy
+  during a deploy, and no checked-in boot service restored it after a host or
+  Docker restart.
 - `restart: unless-stopped` neither orders policy restoration nor establishes
   authenticated readiness.
 - The current container healthcheck only checks process liveness.
@@ -789,13 +859,37 @@ format change to the rollback story.
   fixed `172.30.0.0/24` subnet.
 - No qualified candidate was published, and no running deployment was changed.
 
-**Still open:** prepare the current and previous artifacts on an isolated
-Docker host, then complete the deployed acceptance checks below and record the
-evidence before removing this entry. A GitHub runner is such a host: the
-standard runner had 86 GB of free disk and 15 GiB of memory on 2026-10-10,
-against the 15 GiB of disk `release_artifact.py create` requires, and the scan
-and qualification lanes it gates already pass there. Nobody has run `create`
-on one yet.
+**Implementation update (2026-10-10):**
+- The `Release artifact and deployment rehearsal` workflow ran
+  `release_artifact.py create` to completion for the first time, on a GitHub
+  runner: 10 to 12 minutes for each release, scan and quick qualification
+  included.
+- `scripts/run_deployment_rehearsal.sh` then deploys the candidate with the
+  production Compose file, in untrusted mode, through the wrapper the release
+  retains. Neither container lane does that: both overlays turn untrusted
+  mode off. It checks the images, the confinement, the host policy, one
+  instance and the API after each step:
+  - a release with a changed file is refused with the running application
+    untouched;
+  - a policy that cannot be installed leaves the application stopped;
+  - started without the policy, or with it on another bridge, the application
+    reports the reachable challenge and never serves;
+  - a rollback and a roll-forward keep a known run readable, and its
+    submission is replayed, not run again;
+  - no image is pulled.
+- A manual dispatch uploads the rehearsed release. Run 38071059498 uploaded
+  `scrapeyard-release-f100488…` (1.3 GB, kept 30 days). Since `2c0f4be` the
+  archive records root as the owner of every file and the workflow checks
+  what extracting it gives.
+- [TESTING.md](docs/TESTING.md#release-and-deployment-rehearsal) describes
+  the lane and [DEPLOYMENT.md](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
+  the commands to fetch a release.
+
+**Still open:** the acceptance checks below on the production host, under the
+real proxy and ingress: deploy a candidate, have a bad one refused, and roll
+back without build-network access. The rehearsal has no operator proxy, so
+its known run is one that fails before any fetch. Keep a previous release on
+the host and off it; the workflow artifact expires after 30 days.
 
 **Problem:**
 - The secure wrapper rebuilds Scrapeyard from the checkout on every deployment.
