@@ -432,10 +432,12 @@ followed by moving the `current` link. Its output is printed when it ends;
   the next boot would replace. A directory that cannot be written to is
   normally caught before anything is stopped.
 
-Whenever a promotion does not complete, `promote` ends by saying what is
-running: the earlier release, nothing, or (if the deployment was killed after
-it started the application) the release that was not promoted. In the last
-two cases promote a retained release to settle it.
+When a deployment that had started does not complete, `promote` ends by
+saying what the boot service starts and what is running: the earlier release,
+nothing, or (if the deployment was killed after it started the application)
+the release that was not promoted. In the last two cases promote a retained
+release to settle it. A release refused by the checks before the deployment
+changes nothing, and `promote` says only why it was refused.
 
 Only one start or promotion runs at a time. Each takes a lock before it reads
 the `current` link and keeps it until the link has been moved, so a start of
@@ -444,16 +446,22 @@ promoted. A second `promote` while one is under way is refused.
 
 What the unit does:
 
-- **Boot, and every start of Docker.** After Docker starts it verifies and
+- **Boot, and a start of Docker.** After Docker starts it verifies and
   loads the promoted release, starts Redis and the probe, installs the egress
   policy and the AppArmor profile, and starts the application. If Docker's
-  first start fails and Docker recovers by itself, the unit still starts.
+  first start fails and Docker recovers by itself, the unit still starts. One
+  case is not covered: if `docker.service` ends up failed while this unit is
+  still active, starting Docker again does not run it again; use
+  `systemctl restart scrapeyard.service`.
 - **Shutdown, `systemctl stop scrapeyard.service`, and `systemctl stop
   docker`.** While the unit is active, it stops the application container,
   with the container's own 40-second grace period, before Docker stops. Docker
   then does not start the application by itself at the next boot, ahead of
-  the policy. The stop needs only `COMPOSE_PROJECT_NAME` from `deploy.env`,
-  and it fails, visibly, if Docker does not answer. When the unit is not
+  the policy. The stop needs `deploy.env` to be in place with a valid
+  `COMPOSE_PROJECT_NAME` line, and ignores the rest of the file. If it cannot
+  read that, or Docker does not answer, it stops nothing and the unit is left
+  in the failed state; `systemctl stop` itself still returns success, so
+  check `systemctl status scrapeyard.service`. When the unit is not
   active (after a power loss, or while it is between retries), nothing stops
   the container first. Docker then tries to start it at the next boot, and
   the application cannot start (the AppArmor profile is gone) or refuses to
@@ -476,7 +484,7 @@ The lock between starts and promotions, the settings parser and the ownership
 checks are in the installed script, so they apply to every release. Leaving
 the application stopped after a failed start, the wrapper's own lock and the
 handling of a recreated network are in each release's wrapper and installer;
-a release built before 2026-10-10 does not have them.
+a release built from a commit before `2c0f4be` does not have them.
 
 `systemctl restart scrapeyard.service` deploys the promoted release again. It
 is not the way to promote another one: it stops the application before the

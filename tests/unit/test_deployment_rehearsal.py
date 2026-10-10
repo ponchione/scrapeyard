@@ -249,8 +249,13 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         'chown -R "$PREVIOUS_OWNER" "$PREVIOUS"',
         # A start that waited for a promotion is checked against what was promoted.
         'verify_runtime start-after-promotion "$BOOT_PREVIOUS" previous',
-        # The bridge hook goes back to what it was, even after a failure.
+        # The bridge hook goes back to what it was before the run, read
+        # before the first deployment switches it on.
+        'BRIDGE_HOOK_BEFORE="$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo unloaded)"',
         'echo "$BRIDGE_HOOK_BEFORE" > /proc/sys/net/bridge/bridge-nf-call-iptables',
+        # The directory check is tested with a copy root owns throughout.
+        'copy_release "$BOOT_PREVIOUS" "$UNTRUSTED"',
+        "so what it holds cannot be trusted",
         # A reboot loses the policy, the bridge hook and the AppArmor profile,
         # and only Docker's own start brings the boot service back.
         "modprobe -r br_netfilter",
