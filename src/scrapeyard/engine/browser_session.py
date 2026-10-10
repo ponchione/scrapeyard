@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import resource
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from contextvars import copy_context
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -102,11 +104,41 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # Bound the wait for byte counts and asset-cache stores of finished requests.
 _SIZES_SETTLE_SECONDS = 0.5
-# Releasing a page takes milliseconds. A crashed renderer can leave one of the
-# context's calls unanswered while the driver stays connected (seen with
-# Chromium 145 after Page.crash: set_offline never returned). Past this bound
-# the whole browser session is stopped instead.
+# Releasing a page takes milliseconds. A renderer that stops answering can
+# leave one of the context's calls unanswered while the driver stays connected
+# (seen with Chromium 145 while the kernel was dumping the core of a crashed
+# renderer: set_offline never returned). Past this bound the whole browser
+# session is stopped instead.
 _PAGE_RELEASE_SECONDS = 10
+
+
+_core_dumps_discarded = False
+
+
+def _discard_core_dumps() -> None:
+    """Keep this process and the browsers it starts from dumping core.
+
+    Chromium learns that a renderer died when the renderer's process exits,
+    and a crashed process does not exit until the kernel has finished its core
+    dump. A renderer maps about 1.4 TiB of address space: piped to
+    systemd-coredump, the dump of a small page took 219 seconds, with the page
+    unanswered all the while (TD-71). Both settings are inherited by every
+    process started afterwards.
+    """
+    global _core_dumps_discarded
+    if _core_dumps_discarded:
+        return
+    _core_dumps_discarded = True
+    # A soft limit of 1 is the one value the kernel honours when core_pattern
+    # names a program: it aborts the dump, where it ignores 0. It is also too
+    # small for a core file.
+    with suppress(OSError, ValueError):
+        _, hard = resource.getrlimit(resource.RLIMIT_CORE)
+        soft = 1 if hard == resource.RLIM_INFINITY else min(1, hard)
+        resource.setrlimit(resource.RLIMIT_CORE, (soft, hard))
+    # Anything that dumps all the same carries no memory, only headers.
+    with suppress(OSError):
+        Path("/proc/self/coredump_filter").write_text("0")
 
 
 def _chain_root(request: Any) -> Any:
@@ -240,6 +272,7 @@ class BrowserSession:
         await self._stack.aclose()
 
     async def _open(self, engine: Any) -> None:
+        _discard_core_dumps()
         if self.fetcher_cls is PlayWrightFetcher:
             if not engine.stealth or engine.real_chrome:
                 from playwright import async_api
