@@ -6,9 +6,12 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
-- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-51 to TD-59 and
-  TD-61 were fixed and removed, as were TD-63 and TD-64, found while fixing
-  them.
+- **2026-10-09** (`67b6b4b` to `409f08c`): second roadmap pass. TD-51 to TD-59
+  and TD-61 were fixed and removed, as were TD-63 and TD-64, found while fixing
+  them. The coordinated TD-47 (submit-scope cancel) and TD-46 (unresolved
+  subrequests and the IPv6 deny list) also landed. TD-60 was rechecked against
+  real browsers, corrected to a frame-detach race rather than a favicon bypass,
+  and left for the security review.
 - **2026-10-09** (`a36c0a7` onwards): roadmap pass. TD-30 to TD-44 were fixed
   and removed, and TD-26's code-side fixes landed. Findings made while fixing
   them are TD-51 to TD-62.
@@ -113,7 +116,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | Eyebox configs vs. schema | 56 of 56 validate |
 | `pytest -W error` after TD-25 | 2,356 passed, 17 skipped, with no env override and no network lookups; 41–54 s |
 | After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages |
-| After the second 2026-10-09 pass | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,521 passed, 17 skipped, 90.2% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's 54 configs validate |
+| After the second 2026-10-09 pass (`409f08c`) | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,551 passed, 17 skipped, 90.31% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's client tests (297 passed) and 54 configs pass |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
