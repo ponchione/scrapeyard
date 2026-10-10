@@ -235,12 +235,11 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-56 | P3 | redaction | low | none | |
-| 3 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 4 | TD-63 | P3 | worker | low | none | |
-| 5 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 6 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 7 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-58 | P3 | engine, memory | low | none | Measure first |
+| 3 | TD-63 | P3 | worker | low | none | |
+| 4 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 5 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 6 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -277,7 +276,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
-| TD-56 | P3 | ready | Secret redaction order depends on the process hash seed for equal-length secrets |
 | TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
@@ -375,25 +373,6 @@ update the two tests and `docs/DEPLOYMENT.md` to match.
 **Done when:** a test with a stuck run thread shows shutdown closing the stores
 and the process exiting within the grace, or the trade-off is accepted and this
 entry deleted.
-
-### TD-56 — Secret redaction order depends on the process hash seed for equal-length secrets
-
-**Priority:** P3 · **Area:** redaction · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `_variants_longest_first` sorts secret variants by length only, so
-  equal-length variants come out in set order, which depends on the
-  per-process string hash seed.
-- When two equal-length secrets overlap in a string (secrets `ab` and `ba` in
-  `abab`), the redacted text differs between processes: either
-  `<redacted><redacted>` or `a<redacted>b`, and the latter keeps fragments of
-  a secret. This needs overlapping equal-length secrets, so it is contrived.
-
-**Code:** `engine/url_guard.py` (`_variants_longest_first`).
-**Fix:** sort by `(-len(variant), variant)`, or merge overlapping matches into
-one redaction span.
-**Done when:** a test with overlapping equal-length secrets gives the same
-output under different `PYTHONHASHSEED` values.
 
 ### TD-58 — Every parsed page waits for the cyclic garbage collector to free its tree
 

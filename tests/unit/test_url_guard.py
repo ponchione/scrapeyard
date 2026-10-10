@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import random
 import re
 import socket
+import subprocess
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -517,6 +520,25 @@ def test_secret_variants_are_built_once_per_secret_set() -> None:
 
     info = variants_longest_first.cache_info()
     assert (info.misses, info.hits) == (1, 99)
+
+
+def test_overlapping_equal_length_secrets_redact_the_same_under_every_hash_seed() -> None:
+    script = (
+        "from scrapeyard.engine.url_guard import redact_deployment_secrets as redact; "
+        "print(redact('abab baba a b+a', ['ab', 'ba', 'a b', 'b+a']))"
+    )
+    outputs = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in range(12)
+    }
+
+    assert outputs == {"<redacted><redacted> b<redacted>a <redacted>+a\n"}
 
 
 def test_redaction_without_secrets_returns_the_value_uncopied() -> None:

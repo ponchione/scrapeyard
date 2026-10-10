@@ -170,6 +170,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Deployment secret redaction orders equal-length secret variants by value,
+  so overlapping ones redact the same way in every process. The order used
+  to follow the per-process string hash seed.
 - A result download whose client stops reading is abandoned after 30 s
   without progress, and its connection closed, which frees the rendered body.
   It used to stay in memory until TCP gave up, which can take minutes, and

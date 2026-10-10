@@ -1,6 +1,7 @@
 """Tests for scrape_task crash recovery and duplicate-delivery guards."""
 
 import asyncio
+import gc
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -622,6 +623,10 @@ async def test_sustained_heartbeat_failure_cancels_targets_without_stale_mutatio
         target_started.set()
         await asyncio.Event().wait()
 
+    # The lease allows 30 ms. A full-generation collection in a long test
+    # session can pause the loop for longer and end it after one attempt.
+    gc.collect()
+    gc.disable()
     with (
         patch("scrapeyard.queue.worker.load_config", return_value=config),
         patch("scrapeyard.queue.worker.scrape_target", side_effect=_block_target),
@@ -647,8 +652,11 @@ async def test_sustained_heartbeat_failure_cancels_targets_without_stale_mutatio
                 webhook_dispatcher=webhook_dispatcher,
             )
         )
-        await asyncio.wait_for(target_started.wait(), timeout=1)
-        await asyncio.wait_for(task, timeout=1)
+        try:
+            await asyncio.wait_for(target_started.wait(), timeout=1)
+            await asyncio.wait_for(task, timeout=1)
+        finally:
+            gc.enable()
 
     assert job_store.heartbeat_run.await_count >= 3
     job_store.finalize_owned_run.assert_not_awaited()

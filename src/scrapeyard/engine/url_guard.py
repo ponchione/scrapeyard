@@ -352,13 +352,16 @@ def _secret_variants(secret_values: Any) -> tuple[str, ...]:
 
 
 # Redaction runs once per string of every record, so each run's few secrets
-# are expanded and sorted once instead of per string.
+# are expanded and sorted once instead of per string. Equal-length variants are
+# ordered by value, not by set order, which follows the per-process hash seed:
+# overlapping ones would otherwise redact differently from process to process.
 @lru_cache(maxsize=32)
 def _variants_longest_first(values: tuple[str, ...]) -> tuple[str, ...]:
     variants: set[str] = set()
     for value in values:
         variants.update((value, quote(value, safe=""), quote_plus(value, safe="")))
-    return tuple(variant for variant in sorted(variants, key=len, reverse=True) if variant)
+    ordered = sorted(variants, key=lambda variant: (-len(variant), variant))
+    return tuple(variant for variant in ordered if variant)
 
 
 def _redact_variants(text: str, variants: tuple[str, ...]) -> tuple[str, int]:
