@@ -207,6 +207,13 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
                         crash = asyncio.create_task(cdp.send("Page.crash"))
                         try:
                             await asyncio.wait_for(crashed.wait(), 10)
+                        except asyncio.TimeoutError:
+                            # In the production container on a GitHub runner
+                            # the renderer stopped answering and Chromium
+                            # reported no crash (2026-10-10). The page is lost
+                            # either way, and a renderer that hangs is the
+                            # harder case for the cleanup this checks.
+                            print("renderer did not report its crash within 10s", file=sys.stderr)
                         finally:
                             crash.cancel()
                             with suppress(Exception, asyncio.CancelledError):
