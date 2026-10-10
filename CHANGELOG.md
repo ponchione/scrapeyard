@@ -252,6 +252,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   jump installed.
 - A retained release no longer keeps files that group or others can write,
   and the release archive records root as the owner of every file.
+- `release_artifact.py create` no longer fails at random with "invalid
+  reference format". It named its image after a random temporary directory,
+  and about one such name in twenty put an underscore beside a hyphen, which
+  Docker refuses.
 - `scrapeyard-release` now takes its lock before it reads the `current` link.
   A start of the boot service that had waited for a promotion deployed the
   release the link named before the wait, replacing the one just promoted.

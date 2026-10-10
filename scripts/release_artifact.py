@@ -141,7 +141,11 @@ def create(directory: Path, revision: str) -> None:
                     raise ValueError(
                         f"qualification subnet overlaps existing network {network['Name']}; use an isolated Docker host"
                     )
-        project = f"scrapeyard-release-{bundle.name.removeprefix('.release-')}"
+        # The temporary name is random letters, digits and underscores. Docker
+        # refuses an image name with an underscore beside a hyphen, which one
+        # name in twenty would give, so only the letters and digits are used.
+        suffix = re.sub(r"[^a-z0-9]", "", bundle.name.removeprefix(".release-")) or "0"
+        project = f"scrapeyard-release-{suffix}"
         tag = f"{project}-scrapeyard"
         subprocess.run(
             [
