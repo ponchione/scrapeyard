@@ -26,6 +26,7 @@ from scrapeyard.engine.url_guard import (
     UnsafeURLError,
     URLResolutionError,
     assert_public_url,
+    public_dns_hostname,
     url_host_label,
 )
 from scrapeyard.engine.url_verdicts import assert_public_url_in_run
@@ -80,7 +81,13 @@ async def _pagination_url_is_safe(
     cancellation_guard: CancellationCheckpoint | None,
 ) -> bool:
     if replay_active():
-        # Replay never fetches, so there is no destination to resolve or guard.
+        # Replay never fetches, so there is no destination to resolve. The
+        # lexical checks still apply: the recording run stopped at a refused
+        # URL, and such a URL has no pagination key.
+        try:
+            public_dns_hostname(url)
+        except UnsafeURLError:
+            return False
         return True
     await cancellation_checkpoint(
         cancellation_guard,

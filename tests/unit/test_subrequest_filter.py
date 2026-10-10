@@ -84,6 +84,8 @@ def test_allow_hosts_are_normalized_and_validated() -> None:
         ({"third_party_allow_hosts": ["cdn.example.test"]}, "requires block_third_party"),
         ({"block_third_party": True, "third_party_allow_hosts": ["https://cdn.example.test/"]}, "host names"),
         ({"block_third_party": True, "third_party_allow_hosts": ["cdn.example.test:443"]}, "host names"),
+        # IDNA 2003 would store strasse.test; the browser reports xn--strae-oqa.test.
+        ({"block_third_party": True, "third_party_allow_hosts": ["straße.test"]}, "xn-- form"),
         ({"block_url_patterns": ["*/collect *"]}, "whitespace"),
         ({"block_url_patterns": ["  "]}, "blank"),
         ({"block_url_patterns": ["*/a*", "*/a*"]}, "unique"),

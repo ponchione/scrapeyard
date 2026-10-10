@@ -9,8 +9,9 @@ import sys
 import time
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlparse
 
+import httpx
 import pytest
 
 from scrapeyard.engine.url_guard import (
@@ -141,6 +142,133 @@ def test_assert_public_url_rejects_idna_ipv4_literals_without_dns(host: str) -> 
 
 def test_assert_public_url_allows_public_idna_hostname_without_dns() -> None:
     assert_public_url("https://bücher.example/resource", resolve_dns=False)
+
+
+def _answer_public(calls: list[str]):
+    def getaddrinfo(host, *_args, **_kwargs):
+        calls.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    return getaddrinfo
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "straße.test",  # IDNA 2003 strasse.test, IDNA 2008 xn--strae-oqa.test
+        "ς.test",  # xn--4xa.test against xn--3xa.test
+        "STRASSE.ẞ.test",
+        # httpx refuses these, but a browser maps them to a name other than the
+        # IDNA 2003 one.
+        "ｓｔｒａße.test",
+        "my_site.straße.test",
+        "☃.straße.test",
+        "straße" + "\u00ad" * 1100 + ".test",
+        "a\u1806b.test",
+        "Ꭰ.test",  # Cherokee: mapped by browsers, kept by Python's Unicode 3.2 tables
+        # One name to a browser, but not valid IDNA 2008, so httpx sends nothing.
+        "☃.test",
+        "ｅｘａｍｐｌｅ.com",
+    ],
+)
+def test_hostname_idna_versions_read_differently_is_refused(monkeypatch, host: str) -> None:
+    lookups: list[str] = []
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo", _answer_public(lookups)
+    )
+    url = f"https://{host}/resource"
+
+    for check in (public_dns_hostname, assert_public_url, resolve_public_url, url_host_label):
+        with pytest.raises(UnsafeURLError, match="read differently by IDNA 2003 and IDNA 2008"):
+            check(url)
+    assert canonical_url_origin(url) is None
+    assert lookups == []
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "xn--strae-oqa.test",  # The ASCII spelling of straße.test names one site.
+        "xn--3xa.test",
+        "xn--n3h.test",  # ☃.test
+        "bücher.example",
+        "BÜCHER.example",
+        "bücher。example",
+        "münchen.example",
+        "日本語.example",
+        "İstanbul.example",
+    ],
+)
+def test_guard_resolves_and_pins_the_hostname_httpx_requests(monkeypatch, host: str) -> None:
+    lookups: list[str] = []
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo", _answer_public(lookups)
+    )
+    url = f"https://{host}/resource"
+    requested = httpx.URL(url).raw_host.decode("ascii")
+
+    assert public_dns_hostname(url) == requested
+    assert_public_url(url)
+    resolved = resolve_public_url(url)
+
+    assert lookups == [requested, requested]
+    assert resolved.host_header == requested
+    assert resolved.sni_hostname == requested
+    assert url_host_label(url) == requested
+
+
+def test_every_accepted_non_ascii_hostname_is_the_one_httpx_requests() -> None:
+    # One host per 61 code points in four positions (about 13,000 names), plus
+    # code points the two IDNA versions are known to treat differently. The
+    # full sweep (1.36 million names in seven positions, 40 s) found no
+    # disagreement with httpx, nor with Node 24's WHATWG parser, on 2026-10-10.
+    known_to_differ = {
+        0xDF, 0x3C2, 0x10FC, 0x13A0, 0x1806, 0x1C80, 0x1E9E, 0x212A, 0x1F130, 0xE0100
+    }
+    checked = 0
+    for code_point in sorted(known_to_differ | set(range(0x80, 0x30000, 61))):
+        if 0xD800 <= code_point <= 0xDFFF:
+            continue
+        for template in ("a{}b.test", "{}.test", "{}a.test", "my_site.{}.test"):
+            url = f"https://{template.format(chr(code_point))}/resource"
+            try:
+                guarded = public_dns_hostname(url)
+            except UnsafeURLError:
+                continue
+            try:
+                requested = httpx.URL(url).raw_host.decode("ascii")
+            except httpx.InvalidURL:
+                # Only when lowercasing made the host ASCII before the guard
+                # saw it (the Kelvin sign): httpx then sends nothing.
+                assert (urlparse(url).hostname or "").isascii(), hex(code_point)
+                continue
+            assert guarded == requested.rstrip("."), hex(code_point)
+            checked += 1
+    assert checked > 5000
+
+
+def test_every_accepted_ascii_hostname_is_the_one_httpx_requests() -> None:
+    refused = set()
+    for code_point in range(0x21, 0x7F):
+        url = f"http://a{chr(code_point)}b.example.test/resource"
+        try:
+            guarded = public_dns_hostname(url)
+        except UnsafeURLError:
+            refused.add(chr(code_point))
+            continue
+        try:
+            requested = httpx.URL(url).raw_host.decode("ascii")
+        except httpx.InvalidURL:
+            continue
+        assert guarded == requested, chr(code_point)
+    # httpx percent-encodes these three, so it would request another name.
+    assert {"<", ">", "^"} <= refused
+
+
+@pytest.mark.parametrize("url", ["http://a[b.test/", "https://\uff03.test/"])
+def test_url_host_label_reports_a_malformed_url_as_unsafe(url: str) -> None:
+    with pytest.raises(UnsafeURLError, match="malformed"):
+        url_host_label(url)
 
 
 def test_assert_public_url_can_require_dns_resolution(monkeypatch) -> None:

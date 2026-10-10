@@ -25,7 +25,7 @@ from pydantic import (
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.transforms import parse_transform_pipeline
 from scrapeyard.engine.proxy import normalize_public_proxy_url
-from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url
+from scrapeyard.engine.url_guard import UnsafeURLError, assert_public_url, canonical_hostname
 
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _PAGE_PARAM_RE = re.compile(r"[A-Za-z0-9._\[\]-]+")
@@ -826,13 +826,16 @@ class BrowserConfig(StrictConfigModel):
             case_insensitive=True,
         ):
             try:
-                host = entry.removeprefix("*.").rstrip(".").encode("idna").decode("ascii")
-            except UnicodeError:
+                # The name the browser reports for a request, or no name at all:
+                # an entry IDNA 2003 and 2008 encode differently would never match.
+                host = canonical_hostname(entry.removeprefix("*."))
+            except UnsafeURLError:
                 host = ""
             if not _BLOCK_ALLOW_HOST_RE.fullmatch(host):
                 raise ValueError(
                     "browser.third_party_allow_hosts entries must be host names such as "
-                    "cdn.example.test, without a scheme, port or path"
+                    "cdn.example.test, without a scheme, port or path; write a non-ASCII "
+                    "name that IDNA 2003 and IDNA 2008 encode differently in its xn-- form"
                 )
             if host not in hosts:
                 hosts.append(host)

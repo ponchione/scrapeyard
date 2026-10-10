@@ -28,6 +28,8 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     "pydantic-settings>=2.14.2,<3.0.0",
     "httpx>=0.28,<0.29",
+    # The URL guard encodes hostnames the way httpx does, to compare the two.
+    "idna>=3.7,<4.0",
     "cryptography>=50.0.2,<51.0.0",
     "prometheus-client>=0.22.1,<0.23.0",
     "regex (>=2026.6.28,<2027.0.0)",

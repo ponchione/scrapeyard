@@ -74,6 +74,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- A non-ASCII hostname is now accepted only when IDNA 2003 and strict IDNA
+  2008 encode it to the same name; any other is rejected as an unsafe URL, in
+  submitted configs, in `browser.third_party_allow_hosts`, and in URLs met
+  during a run. The URL guard encodes hostnames with Python's IDNA 2003 codec
+  while httpx and browsers use IDNA 2008, so for `straße.test` the guard
+  checked and pinned `strasse.test` while the client asked for
+  `xn--strae-oqa.test`. Names IDNA 2008 does not allow (`☃.test`, fullwidth
+  spellings) are rejected as well: httpx refuses them and a browser may map
+  them to another name. The ASCII `xn--` spelling of any rejected name is
+  accepted. ASCII hostnames are unaffected, except that one containing `<`,
+  `>` or `^` is rejected, because httpx percent-encodes those and would
+  request a different name. `idna` is now a declared dependency.
 - Within one run, the URL guard now resolves a hostname once per 30 seconds
   instead of on every check. It used to hop to a thread and call the resolver
   for every browser subrequest, and four to six times for each top-level
@@ -223,6 +235,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Replaying a recorded page whose next link names a refused host stops
+  pagination with `unsafe_next_url`, as the live run does. Replay skipped the
+  URL check and then failed the whole target while building the link's
+  pagination key.
+- `url_host_label` reports a URL it cannot parse as an unsafe URL instead of a
+  bare `ValueError`.
 - The browser smoke lane packs its failure diagnostics into one archive
   before uploading them. Result artifacts sit under directories named
   `host:port`, and the upload refused any path containing a colon, so a lane

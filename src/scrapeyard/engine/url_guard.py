@@ -13,6 +13,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, quote_plus, unquote_plus, urlparse, urlunparse
 
+import idna
 import yaml
 from yaml import YAMLError
 
@@ -106,12 +107,52 @@ def _hostname_is_blocked(host: str) -> bool:
     return host.lower().rstrip(".") in _DISALLOWED_HOSTS
 
 
-def _canonical_hostname(host: str) -> str:
-    """Return the ASCII hostname form used by Python's resolver."""
+# httpx percent-encodes these in an ASCII host, so the name it requests is not
+# the one written. No DNS name contains them.
+_CLIENT_ESCAPED_HOST_CHARS = frozenset("<>^")
+
+
+def _idna2003_hostname(host: str) -> str:
+    """Return the ASCII form Python's resolver gives *host* (IDNA 2003)."""
     try:
         return host.encode("idna").decode("ascii").lower().rstrip(".")
     except UnicodeError as exc:
         raise UnsafeURLError("URL hostname is invalid") from exc
+
+
+def _require_one_reading(host: str, canonical: str) -> None:
+    """Refuse *host* unless the HTTP client requests the name *canonical*.
+
+    Python resolves with IDNA 2003, which rewrites characters IDNA 2008 keeps:
+    ``straße.test`` is ``strasse.test`` here but ``xn--strae-oqa.test`` to
+    httpx and to browsers. The guard would then vouch for one site while the
+    client requested another. A non-ASCII host is accepted only when strict
+    IDNA 2008, which is what httpx applies, encodes it to the same name. That
+    also refuses names httpx rejects but a browser maps to something else
+    (``my_site.straße.test``). The ASCII ``xn--`` spelling of a refused name
+    means one site to every reader.
+    """
+    if host.isascii():
+        if _CLIENT_ESCAPED_HOST_CHARS.intersection(host):
+            raise UnsafeURLError("URL hostname contains a character HTTP clients escape")
+        return
+    try:
+        requested = idna.encode(host.lower()).decode("ascii").lower().rstrip(".")
+    except UnicodeError:  # idna.IDNAError is one.
+        requested = None
+    if requested != canonical:
+        raise UnsafeURLError(
+            "URL hostname is read differently by IDNA 2003 and IDNA 2008; "
+            "use its ASCII (xn--) form"
+        )
+
+
+def canonical_hostname(host: str) -> str:
+    """Return the one ASCII name every reader derives from *host*, or refuse it."""
+    canonical = _idna2003_hostname(host)
+    _require_one_reading(host, canonical)
+    return canonical
+
 
 
 def canonical_url_origin(url: str) -> tuple[str, str, int] | None:
@@ -135,7 +176,7 @@ def canonical_url_origin(url: str) -> tuple[str, str, int] | None:
         literal = ipaddress.ip_address(raw_host.rstrip("."))
     except ValueError:
         try:
-            host = _canonical_hostname(raw_host)
+            host = canonical_hostname(raw_host)
         except UnsafeURLError:
             return None
     else:
@@ -214,12 +255,12 @@ def public_dns_hostname(
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
         return None
 
-    host = _canonical_hostname(host)
-    if _hostname_is_blocked(host):
-        raise UnsafeURLError(f"Hostname {host!r} is blocked")
+    canonical = _idna2003_hostname(host)
+    if _hostname_is_blocked(canonical):
+        raise UnsafeURLError(f"Hostname {canonical!r} is blocked")
 
     try:
-        literal = ipaddress.ip_address(host)
+        literal = ipaddress.ip_address(canonical)
     except ValueError:
         literal = None
     if literal is not None:
@@ -227,13 +268,16 @@ def public_dns_hostname(
             raise UnsafeURLError(f"URL points at non-public IP {literal}")
         return None
 
-    legacy_ipv4 = _legacy_ipv4_address(host)
+    legacy_ipv4 = _legacy_ipv4_address(canonical)
     if legacy_ipv4 is not None:
         if _ip_is_blocked(legacy_ipv4):
             raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
         return None
 
-    return host
+    # Last, so a Unicode spelling of a blocked name or of a private address is
+    # still reported as what it is.
+    _require_one_reading(host, canonical)
+    return canonical
 
 
 def assert_public_url(
@@ -294,7 +338,7 @@ def resolve_public_url(url: str) -> ResolvedPublicURL:
     original_host = parsed.hostname
     if original_host is None:  # Covered by assert_public_url; keeps typing honest.
         raise UnsafeURLError("URL has no hostname")
-    canonical_host = _canonical_hostname(original_host)
+    canonical_host = canonical_hostname(original_host)
 
     literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None
     try:
@@ -700,11 +744,14 @@ def url_host_label(url: str) -> str:
     explicit default ports share an identity, while non-default ports remain
     separate origins for rate limiting and circuit isolation.
     """
-    parsed = urlparse(url)
-    raw_host = parsed.hostname
+    try:
+        parsed = urlparse(url)
+        raw_host = parsed.hostname
+    except ValueError as exc:
+        raise UnsafeURLError("URL is malformed") from exc
     if raw_host is None:
         return "unknown-host"
-    host = _canonical_hostname(raw_host)
+    host = canonical_hostname(raw_host)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
