@@ -164,7 +164,8 @@ Mapped on 2026-10-09 against Eyebox `a466ee2`. The client code is
   - `targets[].debug`: `final_url`, `page_title`, `main_document_status`,
     `item_selector_count`, `classification`, `html_excerpt` and
     `selector_counts`.
-- `POST /jobs/{id}/cancel?run_id=` must return 204 (see TD-47).
+- `POST /jobs/{id}/cancel?run_id=` must return 204 for a `submit` credential
+  cancelling an exact run of an ad-hoc job in its project.
 - `GET /jobs/{id}`: Eyebox reads the top-level `status` (price check, accuracy).
 - Public `GET /health` must return 2xx.
 - `DELETE /domains/{host}/guard` is called by the alias backfill.
@@ -248,7 +249,6 @@ passing, which needs it.
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
 - TD-23, TD-46 and TD-60: one security review covering all three.
-- TD-47: a decision.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
 
@@ -271,7 +271,6 @@ passing, which needs it.
 | TD-26 | P1 | before first deploy | CI is disabled, and its workflows haven't run since their fixes |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-46 | P2 | coordinated | Subrequest DNS failures and IPv6 gaps in the browser guard |
-| TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
@@ -372,36 +371,6 @@ retailer set shows the same or better yield and timing.
     depth.
   - **Fix:** deny `::/96`, `::ffff:0:0:0/96` and `fec0::/10`, or allow only
     `2000::/3`. The host firewall rules under `security/` change too.
-
-### TD-47 — Eyebox cannot cancel its own runs: cancel requires the `delete` scope
-
-**Priority:** P2 · **Area:** API auth · **Risk:** low · **Contract:** yes; needs a decision · **Depends on:** an operator decision
-
-**Problem:**
-- `cancel_job` authorizes `AuthScope.delete`.
-- Eyebox's credential (`eyebox-local`, and production prescribes the same) has
-  only `submit` and `read`. Its exact cancel in `SourceRun.reconcile`
-  (`POST /jobs/{id}/cancel?run_id=`) therefore always gets a 403.
-- Eyebox swallows that as `reconciled=False`,
-  `reconciliation_error=HTTPStatusError`, and abandoned runs keep running until
-  their budget runs out.
-- Cancel only works with a legacy `SCRAPEYARD_API_KEYS` key, which has every
-  scope.
-
-**Options:**
-1. Let `submit` cancel an exact `run_id` in its own projects. This is additive:
-   a caller allowed to start a run should be able to stop it.
-2. Add a narrow `cancel` scope and grant it to Eyebox. This also needs updating
-   Eyebox's `KNOWN_SCOPES`.
-3. Grant Eyebox `delete`, which also allows `DELETE /jobs/{id}`.
-
-Option 1 is recommended.
-
-**Done when:**
-- A `submit`+`read` credential cancels its own project's exact run and gets
-  204.
-- The same credential still gets 403 for other projects and for
-  `DELETE /jobs/{id}`.
 
 ### TD-23 — The browser URL guard pays a thread hop and a DNS lookup on every subrequest
 

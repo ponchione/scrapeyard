@@ -339,7 +339,9 @@ sudo security/install-chromium-apparmor-profile.sh remove
   operators who may select a per-job/per-target proxy or CDP endpoint while
   untrusted-submission mode is enabled. An optional non-empty `projects` list limits route and data
   access to those namespaces. Project-scoped list/error queries must include a
-  permitted `project` filter.
+  permitted `project` filter. `submit` also lets a caller cancel an exact
+  `run_id` of an ad-hoc job in its projects; every other cancellation and all
+  deletion need `delete`.
 - `SCRAPEYARD_API_KEYS` remains a deprecated, full-admin restart-time migration
   bridge. It produces digest-based legacy identities and should not be used for
   new deployments.

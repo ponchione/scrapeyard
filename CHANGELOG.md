@@ -58,6 +58,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- `POST /jobs/{job_id}/cancel?run_id=…` now accepts the `submit` scope for an
+  exact run of an ad-hoc job in the caller's project, so a client that may
+  start a run can stop it. Eyebox's `submit` and `read` credential used to get
+  a 403, and the runs it abandoned kept running until their budget ran out.
+  Cancelling without `run_id`, cancelling a scheduled job (which also disables
+  its schedule) and `DELETE /jobs/{job_id}` still require `delete`.
 - Updated locked dependencies with known advisories: aiohttp 3.14.4, anyio
   4.15.1, cryptography 50.0.2, multidict 6.9.1, PyJWT 2.15.1 and urllib3
   2.8.0 (with yarl 1.25.1 and typing-extensions 4.16.0). `cryptography` is

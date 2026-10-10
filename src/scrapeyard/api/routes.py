@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from scrapeyard.api.auth import AuthScope, authorize_request
+from scrapeyard.api.auth import AuthScope, authorize_request, get_authenticated_caller
 from scrapeyard.api.dependencies import (
     get_domain_guard,
     get_error_store,
@@ -709,7 +709,17 @@ async def cancel_job(
 ) -> Response:
     """Cancel the current queued/running delivery and wait for quiescence."""
     job = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.delete, project=job.project)
+    scope = AuthScope.delete
+    if (
+        run_id is not None
+        and job.schedule_cron is None
+        and AuthScope.delete not in get_authenticated_caller(request).scopes
+    ):
+        # A caller that may start an ad-hoc run may stop that exact run. Whatever
+        # currently owns a job, and any scheduled job (cancelling one disables
+        # its schedule), still need delete.
+        scope = AuthScope.submit
+    authorize_request(request, scope, project=job.project)
     try:
         await cancel_current_job(
             job_id,

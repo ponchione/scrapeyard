@@ -823,8 +823,11 @@ Use `POST /jobs/{job_id}/cancel?run_id={run_id}` for owned-run cancellation. The
 store checks the expected run inside the cancellation transaction; a different
 current run returns409 without disabling its schedule or cancelling its worker.
 204 still requires queue/worker quiescence;503/504 requires reconciliation and a
-retry of the same exact cancellation. The endpoint retains its existing `delete`
-scope; callers without it cannot claim acknowledged cancellation.
+retry of the same exact cancellation. Cancellation requires the `delete` scope,
+with one exception: a caller with `submit` for the job's project may cancel an
+exact `run_id` of an ad-hoc job, since it may start such a run. Cancelling
+without `run_id`, or cancelling a scheduled job, which also disables its
+schedule, still requires `delete`.
 
 `GET /scrape/acceptance` with the original `Idempotency-Key` and caller credential
 recovers an unexpired submission receipt without POSTing or enqueueing. It uses

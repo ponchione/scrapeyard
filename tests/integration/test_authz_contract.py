@@ -400,6 +400,74 @@ async def test_schedule_admin_and_delete_scopes_are_least_privilege(
     assert deleted.status_code == 204
 
 
+async def _save_active_job(job_id: str, *, project: str = "alpha", scheduled: bool = False) -> None:
+    await get_job_store().save_job(
+        Job(
+            job_id=job_id,
+            project=project,
+            name=job_id,
+            config_yaml=f"project: {project}",
+            status=JobStatus.queued,
+            current_run_id=f"{job_id}-run",
+            current_trigger="scheduled" if scheduled else "adhoc",
+            schedule_cron="0 9 * * *" if scheduled else None,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_scope_cancels_only_an_exact_adhoc_run_in_its_project(authorized_client):
+    for job_id, kwargs in (
+        ("own", {}),
+        ("unnamed-run", {}),
+        ("other-project", {"project": "beta"}),
+        ("scheduled", {"scheduled": True}),
+    ):
+        await _save_active_job(job_id, **kwargs)
+    submitter = _headers("submitter")
+
+    own = await authorized_client.post("/jobs/own/cancel?run_id=own-run", headers=submitter)
+    stale = await authorized_client.post("/jobs/own/cancel?run_id=another-run", headers=submitter)
+    current = await authorized_client.post("/jobs/unnamed-run/cancel", headers=submitter)
+    other_project = await authorized_client.post(
+        "/jobs/other-project/cancel?run_id=other-project-run", headers=submitter,
+    )
+    scheduled = await authorized_client.post(
+        "/jobs/scheduled/cancel?run_id=scheduled-run", headers=submitter,
+    )
+    reader = await authorized_client.post(
+        "/jobs/unnamed-run/cancel?run_id=unnamed-run-run", headers=_headers("reader"),
+    )
+    delete = await authorized_client.delete("/jobs/own", headers=submitter)
+
+    assert own.status_code == 204
+    assert (await get_job_store().get_job("own")).status is JobStatus.cancelled
+    assert stale.status_code == 409
+    for denied in (current, other_project, scheduled, reader, delete):
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "forbidden"
+    for job_id in ("unnamed-run", "other-project", "scheduled"):
+        assert (await get_job_store().get_job(job_id)).status is JobStatus.queued
+    assert "'delete'" in current.json()["error"]
+    assert "'delete'" in scheduled.json()["error"]
+    assert "'submit'" in reader.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_delete_scope_still_cancels_current_and_scheduled_jobs(authorized_client):
+    await _save_active_job("current")
+    await _save_active_job("scheduled", scheduled=True)
+    deleter = _headers("deleter")
+
+    current = await authorized_client.post("/jobs/current/cancel", headers=deleter)
+    scheduled = await authorized_client.post(
+        "/jobs/scheduled/cancel?run_id=scheduled-run", headers=deleter,
+    )
+
+    assert current.status_code == scheduled.status_code == 204
+    assert (await get_job_store().get_job("scheduled")).status is JobStatus.cancelled
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "override",
