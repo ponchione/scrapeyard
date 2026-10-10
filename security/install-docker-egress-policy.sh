@@ -16,6 +16,8 @@ POLICY_RENDERER="${SCRAPEYARD_EGRESS_POLICY_RENDERER:-${SCRIPT_DIR}/render-egres
 LEGACY_CHAIN="SY-EGRESS-${POLICY_ID}"
 CHAIN_A="${LEGACY_CHAIN}-A"
 CHAIN_B="${LEGACY_CHAIN}-B"
+HOST_CHAIN_A="SY-HOST-${POLICY_ID}-A"
+HOST_CHAIN_B="SY-HOST-${POLICY_ID}-B"
 POLICY_OUTPUT=""
 BRIDGE_NETFILTER_DIR=/proc/sys/net/bridge
 NETWORK_INTERFACES_DIR=/sys/class/net
@@ -80,6 +82,112 @@ drop_stale_jumps() {
     "$tool" -D DOCKER-USER -i "$interface" -j "$chain"
     echo "Removed the $tool jump to $chain left for the removed interface $interface"
   done < <("$tool" -S DOCKER-USER 2>/dev/null)
+}
+
+# The policy in DOCKER-USER sees forwarded and same-bridge traffic only. A
+# connection from the application to one of the host's own addresses (the
+# bridge gateway, the host's network addresses) is input to the host and
+# passes none of it. The host chains below refuse that input from the
+# application's address, and admit only replies to connections the host
+# itself opened to the application.
+
+# Prints "interface chain" for each INPUT jump to one of this policy's host
+# chains. A jump of any other shape is not listed, and its chain then cannot
+# be deleted, which stops the run.
+host_jumps() {
+  local tool=$1 rule
+  local -a fields
+  while IFS= read -r rule; do
+    read -r -a fields <<<"$rule"
+    [[ ${#fields[@]} -eq 6 && "${fields[0]}" == "-A" && "${fields[1]}" == "INPUT" && \
+       "${fields[2]}" == "-i" && "${fields[4]}" == "-j" ]] || continue
+    [[ "${fields[5]}" == "$HOST_CHAIN_A" || "${fields[5]}" == "$HOST_CHAIN_B" ]] || continue
+    printf '%s %s\n' "${fields[3]}" "${fields[5]}"
+  done < <("$tool" -S INPUT 2>/dev/null)
+}
+
+# A host jump left for a bridge that no longer exists matches nothing, like
+# the forwarded policy's. One on another interface that still exists belongs
+# to something else. As above, a missing interface proves nothing unless the
+# deployment bridge itself is in view.
+host_jump_is_stale() {
+  [[ "$1" != "$NETWORK_INTERFACE" && -e "$NETWORK_INTERFACES_DIR/$NETWORK_INTERFACE" && \
+     ! -e "$NETWORK_INTERFACES_DIR/$1" ]]
+}
+
+check_host_jumps() {
+  local tool=$1 interface chain
+  while read -r interface chain; do
+    [[ "$interface" == "$NETWORK_INTERFACE" ]] || host_jump_is_stale "$interface" || \
+      fail "$tool host chain $chain has a jump on another interface ($interface)"
+  done < <(host_jumps "$tool")
+}
+
+host_chain_is_referenced() {
+  local tool=$1 chain=$2 rule
+  while IFS= read -r rule; do
+    [[ " $rule " != *" -j $chain "* ]] || return 0
+  done < <("$tool" -S INPUT 2>/dev/null)
+  return 1
+}
+
+# Builds the inactive host chain in full, switches INPUT to it, and only then
+# removes what it replaces. It only ever adds a refusal, so it runs before the
+# forwarded policy is touched and needs no rollback of its own.
+install_host_rules() {
+  local tool=$1 source=$2 interface chain old="" new other
+  while read -r interface chain; do
+    if host_jump_is_stale "$interface"; then
+      "$tool" -D INPUT -i "$interface" -j "$chain"
+      echo "Removed the $tool host jump to $chain left for the removed interface $interface"
+    else
+      old=$chain
+    fi
+  done < <(host_jumps "$tool")
+  if [[ "$old" == "$HOST_CHAIN_A" ]]; then
+    new=$HOST_CHAIN_B
+    other=$HOST_CHAIN_A
+  else
+    new=$HOST_CHAIN_A
+    other=$HOST_CHAIN_B
+  fi
+  ! host_chain_is_referenced "$tool" "$new" || fail "$tool host chain $new is unexpectedly active"
+  "$tool" -F "$new" >/dev/null 2>&1 || true
+  "$tool" -X "$new" >/dev/null 2>&1 || true
+  "$tool" -N "$new"
+  "$tool" -A "$new" -s "$source" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  "$tool" -A "$new" -s "$source" -j REJECT
+  "$tool" -A "$new" -j RETURN
+  "$tool" -I INPUT 1 -i "$NETWORK_INTERFACE" -j "$new"
+  "$tool" -C INPUT -i "$NETWORK_INTERFACE" -j "$new"
+  while "$tool" -C INPUT -i "$NETWORK_INTERFACE" -j "$other" >/dev/null 2>&1; do
+    "$tool" -D INPUT -i "$NETWORK_INTERFACE" -j "$other"
+  done
+  if ! host_chain_is_referenced "$tool" "$other"; then
+    "$tool" -F "$other" >/dev/null 2>&1 || true
+    "$tool" -X "$other" >/dev/null 2>&1 || true
+  fi
+  echo "Installed $new for Scrapeyard source $source on $NETWORK_INTERFACE (host addresses)"
+}
+
+# Removes this deployment's host jumps and chains. Returns 1 when a chain is
+# left because another live interface still jumps to it.
+remove_host_rules() {
+  local tool=$1 interface chain left=0
+  while read -r interface chain; do
+    if [[ "$interface" == "$NETWORK_INTERFACE" ]] || host_jump_is_stale "$interface"; then
+      "$tool" -D INPUT -i "$interface" -j "$chain"
+    fi
+  done < <(host_jumps "$tool")
+  for chain in "$HOST_CHAIN_A" "$HOST_CHAIN_B"; do
+    if host_chain_is_referenced "$tool" "$chain"; then
+      left=1
+    else
+      "$tool" -F "$chain" >/dev/null 2>&1 || true
+      "$tool" -X "$chain" >/dev/null 2>&1 || true
+    fi
+  done
+  return "$left"
 }
 
 active_chain() {
@@ -155,11 +263,13 @@ if [[ "$ACTION" == "remove" ]]; then
     drop_stale_jumps iptables "$chain"
     remove_chain iptables "$chain" || IN_USE+=("iptables $chain")
   done
+  remove_host_rules iptables || IN_USE+=("iptables SY-HOST-$POLICY_ID")
   if command -v ip6tables >/dev/null 2>&1; then
     for chain in "$LEGACY_CHAIN" "$CHAIN_A" "$CHAIN_B"; do
       drop_stale_jumps ip6tables "$chain"
       remove_chain ip6tables "$chain" || IN_USE+=("ip6tables $chain")
     done
+    remove_host_rules ip6tables || IN_USE+=("ip6tables SY-HOST-$POLICY_ID")
   fi
   [[ ${#IN_USE[@]} -eq 0 ]] || \
     fail "left in place, another interface still jumps to it: ${IN_USE[*]}; remove it with that interface"
@@ -238,6 +348,13 @@ if [[ -n "$APP_SOURCE_V6" ]]; then
   require_bridge_netfilter bridge-nf-call-ip6tables
 fi
 
+# Refuse, before anything is changed, a host chain that another live
+# interface uses.
+check_host_jumps iptables
+if [[ -n "$APP_SOURCE_V6" ]]; then
+  check_host_jumps ip6tables
+fi
+
 for chain in "$LEGACY_CHAIN" "$CHAIN_A" "$CHAIN_B"; do
   drop_stale_jumps iptables "$chain"
   if [[ -n "$APP_SOURCE_V6" ]]; then
@@ -252,6 +369,13 @@ V6_NEW=""
 if [[ -n "$APP_SOURCE_V6" ]]; then
   V6_OLD=$(active_chain ip6tables)
   V6_NEW=$(staging_chain "$V6_OLD")
+fi
+
+# Every refusal above has been made. The host rules go in first: they only add
+# a refusal, and the forwarded policy keeps its own rollback below.
+install_host_rules iptables "$APP_SOURCE"
+if [[ -n "$APP_SOURCE_V6" ]]; then
+  install_host_rules ip6tables "$APP_SOURCE_V6"
 fi
 
 V4_SWITCHED=0

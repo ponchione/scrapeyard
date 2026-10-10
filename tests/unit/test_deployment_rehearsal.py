@@ -183,6 +183,12 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
         'ip route add unreachable "$PROXY_ADDRESS/32"',
         'ip route del unreachable "$PROXY_ADDRESS/32"',
         "SCRAPEYARD_EGRESS_ALLOW_CIDRS=not-a-network",
+        # The host's own addresses are probed after every deployment of a
+        # release whose installer covers them, and the listener is cleaned up.
+        'if app_connects "$address" "$HOST_PROBE_PORT"; then',
+        "the application reached the host's own address",
+        'kill "$HOST_LISTENER_PID"',
+        "host_policy_jumps",
         "controlled non-public challenge was reachable",
         "use an isolated Docker host",
         "an image was pulled during the rehearsal",

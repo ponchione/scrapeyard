@@ -175,6 +175,19 @@ reinserts the prior jump before withdrawing the replacement if any later IPv4
 or IPv6 mutation fails. Address families, tools, Docker chain prerequisites,
 and rendered rules are validated before the active policy is changed.
 
+`DOCKER-USER` sees forwarded and same-bridge traffic only. A connection from
+the application to one of the host's own addresses (the bridge gateway, the
+host's network addresses) is input to the host and passes none of it. The
+installer therefore also adds a chain to `INPUT`, for traffic arriving on the
+deployment bridge. It refuses everything from the application's address
+except replies to connections the host itself opened, so a reverse proxy or a
+health check on the host still reaches the application, and the application
+reaches nothing the host listens on. Before 2026-10-10 that input was not
+filtered: with the policy installed, the application's container connected to
+a listener on the bridge gateway (TD-78). `iptables -F INPUT`, or a firewall
+tool that rebuilds `INPUT`, removes the jump; installing the policy again
+puts it back.
+
 The policy depends on the kernel's bridge netfilter hook
 (`net.bridge.bridge-nf-call-iptables`, and `bridge-nf-call-ip6tables` for an
 IPv6 source). Redis, the probe and any other container on the deployment
@@ -233,11 +246,9 @@ What stays in force:
 - The application's URL guard, Chromium's sandbox and the container's
   confinement.
 
-What the host policy never covered, with or without a proxy, is the host's
-own addresses (the bridge gateway and the host's network addresses) and the
-container's own loopback. Only the URL guard refuses those. With a proxy, a
-browser request that slips past the guard in one of the two races below goes
-to the proxy; without one it goes straight to the host (TD-78).
+The container's own loopback never leaves its network namespace, so no host
+policy covers it; only the URL guard refuses it. Nothing but the application
+listens there.
 
 What is given up:
 
