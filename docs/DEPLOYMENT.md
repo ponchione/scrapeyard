@@ -494,7 +494,12 @@ wrapper has verified anything.
 
 The image is built for Linux `amd64` and runs directly as UID/GID `10001`.
 Chromium uses unprivileged user namespaces, so the image contains no privileged
-setuid helper and startup performs no root repair. Before starting Compose,
+setuid helper and startup performs no root repair. Scrapeyard starts Chromium
+with its sandbox on every browser fetch, with `stealth` and without, and never
+passes `--no-sandbox`. Outside this container, on a host that denies
+unprivileged user namespaces (Ubuntu 23.10 and later do, to programs without
+an AppArmor profile), a browser fetch fails with "No usable sandbox" until the
+host allows them. Before starting Compose,
 load the path-independent host profile:
 
 ```bash

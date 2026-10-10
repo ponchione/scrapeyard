@@ -237,6 +237,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   fetch's cleanup, and with it the target, hung until the run's deadline.
   Releasing a page now has 10 seconds, after which the whole browser session
   is stopped and the fetch's own failure is reported.
+- Chromium now runs inside its own sandbox on every dynamic fetch. Scrapling
+  asks Playwright for the sandbox only when `stealth` is on, and Playwright
+  starts Chromium with `--no-sandbox` otherwise, so fetches without `stealth`
+  had only the container's confinement around the renderer.
 - The host egress policy installer no longer refuses to run after the
   deployment network has been removed and created again. The jump left for
   the old bridge names an interface that no longer exists; `install` and

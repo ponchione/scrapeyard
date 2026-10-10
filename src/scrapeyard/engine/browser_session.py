@@ -289,7 +289,14 @@ class BrowserSession:
                 browser = await runtime.chromium.connect_over_cdp(engine._cdp_url_logic())
                 # Stopping the driver disconnects CDP; never close the remote browser.
             else:
-                browser = await runtime.chromium.launch(**engine._PlaywrightEngine__launch_kwargs())
+                # Scrapling asks for Chromium's sandbox on its stealth path
+                # only, and Playwright starts Chromium with --no-sandbox
+                # unless it is asked for (TD-73).
+                launch_options = {
+                    **engine._PlaywrightEngine__launch_kwargs(),
+                    "chromium_sandbox": True,
+                }
+                browser = await runtime.chromium.launch(**launch_options)
                 self._stack.push_async_callback(_close_resource, browser, browser)
             options = engine._PlaywrightEngine__context_kwargs()
         else:

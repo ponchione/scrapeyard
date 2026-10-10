@@ -338,6 +338,49 @@ async def test_core_dumps_are_discarded_before_the_browser_driver_starts(monkeyp
     assert order == ["discard", "driver"]
 
 
+@pytest.mark.parametrize("stealth", [False, True])
+async def test_chromium_is_always_launched_with_its_sandbox(monkeypatch, stealth) -> None:
+    from playwright import async_api
+    from rebrowser_playwright import async_api as rebrowser_api
+    from scrapling.engines.pw import PlaywrightEngine
+
+    from scrapeyard.engine import browser_session
+
+    launches = []
+
+    class Chromium:
+        async def launch(self, **options):
+            launches.append(options)
+            raise RuntimeError("no browser in this test")
+
+    class Driver:
+        chromium = Chromium()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(browser_session, "_discard_core_dumps", lambda: None)
+    monkeypatch.setattr(async_api, "async_playwright", Driver)
+    monkeypatch.setattr(rebrowser_api, "async_playwright", Driver)
+    engine = PlaywrightEngine(stealth=stealth, adaptor_arguments={})
+    # Scrapling leaves the sandbox out unless stealth is on, and Playwright
+    # then starts Chromium with --no-sandbox.
+    scrapling_options = engine._PlaywrightEngine__launch_kwargs()  # type: ignore[attr-defined]
+    assert scrapling_options.get("chromium_sandbox") is (True if stealth else None)
+    session = BrowserSession(PlayWrightFetcher)
+
+    with pytest.raises(RuntimeError, match="no browser in this test"):
+        await session._open(engine)
+    await session.aclose()
+
+    (options,) = launches
+    assert options["chromium_sandbox"] is True
+    assert {key: options[key] for key in scrapling_options} == scrapling_options
+
+
 class _Frame:
     def __init__(self, behavior: str) -> None:
         self.behavior = behavior
