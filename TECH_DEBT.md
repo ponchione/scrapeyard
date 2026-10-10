@@ -238,11 +238,10 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement, in order. Each row is one PR.
-
-| # | Entry | P | Scope | Risk | Contract | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-62 | P3 | CI | low | none | After TD-26b |
+Ready to implement: nothing. Every entry that could be done without a
+decision, an operator or Eyebox is done. New ready entries go in a table here,
+one PR per row, with the columns `#`, Entry, P, Scope, Risk, Contract and
+Notes.
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -276,7 +275,6 @@ passing, which needs it.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-60 | P2 | coordinated | A browser subrequest can complete during the guard's async check if its frame is detached |
-| TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 
 ## Ready to implement
 
@@ -303,30 +301,25 @@ causes were fixed on 2026-10-09:
 - The locked Python packages with advisories were updated. Both `pip-audit`
   lanes and a local run of `scripts/run_container_security_scan.sh` are clean,
   with no audit exceptions.
+- The workflows pin the Node 24 releases of their actions (`actions/checkout`
+  v7.0.1, `actions/setup-python` v7.0.0, `actions/cache` v6.1.0 and
+  `actions/upload-artifact` v7.0.1) instead of the Node 20 ones. Each SHA was
+  read from the action's tag and its `action.yml` checked for `node24` and for
+  the inputs the workflows pass; none of them has run yet.
 
 **Remaining:**
 - **b. Re-enable Actions,** then confirm on `main` that CI (both quality legs,
   build, live-redis), Dependency audit (both legs), Container security,
   Container and browser smoke, and Release qualification (quick and full)
-  pass. Browser smoke and release qualification install host security policy,
-  so they weren't run locally.
+  pass, and that no run carries a Node 20 deprecation warning. Browser smoke
+  and release qualification install host security policy, so they weren't run
+  locally.
 - **c. Optional:** share or cache image layers between jobs. A PR that only
   touches `src/` still does two cold image builds of about 2.5 min each; this
   can't be verified without Actions.
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-62 — Pinned GitHub actions run on Node 20
-
-**Priority:** P3 · **Area:** CI · **Risk:** low · **Contract:** none · **Depends on:** TD-26b
-
-**Problem:** the workflows pin `actions/checkout` v4, `actions/setup-python` v5,
-`actions/cache` v4 and `actions/upload-artifact` v4, which target Node 20.
-GitHub runs them on Node 24 and only warns for now.
-**Code:** `.github/workflows/*.yml`.
-**Fix:** move to their Node 24 releases, pinned by SHA as today.
-**Done when:** the workflows run without the Node 20 deprecation warning.
 
 ## Coordinated
 

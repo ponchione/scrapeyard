@@ -58,6 +58,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- GitHub Actions workflows now pin the Node 24 releases of their actions by
+  commit SHA: `actions/checkout` v7.0.1, `actions/setup-python` v7.0.0,
+  `actions/cache` v6.1.0 and `actions/upload-artifact` v7.0.1 (from v4, v5, v4
+  and v4, which target the deprecated Node 20 runtime). Every input the
+  workflows pass exists in the new releases. Actions is still disabled, so
+  the first run after it is re-enabled is what confirms them.
 - `POST /jobs/{job_id}/cancel?run_id=…` now accepts the `submit` scope for an
   exact run of an ad-hoc job in the caller's project, so a client that may
   start a run can stop it. Eyebox's `submit` and `read` credential used to get

@@ -47,7 +47,7 @@ jobs:
       SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release-qualification-quick
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Show intended-host capacity
         run: |
           docker version
@@ -58,7 +58,7 @@ jobs:
         run: ./scripts/run_release_qualification.sh --profile quick --no-cache
       - name: Upload bounded qualification report and failure diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-quick-${{ github.run_attempt }}
           path: artifacts/release-qualification-quick/
@@ -75,7 +75,7 @@ jobs:
       SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR: artifacts/release-qualification-full
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Show intended-host capacity
         run: |
           docker version
@@ -86,7 +86,7 @@ jobs:
         run: ./scripts/run_release_qualification.sh --profile full --no-cache
       - name: Upload bounded qualification report and failure diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-qualification-full-${{ github.run_attempt }}
           path: artifacts/release-qualification-full/
