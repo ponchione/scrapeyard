@@ -62,6 +62,7 @@ from scrapeyard.engine.scrape_models import (
     FetchOutcome,
     TargetResult as TargetResult,
     TargetStatus as TargetStatus,
+    drop_self_reference,
 )
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
@@ -286,6 +287,7 @@ async def _fetch_basic_with_safe_redirects(
             request_kwargs,
             budget=budget,
         )
+        drop_self_reference(response)
         if response_observer is not None:
             response_observer()
         if request_url != current_url:
@@ -481,6 +483,7 @@ async def _replay_cached_page(
         raise PageCacheMiss(url)
     parser_arguments = _replay_parser_arguments(target, adaptive=adaptive, adaptive_dir=adaptive_dir)
     response = await _replayed_response(cached, parser_arguments, budget)
+    drop_self_reference(response)
     if (
         cached.click_pagination is not None
         and target.pagination is not None
@@ -667,6 +670,7 @@ async def _fetch_page(
         )
         debug.update(capture)
 
+    drop_self_reference(response)
     populate_fetch_debug(debug, response, url)
     await _assert_fetch_url(
         debug["final_url"],

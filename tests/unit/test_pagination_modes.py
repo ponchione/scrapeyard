@@ -12,9 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 from scrapling import Fetcher
+from scrapling.engines.toolbelt.custom import Response
 
 from scrapeyard.config.schema import FetcherType, PaginationMode, RetryConfig, TargetConfig
-from scrapeyard.engine import browser_session, pagination
+from scrapeyard.engine import browser_session, pagination, scraper
 from scrapeyard.engine.browser_debug import click_pagination_spec, fetch_browser_response
 from scrapeyard.engine.browser_session import BrowserSession
 from scrapeyard.engine.pagination import paginate_target, with_query_param
@@ -365,6 +366,52 @@ async def test_click_mode_frees_each_parse_tree_before_parsing_the_next_snapshot
 
     assert alive_at_parse == [0, 0, 0, 0]
     assert all(ref() is None for ref in parsed)
+    assert [row["title"] for row in result.data] == ["p1", "p2", "p3", "p4", "p5"]
+
+
+@pytest.mark.asyncio
+async def test_link_pagination_frees_each_fetched_page_without_a_cyclic_collection(monkeypatch):
+    fetched: list[weakref.ref[Any]] = []
+    alive_at_fetch: list[int] = []
+
+    async def fetch(_fetcher_cls, url, _call_kwargs, _debug, **_kwargs):
+        alive_at_fetch.append(sum(ref() is not None for ref in fetched))
+        number = int(url.rsplit("=", 1)[1])
+        next_link = f'<a class="next" href="?page={number + 1}">next</a>' if number < 5 else ""
+        html = f"<html><body><h1>p{number}</h1>{next_link}</body></html>"
+        response = Response(
+            url=url, text=html, body=html.encode(), status=200, reason="OK",
+            cookies={}, headers={}, request_headers={}, **Fetcher._generate_parser_arguments(),
+        )
+        fetched.append(weakref.ref(response))
+        return response
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(scraper, "_fetch_basic_with_safe_redirects", fetch)
+    monkeypatch.setattr(scraper, "_assert_fetch_url", no_op)
+    monkeypatch.setattr(scraper, "admit_page", no_op)
+    monkeypatch.setattr(pagination, "_pagination_url_is_safe", AsyncMock(return_value=True))
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://shop.example.test/list?page=1",
+            "selectors": {"title": "h1::text"},
+            "pagination": {"next": "a.next", "max_pages": 10},
+        }
+    )
+
+    # Reference counting alone must free each page: no cyclic collection runs.
+    gc.disable()
+    try:
+        result = await scraper.scrape_target(target, adaptive=False, retry=RetryConfig())
+    finally:
+        gc.enable()
+
+    # Alive at each fetch: the first page, which scrape_target holds until
+    # pagination ends, and the page whose next link is being followed.
+    assert alive_at_fetch == [0, 1, 2, 2, 2]
+    assert all(ref() is None for ref in fetched)
     assert [row["title"] for row in result.data] == ["p1", "p2", "p3", "p4", "p5"]
 
 

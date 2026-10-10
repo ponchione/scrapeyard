@@ -58,6 +58,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   requests are routed. `run_budget.traffic` counts them as `cached`.
 
 ### Changed
+- Each fetched page is now freed as soon as the engine drops it, instead of
+  waiting for the cyclic garbage collector, so parsed pages no longer pile up
+  during pagination. On a 50-page link pagination run with 265 KiB pages,
+  peak RSS growth fell from 53 MB to 31 MB on Python 3.12 (64 MB to 34 MB on
+  3.10), and with 660 KiB pages from 128 MB to 55 MB. Records are unchanged.
 - Stale-running recovery, which runs every minute under the jobs.db write
   lock, no longer scans every job. With 2 KiB configs it took 7.7 ms at 6,600
   jobs and 27 ms at 25,000; it now takes under 1 ms at both. Migration `025`

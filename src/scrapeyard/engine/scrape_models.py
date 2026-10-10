@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import zlib
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +12,17 @@ from scrapeyard.models.job import ErrorType
 
 if TYPE_CHECKING:
     from scrapling.engines.toolbelt.custom import Response
+
+
+def drop_self_reference(page: object) -> None:
+    """Drop Scrapling's ``Response.adaptor``, an alias of the page itself.
+
+    With the alias a dropped page waits for the cyclic garbage collector, which
+    rarely runs once parsed pages reach its oldest generation, so lxml trees
+    pile up across pages. Nothing reads it.
+    """
+    with suppress(AttributeError):
+        delattr(page, "adaptor")
 
 
 class TargetStatus(str, Enum):
@@ -103,12 +114,8 @@ class ClickSnapshot:
 
         html = self.html
         response = Response(text=html, body=html.encode("utf-8"), **self.response_kwargs)
-        try:
-            yield response
-        finally:
-            # Scrapling's Response refers to itself (``adaptor``), so without
-            # this only the cyclic garbage collector would free the tree.
-            del response.adaptor
+        drop_self_reference(response)
+        yield response
 
 
 @dataclass(frozen=True)

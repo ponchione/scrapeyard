@@ -6,6 +6,9 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-52 to TD-59
+  were fixed and removed. Findings made while fixing them are TD-63 and
+  TD-64.
 - **2026-10-09** (`a36c0a7` onwards): roadmap pass. TD-30 to TD-44 were fixed
   and removed, and TD-26's code-side fixes landed. Findings made while fixing
   them are TD-51 to TD-62.
@@ -235,11 +238,10 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-61 | P1 | dependencies | medium | none | Before the first deploy; blocks TD-26 |
-| 2 | TD-58 | P3 | engine, memory | low | none | Measure first |
-| 3 | TD-63 | P3 | worker | low | none | |
-| 4 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 5 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 6 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 2 | TD-63 | P3 | worker | low | none | |
+| 3 | TD-64 | P3 | engine | low | none for the decoding fix | |
+| 4 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 5 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-61 (dependency advisories), then TD-26
 (re-enable CI and confirm every workflow passes). CI is GitHub Actions, not
@@ -276,7 +278,6 @@ container scan and qualification workflows passing, which needs both.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
-| TD-58 | P3 | ready | Every parsed page waits for the cyclic garbage collector to free its tree |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-61 | P1 | ready | Locked Python dependencies have known vulnerabilities |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
@@ -373,27 +374,6 @@ update the two tests and `docs/DEPLOYMENT.md` to match.
 **Done when:** a test with a stuck run thread shows shutdown closing the stores
 and the process exiting within the grace, or the trade-off is accepted and this
 entry deleted.
-
-### TD-58 — Every parsed page waits for the cyclic garbage collector to free its tree
-
-**Priority:** P3 · **Area:** engine, memory · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- Scrapling's `Response.__init__` sets `self.adaptor = self`, so a page
-  dropped after extraction is freed only by the cyclic garbage collector, not
-  by reference counting.
-- Extraction allocates enough to promote the page to older generations, so
-  first pages and link and page-parameter pagination pages can accumulate lxml
-  trees until a gen-2 collection or the worker's end-of-job `gc.collect()`.
-- Unmeasured. Click snapshots already break the cycle (`ClickSnapshot.parsed()`).
-
-**Code:** `engine/pagination.py` (`paginate_target`), `engine/scraper.py`
-(`_scrape_first_page`, `_fetch_page`).
-**Fix:** measure peak RSS on a long link-pagination run first. If it matters,
-delete `response.adaptor` once a page is extracted, as `ClickSnapshot.parsed()`
-does.
-**Done when:** a benchmark shows peak RSS before and after on a 50-page link
-pagination run, with identical records.
 
 ### TD-62 — Pinned GitHub actions run on Node 20
 
