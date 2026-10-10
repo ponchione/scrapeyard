@@ -207,6 +207,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A refused URL is no longer logged as an unhandled error when the request
+  that asked about it has gone. Run-thread work whose caller was cancelled or
+  ran out of budget kept running with nobody awaiting it; when it then
+  failed, as the URL guard does to refuse a URL, asyncio logged `Future
+  exception was never retrieved` at ERROR with the traceback. The same
+  happened to a readiness probe that failed after its response timed out.
+  Both now retrieve the late failure.
 - The fetch-session smoke check no longer fails when Chromium asks for
   `/favicon.ico` by itself. In its browser-disconnect step the test closes
   the browser under a live page; a favicon request issued in those

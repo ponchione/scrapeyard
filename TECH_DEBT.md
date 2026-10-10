@@ -238,11 +238,10 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement, in order. Each row is one PR.
-
-| # | Entry | P | Scope | Risk | Contract | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-66 | P3 | common | low | none | Log noise only |
+Ready to implement: nothing. Every entry that could be done without a
+decision, an operator or Eyebox is done. New ready entries go in a table here,
+one PR per row, with the columns `#`, Entry, P, Scope, Risk, Contract and
+Notes.
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -275,7 +274,6 @@ passing, which needs it.
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-65 | P3 | coordinated | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
-| TD-66 | P3 | ready | A cancelled wait on run-thread work logs "Future exception was never retrieved" |
 
 ## Ready to implement
 
@@ -321,24 +319,6 @@ causes were fixed on 2026-10-09:
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-66 — A cancelled wait on run-thread work logs "Future exception was never retrieved"
-
-**Priority:** P3 · **Area:** common, run threads · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:** `OwnedThreadPool._run_owned` awaits `asyncio.shield(wrapped)`.
-When the awaiting coroutine is cancelled, Python 3.12's `shield` stops
-watching the inner future. If the thread's work then raises, nothing retrieves
-the exception, and asyncio logs `Future exception was never retrieved` at
-ERROR, with the traceback, when the future is collected. Reproduced on 3.12
-on 2026-10-09; 3.10 does not log it. The route guard does this whenever a
-page closes or a run deadline passes while `assert_public_url` is refusing a
-URL on a run thread, so an ordinary refusal is logged as an unhandled error.
-**Code:** `common/run_threads.py` (`OwnedThreadPool._run_owned`).
-**Fix:** on cancellation, add a done callback that retrieves the abandoned
-future's exception.
-**Done when:** a test cancels the awaiter, lets the work raise and collects
-garbage, and the loop's exception handler saw nothing.
 
 ## Coordinated
 

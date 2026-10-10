@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
@@ -151,6 +152,57 @@ async def test_deadline_retains_run_thread_capacity_until_work_finishes():
     finally:
         release.set()
         pool.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancelled", "deadline"])
+async def test_failure_of_abandoned_run_thread_work_is_retrieved(ending: str):
+    loop = asyncio.get_running_loop()
+    unhandled: list[str] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context["message"]))
+    pool = RunThreadPool(max_workers=1)
+    started = threading.Event()
+    release = threading.Event()
+
+    def refusing_work() -> None:
+        started.set()
+        release.wait()
+        raise ValueError("refused")
+
+    try:
+        if ending == "cancelled":
+            waiter = asyncio.ensure_future(
+                run_thread_work(refusing_work, run_budget=None, pool=pool)
+            )
+            assert await asyncio.to_thread(started.wait, 5)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        else:
+            with pytest.raises(BudgetExceeded):
+                await run_thread_work(
+                    refusing_work, run_budget=_budget(max_duration_seconds=0.2), pool=pool,
+                )
+        await asyncio.sleep(0)
+        assert pool.lingering == 1
+
+        release.set()
+        for _ in range(200):
+            if pool.active == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert pool.active == 0
+        # The failure reaches the loop one turn after its thread ends. Nobody
+        # awaits it, and it must not surface as "never retrieved" once collected.
+        await asyncio.sleep(0.01)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        release.set()
+        pool.shutdown()
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio

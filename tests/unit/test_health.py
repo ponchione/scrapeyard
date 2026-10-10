@@ -1,7 +1,10 @@
 """Test the /health endpoint."""
 
 import asyncio
+import gc
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -11,7 +14,7 @@ from httpx import ASGITransport, AsyncClient
 import scrapeyard.main as main_module
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.main import app
-from scrapeyard.runtime.health import ProbeResult
+from scrapeyard.runtime.health import ProbeResult, SingleFlightSyncProbe
 
 
 @pytest.fixture
@@ -172,6 +175,41 @@ async def test_timed_probe_has_explicit_timeout():
     result = await main_module._timed_async_probe("blocked", _blocked(), 0.01)
 
     assert result == ProbeResult(False, "blocked probe timed out after 0.01s")
+
+
+@pytest.mark.asyncio
+async def test_timed_sync_probe_retrieves_a_failure_that_follows_its_timeout():
+    loop = asyncio.get_running_loop()
+    unhandled: list[str] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context["message"]))
+    release = threading.Event()
+    finished = threading.Event()
+
+    def failing_probe() -> ProbeResult:
+        try:
+            release.wait()
+            raise OSError("disk went away")
+        finally:
+            finished.set()
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = await main_module._timed_sync_probe(
+            "blocked", failing_probe, 0.01, SingleFlightSyncProbe(executor),
+        )
+        assert result == ProbeResult(False, "blocked probe timed out after 0.01s")
+
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        await asyncio.sleep(0.01)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        release.set()
+        executor.shutdown()
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio

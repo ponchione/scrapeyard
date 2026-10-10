@@ -38,11 +38,22 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
         task.result()
 
 
+def consume_result_when_done(future: asyncio.Future[Any]) -> None:
+    """Retrieve the result of work nobody awaits any more, whenever it ends.
+
+    ``asyncio.shield`` stops watching its inner future once the caller is
+    cancelled or times out. A failure that arrives later is otherwise logged
+    as "Future exception was never retrieved".
+    """
+
+    future.add_done_callback(_consume_task_result)
+
+
 def cancel_task_nowait(task: asyncio.Future[Any]) -> None:
     """Request cancellation and consume the eventual result without blocking."""
 
     task.cancel()
-    task.add_done_callback(_consume_task_result)
+    consume_result_when_done(task)
 
 
 async def await_with_timeout(

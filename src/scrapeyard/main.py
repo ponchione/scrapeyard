@@ -46,7 +46,11 @@ from scrapeyard.api.response_models import (
 )
 from scrapeyard.api.response_utils import error_content
 from scrapeyard.api.routes import router
-from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.async_tools import (
+    AwaitableCancelled,
+    MonotonicDeadline,
+    consume_result_when_done,
+)
 from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
@@ -575,12 +579,11 @@ async def _timed_sync_probe(
     timeout: float,
     single_flight: SingleFlightSyncProbe,
 ) -> ProbeResult:
-    future = single_flight.submit(function)
+    probe = asyncio.wrap_future(single_flight.submit(function))
+    # The probe outlives a response that timed out or was cancelled.
+    consume_result_when_done(probe)
     try:
-        return await asyncio.wait_for(
-            asyncio.shield(asyncio.wrap_future(future)),
-            timeout=timeout,
-        )
+        return await asyncio.wait_for(asyncio.shield(probe), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning(
             "%s readiness probe is still running after the %.3fs response timeout",

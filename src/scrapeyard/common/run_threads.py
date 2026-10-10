@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
+from scrapeyard.common.async_tools import consume_result_when_done
 from scrapeyard.runtime.metrics import ACTIVE_WORK, WORK_CAPACITY
 
 if TYPE_CHECKING:
@@ -98,6 +99,8 @@ class OwnedThreadPool:
 
         future.add_done_callback(release_slot)
         wrapped = asyncio.wrap_future(future, loop=loop)
+        # A cancelled caller leaves the work running with nobody to hear it fail.
+        consume_result_when_done(wrapped)
         try:
             return await asyncio.shield(wrapped)
         except asyncio.CancelledError:
