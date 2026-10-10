@@ -312,8 +312,21 @@ python3 tests/smoke/verify_api.py \
 compose exec -T --user scrapeyard scrapeyard python - \
   < tests/smoke/verify_runtime.py > "$DIAGNOSTICS_DIR/runtime-contract.json"
 
+# TD-45 spike: diagnostics upload only on failure, and the timings file is only
+# written by a passing run, so show the evidence in the log as soon as it exists.
+echo "TD-45 spike evidence: image_bytes=$IMAGE_SIZE"
+echo "TD-45 spike evidence: runtime contract"
+cat "$DIAGNOSTICS_DIR/runtime-contract.json"
+echo "TD-45 spike evidence: installed browser builds"
+compose exec -T --user scrapeyard scrapeyard sh -c 'du -sm /ms-playwright/* /opt/scrapeyard-cache/camoufox 2>/dev/null; python -c "import importlib.metadata as m; print({n: m.version(n) for n in (\"playwright\", \"rebrowser-playwright\", \"camoufox\", \"scrapling\")})"' || true
+
+FETCH_SESSION_STATUS=0
 compose exec -T --user scrapeyard scrapeyard python - \
-  < tests/smoke/verify_fetch_sessions.py > "$DIAGNOSTICS_DIR/fetch-session-contract.jsonl"
+  < tests/smoke/verify_fetch_sessions.py > "$DIAGNOSTICS_DIR/fetch-session-contract.jsonl" \
+  || FETCH_SESSION_STATUS=$?
+echo "TD-45 spike evidence: fetch-session contract (exit $FETCH_SESSION_STATUS)"
+cat "$DIAGNOSTICS_DIR/fetch-session-contract.jsonl"
+((FETCH_SESSION_STATUS == 0)) || exit "$FETCH_SESSION_STATUS"
 
 # Retrieve only the focused smoke project's bounded results/screenshots, never
 # the SQLite databases, profiles, credentials, or the complete /data tree.
