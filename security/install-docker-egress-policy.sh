@@ -132,15 +132,17 @@ host_chain_is_referenced() {
 }
 
 # Builds the inactive host chain in full, switches INPUT to it, and only then
-# removes what it replaces. It only ever adds a refusal, so it runs before the
-# forwarded policy is touched and needs no rollback of its own.
+# removes what it replaces. For one application address it only ever adds a
+# refusal, so it runs before the forwarded policy is touched and needs no
+# rollback of its own. (A run that changes the application's address and then
+# fails at the forwarded policy leaves the host chain on the new address.)
 install_host_rules() {
-  local tool=$1 source=$2 interface chain old="" new other
+  local tool=$1 source=$2 interface chain old="" new other type
   while read -r interface chain; do
     if host_jump_is_stale "$interface"; then
       "$tool" -D INPUT -i "$interface" -j "$chain"
       echo "Removed the $tool host jump to $chain left for the removed interface $interface"
-    else
+    elif [[ -z "$old" ]]; then
       old=$chain
     fi
   done < <(host_jumps "$tool")
@@ -151,11 +153,25 @@ install_host_rules() {
     new=$HOST_CHAIN_A
     other=$HOST_CHAIN_B
   fi
+  # A run cut short between switching INPUT to its new chain and dropping the
+  # old one leaves a jump to each. Both chains are complete, because a chain
+  # is jumped to only once it is built, so one keeps refusing while the
+  # other's jump is dropped and the chain rebuilt.
+  while "$tool" -C INPUT -i "$NETWORK_INTERFACE" -j "$new" >/dev/null 2>&1; do
+    "$tool" -D INPUT -i "$NETWORK_INTERFACE" -j "$new"
+  done
   ! host_chain_is_referenced "$tool" "$new" || fail "$tool host chain $new is unexpectedly active"
   "$tool" -F "$new" >/dev/null 2>&1 || true
   "$tool" -X "$new" >/dev/null 2>&1 || true
   "$tool" -N "$new"
   "$tool" -A "$new" -s "$source" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  if [[ "$tool" == "ip6tables" ]]; then
+    # Neighbour discovery is not connection-tracked. Refused, the application
+    # could not find the gateway and would have no IPv6 at all.
+    for type in router-solicitation neighbour-solicitation neighbour-advertisement; do
+      "$tool" -A "$new" -s "$source" -p ipv6-icmp --icmpv6-type "$type" -j ACCEPT
+    done
+  fi
   "$tool" -A "$new" -s "$source" -j REJECT
   "$tool" -A "$new" -j RETURN
   "$tool" -I INPUT 1 -i "$NETWORK_INTERFACE" -j "$new"

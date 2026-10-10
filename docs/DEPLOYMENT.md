@@ -184,9 +184,26 @@ except replies to connections the host itself opened, so a reverse proxy or a
 health check on the host still reaches the application, and the application
 reaches nothing the host listens on. Before 2026-10-10 that input was not
 filtered: with the policy installed, the application's container connected to
-a listener on the bridge gateway (TD-78). `iptables -F INPUT`, or a firewall
-tool that rebuilds `INPUT`, removes the jump; installing the policy again
-puts it back.
+a listener on the bridge gateway (TD-78).
+
+Two things follow from that chain having no exceptions:
+
+- Docker's DNS servers must not be one of the host's own non-loopback
+  addresses (a `dnsmasq` on the bridge, for example). Docker dials such a
+  server from the container's namespace, and the application could then
+  resolve nothing. The usual arrangement, where the host's resolver is on
+  loopback and Docker forwards to the upstream servers, is unaffected.
+- An operator proxy cannot run on the Docker host itself.
+  `SCRAPEYARD_EGRESS_ALLOW_CIDRS` opens only the forwarded policy.
+
+Nothing checks that the `INPUT` jump stays in place between deployments: the
+application's startup check tests forwarded traffic only. The jump is lost,
+until the policy is installed again, by `iptables -F`, `nft flush ruleset`
+(and so `systemctl restart nftables`, which also empties `DOCKER-USER`),
+`iptables-restore` without `-n` (as `netfilter-persistent` runs it), and
+`ufw` when `MANAGE_BUILTINS=yes`. A default `ufw` leaves it alone. Do not run
+a second firewall manager over `INPUT` on this host without checking the jump
+afterwards.
 
 The policy depends on the kernel's bridge netfilter hook
 (`net.bridge.bridge-nf-call-iptables`, and `bridge-nf-call-ip6tables` for an
