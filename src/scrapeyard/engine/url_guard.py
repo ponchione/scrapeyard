@@ -152,7 +152,9 @@ def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
     """Parse IPv4 forms accepted by socket/http stacks but not ipaddress."""
     try:
         packed = socket.inet_aton(host)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a host inet_aton can't encode (a lone surrogate) is not
+        # an address either; the hostname checks that follow reject it.
         return None
     return ipaddress.IPv4Address(packed)
 

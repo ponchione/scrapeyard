@@ -207,6 +207,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A hostname containing a lone surrogate is refused as an unsafe URL. The
+  check for legacy IPv4 spellings let `UnicodeEncodeError` escape from the URL
+  guard, so a caller that handles the guard's `UnsafeURLError` saw an error
+  type it did not expect.
 - A browser fetch no longer waits without limit for a crashed page to be
   released. After a renderer crash Chromium 145 left the context's
   `set_offline` call unanswered while the driver stayed connected, so the

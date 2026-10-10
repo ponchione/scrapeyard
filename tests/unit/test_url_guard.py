@@ -20,6 +20,7 @@ from scrapeyard.engine.url_guard import (
     activate_deployment_secret_redaction,
     assert_public_url,
     canonical_url_origin,
+    public_dns_hostname,
     redact_deployment_secrets,
     redact_deployment_secrets_in_value,
     redact_deployment_secrets_in_value_with_count,
@@ -218,6 +219,19 @@ def test_assert_public_url_rejects_trailing_dot_legacy_ipv4_without_dns() -> Non
 def test_assert_public_url_rejects_legacy_ipv4_private_octal_without_dns() -> None:
     with pytest.raises(UnsafeURLError, match="non-public"):
         assert_public_url("http://0300.0250.0001.0001/resource", resolve_dns=False)
+
+
+@pytest.mark.parametrize("host", ["a{}b.test", "{}", "1.2.3.{}"])
+def test_lone_surrogate_hostname_is_an_unsafe_url(host: str) -> None:
+    # Built in code: an escaped surrogate in source can arrive as another character.
+    url = f"https://{host.format(chr(0xD800))}/resource"
+
+    with pytest.raises(UnsafeURLError, match="hostname is invalid"):
+        public_dns_hostname(url)
+    with pytest.raises(UnsafeURLError, match="hostname is invalid"):
+        assert_public_url(url, resolve_dns=False)
+    with pytest.raises(UnsafeURLError, match="hostname is invalid"):
+        resolve_public_url(url)
 
 
 @pytest.mark.parametrize("host", ["[::7f00:1]", "[::ffff:0:7f00:1]", "[::a9fe:a9fe]", "[fec0::1]"])

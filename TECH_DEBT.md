@@ -420,20 +420,15 @@ measured effect instead of fixture numbers.
   one a browser opens.
 - Browser requests are not affected: the browser gives the route guard the
   ASCII name it is about to use.
-- Separately, a lone surrogate in a hostname makes `socket.inet_aton` raise
-  `UnicodeEncodeError` out of `public_dns_hostname`, not `UnsafeURLError`, so
-  a caller that catches the guard's errors sees a type it does not expect.
 
-**Code:** `engine/url_guard.py` (`_canonical_hostname`,
-`_legacy_ipv4_address`, `resolve_public_url`, `url_host_label`,
-`canonical_url_origin`).
+**Code:** `engine/url_guard.py` (`_canonical_hostname`, `resolve_public_url`,
+`url_host_label`, `canonical_url_origin`).
 **Fix:** canonicalize with the IDNA processing the HTTP client uses (httpx
 uses the `idna` package), or refuse a hostname whose two encodings differ.
-Either changes what the guard accepts, so it needs the review. Turning the
-surrogate case into `UnsafeURLError` needs none.
+Either changes what the guard accepts, so it needs the review.
 **Done when:** a test shows the guard, the `Host` header and the client's
-request name agree for `straße.test` and `ς.test` (or that both are refused),
-and a hostname with a lone surrogate raises `UnsafeURLError`.
+request name agree for `straße.test` and `ς.test` (or that both are refused).
+The lone-surrogate half of this entry was fixed on 2026-10-10.
 
 ## Operational and deployment qualification
 
