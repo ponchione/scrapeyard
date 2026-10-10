@@ -251,8 +251,6 @@ passing, which needs it.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
-- TD-60: the owner accepted the frame-detach race on 2026-10-09; the smoke
-  assertion and the written record of that decision remain.
 - TD-65: changes what the URL guard accepts, so it needs a security review.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
@@ -276,7 +274,6 @@ passing, which needs it.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-60 | P2 | coordinated | A browser subrequest can complete during the guard's async check if its frame is detached |
 | TD-65 | P3 | coordinated | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
 | TD-66 | P3 | ready | A cancelled wait on run-thread work logs "Future exception was never retrieved" |
 
@@ -411,43 +408,6 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
-
-### TD-60 — A browser subrequest can complete during the guard's async check if its frame is detached
-
-**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- A 2026-10-09 container check saw the rebrowser stealth path send a
-  `/favicon.ico` request that was counted differently than expected, making
-  `tests/smoke/verify_fetch_sessions.py` flaky at its
-  `run_budget.requests == len(Fixture.requests) == 1` assertion (2 of 4 runs
-  passed on the old image, 3 of 4 on the new).
-- Rechecked 2026-10-09 against real browsers (rebrowser Chromium 136 and
-  Playwright Chromium 145): favicon requests and cross-origin
-  `<link rel=icon>`, `<img>` and `fetch()` subrequests are all delivered
-  through `context.route("**/*")`, so `_guarded_async_intercept_route` sees
-  them and aborts a non-public one. The "favicon bypasses the guard"
-  hypothesis did not reproduce; favicons are routed and counted.
-- One gap remains, and it is a race, not a bypass: because the guard validates
-  asynchronously (a thread hop plus a DNS lookup, for any hostname the run
-  holds no fresh public verdict for), a request can complete before the guard
-  aborts it if the page destroys the request's frame during that window. Reproduced with a cross-site iframe removed or navigated
-  away mid-check. Same-site iframe removal, popup close and top-level
-  navigation did not leak, because those requests share the page's routing and
-  are aborted. The run's verdict cache does not close it: a non-public host
-  never gets a verdict, so its requests still wait on a lookup.
-- In every case the host egress policy (iptables `DOCKER-USER`, which denies
-  non-public destinations) is the backstop, as it already is for the favicon
-  path.
-
-**Code:** `engine/browser_session.py`, `engine/browser_debug.py`
-(`_guarded_async_intercept_route`), `tests/smoke/verify_fetch_sessions.py`.
-**Fix:** on 2026-10-09 the owner accepted the frame-detach race, given the
-egress backstop, and chose not to change the guard. What remains is to record
-that in the deployment guide and to make the smoke assertion ignore
-`/favicon.ico`.
-**Done when:** the deployment guide records the accepted race and the smoke
-verifier passes repeatedly.
 
 ### TD-65 — The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names
 

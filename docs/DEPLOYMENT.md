@@ -199,6 +199,21 @@ accepted; it does not retroactively rewrite persisted schedules. Audit existing
 scheduled configurations before enabling the mode, and recreate intentional
 proxy/CDP overrides with a `transport-admin` credential.
 
+Two browser races are accepted in the application and left to this policy,
+which denies their destinations whatever the application decided:
+
+- The route guard answers asynchronously. If a page removes a cross-site
+  iframe, or navigates it away, while one of that frame's requests is waiting
+  for the guard, the browser can let the request go before the guard aborts
+  it. Requests from same-site frames, popups and top-level navigations are
+  aborted as usual. Measured on 2026-10-09 with Chromium 136 and 145; the
+  run's hostname verdicts do not change it, because a non-public host never
+  gets one.
+- A browser that is closed from outside, or dies, while its page is online
+  can send a request it had started by itself, such as `/favicon.ico`,
+  without handing it to the guard. Scrapeyard takes a context offline before
+  it closes a page or a browser, so its own shutdown paths do not do this.
+
 Kubernetes deployments should express the same allow-before-deny policy with a
 CNI that supports egress CIDR rules; default Kubernetes `NetworkPolicy` cannot
 select arbitrary public destinations while excluding every rebinding target.

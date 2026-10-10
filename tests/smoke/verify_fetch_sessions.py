@@ -57,6 +57,11 @@ class Fixture(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
+def page_requests():
+    """Requests for the fixture's pages. Chromium also asks for /favicon.ico by itself."""
+    return [(path, headers) for path, headers in Fixture.requests if path != "/favicon.ico"]
+
+
 def budget(duration=30):
     return RunBudget(
         max_duration_seconds=duration, max_fetched_bytes=1_000_000,
@@ -105,7 +110,7 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             assert all(b is second_budget for url, b in budgets_seen if url.endswith(("/second", "/private")))
             other = await fetch(OTHER + "/other", budget())
             assert other.page.css("h1::text").get() == "empty"
-            headers = {name.lower(): value for name, value in Fixture.requests[-1][1].items()}
+            headers = {name.lower(): value for name, value in page_requests()[-1][1].items()}
             assert "x-test-secret" not in headers
             assert "cookie" not in headers
             assert all(path != "/private" for path, _ in Fixture.requests)
@@ -120,7 +125,7 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             session = BrowserSession(fetcher)
             clean = await fetch(ORIGIN + "/clean", budget())
             assert clean.page.css("h1::text").get() == "empty"
-            assert "Cookie" not in Fixture.requests[-1][1]
+            assert "Cookie" not in page_requests()[-1][1]
 
             # Deadline and cancellation must close the existing browser before returning.
             for ending in ("budget", "cancel"):
@@ -222,7 +227,14 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
                         assert exc is failure
                 finally:
                     await session.aclose()
-                assert run_budget.requests == len(Fixture.requests) == 1
+                # Chromium can ask for /favicon.ico just as the browser closes
+                # under it. That request never reaches the route guard, so it
+                # is not counted, and it is not what this checks.
+                sent = run_budget.snapshot()["traffic"]["resource_types"]
+                assert sent["document"]["requests"] == len(page_requests()) == 1
+                # Unused redirect capacity was refunded: only the page, and a
+                # favicon if the guard did release one, stay counted.
+                assert run_budget.requests <= 2
                 assert drivers[0].returncode is not None
     finally:
         await session.aclose()

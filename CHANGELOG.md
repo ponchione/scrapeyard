@@ -207,6 +207,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The fetch-session smoke check no longer fails when Chromium asks for
+  `/favicon.ico` by itself. In its browser-disconnect step the test closes
+  the browser under a live page; a favicon request issued in those
+  milliseconds reaches the fixture without ever being handed to the route
+  guard, so the fixture saw two requests where the run counted one (about
+  half the local runs on the stealth path). The check now compares the page
+  requests only. `docs/DEPLOYMENT.md` records the two browser races the
+  application accepts and leaves to the egress policy.
 - Behind a proxy, a browser subrequest whose host doesn't resolve is now
   dropped on its own, and recorded in the fetch's `blocked_requests` debug
   data as `unresolved_request`, instead of failing the whole page and
