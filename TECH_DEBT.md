@@ -272,7 +272,7 @@ passing, which needs it.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
+| TD-60 | P2 | coordinated | A browser subrequest can complete during the guard's async check if its frame is detached |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 
 ## Ready to implement
@@ -446,30 +446,43 @@ Where it doesn't help:
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
 
-### TD-60 — Chromium favicon requests bypass the browser route guard and budget
+### TD-60 — A browser subrequest can complete during the guard's async check if its frame is detached
 
 **Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** the TD-23 security review
 
 **Problem:**
-- In a 2026-10-09 container check, the rebrowser stealth path sometimes sent a
-  `/favicon.ico` request to the page's host. It reached the server but never
-  passed `_guarded_async_intercept_route` or the run budget.
-- That makes `tests/smoke/verify_fetch_sessions.py` flaky on the old and new
-  images alike, at its `run_budget.requests == len(Fixture.requests) == 1`
-  assertion (2 of 4 runs passed on the old image, 3 of 4 on the new).
-- A request outside `page.route` is also outside the URL guard. Only
-  same-origin favicons were observed. A cross-origin `<link rel=icon>` pointing
-  at a private address was not tested, so the host egress policy is the only
-  known backstop.
+- A 2026-10-09 container check saw the rebrowser stealth path send a
+  `/favicon.ico` request that was counted differently than expected, making
+  `tests/smoke/verify_fetch_sessions.py` flaky at its
+  `run_budget.requests == len(Fixture.requests) == 1` assertion (2 of 4 runs
+  passed on the old image, 3 of 4 on the new).
+- Rechecked 2026-10-09 against real browsers (rebrowser Chromium 136 and
+  Playwright Chromium 145): favicon requests and cross-origin
+  `<link rel=icon>`, `<img>` and `fetch()` subrequests are all delivered
+  through `context.route("**/*")`, so `_guarded_async_intercept_route` sees
+  them and aborts a non-public one. The "favicon bypasses the guard"
+  hypothesis did not reproduce; favicons are routed and counted.
+- One gap remains, and it is a race, not a bypass: because the guard validates
+  asynchronously (a thread hop plus any DNS lookup — see TD-23), a request can
+  complete before the guard aborts it if the page destroys the request's frame
+  during that window. Reproduced with a cross-site iframe removed or navigated
+  away mid-check. Same-site iframe removal, popup close and top-level
+  navigation did not leak, because those requests share the page's routing and
+  are aborted. Shrinking the window (the TD-23 verdict cache) does not close it.
+- In every case the host egress policy (iptables `DOCKER-USER`, which denies
+  non-public destinations) is the backstop, as it already is for the favicon
+  path.
 
 **Code:** `engine/browser_session.py`, `engine/browser_debug.py`
 (`_guarded_async_intercept_route`), `tests/smoke/verify_fetch_sessions.py`.
-**Fix:** test whether cross-origin icon links bypass routing. If they do, stop
-favicon fetches (a Chromium switch or blocking `link[rel=icon]`), or document
-the reliance on the egress policy. Make the smoke assertion ignore
-`/favicon.ico`.
-**Done when:** a test with a cross-origin icon link shows it is guarded or
-blocked, and the smoke verifier passes repeatedly.
+**Fix (needs the security review):** decide whether the frame-detach race is
+acceptable given the egress backstop, or close it — for example by taking the
+context offline before a frame is torn down, as the fetch-failure path already
+does, rather than only aborting in the route handler. Independently, and
+without a guard change, make the smoke assertion ignore `/favicon.ico`.
+**Done when:** the security review accepts the decision, a test shows a
+cross-site frame cannot release a request to a non-public address, and the
+smoke verifier passes repeatedly.
 
 ## Operational and deployment qualification
 
