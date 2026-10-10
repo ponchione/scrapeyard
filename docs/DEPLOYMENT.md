@@ -347,6 +347,19 @@ Do not replace either policy with `unconfined`. `/data`, bounded `/tmp`, `/run`,
 home cache/config and Camoufox state tmpfs, and `/dev/shm` are the only writable
 areas.
 
+No browser process dumps core. Chromium is told that a renderer died only when
+the renderer's process exits, and the kernel holds a crashed process until its
+core dump is written. A host whose `kernel.core_pattern` pipes dumps to a
+program (`systemd-coredump`, `apport`) receives them from containers as well,
+and ignores the container's core ulimit when it does. On a GitHub runner that
+left a crashed page unanswered for 219 seconds, and a renderer that ran out of
+memory left a 548 MB compressed dump of it under the host's
+`/var/lib/systemd/coredump` (2026-10-10). Before it starts a browser,
+Scrapeyard therefore gives itself a soft core limit of 1, the one value the
+kernel honours for a piped dump, and an empty `/proc/self/coredump_filter`.
+Every browser process inherits both. The application process is covered too,
+so it leaves no core dump either.
+
 Fresh named volumes inherit UID 10001 from the image. Migrate an older or host
 bind-mounted data directory while the application is stopped:
 

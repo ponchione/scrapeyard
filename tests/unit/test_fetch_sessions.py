@@ -1,7 +1,10 @@
 """Target-scoped transport reuse, isolation, retry, and cleanup contracts."""
 
 import asyncio
+import subprocess
+import sys
 from contextlib import suppress
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit
 
@@ -264,6 +267,75 @@ async def test_browser_cleanup_that_is_never_answered_stops_the_session(monkeypa
     stop_driver.assert_awaited_once()
     assert session._context is None
     context.unroute.assert_not_awaited()
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/coredump_filter").exists(), reason="needs Linux's coredump_filter"
+)
+def test_processes_started_after_a_browser_opens_cannot_dump_core() -> None:
+    # A child process, so the suite keeps its own limits.
+    script = """
+import resource, subprocess, sys
+from scrapeyard.engine import browser_session
+
+_, hard = resource.getrlimit(resource.RLIMIT_CORE)
+resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))
+browser_session._discard_core_dumps()
+print(hard, resource.getrlimit(resource.RLIMIT_CORE)[1])
+# A browser is started the same way: fork, then exec.
+print(subprocess.check_output([sys.executable, "-c", (
+    "import resource;"
+    "print(resource.getrlimit(resource.RLIMIT_CORE)[0], open('/proc/self/coredump_filter').read().strip())"
+)], text=True))
+"""
+    output = subprocess.check_output([sys.executable, "-c", script], text=True, timeout=60).split()
+
+    before, after, inherited_soft, inherited_filter = output
+    assert after == before  # The hard limit is left alone.
+    # 1 is what stops a dump piped to a program; a hard limit of 0 allows only 0.
+    assert inherited_soft == ("0" if before == "0" else "1")
+    assert int(inherited_filter, 16) == 0
+
+
+def test_discarding_core_dumps_tolerates_a_host_that_refuses_it(monkeypatch) -> None:
+    from scrapeyard.engine import browser_session
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("refused")
+
+    monkeypatch.setattr(browser_session, "_core_dumps_discarded", False)
+    monkeypatch.setattr(browser_session.resource, "setrlimit", refuse)
+    monkeypatch.setattr(browser_session.Path, "write_text", refuse)
+
+    browser_session._discard_core_dumps()
+
+    assert browser_session._core_dumps_discarded
+
+
+async def test_core_dumps_are_discarded_before_the_browser_driver_starts(monkeypatch) -> None:
+    from playwright import async_api
+
+    from scrapeyard.engine import browser_session
+
+    order = []
+
+    class Driver:
+        async def __aenter__(self):
+            order.append("driver")
+            raise RuntimeError("no driver in this test")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(browser_session, "_discard_core_dumps", lambda: order.append("discard"))
+    monkeypatch.setattr(async_api, "async_playwright", Driver)
+    session = BrowserSession(PlayWrightFetcher)
+
+    with pytest.raises(RuntimeError, match="no driver in this test"):
+        await session._open(MagicMock(stealth=False, real_chrome=False))
+    await session.aclose()
+
+    assert order == ["discard", "driver"]
 
 
 class _Frame:

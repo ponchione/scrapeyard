@@ -1,4 +1,4 @@
-"""Real-browser fixture runs: traffic report, browser reuse and subrequest blocking.
+"""Real-browser fixture runs: traffic report, browser reuse, subrequest blocking, a crash.
 
 A local HTTP server answers for every ``*.test`` host; Chromium resolves those
 names to it, so first- and third-party requests are observable without network
@@ -7,21 +7,27 @@ access. Skipped when Playwright's Chromium build is not installed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import resource
 import threading
 from collections import Counter
 from collections.abc import Iterator
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import httpx
 import playwright
 import pytest
+from scrapling import PlayWrightFetcher
 from scrapling.engines.pw import PlaywrightEngine
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
+from scrapeyard.engine import browser_debug, browser_session
 from scrapeyard.engine.browser_pool import BrowserPool, activate_browser_pool
 from scrapeyard.engine.scraper import TargetStatus, scrape_target
 
@@ -243,3 +249,61 @@ async def test_allow_listed_cdn_still_renders_the_items(fixture_site, tmp_path, 
     assert fixture_site.hits["static.example-cdn.test"] == int(allow)
     assert fixture_site.hits["tags.example-ads.test"] == 0
     assert traffic["third_party"]["requests"] == int(allow)
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/coredump_filter").exists(), reason="needs Linux's coredump_filter"
+)
+async def test_a_crashed_renderer_is_reported_at_once_where_core_dumps_are_allowed(
+    fixture_site, tmp_path, monkeypatch,
+) -> None:
+    # As in a container or under a service manager: only the hard limit holds
+    # a dump back, and a core file would land in the working directory.
+    soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+    dump_filter = Path("/proc/self/coredump_filter")
+    selected = int(dump_filter.read_text(), 16)
+    resource.setrlimit(resource.RLIMIT_CORE, (hard, hard))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(browser_session, "_core_dumps_discarded", False)
+    session = browser_session.BrowserSession(PlayWrightFetcher)
+    budget = RunBudget(
+        max_duration_seconds=45,
+        max_fetched_bytes=10_000_000,
+        max_extracted_records=1000,
+        max_serialized_result_bytes=1_000_000,
+        max_browser_debug_bytes=1_000_000,
+    )
+    reported = False
+
+    async def crash(page: Any) -> None:
+        nonlocal reported
+        crashed = asyncio.Event()
+        page.on("crash", lambda _: crashed.set())
+        cdp = await page.context.new_cdp_session(page)
+        pending = asyncio.ensure_future(cdp.send("Page.crash"))
+        try:
+            # Milliseconds when nothing is dumped; half a minute and more when
+            # the kernel writes out the renderer's address space first.
+            await asyncio.wait_for(crashed.wait(), 5)
+            reported = True
+        finally:
+            pending.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await pending
+        raise RuntimeError("renderer crashed")
+
+    try:
+        with pytest.raises((RuntimeError, httpx.NetworkError)):
+            await session.fetch(
+                "http://www.example.test/catalog",
+                {"headless": True, "page_action": crash},
+                browser_debug._guarded_async_intercept_route,
+                budget=budget,
+            )
+    finally:
+        await session.aclose()
+        resource.setrlimit(resource.RLIMIT_CORE, (soft, hard))
+        dump_filter.write_text(hex(selected))
+
+    assert reported
+    assert not list(tmp_path.glob("core*"))
