@@ -287,6 +287,53 @@ async def test_chunked_body_stops_at_live_byte_ceiling() -> None:
     assert exc_info.value.observed_amount > 5
 
 
+@pytest.mark.parametrize(
+    ("charset", "heading", "expected"),
+    [
+        ("utf-7", b"+2AA- scope", "+2AA- scope"),
+        ("unicode_escape", b"\\ud800 scope", "\\ud800 scope"),
+        ("raw_unicode_escape", b"\\udfff scope", "\\udfff scope"),
+        ("idna", b"scope", "scope"),
+        ("undefined", b"scope", "scope"),
+        ("zlib", b"scope", "scope"),
+        ("iso-8859-1", b"caf\xe9", "caf\xe9"),
+        ("utf-7", b"caf+AOk-", "caf\xe9"),
+    ],
+    ids=[
+        "utf-7-surrogate", "unicode-escape", "raw-unicode-escape", "idna", "undefined",
+        "zlib", "latin-1", "utf-7-text",
+    ],
+)
+async def test_declared_charset_that_cannot_be_parsed_falls_back_to_utf8(
+    charset: str, heading: bytes, expected: str
+) -> None:
+    body = b"<html><body><h1>" + heading + b"</h1></body></html>"
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _read_request(reader)
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            + f"Content-Type: text/html; charset={charset}\r\n".encode()
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            + body
+        )
+        await writer.drain()
+        writer.close()
+
+    server, url = await _request_url(handler)
+    try:
+        page = await fetch_streaming_response(
+            Fetcher, url, {"timeout": 2, "stealthy_headers": False}, budget=_budget(),
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    titles = [str(title) for title in page.css("h1::text")]
+    assert titles == [expected]
+    titles[0].encode("utf-8")
+
+
 async def test_oversized_content_length_is_rejected_before_body_read() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

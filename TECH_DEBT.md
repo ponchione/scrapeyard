@@ -6,9 +6,9 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
-- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-52 to TD-59
-  were fixed and removed. Findings made while fixing them are TD-63 and
-  TD-64.
+- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-52 to TD-59 and
+  TD-61 were fixed and removed, as were TD-63 and TD-64, found while fixing
+  them.
 - **2026-10-09** (`a36c0a7` onwards): roadmap pass. TD-30 to TD-44 were fixed
   and removed, and TD-26's code-side fixes landed. Findings made while fixing
   them are TD-51 to TD-62.
@@ -238,9 +238,8 @@ Ready to implement, in order. Each row is one PR.
 
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-64 | P3 | engine | low | none for the decoding fix | |
-| 2 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 3 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
+| 1 | TD-62 | P3 | CI | low | none | After TD-26b |
+| 2 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -279,7 +278,6 @@ passing, which needs it.
 | TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
-| TD-64 | P3 | ready | A page whose declared charset decodes to a surrogate fails as `http_error` |
 
 ## Ready to implement
 
@@ -358,33 +356,6 @@ GitHub runs them on Node 24 and only warns for now.
 **Code:** `.github/workflows/*.yml`.
 **Fix:** move to their Node 24 releases, pinned by SHA as today.
 **Done when:** the workflows run without the Node 20 deprecation warning.
-
-### TD-64 — A page whose declared charset decodes to a surrogate fails as `http_error`
-
-**Priority:** P3 · **Area:** engine · **Risk:** low · **Contract:** none for the decoding fix; a different `error_type` for the classification fix · **Depends on:** —
-
-**Problem:**
-- A server can declare a codec that turns body bytes into surrogate code
-  points, such as `utf-7` or `unicode_escape`. Basic fetch decodes with the
-  declared codec and `errors="replace"`, which doesn't stop these codecs from
-  emitting surrogates, and Scrapling's parser then raises
-  `UnicodeEncodeError`. `classify_fetch_exception` reports the 200 response as
-  `http_error`.
-- Checked on 2026-10-09 by parsing such bodies through basic fetch's
-  `Response`, not through a live server. Chromium delivers U+FFFD instead, so
-  browser fetchers are unaffected.
-- Submitted configs already reject surrogates. Here the target fails instead
-  of producing a record that `/results` can't encode, and it needs a server
-  declaring one of these codecs, so it is rare.
-
-**Code:** `engine/basic_fetch.py` (`_decode_body`, `fetch_streaming_response`),
-`engine/fetch_classifier.py` (`classify_fetch_exception`).
-**Fix:** decode bodies whose declared codec can emit surrogates as UTF-8 with
-replacement, so the page parses and `error_type` strings are unchanged. Only
-classifying the `UnicodeError` as a content error instead would change the
-`error_type` Eyebox sees, which needs its agreement.
-**Done when:** a basic fetch of a 200 page declared as `utf-7` holding `+2AA-`
-parses, and its records encode as UTF-8.
 
 ## Coordinated
 

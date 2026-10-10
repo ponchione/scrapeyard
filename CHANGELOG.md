@@ -181,6 +181,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A basic-fetch page whose declared charset can't give parseable text is now
+  decoded as UTF-8 instead of failing its target as `http_error`. That covers
+  `utf-7`, `unicode_escape` and `raw_unicode_escape` bodies that decode to
+  surrogate code points, and codecs such as `idna` that reject replacement.
 - A cancellation that lands while a crash is being recorded, such as a
   shutdown cancel during its database writes, no longer leaves the run
   `running` until the heartbeat timeout. It gets the same recovery as any

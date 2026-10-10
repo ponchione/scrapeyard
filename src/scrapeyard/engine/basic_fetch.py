@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+import re
 import ssl
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
@@ -24,6 +26,7 @@ from scrapeyard.common.traffic import OFFLINE_TLD_EXTRACTOR
 from scrapeyard.engine.url_guard import canonical_url_origin
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 # Response attribute carrying the encoded body bytes received for the traffic report.
 RECEIVED_BYTES_ATTRIBUTE = "_scrapeyard_received_bytes"
 
@@ -104,11 +107,22 @@ def _declared_content_length(response: httpx.Response) -> int | None:
     return int(values[0])
 
 
-def _decode_body(body: bytes, encoding: str) -> str:
+def _decode_body(body: bytes, encoding: str) -> tuple[str, str]:
+    """Decode *body* as declared, or as UTF-8 when that gives nothing parseable.
+
+    Returns the text and the encoding to parse it with.
+    """
     try:
-        return body.decode(encoding, errors="replace")
-    except LookupError:
-        return body.decode("utf-8", errors="replace")
+        text = body.decode(encoding, errors="replace")
+    except (LookupError, UnicodeError):
+        # Not a text encoding (zlib), or one that rejects replacement (idna).
+        return body.decode("utf-8", errors="replace"), "utf-8"
+    # utf-7 and the unicode_escape codecs can decode to surrogate code points,
+    # which no encoder accepts, so parsing the page would fail. UTF-8, nearly
+    # every page, never decodes to one and skips the scan.
+    if codecs.lookup(encoding).name != "utf-8" and _SURROGATE_RE.search(text):
+        return body.decode("utf-8", errors="replace"), "utf-8"
+    return text, encoding
 
 
 def _apply_cookie_jar(
@@ -223,10 +237,10 @@ async def fetch_streaming_response(
                     await budget.consume_fetched_bytes(len(chunk))
                 body.extend(chunk)
             body_bytes = bytes(body)
-            encoding = response.encoding or "utf-8"
+            text, encoding = _decode_body(body_bytes, response.encoding or "utf-8")
             result = Response(
                 url=str(response.url),
-                text=_decode_body(body_bytes, encoding),
+                text=text,
                 body=body_bytes,
                 status=response.status_code,
                 reason=response.reason_phrase,
