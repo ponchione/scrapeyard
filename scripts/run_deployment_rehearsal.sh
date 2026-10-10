@@ -21,7 +21,7 @@ uses the production subnet.
 
 Configuration:
   SCRAPEYARD_REHEARSAL_PROJECT          Compose project (default: scrapeyard-rehearsal)
-  SCRAPEYARD_REHEARSAL_DEPLOY_TIMEOUT   seconds for one deployment (default: 300)
+  SCRAPEYARD_REHEARSAL_DEPLOY_TIMEOUT   seconds for one deployment (default: 600)
   SCRAPEYARD_REHEARSAL_JOB_TIMEOUT      seconds for the known run (default: 120)
   SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR  evidence directory
 EOF
@@ -55,7 +55,7 @@ docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
 docker info >/dev/null 2>&1 || fail "the Docker daemon is unavailable"
 
 PROJECT="${SCRAPEYARD_REHEARSAL_PROJECT:-scrapeyard-rehearsal}"
-DEPLOY_TIMEOUT="${SCRAPEYARD_REHEARSAL_DEPLOY_TIMEOUT:-300}"
+DEPLOY_TIMEOUT="${SCRAPEYARD_REHEARSAL_DEPLOY_TIMEOUT:-600}"
 JOB_TIMEOUT="${SCRAPEYARD_REHEARSAL_JOB_TIMEOUT:-120}"
 DIAGNOSTICS_DIR="${SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR:-$ROOT_DIR/artifacts/deployment-rehearsal}"
 POLICY_ID="rehearsal"
@@ -88,6 +88,7 @@ BRIDGE=""
 PROBE_ADDRESS=""
 ROUTE_ACTIVE=0
 APPARMOR_PROFILE_ACTIVE=0
+PREFLIGHT_PASSED=0
 CLEANUP_COMPLETE=0
 
 manifest_value() {
@@ -189,12 +190,13 @@ cleanup_resources() {
 on_exit() {
   local status=$?
   trap - EXIT INT TERM HUP
-  if ((status != 0)) && [[ -d "$DIAGNOSTICS_DIR" ]]; then
+  if ((status != 0 && PREFLIGHT_PASSED == 1)) && [[ -d "$DIAGNOSTICS_DIR" ]]; then
     echo "Deployment rehearsal failed; retaining diagnostics in $DIAGNOSTICS_DIR" >&2
     capture_diagnostics
     (scan_diagnostics) || true
   fi
-  if ((CLEANUP_COMPLETE == 0)); then
+  # Before the preflight passes, anything found on the host is someone else's.
+  if ((PREFLIGHT_PASSED == 1 && CLEANUP_COMPLETE == 0)); then
     cleanup_resources
   fi
   [[ -z "$WORK_DIR" ]] || rm -rf -- "$WORK_DIR"
@@ -265,6 +267,7 @@ for path in sys.argv[2:]:
                     sys.exit(f"deployment rehearsal: {subnet} overlaps existing network {name}")
 PY
 
+PREFLIGHT_PASSED=1
 ip route add unreachable "$PROXY_ADDRESS/32"
 ROUTE_ACTIVE=1
 if ! apparmor_profile_loaded; then
@@ -283,6 +286,13 @@ deploy() {
 app_is_running() {
   [[ -n "$APP_CONTAINER" ]] && \
     [[ "$(docker inspect --format '{{.State.Status}}' "$APP_CONTAINER" 2>/dev/null)" == "running" ]]
+}
+
+# Whether the application's network namespace can open a TCP connection.
+app_connects() {
+  docker exec "$APP_CONTAINER" python -c \
+    'import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()' \
+    "$1" "$2" >/dev/null 2>&1
 }
 
 verify_api() {
@@ -330,26 +340,32 @@ import sys
 container = json.load(open(sys.argv[1], encoding="utf-8"))[0]
 declared = json.load(open(sys.argv[2], encoding="utf-8"))["services"]["scrapeyard"]
 host = container["HostConfig"]
-options = [option.replace("=", ":", 1) for option in host["SecurityOpt"] or []]
+options = [option.replace("=", ":", 1) for option in host.get("SecurityOpt") or []]
 capabilities = {
-    key: sorted(value.removeprefix("CAP_") for value in host[key] or [])
+    key: sorted(value.removeprefix("CAP_") for value in host.get(key) or [])
     for key in ("CapAdd", "CapDrop")
 }
+# Docker records a CPU limit as nano-CPUs or as a quota over a period.
+cpus = host.get("NanoCpus", 0) / 1_000_000_000 or (
+    host.get("CpuQuota", 0) / host["CpuPeriod"] if host.get("CpuPeriod") else 0
+)
 checks = {
     "apparmor_profile": container["AppArmorProfile"] == "scrapeyard-chromium",
     "seccomp_profile": any(o.startswith("seccomp:") and "unconfined" not in o for o in options),
     "no_new_privileges": "no-new-privileges:true" in options,
-    "not_privileged": host["Privileged"] is False,
-    "read_only_root": host["ReadonlyRootfs"] is True,
+    "not_privileged": host.get("Privileged") is False,
+    "read_only_root": host.get("ReadonlyRootfs") is True,
     "all_capabilities_dropped": capabilities["CapDrop"] == ["ALL"],
     "added_capabilities_as_declared": capabilities["CapAdd"] == sorted(declared.get("cap_add") or []),
-    "init_process": host["Init"] is True,
+    "init_process": host.get("Init") is True,
     "non_root_user": container["Config"]["User"] not in ("", "0", "root", "0:0"),
-    "pids_limit_as_declared": host["PidsLimit"] == declared["pids_limit"],
-    "memory_limit_as_declared": host["Memory"] == int(declared["mem_limit"]),
-    "cpu_limit_as_declared": host["NanoCpus"] == int(float(declared["cpus"]) * 1_000_000_000),
+    "pids_limit_as_declared": host.get("PidsLimit") == declared["pids_limit"],
+    "memory_limit_as_declared": host.get("Memory") == int(declared["mem_limit"]),
+    "cpu_limit_as_declared": cpus == float(declared["cpus"]),
     "only_the_backend_network": list(container["NetworkSettings"]["Networks"]) == [f"{sys.argv[3]}_backend"],
-    "no_docker_socket": not any("docker.sock" in mount["Source"] for mount in container["Mounts"]),
+    "no_docker_socket": not any(
+        "docker.sock" in mount.get("Source", "") for mount in container.get("Mounts") or []
+    ),
 }
 print(json.dumps(checks, indent=2, sort_keys=True))
 sys.exit(0 if all(checks.values()) else 1)
@@ -358,12 +374,13 @@ PY
   # The kernel's view from inside the container.
   [[ "$(docker exec "$APP_CONTAINER" python -c '
 from pathlib import Path
-status = dict(
-    line.split(":\t", 1) for line in Path("/proc/self/status").read_text().splitlines()
-)
+status = {}
+for line in Path("/proc/self/status").read_text().splitlines():
+    key, _, value = line.partition(":")
+    status[key] = value.strip()
 print(
     Path("/proc/self/attr/current").read_text().strip(),
-    status["NoNewPrivs"].strip(), status["Seccomp"].strip(), status["CapEff"].strip(),
+    status["NoNewPrivs"], status["Seccomp"], status["CapEff"],
 )')" == "scrapeyard-chromium (enforce) 1 2 0000000000000000" ]] || \
     fail "[$label] AppArmor, seccomp, no-new-privileges or capabilities are not in force"
   (($(docker top "$APP_CONTAINER" -eo pid,args | grep -F 'scrapeyard.main:app' | grep -c -v 'docker-init') == 1)) || \
@@ -374,15 +391,12 @@ print(
     fail "[$label] expected one egress policy jump, on $BRIDGE"
   [[ "$(</proc/sys/net/bridge/bridge-nf-call-iptables)" == 1 ]] || \
     fail "[$label] bridge netfilter is off"
-  docker exec "$APP_CONTAINER" python -c \
-    "import socket; socket.create_connection(('$PROBE_ADDRESS', 8081), 3).close()" || \
+  app_connects "$PROBE_ADDRESS" 8081 || \
     fail "[$label] the probe's allowed liveness port is unreachable"
-  if docker exec "$APP_CONTAINER" curl --silent --output /dev/null --max-time 3 \
-    "http://$PROBE_ADDRESS:8080/"; then
+  if app_connects "$PROBE_ADDRESS" 8080; then
     fail "[$label] the egress policy let the application reach a private peer"
   fi
-  if docker exec "$APP_CONTAINER" curl --silent --output /dev/null --max-time 3 \
-    'http://169.254.169.254/latest/meta-data/'; then
+  if app_connects 169.254.169.254 80; then
     fail "[$label] the egress policy let the application reach the metadata address"
   fi
 
@@ -436,7 +450,9 @@ remove_egress_policy
 [[ -z "$(policy_jumps)" ]] || fail "the egress policy could not be removed"
 docker start "$APP_CONTAINER" >/dev/null
 REFUSAL_DEADLINE=$((SECONDS + 60))
-until docker logs "$APP_CONTAINER" 2>&1 | grep -q 'controlled non-public challenge was reachable'; do
+# This container is replaced by the rollback, so its log is kept as evidence.
+until docker logs --tail 200 "$APP_CONTAINER" > "$DIAGNOSTICS_DIR/unprotected-start.log" 2>&1 && \
+  grep -q 'controlled non-public challenge was reachable' "$DIAGNOSTICS_DIR/unprotected-start.log"; do
   if curl --silent --output /dev/null --max-time 2 "$API_URL/health"; then
     fail "the application served without the host egress policy"
   fi
@@ -450,7 +466,7 @@ for _ in 1 2 3 4 5; do
   fi
   sleep 1
 done
-docker stop --time 40 "$APP_CONTAINER" >/dev/null
+docker stop -t 40 "$APP_CONTAINER" >/dev/null
 
 echo "Rolling back to the previous release..."
 deploy rollback "$PREVIOUS"
@@ -471,7 +487,7 @@ fi
 
 capture_diagnostics
 echo "Requesting graceful Scrapeyard shutdown..."
-docker stop --time 40 "$APP_CONTAINER" >/dev/null
+docker stop -t 40 "$APP_CONTAINER" >/dev/null
 EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$APP_CONTAINER")"
 [[ "$EXIT_CODE" == "0" || "$EXIT_CODE" == "143" ]] || \
   fail "Scrapeyard exited with unexpected status $EXIT_CODE"

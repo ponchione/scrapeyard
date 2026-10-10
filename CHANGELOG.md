@@ -56,6 +56,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   cached for the run and answered from memory for later pages of the same site
   (after every guard), since Playwright disables the browser's HTTP cache while
   requests are routed. `run_budget.traffic` counts them as `cached`.
+- Added a deployment rehearsal (`scripts/run_deployment_rehearsal.sh`, the
+  `Release artifact and deployment rehearsal` workflow). It builds two retained
+  releases on a GitHub runner and runs the production Compose file through
+  each release's own deploy wrapper: a deployment, a refused corrupted
+  release, a failed and a missing egress policy, a rollback and a roll-forward.
+  A manually dispatched run uploads the rehearsed release.
 
 ### Changed
 - Within one run, the URL guard now resolves a hostname once per 30 seconds
