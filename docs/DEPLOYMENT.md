@@ -404,7 +404,14 @@ Set limits to match host capacity:
 - `SCRAPEYARD_WORKERS_BROWSER_MEMORY_RESERVE_MB` (default `512`, per active browser target)
 - `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` (default `30`, shared by worker and webhook shutdown;
   running jobs drain until a quarter of it, at most 5 s, remains, then are
-  cancelled and record their failure in that remainder)
+  cancelled and record their failure in that remainder. A cancelled job can
+  leave a thread finishing a DNS check, a page parse or a result render, and
+  a thread can't be cancelled: the dispatcher and the databases close first,
+  and the thread gets what is left of the grace. If it is still running
+  then, shutdown reports failure and keeps the instance guard, with the
+  databases already closed, and the process exits when the thread returns or
+  Compose's `stop_grace_period` kills it. Unresolved worker or background
+  tasks, which can still write, keep the databases open as before)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
 - `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` (default `604800`)

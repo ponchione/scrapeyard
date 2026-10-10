@@ -181,6 +181,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Shutdown no longer keeps the databases open, leaving the container to be
+  killed at its `stop_grace_period`, because a thread was still finishing a
+  DNS check, a page parse or a result render for a cancelled job. That work
+  uses neither the databases nor the webhook dispatcher, so both now close
+  first and the thread gets the rest of the grace. If it outlasts the grace,
+  shutdown still reports failure and keeps the instance guard, with the
+  databases already closed. Unresolved worker or background tasks keep them
+  open as before.
 - A basic-fetch page whose declared charset can't give parseable text is now
   decoded as UTF-8 instead of failing its target as `http_error`. That covers
   `utf-7`, `unicode_escape` and `raw_unicode_escape` bodies that decode to

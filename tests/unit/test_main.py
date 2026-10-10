@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -412,6 +413,110 @@ async def test_shutdown_retains_shared_services_for_cancellation_resistant_backg
     finally:
         release.set()
         await task
+
+
+_THREAD_POOLS = {
+    "run_threads": lambda: main_module.get_run_thread_pool,
+    "result_response_threads": lambda: main_module.get_result_response_thread_pool,
+}
+
+
+async def _lingering_thread_work(phase: str, release: threading.Event) -> None:
+    """Leave one thread of the pool running after its awaiting task is cancelled."""
+    pool = _THREAD_POOLS[phase]()()
+
+    def block(**_kwargs) -> None:
+        release.wait()
+
+    task = asyncio.create_task(pool.run(block))
+    while not pool.active:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pool.active == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", sorted(_THREAD_POOLS))
+async def test_shutdown_closes_the_stores_and_waits_for_lingering_thread_work(monkeypatch, phase):
+    app = FastAPI()
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    closed: list[tuple[str, int]] = []
+    factory = _THREAD_POOLS[phase]()
+
+    async def close_webhook(*, timeout: float) -> None:
+        closed.append(("webhook", factory().active))
+
+    async def close_database() -> None:
+        closed.append(("database", factory().active))
+
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+    release = threading.Event()
+    await _lingering_thread_work(phase, release)
+    asyncio.get_running_loop().call_later(0.1, release.set)
+
+    try:
+        await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=10)
+    finally:
+        release.set()
+
+    # Both closed while the thread was still running, and shutdown then succeeded.
+    assert closed == [("webhook", 1), ("database", 1)]
+    assert app.state.shutdown_pending is False
+    assert factory.cache_info().currsize == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", sorted(_THREAD_POOLS))
+async def test_shutdown_closes_the_stores_when_thread_work_outlives_the_grace(monkeypatch, phase):
+    app = FastAPI()
+    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
+    close_webhook = AsyncMock()
+    close_database = AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+    release = threading.Event()
+    await _lingering_thread_work(phase, release)
+
+    try:
+        with pytest.raises(RuntimeError, match=f"{phase}; thread work outlived the grace"):
+            await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0.2)
+
+        close_webhook.assert_awaited_once()
+        close_database.assert_awaited_once_with()
+        # Still reported, and the instance guard stays held, until the thread ends.
+        assert app.state.shutdown_pending is True
+        assert main_module._runtime_shutdown_pending(app) is True
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_still_retains_shared_services_for_an_unresolved_worker_with_thread_work(
+    monkeypatch,
+):
+    app = FastAPI()
+    app.state.worker_pool = SimpleNamespace(
+        stop=AsyncMock(side_effect=asyncio.TimeoutError),
+        shutdown_pending=True,
+    )
+    close_webhook = AsyncMock()
+    close_database = AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
+    monkeypatch.setattr(main_module, "close_db", close_database)
+    release = threading.Event()
+    await _lingering_thread_work("run_threads", release)
+
+    try:
+        with pytest.raises(RuntimeError, match="worker, run_threads; shared services retained"):
+            await main_module._shutdown_runtime_services(app, shutdown_grace_seconds=0.2)
+
+        close_webhook.assert_not_awaited()
+        close_database.assert_not_awaited()
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

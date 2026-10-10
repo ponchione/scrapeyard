@@ -104,6 +104,9 @@ from scrapeyard.storage.secret_envelope import (
 
 _health = HealthCache(get_job_store)
 logger = logging.getLogger(__name__)
+
+# How often shutdown rechecks whether lingering thread work has finished.
+_THREAD_QUIESCE_POLL_SECONDS = 0.05
 _metrics_refresh_lock = asyncio.Lock()
 _metrics_refreshed_at = 0.0
 _readiness_probe_executor = ThreadPoolExecutor(
@@ -299,25 +302,17 @@ async def _shutdown_runtime_services(
         getattr(worker_pool, "shutdown_pending", False)
     ):
         live_owned_phases.append("worker")
-    if (
-        get_run_thread_pool.cache_info().currsize
-        and get_run_thread_pool().active
-    ):
-        live_owned_phases.append("run_threads")
-    if (
-        get_result_response_thread_pool.cache_info().currsize
-        and get_result_response_thread_pool().active
-    ):
-        live_owned_phases.append("result_response_threads")
+    thread_pools = [
+        (phase, factory)
+        for phase, factory in (
+            ("run_threads", get_run_thread_pool),
+            ("result_response_threads", get_result_response_thread_pool),
+        )
+        if factory.cache_info().currsize
+    ]
     if live_owned_phases:
+        live_owned_phases.extend(phase for phase, factory in thread_pools if factory().active)
         retain_shared_services(live_owned_phases)
-
-    if get_run_thread_pool.cache_info().currsize:
-        get_run_thread_pool().shutdown()
-        get_run_thread_pool.cache_clear()
-    if get_result_response_thread_pool.cache_info().currsize:
-        get_result_response_thread_pool().shutdown()
-        get_result_response_thread_pool.cache_clear()
 
     try:
         await close_webhook_dispatcher(timeout=remaining())
@@ -340,6 +335,26 @@ async def _shutdown_runtime_services(
     if not database_close_task.done():
         retain_shared_services(["database"])
     app.state.database_close_task = None
+
+    # Thread work (DNS checks, parsing, page-cache files, result rendering)
+    # uses neither the stores nor the dispatcher, so both are closed above even
+    # while it runs. A thread can't be cancelled; it gets the rest of the grace.
+    while any(factory().active for _phase, factory in thread_pools) and remaining() > 0:
+        await asyncio.sleep(min(_THREAD_QUIESCE_POLL_SECONDS, remaining()))
+    lingering_threads: list[str] = []
+    for phase, factory in thread_pools:
+        if factory().active:
+            lingering_threads.append(phase)
+        else:
+            factory().shutdown()
+            factory.cache_clear()
+    if lingering_threads:
+        app.state.shutdown_pending = True
+        phases = ", ".join([*(phase for phase, _exc in failures), *lingering_threads])
+        raise RuntimeError(
+            f"Runtime shutdown failed for phase(s): {phases}; "
+            "thread work outlived the grace after the stores closed"
+        ) from (failures[0][1] if failures else None)
     if failures:
         phases = ", ".join(phase for phase, _exc in failures)
         raise RuntimeError(f"Runtime shutdown failed for phase(s): {phases}") from failures[0][1]

@@ -6,7 +6,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
-- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-52 to TD-59 and
+- **2026-10-09** (`67b6b4b` onwards): second roadmap pass. TD-51 to TD-59 and
   TD-61 were fixed and removed, as were TD-63 and TD-64, found while fixing
   them.
 - **2026-10-09** (`a36c0a7` onwards): roadmap pass. TD-30 to TD-44 were fixed
@@ -239,7 +239,6 @@ Ready to implement, in order. Each row is one PR.
 | # | Entry | P | Scope | Risk | Contract | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | TD-62 | P3 | CI | low | none | After TD-26b |
-| 2 | TD-51 | P3 | lifespan | medium | none | Needs a design decision |
 
 **Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
 passes). CI is GitHub Actions, not deployment, so local checks cover it until
@@ -275,7 +274,6 @@ passing, which needs it.
 | TD-47 | P2 | coordinated | Eyebox cannot cancel its own runs: cancel requires the `delete` scope |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-51 | P3 | ready | Shutdown ends in SIGKILL while a run or result thread is still active |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
 | TD-62 | P3 | ready | Pinned GitHub actions run on Node 20 |
 
@@ -317,34 +315,6 @@ causes were fixed on 2026-10-09:
 
 **Done when:** an operator has re-enabled Actions, every workflow passes on
 `main`, and `pip-audit` is clean.
-
-### TD-51 — Shutdown ends in SIGKILL while a run or result thread is still active
-
-**Priority:** P3 · **Area:** lifespan · **Risk:** medium · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- `_shutdown_runtime_services` keeps every shared store open while any owned
-  phase is still live. That includes an active run thread or result-response
-  thread, even after the worker pool has stopped cleanly.
-- aiosqlite's connection threads are non-daemon, so the interpreter waits for
-  them at exit and Compose kills the container at its 40 s `stop_grace_period`.
-- This is the documented trade-off: unresolved work "remains tracked and the
-  runtime reports shutdown failure instead of silently abandoning it", and two
-  tests enforce it (`test_shutdown_retains_shared_services_for_unresolved_worker`,
-  `test_lifespan_retains_instance_guard_for_unresolved_worker`). SQLite stays
-  consistent, but every such shutdown ends in SIGKILL.
-- `WorkerPool.stop` keeps this design. Once the pool has used its
-  cancellation reserve, no grace is left to close the stores anyway.
-
-**Code:** `main.py` (`_shutdown_runtime_services`, `live_owned_phases`,
-`retain_shared_services`).
-**Fix:** decide whether a thread that ignores cancellation should keep the
-stores open. Either close the stores once only lingering threads remain, or
-give the thread pools a checkpoint that stops their threads before exit, and
-update the two tests and `docs/DEPLOYMENT.md` to match.
-**Done when:** a test with a stuck run thread shows shutdown closing the stores
-and the process exiting within the grace, or the trade-off is accepted and this
-entry deleted.
 
 ### TD-62 — Pinned GitHub actions run on Node 20
 
