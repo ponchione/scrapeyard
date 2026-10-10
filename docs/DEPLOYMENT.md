@@ -212,6 +212,36 @@ accepted; it does not retroactively rewrite persisted schedules. Audit existing
 scheduled configurations before enabling the mode, and recreate intentional
 proxy/CDP overrides with a `transport-admin` credential.
 
+### Without an operator proxy
+
+Untrusted mode is for a service that takes scrape definitions from callers
+its operator does not control. When the only submitter is the operator's own
+service, sending configurations from its own repository, set
+`SCRAPEYARD_UNTRUSTED_SUBMISSIONS=false` and leave `SCRAPEYARD_PROXY_URL`
+unset. Scrapeyard then fetches directly, from the host's address, and
+`security/deploy-secure-compose.sh` no longer asks for a proxy.
+
+What stays in force:
+
+- The host egress policy and the startup check of it. The application still
+  refuses to start unless the probe's challenge is refused, so private,
+  loopback, link-local and metadata destinations stay unreachable from its
+  container whatever a page or a redirect asks for. The wrapper refuses a
+  probe port of 0, which would switch that check off without a word.
+- The application's URL guard, Chromium's sandbox and the container's
+  confinement.
+
+What is given up:
+
+- A second filter outside the host. Destination filtering rests on the host
+  policy and the URL guard alone.
+- The `transport-admin` gate. Any credential with `submit` can name a proxy
+  or a remote browser (`browser.cdp_url`) for its own targets; both must
+  still be public addresses.
+- The host's address is the one target sites see. A site that blocks it can
+  be given a proxy by itself, with `proxy:` on that job or target; nothing
+  about the deployment changes.
+
 Two browser races are accepted in the application and left to this policy,
 which denies their destinations whatever the application decided:
 
@@ -373,11 +403,13 @@ predates the script. The two expect this layout:
   other Compose variables are refused, so that no second settings file is
   read. Empty lines and lines starting with `#` are skipped. A value cannot
   contain a single quote, and nothing may follow the closing quote, not even
-  a space. It needs `COMPOSE_PROJECT_NAME`, `SCRAPEYARD_PROXY_URL`,
-  `SCRAPEYARD_API_CREDENTIALS`, `SCRAPEYARD_ENCRYPTION_KEYS` and
-  `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID`, plus any other setting the Compose
-  file or the policy installer reads (`SCRAPEYARD_EGRESS_ALLOW_CIDRS`, for
-  example).
+  a space. It needs `COMPOSE_PROJECT_NAME`, `SCRAPEYARD_API_CREDENTIALS`,
+  `SCRAPEYARD_ENCRYPTION_KEYS` and `SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID`;
+  either `SCRAPEYARD_PROXY_URL` or, for a deployment
+  [without an operator proxy](#without-an-operator-proxy),
+  `SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'`; and any other setting the
+  Compose file or the policy installer reads (`SCRAPEYARD_EGRESS_ALLOW_CIDRS`,
+  for example).
 
 `scrapeyard-release` reads that file itself; it is not a systemd
 `EnvironmentFile=`, and systemd never sees it. A line it cannot read stops the

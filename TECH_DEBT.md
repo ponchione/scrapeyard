@@ -29,8 +29,14 @@ it. Read [How to use this list](#how-to-use-this-list) and the
   - TD-71 was diagnosed and fixed: no container restriction hung the crashed
     renderer; the kernel was holding it while its core was dumped.
   - TD-73 (Chromium ran without its sandbox on fetches without `stealth`) was
-    found on the way and is pull request #10, awaiting the owner.
+    found on the way and fixed in pull request #10.
   - TD-22 and TD-20 stay open for their checks on the production host.
+  - The owner then left the open decisions to the maintainer's judgement and
+    ruled out an operator proxy on cost. Pull requests #10 (TD-73) and #3
+    (TD-65) were merged, after a sandboxed Chromium was started inside
+    Eyebox's local container and every Eyebox config and target hostname was
+    checked against the new hostname rule. Production will run first-party
+    submissions with no proxy (TD-18).
 - **2026-10-10** (`12a23e6` to `166ceac`): first Actions pass. The owner
   re-enabled Actions and `main` was pushed for the first time since
   2026-09-25. On the first runs Dependency audit, Container security, the
@@ -293,10 +299,6 @@ envelope field uses up that budget.
 
 Nothing is ready to implement as a single pull request.
 
-**In review, waiting for the owner:**
-- TD-73 is pull request #10. It changes how Chromium starts on fetches
-  without `stealth`.
-
 CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
 and rehearses it; dispatch it on the commit to release.
@@ -304,9 +306,8 @@ and rehearses it; dispatch it on the commit to release.
 **Coordinated:**
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
-- TD-17 to TD-22: deployment qualification; not single PRs. TD-18, TD-19 and
-  TD-21 each wait on a choice only the owner can make (the forward proxy, the
-  DNS name and how its certificate is issued, the off-host backup store).
+- TD-17 to TD-22: deployment qualification; not single PRs. TD-19 needs the
+  owner's DNS name; TD-21 an off-host store.
 
 **Deferred:** TD-48 and TD-49.
 
@@ -326,7 +327,6 @@ and rehearses it; dispatch it on the commit to release.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-73 | P1 | in review | Chromium runs without its sandbox on dynamic fetches without `stealth` |
 
 ## Ready to implement
 
@@ -443,36 +443,6 @@ Where it doesn't help:
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
 
-### TD-73 — Chromium runs without its sandbox on dynamic fetches without `stealth`
-
-**Priority:** P1 · **Area:** engine, browsers · **Risk:** medium · **Contract:** none (no config key changes; non-stealth browser targets start differently) · **Depends on:** the owner's review of pull request #10
-
-**Problem:**
-- Scrapling 0.2.99 passes `chromium_sandbox: True` to Playwright only when
-  `stealth` is on (`scrapling/engines/pw.py`, `__launch_kwargs`), and
-  Playwright adds `--no-sandbox` unless it is asked for the sandbox.
-- A `fetcher: dynamic` target without `browser.stealth` therefore loads pages
-  in renderers that have no Chromium sandbox. Measured 2026-10-10 on a
-  development host with a real browser: 8 of 8 Chromium processes carried
-  `--no-sandbox` without `stealth`, and 0 of 9 with it. The flag was also
-  seen in the production container's process list.
-- The container's seccomp and AppArmor profiles, the dropped capabilities
-  and the egress policy still apply, so this is a missing layer, not an open
-  door.
-
-**Code:** `engine/browser_session.py` (`BrowserSession._open`).
-**Fix:** pull request #10 adds `chromium_sandbox: True` to the launch options
-on both paths and makes the smoke check fail on any Chromium process started
-with `--no-sandbox`. Browser smoke passes with it in the production container.
-**Cost:** the sandbox needs unprivileged user namespaces. The production
-AppArmor profile grants them. A bare Ubuntu 23.10 or later host denies them,
-so outside the container a non-stealth browser fetch then fails with "No
-usable sandbox" where it used to run unsandboxed; the CI runner needed
-`kernel.apparmor_restrict_unprivileged_userns=0` for the real-browser tests.
-Fetches with `stealth` already behave that way.
-**Done when:** #10 is merged with browser smoke passing, and one run of
-non-stealth browser targets on Eyebox's local stack gives the same results.
-
 ## Operational and deployment qualification
 
 These entries need operator work and deployed evidence. They are not single PRs.
@@ -571,10 +541,27 @@ and egress configuration.
 
 ### TD-18 — Production forward-proxy selection and egress qualification are incomplete
 
-**Priority/ownership:** P1; Scrapeyard deployment/security. Depends on the
-operator's proxy endpoint and intended retailer set; supplies TD-17's egress path.
+**Priority/ownership:** P1; Scrapeyard deployment/security. Supplies TD-17's
+egress path.
 
-**Problem:** production Compose enables untrusted submissions, and startup
+**Decision (owner, 2026-10-10):** no operator proxy, on cost. Eyebox is the
+only submitter and sends configurations from its own repository, so production
+sets `SCRAPEYARD_UNTRUSTED_SUBMISSIONS=false` and fetches directly from the
+host's address ([DEPLOYMENT.md](docs/DEPLOYMENT.md#without-an-operator-proxy)).
+- The host egress policy and the application's startup check of it stay
+  mandatory; the deploy wrapper refuses to run with that check switched off.
+- A retailer that blocks the host's address is accepted as lost, or given a
+  proxy by itself with `proxy:` on its targets, which this mode allows
+  without `transport-admin`.
+- The deploy wrapper accepts the mode, and the deployment rehearsal's last
+  steps promote, start and attest a release with these settings.
+
+**Still open:** on the production host, the denial matrix below from the real
+container, with no proxy; and under TD-17, which retailers answer the host's
+address at all. The proxy selection work below is moot unless a proxy is
+adopted later.
+
+**Problem (as recorded before the decision):** production Compose enables untrusted submissions, and startup
 requires a nonempty, non-`direct` `SCRAPEYARD_PROXY_URL`. The stack supplies
 Redis and an egress probe but no filtering forward proxy. The HTTPS ingress
 proxy in TD-19 does not satisfy this requirement. A commercial scraping proxy

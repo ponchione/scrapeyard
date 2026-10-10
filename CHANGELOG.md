@@ -74,6 +74,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- `security/deploy-secure-compose.sh` deploys without `SCRAPEYARD_PROXY_URL`
+  when `SCRAPEYARD_UNTRUSTED_SUBMISSIONS` is `false`, for a deployment whose
+  only submitter is its operator's own service. Otherwise it still requires
+  the proxy. In either mode it now refuses a probe port of 0, which switches
+  off the application's startup check of the host egress policy.
 - A non-ASCII hostname is now accepted only when IDNA 2003 and strict IDNA
   2008 encode it to the same name; any other is rejected as an unsafe URL, in
   submitted configs, in `browser.third_party_allow_hosts`, and in URLs met

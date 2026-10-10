@@ -197,20 +197,25 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
         "docker builder prune",
         "volume prune",
         "network prune",
-        # Production runs untrusted mode behind the probe; no overlay may relax it.
+        # Production runs behind the probe; no overlay may relax that.
         "docker-compose.smoke.yml",
         "docker-compose.qualification.yml",
-        "SCRAPEYARD_UNTRUSTED_SUBMISSIONS",
     ):
         assert forbidden not in text
+    # Everything before the boot service runs Compose's default, untrusted
+    # submissions behind a proxy. Only the settings file of the last steps
+    # switches to first-party submissions without one.
+    base_phase = text[: text.index("  write_deploy_env() {")]
+    assert "SCRAPEYARD_UNTRUSTED_SUBMISSIONS" not in base_phase
     # The steps run in the order an operator would meet them.
     steps = [
         text.index(marker)
         for marker in (
             "\ndeploy candidate ",
+            "if deploy no-proxy ",
             "if deploy corrupted ",
             "if deploy policy-failure ",
-            "\nremove_egress_policy\n",
+            "\nexpect_refusal_without_policy unprotected-start\n",
             "if deploy uncovered-bridge ",
             "\ndeploy rollback ",
             "\ndeploy roll-forward ",
@@ -228,6 +233,9 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
             "the boot service did not recover after its setting was repaired",
             "promote promote-rollback ",
             "await_unit rollback-boot ",
+            "promote promote-no-proxy ",
+            "expect_refusal_without_policy unprotected-start-no-proxy",
+            "await_unit boot-no-proxy ",
         )
     ]
     assert steps == sorted(steps)
@@ -273,6 +281,10 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         "systemctl start docker.service >/dev/null 2>&1",
         "already exists; use an isolated host",
         "the AppArmor profile is already loaded; use an isolated host",
+        # The last steps run the settings a host without an operator proxy
+        # uses: the application's own log must show that it checked the policy.
+        "printf \"SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'\\n\"",
+        "grep -q 'Connected-IP egress policy attested'",
     ):
         assert contract in text, contract
     # A promotion is never cut short by a timeout of the rehearsal's own: the

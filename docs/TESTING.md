@@ -647,8 +647,10 @@ In order, it:
 2. Records a known run. The rehearsal has no operator proxy, so the run
    targets a `.invalid` name, is refused before any connection, and ends
    `failed`; it is still a stored run and result.
-3. Offers a copy of the candidate with one file changed. The wrapper must
-   refuse it and leave the running application untouched.
+3. Deploys again with no proxy set. Submissions are untrusted by default, so
+   the wrapper must refuse before it stops anything. Then offers a copy of the
+   candidate with one file changed. The wrapper must refuse it and leave the
+   running application untouched.
 4. Fails the egress policy installation. The wrapper must stop, with the
    application stopped and the active policy unchanged.
 5. Removes the egress policy and starts the application container directly.
@@ -687,6 +689,12 @@ with the same checks as a deployment:
    recover by itself once the file is repaired.
 8. A promoted rollback, and a start of the rolled-back release through the
    boot service.
+9. The settings changed to those of a host
+   [without an operator proxy](DEPLOYMENT.md#without-an-operator-proxy), and
+   the candidate promoted with them. The application must run with no proxy,
+   its own log must show that it checked the host egress policy, and started
+   without the policy it must still refuse to serve. Steps 1 to 8 keep a
+   proxy set, because the previous release may predate this mode.
 
 After each deployment it checks, from outside the application:
 
