@@ -6,6 +6,15 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-09** (`8f564a6` to `bc3041e`): third roadmap pass, on the owner's
+  decisions for the blocked entries. TD-62 was closed (Node 24 action pins;
+  nothing has run them yet, see TD-26b), as were the coordinated TD-23 (a run
+  resolves each hostname once per 30 seconds) and TD-60 (the frame-detach race
+  was accepted and documented, and the smoke check fixed). An independent
+  adversarial review of TD-23 found two defects in its first version, fixed
+  before the merge, and two older ones: TD-66, fixed, and TD-65, left for a
+  security review. TD-67, a unit test that needed 15 GiB of free temp disk,
+  was found by the final run and fixed.
 - **2026-10-09** (`67b6b4b` to `409f08c`): second roadmap pass. TD-51 to TD-59
   and TD-61 were fixed and removed, as were TD-63 and TD-64, found while fixing
   them. The coordinated TD-47 (submit-scope cancel) and TD-46 (unresolved
@@ -117,6 +126,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | `pytest -W error` after TD-25 | 2,356 passed, 17 skipped, with no env override and no network lookups; 41–54 s |
 | After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages |
 | After the second 2026-10-09 pass (`409f08c`) | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,551 passed, 17 skipped, 90.31% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's client tests (297 passed) and 54 configs pass |
+| After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
