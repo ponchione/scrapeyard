@@ -40,7 +40,6 @@ def _assert_writable(path: Path) -> None:
 
 def main() -> None:
     import playwright
-    import rebrowser_playwright
     from camoufox.pkgman import Version, launch_path
 
     uid = os.getuid()
@@ -73,21 +72,14 @@ def main() -> None:
             )
 
     playwright_version = importlib.metadata.version("playwright")
-    rebrowser_version = importlib.metadata.version("rebrowser-playwright")
     camoufox_package_version = importlib.metadata.version("camoufox")
     playwright_revision = _chromium_revision(playwright)
-    rebrowser_revision = _chromium_revision(rebrowser_playwright)
 
     browser_root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
     stock_browser = browser_root / f"chromium-{playwright_revision}"
     assert stock_browser.is_dir(), f"locked Playwright Chromium is missing: {stock_browser}"
 
-    bundled_sandbox = (
-        browser_root
-        / f"chromium-{rebrowser_revision}"
-        / "chrome-linux"
-        / "chrome_sandbox"
-    )
+    bundled_sandbox = stock_browser / "chrome-linux64" / "chrome_sandbox"
     assert bundled_sandbox.is_file() and os.access(bundled_sandbox, os.X_OK)
     assert not bundled_sandbox.stat().st_mode & 0o4000
     assert "CHROME_DEVEL_SANDBOX" not in os.environ
@@ -145,8 +137,6 @@ def main() -> None:
             "playwright_version": playwright_version,
             "playwright_chromium_revision": playwright_revision,
             "playwright_chromium_path": str(stock_browser),
-            "rebrowser_playwright_version": rebrowser_version,
-            "rebrowser_chromium_revision": rebrowser_revision,
             "bundled_sandbox_path": str(bundled_sandbox),
             "sandbox_strategy": "unprivileged-user-namespace",
             "camoufox_package_version": camoufox_package_version,

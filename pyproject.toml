@@ -13,7 +13,6 @@ dependencies = [
     # Browser drivers are pinned exactly: the Dockerfile installs and asserts
     # the browser builds that match these versions.
     "playwright==1.58.0",
-    "rebrowser-playwright==1.52.0",
     "camoufox==0.4.11",
     # Scrapling 0.2 passes a deprecated no-op parser option. Keep the temporary,
     # exact test warning filter bounded to this security-fixed lxml API line.

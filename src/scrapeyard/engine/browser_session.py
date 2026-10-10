@@ -241,12 +241,9 @@ class BrowserSession:
 
     async def _open(self, engine: Any) -> None:
         if self.fetcher_cls is PlayWrightFetcher:
-            if not engine.stealth or engine.real_chrome:
-                from playwright import async_api
-                runtime_manager: Any = async_api.async_playwright()
-            else:
-                from rebrowser_playwright.async_api import async_playwright
-                runtime_manager = async_playwright()
+            # TD-45 spike, route U: stealth runs on the upstream driver too.
+            from playwright import async_api
+            runtime_manager: Any = async_api.async_playwright()
 
             # Register before startup: cancellation can interrupt __aenter__
             # after the driver starts, before enter_async_context would own it.

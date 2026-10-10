@@ -67,12 +67,10 @@ async def benchmark(args):
     try:
         with ExitStack() as stack, TemporaryDirectory() as data_dir:
             from playwright.async_api import BrowserType
-            from rebrowser_playwright.async_api import BrowserType as RebrowserType
 
-            for browser_type in (BrowserType, RebrowserType):
-                stack.enter_context(patch.object(
-                    browser_type, "launch", count_launch(browser_type.launch),
-                ))
+            stack.enter_context(patch.object(
+                BrowserType, "launch", count_launch(BrowserType.launch),
+            ))
             target = TargetConfig.model_validate({
                 "url": f"http://{args.host}:8080/?pages={args.pages}",
                 "fetcher": args.fetcher,

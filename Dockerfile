@@ -25,8 +25,6 @@ FROM ${PYTHON_IMAGE} AS runtime
 ARG PIP_VERSION=26.2.1
 ARG PLAYWRIGHT_VERSION=1.58.0
 ARG PLAYWRIGHT_CHROMIUM_REVISION=1208
-ARG REBROWSER_PLAYWRIGHT_VERSION=1.52.0
-ARG REBROWSER_CHROMIUM_REVISION=1169
 ARG CAMOUFOX_PACKAGE_VERSION=0.4.11
 ARG CAMOUFOX_BROWSER_VERSION=135.0.1
 ARG CAMOUFOX_BROWSER_RELEASE=beta.24
@@ -52,8 +50,6 @@ LABEL org.opencontainers.image.base.name="python:3.12.11-slim-bookworm" \
       org.scrapeyard.runtime.uid="10001" \
       org.scrapeyard.browser.playwright.version="${PLAYWRIGHT_VERSION}" \
       org.scrapeyard.browser.playwright.chromium-revision="${PLAYWRIGHT_CHROMIUM_REVISION}" \
-      org.scrapeyard.browser.rebrowser-playwright.version="${REBROWSER_PLAYWRIGHT_VERSION}" \
-      org.scrapeyard.browser.rebrowser-playwright.chromium-revision="${REBROWSER_CHROMIUM_REVISION}" \
       org.scrapeyard.browser.camoufox-package.version="${CAMOUFOX_PACKAGE_VERSION}" \
       org.scrapeyard.browser.camoufox.version="${CAMOUFOX_BROWSER_VERSION}" \
       org.scrapeyard.browser.camoufox.release="${CAMOUFOX_BROWSER_RELEASE}" \
@@ -100,7 +96,6 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         /data/db /data/results /data/adaptive /data/logs \
         "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}/camoufox" \
     && python -m playwright install --with-deps --no-shell chromium \
-    && python -m rebrowser_playwright install --no-shell chromium \
     && curl --fail --location --retry 3 \
         --output /tmp/camoufox.zip \
         "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}/camoufox-${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}-lin.x86_64.zip" \
@@ -118,10 +113,8 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && rm /tmp/camoufox.zip /tmp/ublock-origin.xpi \
     && test "$(python -c 'import json, os, pathlib; p=pathlib.Path(os.environ["XDG_CACHE_HOME"])/"camoufox"/"addons"/"UBO"/"manifest.json"; print(json.loads(p.read_text())["version"])')" = "${UBO_VERSION}" \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" = "${PLAYWRIGHT_VERSION}" \
-    && test "$(python -c 'import importlib.metadata as m; print(m.version("rebrowser-playwright"))')" = "${REBROWSER_PLAYWRIGHT_VERSION}" \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("camoufox"))')" = "${CAMOUFOX_PACKAGE_VERSION}" \
     && test "$(python -c 'import json, pathlib, playwright; p=pathlib.Path(playwright.__file__).parent/"driver"/"package"/"browsers.json"; print(next(x["revision"] for x in json.loads(p.read_text())["browsers"] if x["name"] == "chromium"))')" = "${PLAYWRIGHT_CHROMIUM_REVISION}" \
-    && test "$(python -c 'import json, pathlib, rebrowser_playwright; p=pathlib.Path(rebrowser_playwright.__file__).parent/"driver"/"package"/"browsers.json"; print(next(x["revision"] for x in json.loads(p.read_text())["browsers"] if x["name"] == "chromium"))')" = "${REBROWSER_CHROMIUM_REVISION}" \
     && python -m camoufox path \
     && chown -R "${SCRAPEYARD_UID}:${SCRAPEYARD_GID}" /data /home/scrapeyard \
     && chmod 0750 /data /data/db /data/results /data/adaptive /data/logs \
