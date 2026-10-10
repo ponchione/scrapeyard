@@ -223,6 +223,9 @@ def create(directory: Path, revision: str) -> None:
             "files": inventory(bundle),
         }
         (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        # Written after the pass above, and a umask of 002 would leave it
+        # group-writable.
+        (bundle / "manifest.json").chmod(0o644)
         verify(bundle)
         bundle.rename(directory)
     print(f"Retained scanned and qualified release {revision}: {directory}")

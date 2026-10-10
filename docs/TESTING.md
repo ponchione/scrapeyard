@@ -632,8 +632,8 @@ release retains:
 
 ```bash
 sudo ./scripts/run_deployment_rehearsal.sh \
-  --candidate /srv/scrapeyard-releases/candidate \
-  --previous /srv/scrapeyard-releases/previous
+  --candidate ~/scrapeyard-releases/candidate \
+  --previous ~/scrapeyard-releases/previous
 ```
 
 Run it as root on a Docker host that runs nothing else. It installs the host
@@ -653,8 +653,40 @@ In order, it:
    application stopped and the active policy unchanged.
 5. Removes the egress policy and starts the application container directly.
    It must report the reachable challenge and never serve.
-6. Rolls back to the previous release, then rolls forward to the candidate.
+6. Deploys with the policy installed on another bridge. The application must
+   fail its start on the reachable challenge, and the wrapper must leave its
+   container stopped, not restarting.
+7. Rolls back to the previous release, then rolls forward to the candidate.
    Both must pass the same checks and return the known run unchanged.
+
+With `--boot-service` it goes on to the
+[boot service](DEPLOYMENT.md#boot-service-and-promotion), installed as the
+deployment guide describes, with the releases copied under a root-owned
+`/srv/scrapeyard-releases`. This part needs systemd. It stops Docker, unloads
+the AppArmor profile and unloads the bridge netfilter module for a moment, and
+it refuses to start if the paths it installs already exist. Each step ends
+with the same checks as a deployment:
+
+1. Promotions that must be refused with nothing moved: a release with a
+   changed file, one with a file another account owns, and one in a directory
+   another account can write to.
+2. A promotion stopped early and one stopped after it had stopped the
+   application. Both must be reported as failed with the link unmoved; the
+   second must end with the application stopped and say so, and a new
+   promotion must work at once.
+3. A start of the boot service while a promotion is under way. The start
+   waits, and must then start the release that was promoted.
+4. A Docker restart, and a killed Docker daemon, which must be back within a
+   minute.
+5. Docker stopped, then the egress policy, the bridge netfilter module and
+   the AppArmor profile removed, then Docker started. Nothing but Docker's
+   start may bring the boot service and the application back.
+6. The containers and the network removed. The policy must follow the new
+   bridge, and the known run must still be readable.
+7. A broken setting. The boot service must retry with nothing serving, and
+   recover by itself once the file is repaired.
+8. A promoted rollback, and a start of the rolled-back release through the
+   boot service.
 
 After each deployment it checks, from outside the application:
 
@@ -682,15 +714,20 @@ list) goes to
 `SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR`; the script deletes it instead if
 either generated credential appears in it. On exit it removes the project's
 containers, network and volumes, the rehearsal policy, the unreachable route
-and, if it loaded it, the AppArmor profile. It leaves the loaded images and
-the host-wide bridge netfilter setting.
+and, if it loaded it, the AppArmor profile. With `--boot-service` it also
+removes the unit, the installed script, the settings file and its copies of
+the releases, starts Docker if a failed step left it stopped, and puts the
+bridge netfilter setting back as it found it. It leaves the loaded images.
 
 The `Release artifact and deployment rehearsal` workflow builds, scans and
 qualifies both releases with `scripts/release_artifact.py create` and then
-runs the rehearsal. On a pull request that touches the deployment files it
-uses the pull request's head and base. A manual dispatch takes `revision` and
-`previous_revision` (default: the branch head and its parent) and uploads the
-candidate as `scrapeyard-release-<revision>` with its SHA-256, kept for 30
+runs the rehearsal with `--boot-service`. It packs the candidate with root as
+the owner of every file, extracts the archive as the deployment guide says,
+and checks that the result verifies and holds nothing another account owns or
+can write to. On a pull request that touches the deployment files it uses the
+pull request's head and base. A manual dispatch takes `revision` and
+`previous_revision` (default: the branch head and its parent) and also uploads
+the candidate as `scrapeyard-release-<revision>` with its SHA-256, kept for 30
 days. It has read-only repository permission, SHA-pinned actions, no caches
 and a 120-minute timeout.
 

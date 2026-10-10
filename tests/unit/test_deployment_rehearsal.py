@@ -217,7 +217,10 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
             'systemctl enable --now "$UNIT"',
             "if promote promote-corrupted ",
             "if promote promote-foreign-owner ",
+            "if promote promote-untrusted-directory ",
             "promote promote-interrupted ",
+            "promote promote-interrupted-late ",
+            "promote promote-during-start ",
             "systemctl restart docker.service",
             "systemctl kill --signal=KILL --kill-whom=main docker.service",
             "await_unit cold-start ",
@@ -234,13 +237,20 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
     text = RUNNER.read_text(encoding="utf-8")
     for contract in (
         # The unit and the script are the candidate's, installed as documented.
-        'install -m 644 "$CANDIDATE/source/security/systemd/$UNIT" "$UNIT_FILE"',
-        'install -m 755 "$CANDIDATE/source/security/manage-release.sh" "$MANAGE"',
+        'install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$UNIT" "$UNIT_FILE"',
+        'install -m 755 "$BOOT_CANDIDATE/source/security/manage-release.sh" "$MANAGE"',
         'MANAGE="/usr/local/sbin/scrapeyard-release"',
-        'ln -s -- "$CANDIDATE" "$RELEASES_ROOT/current"',
-        # A release is refused unless root owns it, as after extraction by root.
-        'chown -R 0:0 "$CANDIDATE" "$PREVIOUS"',
-        'chown -R "$RELEASE_OWNER" "$CANDIDATE" "$PREVIOUS"',
+        'ln -s -- "$BOOT_CANDIDATE" "$RELEASES_ROOT/current"',
+        # A release is refused unless root owns it and every directory above
+        # it, as after extraction by root under a root-owned directory.
+        'install -d -m 755 -o 0 -g 0 "$RELEASES_ROOT"',
+        'chown -R 0:0 "$BOOT_CANDIDATE" "$BOOT_PREVIOUS"',
+        'chown -R "$CANDIDATE_OWNER" "$CANDIDATE"',
+        'chown -R "$PREVIOUS_OWNER" "$PREVIOUS"',
+        # A start that waited for a promotion is checked against what was promoted.
+        'verify_runtime start-after-promotion "$BOOT_PREVIOUS" previous',
+        # The bridge hook goes back to what it was, even after a failure.
+        'echo "$BRIDGE_HOOK_BEFORE" > /proc/sys/net/bridge/bridge-nf-call-iptables',
         # A reboot loses the policy, the bridge hook and the AppArmor profile,
         # and only Docker's own start brings the boot service back.
         "modprobe -r br_netfilter",
@@ -254,6 +264,7 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         'systemctl stop "$PROMOTE_UNIT"',
         'systemctl disable --now "$UNIT"',
         'rm -rf -- "$UNIT_FILE" "$UNIT_DROP_IN" "$ENV_DIR" "$MANAGE" "$RELEASES_ROOT/current"',
+        'rm -rf -- "$BOOT_CANDIDATE"',
         "systemctl start docker.service >/dev/null 2>&1",
         "already exists; use an isolated host",
         "the AppArmor profile is already loaded; use an isolated host",
