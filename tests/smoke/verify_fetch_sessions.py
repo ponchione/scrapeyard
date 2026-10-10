@@ -245,6 +245,26 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
 MODE_TIMEOUT_SECONDS = 180
 
 
+def _await_chain(awaited):
+    """Yield each suspended frame from a task's coroutine down to what it awaits.
+
+    Task.print_stack stops at the outermost coroutine.
+    """
+    while awaited is not None:
+        frame = next(
+            (f for f in (getattr(awaited, name, None) for name in ("cr_frame", "gi_frame", "ag_frame")) if f),
+            None,
+        )
+        if frame is None:
+            yield repr(awaited)[:300]
+            return
+        yield f"{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+        awaited = next(
+            (a for a in (getattr(awaited, name, None) for name in ("cr_await", "gi_yieldfrom", "ag_await")) if a),
+            None,
+        )
+
+
 async def verify_within_timeout(fetcher, fetcher_type, data_dir, *, stealth):
     """Run one mode, or say where it is stuck and stop the process.
 
@@ -263,7 +283,9 @@ async def verify_within_timeout(fetcher, fetcher_type, data_dir, *, stealth):
     )
     for pending in asyncio.all_tasks():
         if pending is not asyncio.current_task():
-            pending.print_stack(file=sys.stderr)
+            print(f"  {pending.get_name()}:", file=sys.stderr)
+            for where in _await_chain(pending.get_coro()):
+                print(f"    {where}", file=sys.stderr)
     sys.stderr.flush()
     # Cleanup would wait on the same browser, so leave without it.
     os._exit(3)
