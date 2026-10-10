@@ -28,6 +28,7 @@ state = (
     else {"chains": {"DOCKER-USER": []}, "jumps": [], "interfaces": {}}
 )
 interfaces = state.setdefault("interfaces", {})
+host_jumps = state.setdefault("input", [])
 interface = args[args.index("-i") + 1] if "-i" in args else None
 mutations = {"-N", "-A", "-I", "-D", "-F", "-X"}
 if args and args[0] in mutations:
@@ -42,6 +43,27 @@ if args and args[0] in mutations:
 def save():
     state_path.write_text(json.dumps(state, sort_keys=True))
 
+if len(args) > 1 and args[1] == "INPUT":
+    # The host's INPUT chain: a list of [interface, chain] jumps.
+    if args[0] == "-S":
+        for jump_interface, chain in host_jumps:
+            print(f"-A INPUT -i {jump_interface} -j {chain}")
+        raise SystemExit(0)
+    jump = [interface, args[args.index("-j") + 1]]
+    if args[0] == "-C":
+        raise SystemExit(0 if jump in host_jumps else 1)
+    if args[0] == "-I":
+        if jump[1] not in state["chains"]:
+            raise SystemExit(1)
+        host_jumps.insert(0, jump)
+    elif args[0] == "-D":
+        if jump not in host_jumps:
+            raise SystemExit(1)
+        host_jumps.remove(jump)
+    else:
+        raise SystemExit(f"unsupported shim command: {tool} {' '.join(args)}")
+    state_path.write_text(json.dumps(state, sort_keys=True))
+    raise SystemExit(0)
 if args[:2] == ["-S", "DOCKER-USER"]:
     for chain in state["jumps"]:
         print(f"-A DOCKER-USER -i {interfaces.get(chain, 'br-test')} -j {chain}")
@@ -81,6 +103,8 @@ elif args and args[0] == "-F":
 elif args and args[0] == "-X":
     chain = args[1]
     if chain not in state["chains"] or chain in state["jumps"]:
+        raise SystemExit(1)
+    if any(chain == jumped for _interface, jumped in host_jumps):
         raise SystemExit(1)
     del state["chains"][chain]
 else:
@@ -395,7 +419,9 @@ def test_a_policy_chain_another_live_bridge_still_uses_is_left_as_it_is(
     )
 
     assert result.returncode == 2
-    expected = "unexpected jump scope" if action == "install" else "another interface still jumps"
+    expected = (
+        "has a jump on another interface" if action == "install" else "another interface still jumps"
+    )
     assert expected in result.stderr
     # Its jump stays, and so do the rules the jump leads to.
     for tool, state in before.items():
@@ -450,4 +476,115 @@ def test_remove_also_clears_the_jump_left_for_a_removed_bridge(tmp_path: Path) -
     for tool in ("iptables", "ip6tables"):
         state = json.loads((state_dir / f"{tool}.json").read_text())
         assert state["jumps"] == []
+        assert set(state["chains"]) == {"DOCKER-USER"}
+
+
+def _host_rules(state_dir: Path, tool: str = "iptables") -> tuple[list[list[str]], dict[str, list[str]]]:
+    state = json.loads((state_dir / f"{tool}.json").read_text())
+    chains = {name: rules for name, rules in state["chains"].items() if name.startswith("SY-HOST-")}
+    return state["input"], chains
+
+
+def test_install_refuses_the_application_s_connections_to_the_host_itself(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    for tool, source in (("iptables", "172.30.0.250"), ("ip6tables", "2001:db8::250")):
+        jumps, chains = _host_rules(state_dir, tool)
+        # Input to the host from the deployment bridge passes the host chain.
+        assert jumps == [["br-test", "SY-HOST-test-A"]]
+        # Replies to connections the host opened are admitted; everything else
+        # from the application's address is refused; other sources pass on.
+        assert chains == {
+            "SY-HOST-test-A": [
+                f"-s {source} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+                f"-s {source} -j REJECT",
+                "-j RETURN",
+            ]
+        }
+
+    for expected in ("SY-HOST-test-B", "SY-HOST-test-A"):
+        assert _run(installer, env).returncode == 0
+        jumps, chains = _host_rules(state_dir)
+        assert jumps == [["br-test", expected]]
+        assert list(chains) == [expected]
+
+
+def test_host_rules_follow_a_recreated_deployment_bridge(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    interfaces = tmp_path / "net"
+    (interfaces / "br-old").mkdir(parents=True)
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-old"
+    assert _run(installer, env).returncode == 0
+
+    (interfaces / "br-old").rmdir()
+    (interfaces / "br-new").mkdir()
+    env["SCRAPEYARD_EGRESS_INTERFACE"] = "br-new"
+    result = _run(installer, env)
+
+    assert result.returncode == 0, result.stderr
+    assert "host jump to SY-HOST-test-A left for the removed interface br-old" in result.stdout
+    for tool in ("iptables", "ip6tables"):
+        (jump,), chains = _host_rules(state_dir, tool)
+        assert jump[0] == "br-new"
+        assert list(chains) == [jump[1]]
+
+
+@pytest.mark.parametrize(
+    "failing", ["-N SY-HOST-test-B", "-A SY-HOST-test-B", "-I INPUT", "-D INPUT"]
+)
+def test_a_failure_in_the_host_rules_leaves_the_forwarded_policy_as_it_was(
+    tmp_path: Path, failing: str
+) -> None:
+    installer = _installer(tmp_path)
+    bin_dir = _shim_bin(tmp_path)
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    assert _run(installer, _environment(bin_dir, baseline)).returncode == 0
+    for name in ("mutation-count", "mutations.log"):
+        (baseline / name).unlink(missing_ok=True)
+    before = json.loads((baseline / "iptables.json").read_text())
+
+    # Find where a reinstall makes this change, then fail a second reinstall there.
+    completed = tmp_path / "completed"
+    shutil.copytree(baseline, completed)
+    assert _run(installer, _environment(bin_dir, completed)).returncode == 0
+    failure_point = next(
+        int(row.split("\t", 1)[0])
+        for row in (completed / "mutations.log").read_text().splitlines()
+        if "\tiptables\t" in row and failing in row
+    )
+    state_dir = tmp_path / "failed"
+    shutil.copytree(baseline, state_dir)
+    env = _environment(bin_dir, state_dir)
+    env["FAIL_AT"] = str(failure_point)
+
+    result = _run(installer, env)
+
+    assert result.returncode != 0
+    after = json.loads((state_dir / "iptables.json").read_text())
+    # The forwarded policy was not touched.
+    assert after["jumps"] == before["jumps"] == ["SY-EGRESS-test-A"]
+    assert after["chains"]["SY-EGRESS-test-A"] == before["chains"]["SY-EGRESS-test-A"]
+    # And input from the application is refused throughout: by the old host
+    # chain, or by the new one once INPUT jumps to it.
+    assert after["input"], after
+    for _interface, chain in after["input"]:
+        assert any(rule.endswith("-j REJECT") for rule in after["chains"][chain])
+
+
+def test_remove_takes_the_host_rules_away_with_the_forwarded_policy(tmp_path: Path) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    assert _run(installer, env).returncode == 0
+
+    result = subprocess.run(
+        [os.fspath(installer), "remove"], env=env, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    for tool in ("iptables", "ip6tables"):
+        state = json.loads((state_dir / f"{tool}.json").read_text())
+        assert state["input"] == [] and state["jumps"] == []
         assert set(state["chains"]) == {"DOCKER-USER"}

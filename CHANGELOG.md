@@ -281,6 +281,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   jump installed.
 - A retained release no longer keeps files that group or others can write,
   and the release archive records root as the owner of every file.
+- The host egress policy now also covers the host's own addresses. A
+  connection from the application to the bridge gateway or to the host's
+  network address is input to the host, not forwarded traffic, and passed no
+  rule: with the policy installed, the application's container connected to a
+  listener on the gateway. The installer adds an `INPUT` chain on the
+  deployment bridge that refuses everything from the application's address
+  except replies to connections the host opened.
 - `release_artifact.py create` no longer fails at random with "invalid
   reference format". It named its image after a random temporary directory,
   and about one such name in twenty put an underscore beside a hyphen, which

@@ -37,7 +37,11 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     Eyebox's local container and every Eyebox config and target hostname was
     checked against the new hostname rule. Production will run first-party
     submissions with no proxy (TD-18). The review of that change found TD-78:
-    the host egress policy does not cover the host's own addresses.
+    the host egress policy did not cover the host's own addresses. A probe in
+    the smoke lane showed the application's container reaching a listener on
+    the bridge gateway with the policy installed (run 38094674579); the
+    installer now refuses that input, and the smoke lane and the rehearsal
+    probe it.
 - **2026-10-10** (`12a23e6` to `166ceac`): first Actions pass. The owner
   re-enabled Actions and `main` was pushed for the first time since
   2026-09-25. On the first runs Dependency audit, Container security, the
@@ -298,11 +302,7 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement, one PR per row:
-
-| # | Entry | P | Scope | Risk | Contract | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | TD-78 | P1 | security, host policy | medium | none | Do before production starts without a proxy. Needs the smoke lane and the rehearsal, so a GitHub runner |
+Nothing is ready to implement as a single pull request.
 
 CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
@@ -322,7 +322,6 @@ and rehearses it; dispatch it on the commit to release.
 
 | ID | P | Status | Finding |
 | --- | --- | --- | --- |
-| TD-78 | P1 | ready | The host egress policy does not cover the host's own addresses |
 | TD-17 | P2 | operational | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 | TD-18 | P1 | operational | Production forward-proxy selection and egress qualification are incomplete |
 | TD-19 | P1 | operational | Restricted Hetzner HTTPS ingress and Railway credential handoff are incomplete |
@@ -336,39 +335,7 @@ and rehearses it; dispatch it on the commit to release.
 
 ## Ready to implement
 
-### TD-78 — The host egress policy does not cover the host's own addresses
-
-**Priority:** P1 · **Area:** security, host policy · **Risk:** medium · **Contract:** none · **Depends on:** —
-
-**Problem:**
-- The policy is installed in `DOCKER-USER`, which sees forwarded and
-  same-bridge traffic. A connection from the application's container to one
-  of the host's own addresses (the bridge gateway `172.30.0.1`, or an address
-  of the host's network interfaces) is input to the host and passes no rule
-  of the policy. The container's own loopback never leaves its namespace.
-- For those destinations the URL guard is the only refusal. The two browser
-  races that `docs/DEPLOYMENT.md` accepts get past the guard. With an
-  operator proxy such a request went to the proxy; without one (TD-18) it
-  goes straight to the host.
-- What it could reach is whatever the host listens on beyond loopback: the
-  reverse proxy planned in TD-19, `sshd`, anything bound to every interface.
-  The request is blind, because the frame that sent it is gone.
-- Found by reading, in the independent review of the no-proxy change on
-  2026-10-10. It has not been demonstrated: the smoke lane and the rehearsal
-  probe a private peer and the metadata address, never the gateway.
-
-**Code:** `security/install-docker-egress-policy.sh`,
-`scripts/run_container_browser_smoke.sh`, `scripts/run_deployment_rehearsal.sh`
-(`verify_runtime`).
-**Fix:** have the installer also refuse new connections from the
-application's address to the host itself: an `INPUT` rule scoped to the
-deployment bridge and the application's source address, after an accept for
-established connections so that the host can still call the application. Use
-the same staged replacement and rollback as the forwarded policy. First probe
-the gateway from the container in the smoke lane, to see the gap.
-**Done when:** from the application's container, a connection to the bridge
-gateway and to the host's address is refused in the smoke lane and the
-rehearsal, while the host still reaches the application's port.
+Nothing at present.
 
 ## Coordinated
 

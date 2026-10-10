@@ -134,6 +134,8 @@ API_URL=""
 BRIDGE=""
 PROBE_ADDRESS=""
 ROUTE_ACTIVE=0
+HOST_LISTENER_PID=""
+HOST_PROBE_PORT=18999
 APPARMOR_PROFILE_ACTIVE=0
 PREFLIGHT_PASSED=0
 CLEANUP_COMPLETE=0
@@ -179,12 +181,18 @@ policy_jumps() {
   iptables -S DOCKER-USER | grep -E -- " -j SY-EGRESS-$POLICY_ID(-[AB])?\$" || true
 }
 
+# The jumps that refuse the application's connections to the host itself.
+host_policy_jumps() {
+  iptables -S INPUT | grep -E -- " -j SY-HOST-$POLICY_ID-[AB]\$" || true
+}
+
 # Removes the rehearsal's policy from every interface it is installed on. The
 # interfaces come from the jumps themselves: the deployment bridge changes when
 # the network is recreated, and one step installs the policy somewhere else.
 remove_egress_policy() {
   local interface
-  for interface in $(policy_jumps | sed -n 's/^-A DOCKER-USER -i \([^ ]*\) -j .*/\1/p' | sort -u); do
+  for interface in $({ policy_jumps; host_policy_jumps; } | \
+    sed -n 's/^-A [A-Z-]* -i \([^ ]*\) -j .*/\1/p' | sort -u); do
     SCRAPEYARD_EGRESS_INTERFACE="$interface" SCRAPEYARD_EGRESS_POLICY_ID="$POLICY_ID" \
       "$CANDIDATE/source/security/install-docker-egress-policy.sh" remove
   done
@@ -269,6 +277,8 @@ cleanup_resources() {
     ip route del unreachable "$PROXY_ADDRESS/32" >/dev/null 2>&1
     ROUTE_ACTIVE=0
   fi
+  [[ -z "$HOST_LISTENER_PID" ]] || kill "$HOST_LISTENER_PID" >/dev/null 2>&1
+  HOST_LISTENER_PID=""
   [[ -z "$CORRUPTED" ]] || rm -rf -- "$CORRUPTED"
   set -e
   CLEANUP_COMPLETE=1
@@ -293,7 +303,8 @@ trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
 assert_no_project_resources
-[[ -z "$(policy_jumps)" ]] || fail "a rehearsal egress policy is already installed on this host"
+[[ -z "$(policy_jumps)$(host_policy_jumps)" ]] || \
+  fail "a rehearsal egress policy is already installed on this host"
 if [[ -e "$DIAGNOSTICS_DIR" && ! -d "$DIAGNOSTICS_DIR" ]]; then
   fail "diagnostics path exists and is not a directory: $DIAGNOSTICS_DIR"
 fi
@@ -358,6 +369,19 @@ PREFLIGHT_PASSED=1
 [[ -e /sys/class/net/docker0 ]] || fail "Docker's default bridge docker0 is needed for one step"
 ip route add unreachable "$PROXY_ADDRESS/32"
 ROUTE_ACTIVE=1
+# A listener on every address of the host stands in for whatever a production
+# host listens on. The application must not be able to reach it.
+(exec 3<>"/dev/tcp/127.0.0.1/$HOST_PROBE_PORT") >/dev/null 2>&1 && \
+  fail "port $HOST_PROBE_PORT is already in use"
+python3 -c '
+import socket, sys
+server = socket.create_server(("0.0.0.0", int(sys.argv[1])))
+while True:
+    server.accept()[0].close()
+' "$HOST_PROBE_PORT" &
+HOST_LISTENER_PID=$!
+HOST_ADDRESS="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+[[ -n "$HOST_ADDRESS" ]] || fail "could not find the host's network address"
 if ! apparmor_profile_loaded; then
   APPARMOR_PROFILE_ACTIVE=1
 fi
@@ -410,7 +434,7 @@ verify_api() {
 expect_refusal_without_policy() {
   local label=$1 since deadline
   remove_egress_policy
-  [[ -z "$(policy_jumps)" ]] || fail "the egress policy could not be removed"
+  [[ -z "$(policy_jumps)$(host_policy_jumps)" ]] || fail "the egress policy could not be removed"
   since=$(date +%s)
   docker start "$APP_CONTAINER" >/dev/null
   deadline=$((SECONDS + 60))
@@ -434,7 +458,7 @@ expect_refusal_without_policy() {
 
 # Everything a deployment must leave true, checked from outside the application.
 verify_runtime() {
-  local label=$1 release=$2 name=$3 service container network_id
+  local label=$1 release=$2 name=$3 service container network_id gateway address
   local -a found
   for service in scrapeyard redis egress-probe; do
     mapfile -t found < <(service_containers "$service")
@@ -525,6 +549,22 @@ print(
   fi
   if app_connects 169.254.169.254 80; then
     fail "[$label] the egress policy let the application reach the metadata address"
+  fi
+  # The host's own addresses are input to the host, which the forwarded
+  # policy never sees. A release whose installer has host rules must refuse
+  # them; an older one is not held to it.
+  gateway="$(docker inspect --format \
+    '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$APP_CONTAINER")"
+  (exec 3<>"/dev/tcp/$gateway/$HOST_PROBE_PORT") >/dev/null 2>&1 || \
+    fail "[$label] the host's probe listener is not answering on $gateway"
+  if grep -q 'SY-HOST-' "$release/source/security/install-docker-egress-policy.sh"; then
+    (($(host_policy_jumps | grep -c -F -- "-i $BRIDGE ") == 1 && $(host_policy_jumps | wc -l) == 1)) || \
+      fail "[$label] expected one host policy jump, on $BRIDGE"
+    for address in "$gateway" "$HOST_ADDRESS"; do
+      if app_connects "$address" "$HOST_PROBE_PORT"; then
+        fail "[$label] the application reached the host's own address $address"
+      fi
+    done
   fi
 
   python3 scripts/release_artifact.py verify "$release" >/dev/null || \
@@ -995,7 +1035,7 @@ scan_diagnostics
 
 cleanup_resources
 assert_no_project_resources
-[[ -z "$(policy_jumps)" ]] || fail "cleanup left the rehearsal egress policy installed"
+[[ -z "$(policy_jumps)$(host_policy_jumps)" ]] || fail "cleanup left the rehearsal egress policy installed"
 rm -rf -- "$WORK_DIR"
 WORK_DIR=""
 trap - EXIT INT TERM HUP

@@ -42,6 +42,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def test_smoke_lane_probes_the_host_s_own_addresses_from_the_application() -> None:
+    script = Path("scripts/run_container_browser_smoke.sh").read_text(encoding="utf-8")
+    # Input to the host is not forwarded traffic, so it needs its own probe:
+    # the bridge gateway and the host's network address, from the container.
+    assert 'for address in "$BRIDGE_GATEWAY" "$HOST_ADDRESS"; do' in script
+    assert "network policy let the application reach the host's own address" in script
+    # The listener must be up before a refusal means anything, and gone afterwards.
+    assert 'fail "the host probe listener did not start"' in script
+    assert script.count('kill "$HOST_LISTENER_PID"') == 2
+
+
 def test_fixture_serves_deterministic_static_dynamic_redirect_and_protected_scenarios() -> None:
     server = create_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -265,7 +276,10 @@ def test_egress_policy_blocks_reserved_destinations_after_explicit_allows() -> N
     assert 'CHAIN_A="${LEGACY_CHAIN}-A"' in text
     assert 'CHAIN_B="${LEGACY_CHAIN}-B"' in text
     assert "--dport 6379 -j ACCEPT" in text
-    assert text.count("--ctstate ESTABLISHED,RELATED -j ACCEPT") == 2
+    # The forwarded policy for each address family, and the host chain.
+    assert text.count("--ctstate ESTABLISHED,RELATED -j ACCEPT") == 3
+    assert 'HOST_CHAIN_A="SY-HOST-${POLICY_ID}-A"' in text
+    assert '"$tool" -I INPUT 1 -i "$NETWORK_INTERFACE" -j "$new"' in text
     assert 'PROBE_LIVENESS_PORT="${SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT:-8081}"' in text
     assert '-p tcp --dport "$PROBE_LIVENESS_PORT" -j ACCEPT' in text
     rendered = subprocess.run(
