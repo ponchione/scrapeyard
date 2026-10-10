@@ -69,6 +69,18 @@ def test_ci_required_gate_contracts() -> None:
     )
 
 
+def test_ci_lets_the_real_browser_tests_start_a_sandboxed_chromium() -> None:
+    quality = _workflow("ci.yml")["jobs"]["quality"]
+    install = next(
+        step for step in quality["steps"] if step.get("name", "").startswith("Install Chromium")
+    )
+    assert install["if"] == "matrix.python-version == '3.12'"
+    assert "playwright install --with-deps chromium" in install["run"]
+    # Scrapeyard never starts Chromium with --no-sandbox, so the runner has to
+    # allow the user namespaces the sandbox is built from.
+    assert "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in install["run"]
+
+
 def test_ci_type_checks_once_against_the_configured_target() -> None:
     quality = _workflow("ci.yml")["jobs"]["quality"]
     type_check = next(step for step in quality["steps"] if step.get("name") == "Type check")

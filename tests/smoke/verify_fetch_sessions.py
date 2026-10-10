@@ -13,6 +13,7 @@ import sys
 import threading
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -72,6 +73,27 @@ def budget(duration=30):
     )
 
 
+def descendant_commands():
+    """Command lines of every process this one started, directly or not."""
+    children, commands = {}, {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            parent = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(parent, []).append(int(entry.name))
+        commands[int(entry.name)] = command.strip()
+    found, pending = [], [os.getpid()]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(commands[child])
+            pending.append(child)
+    return found
+
+
 async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
     Fixture.requests.clear()
     target = TargetConfig.model_validate({
@@ -104,6 +126,17 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             assert second.page.css("h1::text").get() == "present"
             assert session._context is context
             assert not context.pages  # No earlier page callbacks remain alive.
+            if fetcher is PlayWrightFetcher:
+                # Chromium runs inside its own sandbox on the stealth path and
+                # off it. Scrapling asks for it only with stealth, and
+                # Playwright otherwise starts Chromium with --no-sandbox.
+                chromium = [
+                    command for command in descendant_commands()
+                    if "--type=" in command or "--remote-debugging-pipe" in command
+                ]
+                assert any("--type=zygote" in command for command in chromium), chromium
+                unsandboxed = [command[:120] for command in chromium if "--no-sandbox" in command]
+                assert not unsandboxed, unsandboxed
             assert "blocked_requests" not in first.debug
             assert second.debug["blocked_requests"] == [
                 {"kind": "request", "url": "http://127.0.0.1:8080/private"},

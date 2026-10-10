@@ -61,7 +61,12 @@ jobs:
         # tests/integration/test_browser_traffic.py skips without it. One leg
         # is enough: those tests exercise the browser, not the interpreter.
         if: matrix.python-version == '3.12'
-        run: poetry run playwright install --with-deps chromium
+        # Chromium's sandbox needs unprivileged user namespaces, which Ubuntu
+        # 24.04 denies to programs without an AppArmor profile. In production
+        # the container's profile grants them; here the runner is told to.
+        run: |
+          poetry run playwright install --with-deps chromium
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test with coverage
         run: poetry run pytest -W error -rs --junitxml=test-results/junit.xml --cov-report=xml:coverage.xml
       - name: Upload test diagnostics on failure
