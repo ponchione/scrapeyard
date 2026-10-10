@@ -620,6 +620,87 @@ Redis host `vm.overcommit_memory` warnings are upstream/platform warnings;
 they do not replace successful browser extraction, AOF reload, or threshold
 assertions.
 
+## Release and deployment rehearsal
+
+Neither lane above starts Scrapeyard the way production does: both overlays
+turn untrusted-submission mode off, and neither runs
+`security/deploy-secure-compose.sh`. The rehearsal lane does. It takes two
+retained releases (see
+[DEPLOYMENT.md](DEPLOYMENT.md#retained-release-artifacts-and-rollback)) and
+runs the production Compose file, with no overlay, through the wrapper each
+release retains:
+
+```bash
+sudo ./scripts/run_deployment_rehearsal.sh \
+  --candidate /srv/scrapeyard-releases/candidate \
+  --previous /srv/scrapeyard-releases/previous
+```
+
+Run it as root on a Docker host that runs nothing else. It installs the host
+egress policy and the AppArmor profile, uses the production subnet, and
+refuses to start when an existing Docker network overlaps that subnet. Nothing
+is built or pulled.
+
+In order, it:
+
+1. Deploys the candidate and checks what is running (below).
+2. Records a known run. The rehearsal has no operator proxy, so the run
+   targets a `.invalid` name, is refused before any connection, and ends
+   `failed`; it is still a stored run and result.
+3. Offers a copy of the candidate with one file changed. The wrapper must
+   refuse it and leave the running application untouched.
+4. Fails the egress policy installation. The wrapper must stop, with the
+   application stopped and the active policy unchanged.
+5. Removes the egress policy and starts the application container directly.
+   It must report the reachable challenge and never serve.
+6. Rolls back to the previous release, then rolls forward to the candidate.
+   Both must pass the same checks and return the known run unchanged.
+
+After each deployment it checks, from outside the application:
+
+- every container runs the image its release retains, is healthy, and
+  publishes no host port;
+- the application container matches the release's Compose file (capabilities,
+  limits, read-only root, init, one network) and runs under the AppArmor
+  profile, seccomp, no-new-privileges and an empty capability set;
+- exactly one application process and one egress policy jump, on the
+  deployment bridge; the probe's challenge port and the metadata address are
+  refused and the probe's liveness port is allowed;
+- public liveness answers, readiness answers only the monitoring credential,
+  and the client credential (submit and read in one project, as Eyebox's is)
+  cannot read readiness;
+- the known run reads back with the same `job_id`, `run_id`, `status`,
+  `project`, `name`, `config_hash` and `completed_at`, and submitting it again
+  with the same idempotency key replays it;
+- the retained release still verifies, and no image was pulled.
+
+The operator proxy setting points at a public address that the script makes
+unreachable on the host for the length of the run, so nothing can be sent to
+it. Evidence (the wrapper's output for each step, the confinement verdicts,
+the API reports, the log of the start without the policy and an image-event
+list) goes to
+`SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR`; the script deletes it instead if
+either generated credential appears in it. On exit it removes the project's
+containers, network and volumes, the rehearsal policy, the unreachable route
+and, if it loaded it, the AppArmor profile. It leaves the loaded images and
+the host-wide bridge netfilter setting.
+
+The `Release artifact and deployment rehearsal` workflow builds, scans and
+qualifies both releases with `scripts/release_artifact.py create` and then
+runs the rehearsal. On a pull request that touches the deployment files it
+uses the pull request's head and base. A manual dispatch takes `revision` and
+`previous_revision` (default: the branch head and its parent) and uploads the
+candidate as `scrapeyard-release-<revision>` with its SHA-256, kept for 30
+days. It has read-only repository permission, SHA-pinned actions, no caches
+and a 120-minute timeout.
+
+The rehearsal does not cover a successful scrape through an operator proxy,
+the reverse proxy, a host reboot, or backups.
+
+First run, 2026-10-10 on a GitHub runner (Ubuntu 24.04, Docker 28.0.4, Compose
+2.38.2), releases of `711aead` over `2f6b70f`: each release took 10 to 12
+minutes to build, scan and qualify, and the rehearsal passed in 125 seconds.
+
 ## Dependency vulnerability audits
 
 Install the locked development environment before auditing it:

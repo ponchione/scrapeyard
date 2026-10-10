@@ -243,6 +243,24 @@ python3 scripts/release_artifact.py create /srv/scrapeyard-releases/candidate --
 python3 scripts/release_artifact.py verify /srv/scrapeyard-releases/candidate
 ```
 
+A GitHub runner is such a host. The `Release artifact and deployment
+rehearsal` workflow prepares the release there, deploys it and rolls it back
+(see [TESTING.md](TESTING.md#release-and-deployment-rehearsal)), and uploads
+it:
+
+```bash
+gh workflow run release-rehearsal.yml --ref main \
+  -f revision=<commit> -f previous_revision=<currently deployed commit>
+gh run download <run-id> -n scrapeyard-release-<commit>
+sha256sum -c scrapeyard-release-<commit>.tar.zst.sha256
+sudo tar --zstd -xpf scrapeyard-release-<commit>.tar.zst -C /srv/scrapeyard-releases
+python3 /srv/scrapeyard-releases/scrapeyard-release-<commit>/source/scripts/release_artifact.py \
+  verify /srv/scrapeyard-releases/scrapeyard-release-<commit>
+```
+
+Compare the checksum with the one in the run's summary. The artifact expires
+after 30 days, so it is a way to move a release, not a place to keep one.
+
 The directory contains the source revision's files (including Compose, SQL,
 entrypoint and security policy), bounded scan/qualification reports, the
 application/Redis/probe image archive, and a SHA-256/permission manifest. The
