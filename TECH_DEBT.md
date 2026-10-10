@@ -709,6 +709,11 @@ ingress and TD-22's release artifact selection.
 - All of the monitoring work below: readiness and metrics collection, and
   alerts. It needs the owner's choice of a monitoring service.
 - The health check Compose runs is still process liveness only.
+- Nothing watches the host policy between deployments. The startup check
+  covers forwarded traffic; the `INPUT` jump that keeps the application off
+  the host's own addresses (added for TD-78) can be removed by another
+  firewall tool without the application noticing. An alert on a missing jump
+  belongs with the monitoring work.
 
 **Problem:**
 - Before 2026-10-10, `security/deploy-secure-compose.sh` installed policy

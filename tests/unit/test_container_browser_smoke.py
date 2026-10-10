@@ -50,6 +50,8 @@ def test_smoke_lane_probes_the_host_s_own_addresses_from_the_application() -> No
     assert "network policy let the application reach the host's own address" in script
     # The listener must be up before a refusal means anything, and gone afterwards.
     assert 'fail "the host probe listener did not start"' in script
+    # A container the policy does not name must reach it over the same bridge.
+    assert 'fail "the host probe listener is not reachable from the deployment bridge"' in script
     assert script.count('kill "$HOST_LISTENER_PID"') == 2
 
 

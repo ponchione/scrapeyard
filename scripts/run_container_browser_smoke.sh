@@ -327,6 +327,12 @@ until (exec 3<>"/dev/tcp/$BRIDGE_GATEWAY/$HOST_PROBE_PORT") >/dev/null 2>&1; do
   ((SECONDS < LISTENER_DEADLINE)) || fail "the host probe listener did not start"
   sleep 0.2
 done
+# A neighbour on the same bridge that the policy does not name must get
+# through, or a refusal below would prove nothing about the policy.
+compose exec -T peer python -c \
+  'import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()' \
+  "$BRIDGE_GATEWAY" "$HOST_PROBE_PORT" || \
+  fail "the host probe listener is not reachable from the deployment bridge"
 for address in "$BRIDGE_GATEWAY" "$HOST_ADDRESS"; do
   if compose exec -T scrapeyard python -c \
     'import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close()' \

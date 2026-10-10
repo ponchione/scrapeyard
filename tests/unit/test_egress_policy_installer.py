@@ -497,9 +497,16 @@ def test_install_refuses_the_application_s_connections_to_the_host_itself(tmp_pa
         assert jumps == [["br-test", "SY-HOST-test-A"]]
         # Replies to connections the host opened are admitted; everything else
         # from the application's address is refused; other sources pass on.
+        # IPv6 also needs neighbour discovery, which is not connection-tracked:
+        # without it the application could not find its gateway.
+        discovery = [
+            f"-s {source} -p ipv6-icmp --icmpv6-type {kind} -j ACCEPT"
+            for kind in ("router-solicitation", "neighbour-solicitation", "neighbour-advertisement")
+        ]
         assert chains == {
             "SY-HOST-test-A": [
                 f"-s {source} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+                *(discovery if tool == "ip6tables" else []),
                 f"-s {source} -j REJECT",
                 "-j RETURN",
             ]
@@ -573,6 +580,14 @@ def test_a_failure_in_the_host_rules_leaves_the_forwarded_policy_as_it_was(
     assert after["input"], after
     for _interface, chain in after["input"]:
         assert any(rule.endswith("-j REJECT") for rule in after["chains"][chain])
+
+    # Wherever it stopped, even with a jump to each chain left behind, the
+    # next install completes without anyone clearing up first.
+    retry = _run(installer, _environment(bin_dir, state_dir))
+    assert retry.returncode == 0, retry.stderr
+    jumps, chains = _host_rules(state_dir)
+    assert len(jumps) == 1 and jumps[0][0] == "br-test"
+    assert list(chains) == [jumps[0][1]]
 
 
 def test_remove_takes_the_host_rules_away_with_the_forwarded_policy(tmp_path: Path) -> None:
