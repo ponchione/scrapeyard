@@ -959,11 +959,12 @@ PY
   expect_refusal_without_policy unprotected-start-no-proxy
   # The boot service then starts it as it would after a boot.
   BEFORE="$(invocation)"
-  STARTED_AT="$(date +%s)"
+  # Not STARTED_AT: that is the whole run's clock.
+  BOOT_STARTED_EPOCH="$(date +%s)"
   systemctl start "$UNIT"
   await_unit boot-no-proxy "$BEFORE"
   verify_runtime boot-no-proxy "$BOOT_CANDIDATE" candidate
-  verify_direct_egress boot-no-proxy "$STARTED_AT"
+  verify_direct_egress boot-no-proxy "$BOOT_STARTED_EPOCH"
   verify_api boot-no-proxy --known "$WORK_DIR/known-run.json"
 fi
 
