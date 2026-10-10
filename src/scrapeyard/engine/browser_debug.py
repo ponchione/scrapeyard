@@ -145,6 +145,19 @@ def _bounded_append(items: list[dict[str, Any]], entry: dict[str, Any], *, limit
         del items[: len(items) - limit]
 
 
+def _record_blocked_request(request_url: str, kind: str) -> str:
+    """Add a request the guard refused to the fetch's diagnostics; return its safe URL."""
+    safe_request_url = truncate_text(redact_userinfo_in_url(request_url), _EVENT_TEXT_CHARS)
+    blocked_requests = _BROWSER_BLOCKED_REQUESTS.get()
+    if blocked_requests is not None:
+        _bounded_append(
+            blocked_requests,
+            {"kind": kind, "url": safe_request_url},
+            limit=_MAX_BLOCKED_REQUESTS,
+        )
+    return safe_request_url
+
+
 async def _guarded_async_intercept_route(route: Any) -> None:
     """Scrapling route handler wrapper that blocks unsafe browser requests."""
     block_resources = _BROWSER_BLOCK_RESOURCES.get()
@@ -181,22 +194,22 @@ async def _guarded_async_intercept_route(route: Any) -> None:
                 allow_unresolved=not _BROWSER_REQUIRE_RESOLVED_DNS.get(),
             )
         except URLResolutionError:
-            # Do not release an unvalidated subrequest. Aborting this browser
-            # attempt still lets the outer RetryHandler retry transient DNS.
-            await route.abort()
-            raise
-        except UnsafeURLError:
-            safe_request_url = truncate_text(
-                redact_userinfo_in_url(request_url),
-                _EVENT_TEXT_CHARS,
+            # Never release an unvalidated request. For the document, failing
+            # this browser attempt lets the outer RetryHandler retry transient
+            # DNS. A subrequest is dropped on its own, as a non-public one is:
+            # one dead host must not fail a page that otherwise loaded.
+            if _is_top_level_navigation(request):
+                await route.abort()
+                raise
+            safe_request_url = _record_blocked_request(request_url, "unresolved_request")
+            logger.warning(
+                "Dropped browser subrequest to an unresolvable host: %s",
+                safe_request_url,
             )
-            blocked_requests = _BROWSER_BLOCKED_REQUESTS.get()
-            if blocked_requests is not None:
-                _bounded_append(
-                    blocked_requests,
-                    {"kind": "request", "url": safe_request_url},
-                    limit=_MAX_BLOCKED_REQUESTS,
-                )
+            await route.abort()
+            return
+        except UnsafeURLError:
+            safe_request_url = _record_blocked_request(request_url, "request")
             logger.warning(
                 "Blocked browser request to non-public URL: %s",
                 safe_request_url,

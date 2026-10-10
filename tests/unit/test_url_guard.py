@@ -220,6 +220,12 @@ def test_assert_public_url_rejects_legacy_ipv4_private_octal_without_dns() -> No
         assert_public_url("http://0300.0250.0001.0001/resource", resolve_dns=False)
 
 
+@pytest.mark.parametrize("host", ["[::7f00:1]", "[::ffff:0:7f00:1]", "[::a9fe:a9fe]", "[fec0::1]"])
+def test_assert_public_url_rejects_ipv6_spellings_of_local_addresses(host: str) -> None:
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_url(f"http://{host}/resource", resolve_dns=False)
+
+
 def test_redact_userinfo_in_text_handles_passwordless_userinfo() -> None:
     text = "proxy: http://token@gate.example.com:7777"
 

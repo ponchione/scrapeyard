@@ -187,6 +187,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Behind a proxy, a browser subrequest whose host doesn't resolve is now
+  dropped on its own, and recorded in the fetch's `blocked_requests` debug
+  data as `unresolved_request`, instead of failing the whole page and
+  relaunching the browser on every attempt. The request is still never sent,
+  and an unresolvable main document still fails the attempt and is retried.
+- The connected-address policy now also denies IPv4-compatible (`::/96`),
+  IPv4-translated (`::ffff:0:0:0/96`) and site-local (`fec0::/10`) IPv6
+  destinations, which could spell a local IPv4 address such as `::7f00:1`.
+  The host egress policy is rendered from the same table; install it again
+  to apply the new rules there.
 - Shutdown no longer keeps the databases open, leaving the container to be
   killed at its `stop_grace_period`, because a thread was still finishing a
   DNS check, a page parse or a result render for a cancelled job. That work

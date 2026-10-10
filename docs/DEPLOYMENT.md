@@ -106,7 +106,9 @@ Enforce outbound network policy for the Scrapeyard container or pod:
   loopback, link-local, and ULA ranges.
 - Block special-purpose documentation, transition, multicast, benchmark, and
   reserved destinations, including `192.0.2.0/24`, `198.51.100.0/24`,
-  `203.0.113.0/24`, IPv4-mapped IPv6, and NAT64 forms of denied IPv4 ranges.
+  `203.0.113.0/24`, IPv4-mapped IPv6, and NAT64 forms of denied IPv4 ranges,
+  and the deprecated IPv4-compatible (`::/96`), IPv4-translated
+  (`::ffff:0:0:0/96`) and site-local (`fec0::/10`) IPv6 ranges.
 
 Route all untrusted scrape traffic through the configured proxy gateway. Where
 the host policy can use a public allowlist, allow Scrapeyard egress only to that
@@ -145,7 +147,8 @@ the application predicate and the host-policy renderer. It is fixed to the IANA
 special-purpose registries reviewed on 2025-10-09 instead of changing with the
 host Python version's `ipaddress.is_global` tables. It is intentionally stricter
 for a few special-purpose blocks whose isolated public exceptions are not
-useful scrape targets, including all of `192.0.0.0/24`.
+useful scrape targets, including all of `192.0.0.0/24`. A change to the table
+reaches the host firewall only when the policy is installed again.
 
 Policy replacement uses alternating staging chains. The installer fully builds
 the inactive chain, inserts and confirms its `DOCKER-USER` jump while the old

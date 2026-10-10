@@ -248,7 +248,7 @@ passing, which needs it.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
-- TD-23, TD-46 and TD-60: one security review covering all three.
+- TD-23 and TD-60: one security review covering both.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
 
@@ -270,7 +270,6 @@ passing, which needs it.
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-26 | P1 | before first deploy | CI is disabled, and its workflows haven't run since their fixes |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
-| TD-46 | P2 | coordinated | Subrequest DNS failures and IPv6 gaps in the browser guard |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
 | TD-60 | P2 | coordinated | Chromium favicon requests bypass the browser route guard and budget |
@@ -348,30 +347,6 @@ data before any code.
 **Done when:** browser smoke passes, and a qualification run on the Eyebox
 retailer set shows the same or better yield and timing.
 
-### TD-46 — Subrequest DNS failures and IPv6 gaps in the browser guard
-
-**Priority:** P2 · **Area:** engine URL guard · **Risk:** medium · **Contract:** fewer failed pages behind a proxy · **Depends on:** one security review together with TD-23
-
-- **a. Behind a proxy, one unresolvable subrequest host fails the whole page.**
-  - A proxy is required in production (TD-18), and it makes
-    `_requires_verified_dns` force strict resolution.
-  - In `_guarded_async_intercept_route`, a subrequest host that doesn't resolve
-    raises `URLResolutionError`. `BrowserSession.fetch.guard` turns that into a
-    failed page and relaunches the browser on every attempt.
-  - Exposure: a dead first-party subdomain on any target, or any dead
-    third-party host on the 127 of 311 Eyebox browser targets that don't set
-    `block_third_party`.
-  - **Fix:** for subrequests, abort and record just that request. Keep failing
-    and retrying for the main document. The request is still never let through
-    unvalidated.
-- **b. The IPv6 deny list has gaps.**
-  - `engine/ip_policy.py` allows `::7f00:1` (IPv4-compatible),
-    `::ffff:0:7f00:1` (IPv4-translated) and `fec0::1` (site-local).
-  - These aren't routable in a normal Docker setup, so this is defense in
-    depth.
-  - **Fix:** deny `::/96`, `::ffff:0:0:0/96` and `fec0::/10`, or allow only
-    `2000::/3`. The host firewall rules under `security/` change too.
-
 ### TD-23 — The browser URL guard pays a thread hop and a DNS lookup on every subrequest
 
 **Priority/ownership:** P3; browser fetch efficiency. Measured locally; the
@@ -416,8 +391,7 @@ guard itself must not change without a security review.
 - `_pagination_url_is_safe`.
 - `_assert_connection_endpoint`, once per attempt for the proxy endpoint.
 
-Fold those into the same verdict cache. Review TD-46 under the same security
-review.
+Fold those into the same verdict cache.
 
 **Done when:**
 - A security review accepts the design.
@@ -474,7 +448,7 @@ measured effect instead of fixture numbers.
 
 ### TD-60 — Chromium favicon requests bypass the browser route guard and budget
 
-**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** the TD-23/TD-46 security review
+**Priority:** P2 · **Area:** engine, browser guard · **Risk:** medium · **Contract:** none · **Depends on:** the TD-23 security review
 
 **Problem:**
 - In a 2026-10-09 container check, the rebrowser stealth path sometimes sent a

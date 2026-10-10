@@ -50,8 +50,11 @@ DENIED_ADDRESS_NETWORKS: tuple[IPNetwork, ...] = _networks(
     "224.0.0.0/4",
     "240.0.0.0/4",
     # IPv6 special-purpose, transition, documentation, local, and multicast.
-    "::/128",
-    "::1/128",
+    # ::/96 is the unspecified and loopback addresses and the deprecated
+    # IPv4-compatible form (::a.b.c.d); ::ffff:0:0:0/96 is IPv4-translated
+    # (SIIT). Neither is a real destination, and both can spell an IPv4 one.
+    "::/96",
+    "::ffff:0:0:0/96",
     "64:ff9b:1::/48",
     "100::/64",
     "100:0:0:1::/64",
@@ -62,6 +65,8 @@ DENIED_ADDRESS_NETWORKS: tuple[IPNetwork, ...] = _networks(
     "5f00::/16",
     "fc00::/7",
     "fe80::/10",
+    # Site-local, deprecated by RFC 3879.
+    "fec0::/10",
     "ff00::/8",
 )
 

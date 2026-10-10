@@ -89,11 +89,15 @@ class FakeRoute:
         url: str,
         resource_type: str,
         headers: dict[str, str] | None = None,
+        *,
+        top_level_navigation: bool = False,
     ):
         self.request = SimpleNamespace(
             url=url,
             resource_type=resource_type,
             headers=headers or {},
+            is_navigation_request=lambda: top_level_navigation,
+            frame=SimpleNamespace(parent_frame=None),
         )
         self.aborted = False
         self.continued = False
@@ -629,7 +633,7 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
         selectors={"title": "h1"},
         browser={"disable_resources": False},
     )
-    route = FakeRoute("https://unresolved.example/pixel.png", "image")
+    route = FakeRoute("https://unresolved.example/", "document", top_level_navigation=True)
 
     def _raise_gaierror(*_args, **_kwargs):
         raise socket.gaierror
@@ -653,6 +657,53 @@ async def test_fetch_browser_response_can_require_resolved_browser_route_dns(mon
 
     assert route.aborted is True
     assert route.continued is False
+
+
+@pytest.mark.asyncio
+async def test_unresolved_browser_subrequest_is_dropped_without_failing_the_page(
+    monkeypatch,
+) -> None:
+    target = TargetConfig(
+        url="https://example.com",
+        fetcher=FetcherType.dynamic,
+        selectors={"title": "h1"},
+        browser={"disable_resources": False},
+    )
+    dead = [
+        FakeRoute("https://user:password@dead.example/pixel.png?api_key=secret", "image"),
+        FakeRoute("https://dead-frame.example/widget", "document"),
+    ]
+    live = FakeRoute("https://8.8.8.8/app.js", "script")
+
+    def _resolve(host, *_args, **_kwargs):
+        if str(host).startswith("dead"):
+            raise socket.gaierror
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+
+    async def route_fetch(url: str, kwargs, route_handler):
+        for route in (*dead, live):
+            await route_handler(route)
+        return SimpleNamespace(status=200, url=url, text="<html>ok</html>")
+
+    monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _resolve)
+
+    _response, capture = await fetch_browser_response(
+        ScriptedBrowserSession(route_fetch),
+        target.url,
+        target,
+        FetcherType.dynamic,
+        {},
+        artifacts_dir=None,
+        require_resolved_dns=True,
+    )
+
+    # Neither dead host was released, and the rest of the page still loaded.
+    assert [(route.aborted, route.continued) for route in dead] == [(True, False)] * 2
+    assert (live.aborted, live.continued) == (False, True)
+    assert capture["blocked_requests"] == [
+        {"kind": "unresolved_request", "url": "https://dead.example/pixel.png?api_key=<redacted>"},
+        {"kind": "unresolved_request", "url": "https://dead-frame.example/widget"},
+    ]
 
 
 @pytest.mark.asyncio
