@@ -6,6 +6,19 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-10** (`12a23e6` to `166ceac`): first Actions pass. The owner
+  re-enabled Actions and `main` was pushed for the first time since
+  2026-09-25. On the first runs Dependency audit, Container security, the
+  distribution build, live Redis and both qualification profiles passed; the
+  Quality job and browser smoke failed. Fixing them closed TD-26 and found
+  three defects the local checks could not: TD-68 (the egress policy filtered
+  nothing on the deployment bridge under Docker 27.4 or newer), TD-70 (a
+  crashed page could hold a browser fetch open until the run deadline) and
+  TD-69 (CI skipped the real-browser tests and floated on `ubuntu-latest`).
+  All three are fixed. TD-71 was recorded. TD-26c (sharing image layers
+  between jobs) was dropped: cold builds took 101 to 188 s in jobs of 4 to
+  10 minutes, and each lane rebuilds on purpose. The lone-surrogate half of
+  TD-65 landed; the rest is pull request #3, awaiting a security review.
 - **2026-10-09** (`8f564a6` to `bc3041e`): third roadmap pass, on the owner's
   decisions for the blocked entries. TD-62 was closed (Node 24 action pins;
   nothing has run them yet, see TD-26b), as were the coordinated TD-23 (a run
@@ -67,7 +80,10 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 4. **Read the Contract field.** "None" means internal only. Anything else means
    checking the [Eyebox contract](#eyebox-contract) and running the Eyebox
    checks in step 5 before merging.
-5. **Run the checks locally.** CI is disabled until TD-26 lands.
+5. **Run the checks locally, then open a pull request.** GitHub Actions runs
+   them again, on Python 3.10 and 3.12, and runs the container lanes when
+   their paths change. Read a failed job's log with
+   `gh api repos/{owner}/{repo}/actions/jobs/<job_id>/logs`.
 
    ```sh
    poetry run ruff check src tests scripts security
@@ -97,7 +113,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-68**) and use this template:
+7. **New findings** take the next free ID (**TD-72**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -127,6 +143,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the 2026-10-09 roadmap pass | ruff 0.16.9 over `src tests scripts security` and mypy (105 files) pass; `pytest -W error` 2,492 passed, 17 skipped, 90.15% coverage on 3.12, and the same counts on 3.10; the 17 live Redis tests pass against a service-style Redis; `pip-audit` finds pip 26.2.1 clean but 32 production advisories in locked packages |
 | After the second 2026-10-09 pass (`409f08c`) | ruff, mypy (105 files) and `pytest -W error` pass on 3.12 and 3.10: 2,551 passed, 17 skipped, 90.31% coverage; `scripts/audit_dependencies.py all` and the container scan (image built locally) are clean; Eyebox's client tests (297 passed) and 54 configs pass |
 | After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
+| After the first Actions pass (2026-10-10, `166ceac`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,614 passed, 17 skipped, 90.44% coverage. On GitHub at the same commit: CI (Quality 3.10: 2,611 passed, 20 skipped; Quality 3.12: 2,614 passed, 17 skipped, with Chromium installed for the three real-browser tests; distribution build; live Redis), Dependency audit on both legs, Container security, browser smoke (4 min; image 3.36 GB), and release qualification quick (10 min) and full (23 min) all pass, with no deprecation or runner warnings. Eyebox's client tests (299 passed) and 54 configs pass |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -248,19 +265,21 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready to implement: nothing. Every entry that could be done without a
-decision, an operator or Eyebox is done. New ready entries go in a table here,
-one PR per row, with the columns `#`, Entry, P, Scope, Risk, Contract and
-Notes.
+Ready to implement, one PR per row:
 
-**Before the first deploy:** TD-26 (re-enable CI and confirm every workflow
-passes). CI is GitHub Actions, not deployment, so local checks cover it until
-then. A release (TD-22) needs the container scan and qualification workflows
-passing, which needs it.
+| # | Entry | P | Scope | Risk | Contract | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | TD-71 | P3 | container hardening, browsers | low | none | Needs the smoke lane, so a GitHub runner or an isolated Docker host |
+
+**In review:** TD-65 is pull request #3. It changes what the URL guard
+accepts, so it waits for the owner's security review.
+
+CI gates pull requests since 2026-10-10. A release (TD-22) needs the container
+scan and both qualification profiles passing on its revision; they pass on
+`main` as of this pass.
 
 **Coordinated:**
 - TD-45: needs Eyebox to move with it.
-- TD-65: changes what the URL guard accepts, so it needs a security review.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs.
 
@@ -279,56 +298,46 @@ passing, which needs it.
 | TD-21 | P1 | operational | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
-| TD-26 | P1 | before first deploy | CI is disabled, and its workflows haven't run since their fixes |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-65 | P3 | coordinated | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
+| TD-65 | P3 | in review | The URL guard resolves a different hostname than the HTTP client requests for some non-ASCII names |
+| TD-71 | P3 | ready | In the production container a crashed renderer hangs instead of being reported |
 
 ## Ready to implement
 
-### TD-26 — CI is disabled, and its workflows haven't run since their fixes
+### TD-71 — In the production container a crashed renderer hangs instead of being reported
 
-**Priority:** P1 · **Area:** CI, build · **Risk:** low · **Contract:** none · **Depends on:** an operator re-enabling Actions
+**Priority:** P3 · **Area:** browsers, container hardening · **Risk:** low · **Contract:** none · **Depends on:** —
 
-**Problem:** Actions is disabled for the repository
-(`gh api repos/{owner}/{repo}/actions/permissions` returns `enabled: false`),
-so nothing gates merges. The last runs on `main` (2026-09-07) failed in CI,
-Dependency audit, Container security and Release qualification. The code-side
-causes were fixed on 2026-10-09:
-- pip moved to 26.2.1 everywhere (26.1.2 had PYSEC-2026-3721), and the runtime
-  image no longer ships pip.
-- The live-redis job enables append-only persistence with `CONFIG SET`, and its
-  admission test re-enables memory admission through a fixture. All 17 live
-  tests passed locally against a service-style Redis.
-- The Debian snapshot moved to `20261008T000000Z`; a local image scan found no
-  Debian findings.
-- Release qualification's backup runs as the backup directory's group, not
-  1000.
-- mypy runs on one matrix leg, and browser smoke also triggers on model and SQL
-  changes.
-- The locked Python packages with advisories were updated. Both `pip-audit`
-  lanes and a local run of `scripts/run_container_security_scan.sh` are clean,
-  with no audit exceptions.
-- The workflows pin the Node 24 releases of their actions (`actions/checkout`
-  v7.0.1, `actions/setup-python` v7.0.0, `actions/cache` v6.1.0 and
-  `actions/upload-artifact` v7.0.1) instead of the Node 20 ones. Each SHA was
-  read from the action's tag and its `action.yml` checked for `node24` and for
-  the inputs the workflows pass; none of them has run yet.
+**Problem:**
+- In the production image under the Compose security options, on a GitHub
+  runner (Ubuntu 24.04, Docker 28.0.4), `Page.crash` over CDP left the
+  renderer unresponsive. Playwright fired no `crash` event within 10 seconds,
+  for upstream Chromium 145 and for rebrowser's Chromium 136, and
+  `context.set_offline(True)` was then never answered (smoke runs
+  38052739287 and 38053605687, 2026-10-10).
+- Outside the container the same check saw the `crash` event: both Chromium
+  modes of the fetch-session check passed on a development host on
+  2026-10-09, when the check still required the event.
+- Since TD-70 the session is stopped after 10 seconds, so the fetch no longer
+  hangs. Such a page still costs that wait, and the target reports a network
+  error instead of a crash.
+- Not known: whether a real renderer crash (out of memory, a segfault)
+  behaves like the deliberate `Page.crash`, and which of seccomp, AppArmor,
+  the dropped capabilities or the PID limit is responsible.
 
-**Remaining:**
-- **b. Re-enable Actions,** then confirm on `main` that CI (both quality legs,
-  build, live-redis), Dependency audit (both legs), Container security,
-  Container and browser smoke, and Release qualification (quick and full)
-  pass, and that no run carries a Node 20 deprecation warning. Browser smoke
-  and release qualification install host security policy, so they weren't run
-  locally.
-- **c. Optional:** share or cache image layers between jobs. A PR that only
-  touches `src/` still does two cold image builds of about 2.5 min each; this
-  can't be verified without Actions.
-
-**Done when:** an operator has re-enabled Actions, every workflow passes on
-`main`, and `pip-audit` is clean.
+**Code:** `tests/smoke/verify_fetch_sessions.py` (the `crash` ending),
+`security/seccomp/chromium.json`, `security/apparmor/`, `docker-compose.yml`
+(`security_opt`, `cap_drop`, `pids_limit`), `engine/browser_session.py`
+(`_PAGE_RELEASE_SECONDS`).
+**Fix:** rerun the smoke lane with each restriction lifted in turn, and read
+the kernel and audit logs for a seccomp or AppArmor denial when the renderer
+crashes. Then allow what Chromium needs to report the crash, or record why
+the hang is accepted.
+**Done when:** the smoke check's crash case sees the `crash` event in the
+production container, or this entry records the cause and the decision to
+keep the 10-second bound as the handling.
 
 ## Coordinated
 
@@ -340,14 +349,56 @@ data before any code.
 **Priority:** P1 · **Area:** dependencies, browsers · **Risk:** medium · **Contract:** Eyebox's hard-test venv (`../eyebox/.hard-test/scrapeyard-venv`) and the host's `~/.cache/ms-playwright` must move in lockstep · **Depends on:** coordination with Eyebox
 
 **Problem:**
-- rebrowser-playwright 1.52 ships Chromium 136.0.7103, which the dynamic and
-  stealthy fetchers use. Playwright 1.58 ships Chromium 145.
+- rebrowser-playwright 1.52 ships Chromium 136.0.7103, which the stealth
+  path of the dynamic fetcher uses. Playwright 1.58 ships Chromium 145.
+- There is nothing to bump to: on 2026-10-10 PyPI's newest
+  rebrowser-playwright was still 1.52.0 (2025-05-09). The newest of the others
+  were playwright 1.63.0, patchright 1.63.0, camoufox 0.5.8 and scrapling
+  0.4.15. Moving the stealth path means choosing another driver.
 - Scrapeyard loads hostile pages with the older build.
 - The Scrapling `<0.3` pin limits the options: `browser_session.py` calls
   name-mangled Scrapling internals, which is fine only while the version stays
   below 0.3 (0.2.99 is the last 0.2 release).
 
-**Fix:** plan a bump, or route stealth through upstream Playwright.
+**Spike (2026-10-10):** two routes were built on branches and run through the
+browser smoke lane on a GitHub runner. Both passed every fetcher mode and the
+fetch-session checks at the first attempt. Neither is merged.
+
+| | Today | Upstream Playwright (`td-45-spike-upstream`) | patchright 1.63.0 (`td-45-spike-patchright`) |
+| --- | --- | --- | --- |
+| Stealth Chromium | 136.0.7103 (rev 1169) | 145.0.7632 (rev 1208) | 153.0.8010 (rev 1243) |
+| Image size | 3.36 GB | 2.75 GB | 3.31 GB |
+| Smoke run | 38053605687 | 38053992070 | 38053993427 |
+| Eyebox local stack | — | nothing to install | needs `patchright==1.63.0` in its venv and `chromium-1243` in the host cache, or the service will not import |
+
+Measured on a development host against loopback fixtures, on the stealth path:
+- `navigator.webdriver` is false on all three, and the classic
+  `Runtime.enable` probe (an Error `stack` getter) is silent on all three. It
+  fires only on Chromium 136 with an unpatched driver.
+- A variant of that probe (an Error `name` getter) fires once today, twice on
+  upstream and once on patchright. Whether real detectors use it is unknown.
+- Page-visible `__pw*` globals: 3 today, 4 on upstream, 1 on patchright. One
+  of them, `__pwWebSocketDispatch`, comes from Scrapeyard's own WebSocket
+  guard on every route.
+- Upstream captures page console messages for the classifier; rebrowser and
+  patchright capture none.
+
+Also found:
+- Scrapling 0.2.99 requires rebrowser-playwright, so the package (about
+  130 MB) stays installed on either route; only its Chromium can go.
+- Scrapling itself moved to patchright (0.3.14 pins 1.56.0; 0.4.15 needs
+  1.62.1 or newer).
+- patchright 1.58.2 ships the same Chromium revision 1208 as the pinned
+  playwright (from its wheel manifest, not built): a middle route with one
+  browser build and nothing new for Eyebox to download.
+- camoufox 0.5.8 requires `playwright<1.63`.
+
+Not measured: yield or timing against any retailer or anti-bot vendor (148
+of the 337 targets in Eyebox's configs use dynamic stealth), Python 3.10, and
+whether the new Chromium starts inside Eyebox's Playwright 1.58.2 container.
+
+**Fix:** the owner chooses the route. The spike branches hold the code change
+for either (ten files each); README and `docs/` still need the rename.
 
 **Done when:** browser smoke passes, and a qualification run on the Eyebox
 retailer set shows the same or better yield and timing.
@@ -638,6 +689,9 @@ ingress and TD-22's release artifact selection.
   startup attestation and readiness.
 - Handle Docker restarts and network recreation, and bound failed-start
   retries.
+- Run the egress installer at every boot. Since TD-68 it also loads
+  `br_netfilter` and sets `net.bridge.bridge-nf-call-iptables`, which the
+  policy needs and which does not survive a reboot.
 - Keep one application process, non-root execution, seccomp, capabilities, and
   filesystem limits.
 - Wire private authenticated readiness and metrics collection, with alerts for
@@ -737,7 +791,11 @@ format change to the rollback story.
 
 **Still open:** prepare the current and previous artifacts on an isolated
 Docker host, then complete the deployed acceptance checks below and record the
-evidence before removing this entry.
+evidence before removing this entry. A GitHub runner is such a host: the
+standard runner had 86 GB of free disk and 15 GiB of memory on 2026-10-10,
+against the 15 GiB of disk `release_artifact.py create` requires, and the scan
+and qualification lanes it gates already pass there. Nobody has run `create`
+on one yet.
 
 **Problem:**
 - The secure wrapper rebuilds Scrapeyard from the checkout on every deployment.

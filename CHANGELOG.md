@@ -207,6 +207,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The browser smoke lane packs its failure diagnostics into one archive
+  before uploading them. Result artifacts sit under directories named
+  `host:port`, and the upload refused any path containing a colon, so a lane
+  that failed after its first scrape uploaded nothing.
 - A hostname containing a lone surrogate is refused as an unsafe URL. The
   check for legacy IPv4 spellings let `UnicodeEncodeError` escape from the URL
   guard, so a caller that handles the guard's `UnsafeURLError` saw an error

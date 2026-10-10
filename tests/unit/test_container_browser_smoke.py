@@ -223,7 +223,12 @@ def test_container_browser_workflow_is_path_filtered_least_privilege_and_no_cach
         if step.get("uses", "").startswith("actions/upload-artifact@")
     )
     assert artifact["if"] == "failure()"
-    assert artifact["with"]["path"] == "artifacts/container-browser-smoke/"
+    # Packed first: result artifacts sit under host:port directories, and
+    # upload-artifact refuses a path that contains a colon.
+    pack = job["steps"][job["steps"].index(artifact) - 1]
+    assert pack["if"] == "failure()"
+    assert "tar -C artifacts -czf container-browser-smoke-diagnostics.tar.gz" in pack["run"]
+    assert artifact["with"]["path"] == "container-browser-smoke-diagnostics.tar.gz"
 
 
 def test_dockerfile_has_immutable_inputs_and_non_root_runtime_contract() -> None:

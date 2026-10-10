@@ -52,11 +52,19 @@ jobs:
           free -h
       - name: Build the production image and run real browser smoke tests
         run: ./scripts/run_container_browser_smoke.sh --no-cache
+      - name: Pack focused smoke diagnostics on failure
+        # Result artifacts sit under directories named host:port, and
+        # upload-artifact refuses a path with a colon in it.
+        if: failure()
+        run: |
+          if [ -d artifacts/container-browser-smoke ]; then
+            tar -C artifacts -czf container-browser-smoke-diagnostics.tar.gz container-browser-smoke
+          fi
       - name: Upload focused smoke diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-browser-smoke-diagnostics
-          path: artifacts/container-browser-smoke/
+          path: container-browser-smoke-diagnostics.tar.gz
           if-no-files-found: warn
           retention-days: 7
