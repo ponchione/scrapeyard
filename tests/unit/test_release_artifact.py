@@ -118,7 +118,12 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
     monkeypatch.setattr(subprocess, "run", execute)
     monkeypatch.setattr(release_artifact, "run", output)
     if failure is None:
-        release_artifact.create(tmp_path / "candidate", "HEAD")
+        # A build account with a group-writable umask must not leak it into the release.
+        previous_umask = os.umask(0o002)
+        try:
+            release_artifact.create(tmp_path / "candidate", "HEAD")
+        finally:
+            os.umask(previous_umask)
         manifest = release_artifact.verify(tmp_path / "candidate")
         assert set(manifest["images"]) == {"scrapeyard", "redis", "egress-probe"}
         assert {
@@ -128,6 +133,7 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
         } <= manifest["files"].keys()
         # Root runs what a release holds, so only its owner may write to it.
         assert manifest["files"]["images.tar"]["mode"] == 0o644
+        assert (tmp_path / "candidate" / "manifest.json").stat().st_mode & 0o777 == 0o644
         assert not any(entry["mode"] & 0o022 for entry in manifest["files"].values())
         assert not any(
             path.stat().st_mode & 0o022 for path in (tmp_path / "candidate").rglob("*")

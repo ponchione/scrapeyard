@@ -102,7 +102,8 @@ if ((BOOT_SERVICE == 1)); then
   for command in systemctl systemd-run apparmor_parser; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required for --boot-service"
   done
-  for path in "$ENV_DIR" "$UNIT_FILE" "$UNIT_DROP_IN" "$MANAGE" "$RELEASES_ROOT/current"; do
+  for path in "$ENV_DIR" "$UNIT_FILE" "$UNIT_DROP_IN" "$MANAGE" "$RELEASES_ROOT/current" \
+    "$RELEASES_ROOT/$(basename -- "$CANDIDATE")" "$RELEASES_ROOT/$(basename -- "$PREVIOUS")"; do
     [[ ! -e "$path" && ! -L "$path" ]] || fail "$path already exists; use an isolated host"
   done
   [[ -f "$CANDIDATE/source/security/systemd/$UNIT" && \
@@ -118,7 +119,11 @@ fi
 WORK_DIR=""
 BOOT_SERVICE_ACTIVE=0
 RELEASES_ROOT_CREATED=0
-RELEASE_OWNER=""
+CANDIDATE_OWNER=""
+PREVIOUS_OWNER=""
+BOOT_CANDIDATE=""
+BOOT_PREVIOUS=""
+BRIDGE_HOOK_BEFORE=""
 PROMOTE_UNIT="scrapeyard-promote.service"
 CORRUPTED=""
 APP_CONTAINER=""
@@ -219,14 +224,26 @@ cleanup_resources() {
   if ((BOOT_SERVICE_ACTIVE == 1)); then
     systemctl stop "$PROMOTE_UNIT" >/dev/null 2>&1
     systemctl disable --now "$UNIT" >/dev/null 2>&1
-    rm -rf -- "$UNIT_FILE" "$UNIT_DROP_IN" "$ENV_DIR" "$MANAGE" "$RELEASES_ROOT/current"
-    ((RELEASES_ROOT_CREATED == 0)) || rmdir -- "$RELEASES_ROOT" >/dev/null 2>&1
+    rm -rf -- "$UNIT_FILE" "$UNIT_DROP_IN" "$ENV_DIR" "$MANAGE" "$RELEASES_ROOT/current" \
+      "$RELEASES_ROOT/current.new"
     systemctl daemon-reload >/dev/null 2>&1
     systemctl reset-failed "$UNIT" >/dev/null 2>&1
     # A step that stopped Docker may have failed before starting it again,
     # and nothing below can be removed without it.
     systemctl start docker.service >/dev/null 2>&1
-    [[ -z "$RELEASE_OWNER" ]] || chown -R "$RELEASE_OWNER" "$CANDIDATE" "$PREVIOUS" >/dev/null 2>&1
+    # The copies share their files with the releases, so the files' owners
+    # go back to what each release had.
+    [[ -z "$CORRUPTED" ]] || rm -rf -- "$CORRUPTED"
+    [[ -z "$BOOT_CANDIDATE" ]] || rm -rf -- "$BOOT_CANDIDATE"
+    [[ -z "$BOOT_PREVIOUS" ]] || rm -rf -- "$BOOT_PREVIOUS"
+    [[ -z "$CANDIDATE_OWNER" ]] || chown -R "$CANDIDATE_OWNER" "$CANDIDATE" >/dev/null 2>&1
+    [[ -z "$PREVIOUS_OWNER" ]] || chown -R "$PREVIOUS_OWNER" "$PREVIOUS" >/dev/null 2>&1
+    # The simulated reboot unloads the bridge hook; put it back as it was.
+    if [[ -n "$BRIDGE_HOOK_BEFORE" ]]; then
+      modprobe br_netfilter >/dev/null 2>&1
+      echo "$BRIDGE_HOOK_BEFORE" > /proc/sys/net/bridge/bridge-nf-call-iptables
+    fi
+    ((RELEASES_ROOT_CREATED == 0)) || rmdir -- "$RELEASES_ROOT" >/dev/null 2>&1
     BOOT_SERVICE_ACTIVE=0
   fi
   ids="$(project_resources container)"
@@ -571,6 +588,17 @@ verify_runtime roll-forward "$CANDIDATE" candidate
 verify_api roll-forward --known "$WORK_DIR/known-run.json"
 
 if ((BOOT_SERVICE == 1)); then
+  running_application() {
+    docker ps -q --filter "label=com.docker.compose.project=$PROJECT" \
+      --filter "label=com.docker.compose.service=scrapeyard"
+  }
+  await_promotion_under_way() {
+    local deadline=$((SECONDS + 60))
+    until [[ "$(systemctl is-active "$PROMOTE_UNIT" || true)" == "activating" ]]; do
+      ((SECONDS < deadline)) || fail "the promotion unit did not start"
+      sleep 0.2
+    done
+  }
   current_release() {
     readlink -- "$RELEASES_ROOT/current" 2>/dev/null || true
   }
@@ -614,84 +642,144 @@ if ((BOOT_SERVICE == 1)); then
 
   echo "Installing the boot service as the deployment guide does..."
   BOOT_SERVICE_ACTIVE=1
-  # Root runs a release at every boot, so the service refuses one that another
-  # account owns. An operator gets this from extracting the archive as root.
-  RELEASE_OWNER="$(stat -c '%u:%g' "$CANDIDATE")"
-  chown -R 0:0 "$CANDIDATE" "$PREVIOUS"
+  BRIDGE_HOOK_BEFORE="$(</proc/sys/net/bridge/bridge-nf-call-iptables)"
   if [[ ! -d "$RELEASES_ROOT" ]]; then
-    mkdir -p -- "$RELEASES_ROOT"
+    install -d -m 755 -o 0 -g 0 "$RELEASES_ROOT"
     RELEASES_ROOT_CREATED=1
   fi
+  # Root runs a release at every boot, so the service refuses one that another
+  # account owns or could replace. An operator gets root's ownership from
+  # extracting the archive as root; here the releases are copied to where
+  # they would be extracted. The copies are hard links where that is possible.
+  CANDIDATE_OWNER="$(stat -c '%u:%g' "$CANDIDATE")"
+  PREVIOUS_OWNER="$(stat -c '%u:%g' "$PREVIOUS")"
+  BOOT_CANDIDATE="$RELEASES_ROOT/$(basename -- "$CANDIDATE")"
+  BOOT_PREVIOUS="$RELEASES_ROOT/$(basename -- "$PREVIOUS")"
+  cp -al "$CANDIDATE" "$BOOT_CANDIDATE" 2>/dev/null || cp -a "$CANDIDATE" "$BOOT_CANDIDATE"
+  cp -al "$PREVIOUS" "$BOOT_PREVIOUS" 2>/dev/null || cp -a "$PREVIOUS" "$BOOT_PREVIOUS"
+  chown -R 0:0 "$BOOT_CANDIDATE" "$BOOT_PREVIOUS"
   install -d -m 700 "$ENV_DIR"
   write_deploy_env
-  ln -s -- "$CANDIDATE" "$RELEASES_ROOT/current"
-  install -m 755 "$CANDIDATE/source/security/manage-release.sh" "$MANAGE"
-  install -m 644 "$CANDIDATE/source/security/systemd/$UNIT" "$UNIT_FILE"
+  ln -s -- "$BOOT_CANDIDATE" "$RELEASES_ROOT/current"
+  install -m 755 "$BOOT_CANDIDATE/source/security/manage-release.sh" "$MANAGE"
+  install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$UNIT" "$UNIT_FILE"
   systemctl daemon-reload
   BEFORE="$(invocation)"
   systemctl enable --now "$UNIT" > "$DIAGNOSTICS_DIR/boot-service-enable.log" 2>&1
   await_unit boot-service-start "$BEFORE"
-  verify_runtime boot-service-start "$CANDIDATE" candidate
+  verify_runtime boot-service-start "$BOOT_CANDIDATE" candidate
   verify_api boot-service-start --known "$WORK_DIR/known-run.json"
 
   echo "Promoting a corrupted release; the link and the running release must not move..."
-  CORRUPTED="$(dirname "$CANDIDATE")/.rehearsal-corrupted.$$"
-  cp -al "$CANDIDATE" "$CORRUPTED"
+  CORRUPTED="$(dirname "$BOOT_CANDIDATE")/.rehearsal-corrupted.$$"
+  cp -al "$BOOT_CANDIDATE" "$CORRUPTED"
   rm -f -- "$CORRUPTED/source/docker-compose.yml"
-  cp -- "$CANDIDATE/source/docker-compose.yml" "$CORRUPTED/source/docker-compose.yml"
+  cp -- "$BOOT_CANDIDATE/source/docker-compose.yml" "$CORRUPTED/source/docker-compose.yml"
   echo "# changed after the release was retained" >> "$CORRUPTED/source/docker-compose.yml"
   RUNNING_BEFORE="$APP_CONTAINER"
   if promote promote-corrupted "$CORRUPTED"; then
     fail "a release whose files changed was promoted"
   fi
-  [[ "$(current_release)" == "$CANDIDATE" ]] || fail "a refused promotion moved the release link"
+  [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "a refused promotion moved the release link"
   [[ "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && app_is_running || \
     fail "a refused promotion disturbed the running application"
   rm -rf -- "$CORRUPTED"
   CORRUPTED=""
 
   echo "Promoting a release another account could change; it must be refused before anything is stopped..."
-  chown 65534:65534 "$PREVIOUS/source/security/deploy-secure-compose.sh"
-  if promote promote-foreign-owner "$PREVIOUS"; then
+  chown 65534:65534 "$BOOT_PREVIOUS/source/security/deploy-secure-compose.sh"
+  if promote promote-foreign-owner "$BOOT_PREVIOUS"; then
     fail "a release that another account owns was promoted"
   fi
-  chown 0:0 "$PREVIOUS/source/security/deploy-secure-compose.sh"
-  [[ "$(current_release)" == "$CANDIDATE" && "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && \
+  chown 0:0 "$BOOT_PREVIOUS/source/security/deploy-secure-compose.sh"
+  [[ "$(current_release)" == "$BOOT_CANDIDATE" && "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && \
     app_is_running || fail "refusing a release by its owner disturbed the deployment"
 
+  if [[ -n "$(find "$(dirname -- "$PREVIOUS")" -maxdepth 0 \( ! -user 0 -o -perm /022 \) -print)" ]]; then
+    echo "Promoting a release from a directory another account can write to; it must be refused..."
+    if promote promote-untrusted-directory "$PREVIOUS"; then
+      fail "a release that another account could replace was promoted"
+    fi
+    grep -q -F 'not owned by root, or others can write to it' \
+      "$DIAGNOSTICS_DIR/promote-untrusted-directory-promote.log" || \
+      fail "the release in an untrusted directory was refused for another reason"
+    [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "a refused promotion moved the release link"
+  fi
+
   echo "Stopping a promotion halfway; it must be reported as failed, with the link unmoved..."
-  promote promote-interrupted "$PREVIOUS" &
+  promote promote-interrupted "$BOOT_PREVIOUS" &
   PROMOTION=$!
-  INTERRUPT_DEADLINE=$((SECONDS + 60))
-  until [[ "$(systemctl is-active "$PROMOTE_UNIT" || true)" == "activating" ]]; do
-    ((SECONDS < INTERRUPT_DEADLINE)) || fail "the promotion unit did not start"
-    sleep 0.2
-  done
+  await_promotion_under_way
   sleep 3
   systemctl stop "$PROMOTE_UNIT"
   if wait "$PROMOTION"; then
     fail "a promotion that was stopped halfway was reported as successful"
   fi
-  [[ "$(current_release)" == "$CANDIDATE" ]] || fail "a stopped promotion moved the release link"
+  [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "a stopped promotion moved the release link"
   # Wherever it was stopped, the application is running the promoted release
   # or it is stopped; it must not be running the release that was not promoted.
   APP_CONTAINER="$(service_containers scrapeyard)"
   if app_is_running; then
     [[ "$(docker inspect --format '{{.Image}}' "$APP_CONTAINER")" == \
-       "$(manifest_value "$CANDIDATE" images.scrapeyard)" ]] || \
+       "$(manifest_value "$BOOT_CANDIDATE" images.scrapeyard)" ]] || \
       fail "a stopped promotion left the unpromoted release running"
   fi
   # The documented way back: promote a retained release again.
-  promote promote-after-interruption "$CANDIDATE"
-  verify_runtime promote-after-interruption "$CANDIDATE" candidate
+  promote promote-after-interruption "$BOOT_CANDIDATE"
+  verify_runtime promote-after-interruption "$BOOT_CANDIDATE" candidate
   verify_api promote-after-interruption --known "$WORK_DIR/known-run.json"
+
+  echo "Stopping a promotion after it has stopped the application; it must end stopped and say so..."
+  promote promote-interrupted-late "$BOOT_PREVIOUS" &
+  PROMOTION=$!
+  await_promotion_under_way
+  LATE_DEADLINE=$((SECONDS + 120))
+  while [[ -n "$(running_application)" ]]; do
+    ((SECONDS < LATE_DEADLINE)) || fail "the promotion never stopped the application"
+    sleep 0.2
+  done
+  systemctl stop "$PROMOTE_UNIT"
+  if wait "$PROMOTION"; then
+    fail "a promotion that was stopped halfway was reported as successful"
+  fi
+  [[ "$(current_release)" == "$BOOT_CANDIDATE" ]] || fail "a stopped promotion moved the release link"
+  [[ -z "$(running_application)" ]] || fail "a promotion stopped after the application was stopped left it running"
+  # systemd 255 hands control back while the interrupted deployment is still
+  # stopping the application; the verdict must be the state after that.
+  grep -q -F 'the application is stopped; promote a retained release to start it' \
+    "$DIAGNOSTICS_DIR/promote-interrupted-late-promote.log" || \
+    fail "the stopped promotion did not report that the application is stopped"
+  # A new promotion must be possible at once.
+  promote promote-after-late-interruption "$BOOT_CANDIDATE"
+  verify_runtime promote-after-late-interruption "$BOOT_CANDIDATE" candidate
+  verify_api promote-after-late-interruption --known "$WORK_DIR/known-run.json"
+
+  echo "Starting the boot service while a promotion is under way; it must start what was promoted..."
+  systemctl stop "$UNIT"
+  promote promote-during-start "$BOOT_PREVIOUS" &
+  PROMOTION=$!
+  await_promotion_under_way
+  sleep 1
+  # This start waits for the promotion. It must then read the link again:
+  # deploying the release the link named before the wait would bring the
+  # candidate back after the promotion had reported the previous release.
+  BEFORE="$(invocation)"
+  systemctl start "$UNIT"
+  wait "$PROMOTION" || fail "a promotion failed because a boot start was waiting for it"
+  await_unit start-after-promotion "$BEFORE"
+  [[ "$(current_release)" == "$BOOT_PREVIOUS" ]] || fail "the promotion did not select the previous release"
+  verify_runtime start-after-promotion "$BOOT_PREVIOUS" previous
+  verify_api start-after-promotion --known "$WORK_DIR/known-run.json"
+  promote promote-candidate-again "$BOOT_CANDIDATE"
+  verify_runtime promote-candidate-again "$BOOT_CANDIDATE" candidate
+  verify_api promote-candidate-again --known "$WORK_DIR/known-run.json"
 
   echo "Restarting Docker; the boot service must bring the release back..."
   record_image_events
   BEFORE="$(invocation)"
   systemctl restart docker.service
   await_unit docker-restart "$BEFORE"
-  verify_runtime docker-restart "$CANDIDATE" candidate
+  verify_runtime docker-restart "$BOOT_CANDIDATE" candidate
   verify_api docker-restart --known "$WORK_DIR/known-run.json"
 
   echo "Killing the Docker daemon; it must come back without waiting for the boot service's stop..."
@@ -707,7 +795,7 @@ if ((BOOT_SERVICE == 1)); then
   done
   echo "docker_back_after_seconds=$((SECONDS - CRASHED_AT))" > "$DIAGNOSTICS_DIR/docker-crash.txt"
   await_unit docker-crash "$BEFORE"
-  verify_runtime docker-crash "$CANDIDATE" candidate
+  verify_runtime docker-crash "$BOOT_CANDIDATE" candidate
   verify_api docker-crash --known "$WORK_DIR/known-run.json"
 
   echo "Stopping Docker and removing what a reboot loses: the policy, the bridge hook and the AppArmor profile..."
@@ -726,12 +814,12 @@ if ((BOOT_SERVICE == 1)); then
     echo 0 > /proc/sys/net/bridge/bridge-nf-call-iptables
     echo "bridge_netfilter=hook switched off" > "$DIAGNOSTICS_DIR/cold-start.txt"
   fi
-  "$CANDIDATE/source/security/install-chromium-apparmor-profile.sh" remove >/dev/null
+  "$BOOT_CANDIDATE/source/security/install-chromium-apparmor-profile.sh" remove >/dev/null
   apparmor_profile_loaded && fail "the AppArmor profile could not be unloaded"
   # As at boot, nothing starts the boot service but Docker's own start.
   systemctl start docker.service
   await_unit cold-start "$BEFORE"
-  verify_runtime cold-start "$CANDIDATE" candidate
+  verify_runtime cold-start "$BOOT_CANDIDATE" candidate
   verify_api cold-start --known "$WORK_DIR/known-run.json"
 
   echo "Recreating the deployment network; the policy must follow the new bridge..."
@@ -743,7 +831,7 @@ if ((BOOT_SERVICE == 1)); then
   BEFORE="$(invocation)"
   systemctl start "$UNIT"
   await_unit network-recreated "$BEFORE"
-  verify_runtime network-recreated "$CANDIDATE" candidate
+  verify_runtime network-recreated "$BOOT_CANDIDATE" candidate
   [[ "$BRIDGE" != "$OLD_BRIDGE" ]] || fail "the deployment network was not recreated"
   verify_api network-recreated --known "$WORK_DIR/known-run.json"
 
@@ -772,13 +860,13 @@ if ((BOOT_SERVICE == 1)); then
     > "$DIAGNOSTICS_DIR/boot-service-retries.txt"
   rm -rf -- "$UNIT_DROP_IN"
   systemctl daemon-reload
-  verify_runtime settings-repaired "$CANDIDATE" candidate
+  verify_runtime settings-repaired "$BOOT_CANDIDATE" candidate
   verify_api settings-repaired --known "$WORK_DIR/known-run.json"
 
   echo "Promoting the previous release as a rollback..."
-  promote promote-rollback "$PREVIOUS"
-  [[ "$(current_release)" == "$PREVIOUS" ]] || fail "the rollback did not select the previous release"
-  verify_runtime promote-rollback "$PREVIOUS" previous
+  promote promote-rollback "$BOOT_PREVIOUS"
+  [[ "$(current_release)" == "$BOOT_PREVIOUS" ]] || fail "the rollback did not select the previous release"
+  verify_runtime promote-rollback "$BOOT_PREVIOUS" previous
   verify_api promote-rollback --known "$WORK_DIR/known-run.json"
 
   echo "Starting the rolled-back release through the boot service, as the next boot would..."
@@ -787,7 +875,7 @@ if ((BOOT_SERVICE == 1)); then
   BEFORE="$(invocation)"
   systemctl restart "$UNIT"
   await_unit rollback-boot "$BEFORE"
-  verify_runtime rollback-boot "$PREVIOUS" previous
+  verify_runtime rollback-boot "$BOOT_PREVIOUS" previous
   verify_api rollback-boot --known "$WORK_DIR/known-run.json"
 fi
 

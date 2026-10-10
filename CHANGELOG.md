@@ -252,6 +252,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   jump installed.
 - A retained release no longer keeps files that group or others can write,
   and the release archive records root as the owner of every file.
+- `scrapeyard-release` now takes its lock before it reads the `current` link.
+  A start of the boot service that had waited for a promotion deployed the
+  release the link named before the wait, replacing the one just promoted.
+- `scrapeyard-release` refuses a release, or a `current` link, under a
+  directory that another account can write to, and accepts no `COMPOSE_`
+  setting but the project name. Its `stop` no longer reports success when
+  Docker did not answer, and no longer depends on the rest of the settings
+  file. A promotion that was stopped is judged once its unit has finished
+  stopping, and one whose link cannot be moved stops what it deployed.
 - The host egress policy now requires the kernel's bridge netfilter hook
   before it installs. The policy's `DOCKER-USER` rules see traffic between
   containers on the deployment bridge only while
