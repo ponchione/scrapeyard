@@ -31,7 +31,7 @@ concurrency:
 jobs:
   production-container-smoke:
     name: Production image / real browsers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       SCRAPEYARD_SMOKE_PROJECT: scrapeyard-smoke-${{ github.run_id }}-${{ github.run_attempt }}

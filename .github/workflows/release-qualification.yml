@@ -40,7 +40,7 @@ jobs:
   quick-recovery-restore:
     name: Quick recovery and restore / production runtime
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'quick')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-qualification-${{ github.run_id }}-${{ github.run_attempt }}
@@ -68,7 +68,7 @@ jobs:
   full-load-soak:
     name: Full load and soak / production runtime
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       SCRAPEYARD_QUALIFICATION_PROJECT: scrapeyard-qualification-${{ github.run_id }}-${{ github.run_attempt }}
