@@ -224,12 +224,20 @@ unset. Scrapeyard then fetches directly, from the host's address, and
 What stays in force:
 
 - The host egress policy and the startup check of it. The application still
-  refuses to start unless the probe's challenge is refused, so private,
-  loopback, link-local and metadata destinations stay unreachable from its
-  container whatever a page or a redirect asks for. The wrapper refuses a
-  probe port of 0, which would switch that check off without a word.
+  refuses to start unless the probe's challenge is refused, so other
+  containers, private networks, link-local and metadata addresses stay
+  unreachable from its container whatever a page or a redirect asks for. The
+  wrapper refuses a deployment that sets the probe's address or ports, which
+  the Compose file fixes, or a probe timeout under one second: a challenge
+  that times out counts as refused.
 - The application's URL guard, Chromium's sandbox and the container's
   confinement.
+
+What the host policy never covered, with or without a proxy, is the host's
+own addresses (the bridge gateway and the host's network addresses) and the
+container's own loopback. Only the URL guard refuses those. With a proxy, a
+browser request that slips past the guard in one of the two races below goes
+to the proxy; without one it goes straight to the host (TD-78).
 
 What is given up:
 
@@ -241,6 +249,10 @@ What is given up:
 - The host's address is the one target sites see. A site that blocks it can
   be given a proxy by itself, with `proxy:` on that job or target; nothing
   about the deployment changes.
+
+A host set up this way cannot roll back to a release built from a commit
+before this mode existed: that release's wrapper asks for the proxy and
+refuses before it stops anything.
 
 Two browser races are accepted in the application and left to this policy,
 which denies their destinations whatever the application decided:

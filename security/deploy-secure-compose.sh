@@ -24,12 +24,17 @@ if [[ "${SCRAPEYARD_UNTRUSTED_SUBMISSIONS:-true}" != "false" ]]; then
     fail "SCRAPEYARD_PROXY_URL must name an egress-filtering operator proxy, unless SCRAPEYARD_UNTRUSTED_SUBMISSIONS is false"
 fi
 # With or without a proxy, the host egress policy is the boundary for browser
-# traffic, and the application checks it at startup only while its probe is
-# configured. A port of 0 would switch that check off without a word.
-for setting in SCRAPEYARD_EGRESS_POLICY_PROBE_PORT SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT; do
-  [[ ! "${!setting:-}" =~ ^0+$ ]] || \
-    fail "$setting=0 would switch off the startup check of the host egress policy"
+# traffic. The application checks it at startup only while its probe is
+# configured, and counts a challenge that times out as refused. The Compose
+# file fixes the probe's address and ports, so a deployment has no reason to
+# set them, and a timeout too short for a connection to complete would let
+# the check pass with no policy at all.
+for setting in SCRAPEYARD_EGRESS_POLICY_PROBE_HOST SCRAPEYARD_EGRESS_POLICY_PROBE_PORT \
+  SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT; do
+  [[ -z "${!setting:-}" ]] || fail "$setting is fixed by the Compose file; unset it"
 done
+[[ "${SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS:-1}" =~ ^[1-9][0-9]*(\.[0-9]+)?$ ]] || \
+  fail "SCRAPEYARD_EGRESS_POLICY_PROBE_TIMEOUT_SECONDS must be a number of seconds, 1 or more"
 
 # One deployment at a time. A promotion that overlaps the boot service's start
 # would interleave their stop, policy and start steps.
