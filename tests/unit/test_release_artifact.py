@@ -280,6 +280,7 @@ def _wrapper_with_fake_docker(tmp_path, docker_script):
         ("((EUID == 0)) || fail", "true || fail"),
         ("LOCK_DIR=/run/scrapeyard", f"LOCK_DIR={tmp_path / 'lock'}"),
         ("flock --wait 600 9", "flock --nonblock 9"),
+        ("    sleep 1\n", "    sleep 0\n"),
     ):
         assert text.count(old) == 1
         text = text.replace(old, new)
@@ -309,14 +310,23 @@ def _wrapper_with_fake_docker(tmp_path, docker_script):
     return ["bash", str(wrapper), "--release", str(bundle)], env
 
 
+# APP_STATE is what Docker reports for the application's container after a
+# stop. The container exists from the start with APP_EXISTS=yes, and otherwise
+# once the application has been started; REMOVAL=fails makes `docker rm` fail.
 _FAKE_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$CALLS"
+present() { [[ ! -e "$CALLS.removed" && ( "${APP_EXISTS:-}" == yes || -e "$CALLS.started" ) ]]; }
 case "$*" in
   "compose config --images") echo sha256:aaaaaaaa ;;
   "compose ps -q egress-probe") echo probe ;;
+  "compose ps --all --quiet scrapeyard") [[ "${DOCKER_PS:-}" != fails ]] || exit 1; ! present || echo app1 ;;
+  "ps --all --quiet --filter id=app1") ! present || echo app1 ;;
+  "inspect --format {{.State.Status}} app1") echo "${APP_STATE:-exited}" ;;
+  "logs --tail 5 app1") echo "reopen exec fifo: function not implemented" ;;
+  "rm --force app1") [[ "${REMOVAL:-works}" == works ]] || exit 1; touch "$CALLS.removed" ;;
   "inspect "*) echo abcdef123456 ;;
   "network inspect "*) echo br-release ;;
-  "compose up -d --wait --no-build --pull never") exit "${START_STATUS:-0}" ;;
+  "compose up -d --wait --no-build --pull never") touch "$CALLS.started"; exit "${START_STATUS:-0}" ;;
 esac
 """
 
@@ -329,8 +339,12 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
     assert result.returncode == 1
     calls = Path(env["CALLS"]).read_text().splitlines()
     # The container is unless-stopped: left alone it would keep restarting.
-    assert calls[-1] == "docker compose stop scrapeyard"
-    assert calls[-2] == "docker compose up -d --wait --no-build --pull never"
+    assert calls[-4:] == [
+        "docker compose up -d --wait --no-build --pull never",
+        "docker compose stop scrapeyard",
+        "docker compose ps --all --quiet scrapeyard",
+        "docker inspect --format {{.State.Status}} app1",
+    ]
     assert b"the application is left stopped" in result.stderr
 
     Path(env["CALLS"]).write_text("")
@@ -338,6 +352,87 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
     assert Path(env["CALLS"]).read_text().splitlines()[-1] == (
         "docker compose up -d --wait --no-build --pull never"
     )
+
+
+def test_a_container_docker_cannot_stop_is_removed_after_a_failed_start(tmp_path):
+    # runc 1.3.3 could not start a container under the profile of 2026-10-10.
+    # Docker restarted it without end and `docker stop` reported "did not
+    # receive an exit event", so the stop alone left it restarting.
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(
+        command, cwd=tmp_path, env=dict(env, START_STATUS="1", APP_STATE="restarting"), capture_output=True
+    )
+
+    assert result.returncode == 1
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert calls[-7:] == [
+        "docker compose stop scrapeyard",
+        "docker compose ps --all --quiet scrapeyard",
+        "docker inspect --format {{.State.Status}} app1",
+        "docker logs --tail 5 app1",
+        "docker update --restart=no app1",
+        "docker rm --force app1",
+        "docker ps --all --quiet --filter id=app1",
+    ]
+    stderr = result.stderr.decode()
+    assert "did not stop and is being removed; its last output:" in stderr
+    assert "reopen exec fifo: function not implemented" in stderr
+    assert stderr.rstrip().endswith("failed; the application is left stopped")
+
+
+def test_a_failed_start_says_so_when_its_container_cannot_be_removed(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, START_STATUS="1", APP_STATE="restarting", REMOVAL="fails"),
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert calls.count("docker rm --force app1") == 5
+    stderr = result.stderr.decode()
+    assert "the application is left stopped" not in stderr
+    assert "could not be stopped or removed; see 'docker ps --all'" in stderr
+
+
+@pytest.mark.parametrize(
+    ("fault", "removals"),
+    [({"APP_STATE": "restarting", "REMOVAL": "fails"}, 5), ({"DOCKER_PS": "fails"}, 0)],
+)
+def test_a_deployment_is_refused_while_an_earlier_container_cannot_be_cleared(tmp_path, fault, removals):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(command, cwd=tmp_path, env=dict(env, APP_EXISTS="yes", **fault), capture_output=True)
+
+    assert result.returncode == 2
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert calls.count("docker rm --force app1") == removals
+    assert not any(call.startswith("docker compose up") for call in calls)
+    assert b"the application's container could not be stopped or removed" in result.stderr
+
+
+def test_a_deployment_clears_a_container_left_restarting_and_keeps_one_that_stopped(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    subprocess.run(
+        command, cwd=tmp_path, env=dict(env, APP_EXISTS="yes", APP_STATE="created"), check=True, capture_output=True
+    )
+
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert calls.index("docker rm --force app1") < calls.index(
+        "docker compose up -d --wait --no-build --pull never egress-probe redis"
+    )
+
+    Path(env["CALLS"]).write_text("")
+    Path(env["CALLS"] + ".removed").unlink()
+    subprocess.run(command, cwd=tmp_path, env=dict(env, APP_EXISTS="yes"), check=True, capture_output=True)
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert "docker inspect --format {{.State.Status}} app1" in calls
+    assert not any(call.startswith(("docker rm", "docker update")) for call in calls)
 
 
 def test_a_deployment_needs_a_proxy_unless_submissions_are_first_party(tmp_path):

@@ -65,9 +65,45 @@ else
   docker compose build scrapeyard
 fi
 
+# Removes a container that Docker could not stop. A removal can fail the same
+# way as the stop while a start is under way, so it is tried again; without the
+# restart policy no further start follows it.
+remove_container() {
+  local container=$1 remaining
+  docker update --restart=no "$container" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    docker rm --force "$container" >/dev/null 2>&1 || true
+    if remaining=$(docker ps --all --quiet --filter "id=$container") && [[ -z "$remaining" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Leaves no application container that can run. `docker compose stop` settles
+# one that is running, or that exits by itself and is restarted. Docker cannot
+# stop a container whose every start dies before it is up (2026-10-11, runc
+# 1.3.3 under a seccomp profile it could not start with): the stop reports
+# "did not receive an exit event" and the restarts go on. A container that is
+# not `exited` after the stop is therefore removed, once its last output has
+# been printed; the next start creates it again.
+stop_application() {
+  local containers container failed=0
+  docker compose stop scrapeyard >/dev/null 2>&1 || true
+  containers=$(docker compose ps --all --quiet scrapeyard) || return 1
+  for container in $containers; do
+    [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)" != "exited" ]] || continue
+    echo "scrapeyard secure compose deployment: the application's container did not stop and is being removed; its last output:" >&2
+    docker logs --tail 5 "$container" 2>&1 | cut -c1-300 >&2 || true
+    remove_container "$container" || failed=1
+  done
+  return "$failed"
+}
+
 # A redeploy must not leave an already-running untrusted-submission service
 # online if host-policy replacement encounters an unexpected tool failure.
-docker compose stop scrapeyard
+stop_application || fail "the application's container could not be stopped or removed"
 
 # From here on the application is down, and whatever fails or interrupts the
 # rest must leave it down. Its container restarts by itself (unless-stopped),
@@ -77,8 +113,11 @@ leave_stopped() {
   local status=$?
   trap - EXIT
   if ((status != 0)); then
-    docker compose stop scrapeyard >/dev/null 2>&1 || true
-    echo "scrapeyard secure compose deployment: failed; the application is left stopped" >&2
+    if stop_application; then
+      echo "scrapeyard secure compose deployment: failed; the application is left stopped" >&2
+    else
+      echo "scrapeyard secure compose deployment: failed, and the application's container could not be stopped or removed; see 'docker ps --all'" >&2
+    fi
   fi
   exit "$status"
 }

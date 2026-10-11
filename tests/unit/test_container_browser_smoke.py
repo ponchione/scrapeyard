@@ -312,7 +312,7 @@ def test_secure_compose_deployment_installs_policy_before_starting_app() -> None
     dependency_start = text.index('docker compose up -d --wait "${start_options[@]}" egress-probe redis')
     image_build = text.index("docker compose build scrapeyard")
     policy_install = text.index("install-docker-egress-policy.sh install")
-    application_stop = text.index("docker compose stop scrapeyard")
+    application_stop = text.index("stop_application || fail")
     application_start = text.index("docker compose up -d --wait", policy_install)
 
     assert image_build < application_stop < dependency_start < policy_install < application_start
