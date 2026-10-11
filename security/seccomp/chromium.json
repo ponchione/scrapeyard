@@ -63,6 +63,35 @@
 			"excludes": {}
 		},
 		{
+			"comment": "runc 1.3.3 opens /proc/thread-self/fd with openat2 after it has loaded this filter; refused, no container or exec starts",
+			"names": [
+				"openat2"
+			],
+			"action": "SCMP_ACT_ALLOW",
+			"args": [],
+			"includes": {},
+			"excludes": {}
+		},
+		{
+			"comment": "runc answers ENOSYS only above the highest syscall a profile names, which was io_uring_register (427) until openat2 (437) was listed. These are 428 to 436 and keep that answer: glibc falls back from clone3 to clone on ENOSYS, and on the default EPERM no thread starts",
+			"names": [
+				"open_tree",
+				"move_mount",
+				"fsopen",
+				"fsconfig",
+				"fsmount",
+				"fspick",
+				"pidfd_open",
+				"clone3",
+				"close_range"
+			],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 38,
+			"args": [],
+			"includes": {},
+			"excludes": {}
+		},
+		{
 			"names": [
 				"accept",
 				"accept4",

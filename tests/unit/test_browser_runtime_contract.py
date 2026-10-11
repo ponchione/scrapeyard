@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -120,3 +121,48 @@ def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
     assert "seccomp" in readme
     assert "volume" in readme
     assert "ownership" in readme
+
+
+# The system calls numbered 428 and up on every Linux architecture, in order.
+_NEWER_SYSCALLS = (
+    "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "fspick", "pidfd_open",
+    "clone3", "close_range", "openat2", "pidfd_getfd", "faccessat2", "process_madvise",
+    "epoll_pwait2", "mount_setattr", "quotactl_fd", "landlock_create_ruleset",
+    "landlock_add_rule", "landlock_restrict_self", "memfd_secret", "process_mrelease",
+    "futex_waitv", "set_mempolicy_home_node", "cachestat", "fchmodat2", "map_shadow_stack",
+    "futex_wake", "futex_wait", "futex_requeue", "statmount", "listmount",
+    "lsm_get_self_attr", "lsm_set_self_attr", "lsm_list_modules", "mseal",
+)
+
+
+def _seccomp_rules() -> dict[str, dict]:
+    profile = json.loads(Path("security/seccomp/chromium.json").read_text())
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO" and "defaultErrnoRet" not in profile
+    return {name: rule for rule in profile["syscalls"] for name in rule["names"]}
+
+
+def test_seccomp_profile_lets_a_hardened_runc_start_the_container() -> None:
+    # runc 1.3.3 opens /proc/thread-self/fd with openat2 after loading the
+    # filter. Refused, neither a container nor an exec starts (2026-10-11).
+    rule = _seccomp_rules()["openat2"]
+
+    assert rule["action"] == "SCMP_ACT_ALLOW" and rule["args"] == []
+
+
+def test_seccomp_profile_answers_enosys_below_its_newest_syscall() -> None:
+    # runc answers ENOSYS only above the highest-numbered system call a
+    # profile names; one that is lower and not named gets the default EPERM.
+    # glibc falls back from clone3 to clone on ENOSYS alone, so with openat2
+    # named and clone3 left out, no thread could start.
+    rules = _seccomp_rules()
+    named = [name for name in _NEWER_SYSCALLS if name in rules]
+    assert named, "the profile names none of the newer system calls"
+    below_newest = _NEWER_SYSCALLS[: _NEWER_SYSCALLS.index(named[-1])]
+
+    assert [name for name in below_newest if name not in rules] == []
+    for name in below_newest:
+        rule = rules[name]
+        assert rule["action"] == "SCMP_ACT_ALLOW" or (
+            rule["action"] == "SCMP_ACT_ERRNO" and rule["errnoRet"] == 38
+        ), name
+    assert rules["clone3"]["action"] == "SCMP_ACT_ERRNO"
