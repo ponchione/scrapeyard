@@ -471,6 +471,14 @@ verify_runtime() {
        "running/healthy" ]] || fail "[$label] $service is not running and healthy"
     [[ -z "$(docker port "$container")" ]] || fail "[$label] $service publishes a host port"
   done
+  # A probe health check that needs most of its three seconds here misses
+  # them on slower cores, and then nothing starts (2026-10-11). The previous
+  # release may predate the cheaper check, so only the candidate is timed.
+  if [[ "$name" == candidate ]]; then
+    docker inspect --format '{{json .State.Health.Log}}' "$(service_containers egress-probe)" | \
+      python3 tests/rehearsal/probe_health.py > "$DIAGNOSTICS_DIR/$label-probe-health-seconds" || \
+      fail "[$label] the probe's health check is too slow for a slower host"
+  fi
   APP_CONTAINER="$(service_containers scrapeyard)"
   PROBE_ADDRESS="$(docker inspect --format \
     '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(service_containers egress-probe)")"

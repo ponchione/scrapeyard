@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
-from tests.rehearsal import verify_deployment
+from tests.rehearsal import probe_health, verify_deployment
 from tests.rehearsal.verify_deployment import KNOWN_CONFIG, PROJECT, RehearsalFailure
 
 RUNNER = Path("scripts/run_deployment_rehearsal.sh")
@@ -352,3 +352,47 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     assert "--no-same-owner" in pack["run"]
     assert "release_artifact.py verify" in pack["run"]
     assert "! -user 0 -o -perm /022" in pack["run"]
+
+
+def _health_log(*seconds: float) -> list[dict[str, Any]]:
+    return [
+        {"Start": "2026-10-11T10:51:41.5Z", "End": f"2026-10-11T10:51:{41.5 + taken:012.9f}Z", "ExitCode": 0}
+        for taken in seconds
+    ]
+
+
+def test_probe_health_compares_the_fastest_recorded_check(capsys):
+    # Docker trims a timestamp's trailing zeros and may write a zone offset.
+    assert probe_health.fastest_seconds(_health_log(0.2, 2.4, 0.31)) == pytest.approx(0.2)
+    offset = [{"Start": "2026-10-11T03:51:59.9-07:00", "End": "2026-10-11T03:52:00.150000001-07:00"}]
+    assert probe_health.fastest_seconds(offset) == pytest.approx(0.25, abs=1e-6)
+
+    for log, message in (([], "no health check"), ([{"Start": "soon", "End": "later"}], "not a Docker timestamp")):
+        with pytest.raises(ValueError, match=message):
+            probe_health.fastest_seconds(log)
+
+
+@pytest.mark.parametrize(("seconds", "status"), [((0.2, 0.21, 2.9), 0), ((2.4, 2.6, 2.5), 1)])
+def test_probe_health_fails_a_check_that_is_slow_every_time(seconds, status):
+    done = subprocess.run(
+        ["python3", "tests/rehearsal/probe_health.py"],
+        input=json.dumps(_health_log(*seconds)),
+        capture_output=True,
+        text=True,
+    )
+
+    assert done.returncode == status
+    assert done.stdout.strip() == f"{min(seconds):.3f}"
+    assert ("over the 0.5s this runner allows" in done.stderr) == bool(status)
+
+
+def test_runner_times_the_probe_health_check_wherever_it_verifies_a_deployment():
+    text = RUNNER.read_text(encoding="utf-8")
+    verification = text[text.index("verify_runtime() {") : text.index("\n}\n", text.index("verify_runtime() {"))]
+
+    assert (
+        'if [[ "$name" == candidate ]]; then\n'
+        "    docker inspect --format '{{json .State.Health.Log}}' \"$(service_containers egress-probe)\" | \\\n"
+        "      python3 tests/rehearsal/probe_health.py"
+    ) in verification
+    assert "the probe's health check is too slow for a slower host" in verification
