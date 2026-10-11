@@ -6,6 +6,36 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-11** (`b371a37`): first deployment on the production host, a
+  rented four-core virtual machine (Ubuntu 24.04.4, kernel 6.8.0-146, Docker
+  28.5.2 and containerd.io 1.7.29 from Docker's repository, Compose 2.38.2).
+  The release that had passed every lane did not start there, for three
+  reasons, each found and fixed on the host before a new release was built:
+  - TD-79: the egress probe's health check took 5.2 s of its three-second
+    deadline. The host's cores are about half as fast as the runner's, the
+    check runs under a quarter of a CPU, and its image has no bytecode, so
+    each check compiled `asyncio` (3.3 s there), `argparse`, `secrets` and
+    `socket.py`. It now imports built-in modules only and takes 0.2 s. The
+    rehearsal times the check from now on.
+  - TD-80: the host's runc is 1.3.3, which calls `openat2` after loading the
+    seccomp filter. The profile refused it and the application's container
+    died before it was up. Allowing `openat2` alone then broke thread
+    creation: runc answers `ENOSYS` only above the highest system call a
+    profile names, so `clone3` began to answer `EPERM`. The nine calls
+    between are now named with `ENOSYS`. The runner's runc is older and
+    shows neither effect (TD-82).
+  - TD-81: Docker restarted that container without end and could not stop
+    it ("did not receive an exit event"), so the wrapper's "the application
+    is left stopped" was untrue, and the next deployment failed at its own
+    first stop. The wrapper now removes a container that is not `exited`
+    after the stop. Its first version, tried on the host, failed once
+    because the removal can fail the same way; it is retried.
+  With the three fixes applied by hand the application started, attested the
+  policy, refused the host's own addresses, private ranges and the metadata
+  address from its container, and completed `basic`, `dynamic` and `stealthy`
+  fetches of a public page. TD-82 to TD-84 record what the lanes still do not
+  cover. TD-20 and TD-22 stay open until the rebuilt release has been
+  promoted and the host rebooted.
 - **2026-10-10** (`2f6b70f` to the merge of pull request #12): deployment
   pass, begun because the owner is provisioning the production host.
   - A rehearsal lane now builds retained releases on a GitHub runner and
@@ -149,7 +179,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-79**) and use this template:
+7. **New findings** take the next free ID (**TD-85**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -302,13 +332,14 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Nothing is ready to implement as a single pull request.
+Ready as single pull requests, in this order: TD-82, then TD-84.
 
 CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
 and rehearses it; dispatch it on the commit to release.
 
 **Coordinated:**
+- TD-83: needs a security review.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs. TD-19 needs the
@@ -332,15 +363,79 @@ and rehearses it; dispatch it on the commit to release.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
+| TD-82 | P2 | ready | The rehearsal runner's container runtime is older than a patched host's |
+| TD-83 | P2 | coordinated | The seccomp allowlist predates the system calls added since Linux 5.1 |
+| TD-84 | P2 | ready | No lane has run a release on Docker 29 |
 
 ## Ready to implement
 
-Nothing at present.
+### TD-82 — The rehearsal runner's container runtime is older than a patched host's
+
+**Priority:** P2 · **Area:** CI, deployment · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:** The rehearsal and smoke lanes use whatever Docker, runc and
+Compose GitHub's `ubuntu-24.04` image carries (Docker 28.0.4 and Compose
+2.38.2 on 2026-10-10). The first production host, installed from Docker's
+repository a day later, got runc 1.3.3, and a release that had passed every
+lane could not start a container there (TD-80, fixed). The lanes still run
+the older runtime, so they would pass that release today, and they will meet
+the next such difference only when the runner image happens to change.
+**Code:** `.github/workflows/release-rehearsal.yml`, `.github/workflows/ci.yml`
+(the smoke job), `docs/DEPLOYMENT.md`.
+**Fix:** Before a lane builds anything, install pinned `docker-ce`,
+`containerd.io` and the Compose plugin from Docker's repository: the versions
+the deployment guide names for a host. Write `docker version` and
+`runc --version` into the lane's evidence, and state the versions in the
+guide. Raise the pins and the guide together.
+**Done when:** A lane's evidence shows the pinned versions, and a rehearsal of
+`b371a37` fails at its first deployment with runc's "unsafe procfs detected".
+
+### TD-84 — No lane has run a release on Docker 29
+
+**Priority:** P2 · **Area:** deployment · **Risk:** medium · **Contract:** none · **Depends on:** TD-82
+
+**Problem:** The production host runs Docker 28.5.2 and Compose 2.38.2, held
+at those versions, because no lane has run anything newer. Docker's
+repository offered 29.9.0 and Compose 5.6.0 on 2026-10-11. One difference to
+check first: `release_artifact.py load` compares the IDs of the images it
+loads with the release's manifest, and Docker 29 is reported to store images
+with containerd on a new installation, which changes the ID an image is
+given. Nothing here has been run on it.
+**Code:** `scripts/release_artifact.py` (`load`, `verify`),
+`security/deploy-secure-compose.sh`, `scripts/run_deployment_rehearsal.sh`.
+**Fix:** With TD-82's pins, run the rehearsal on Docker 29 and Compose 5. Fix
+what fails, then raise the pins, the guide and the host.
+**Done when:** A dispatched rehearsal passes on Docker 29 and the production
+host has been upgraded and rebooted on it.
 
 ## Coordinated
 
 These need a decision, a security review, an Eyebox change, or real-traffic
 data before any code.
+
+### TD-83 — The seccomp allowlist predates the system calls added since Linux 5.1
+
+**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** —
+
+**Problem:** `security/seccomp/chromium.json` is the profile Playwright
+publishes: Docker's default list of about 2020 plus `clone`, `setns` and
+`unshare` for Chromium's user-namespace sandbox. Its highest-numbered system
+call was `io_uring_register` (427) until TD-80 added `openat2`. Everything
+newer (`faccessat2`, `close_range`, `clone3`, `epoll_pwait2`, `landlock_*`,
+`process_madvise` and the rest) answers `ENOSYS`, and callers fall back. That
+works today: browser fetches passed on the production host on 2026-10-11. It
+holds only while every caller treats `ENOSYS` as an old kernel, and runc
+1.3.3 was the first that did not. The next one fails the same way, in
+production first (TD-82).
+**Code:** `security/seccomp/chromium.json`,
+`tests/unit/test_browser_runtime_contract.py`.
+**Fix:** Derive the profile again from the current Moby default plus the
+three user-namespace calls. Decide `clone3` on purpose: Moby answers `ENOSYS`
+because a filter cannot read its flags, and this profile already allows
+`clone` unfiltered. Keep the difference from the Moby default as a short list
+beside the profile, and have the change reviewed as a security change.
+**Done when:** The reviewed difference is recorded, and the smoke lane, the
+rehearsal and a deployment on a host with the current runc pass.
 
 ### TD-45 — Bundled browsers are months behind upstream
 

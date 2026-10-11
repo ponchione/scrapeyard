@@ -700,6 +700,9 @@ After each deployment it checks, from outside the application:
 
 - every container runs the image its release retains, is healthy, and
   publishes no host port;
+- the fastest of the probe's recorded health checks took under half a second
+  (candidate only; the check has three seconds, under a quarter of a CPU, and
+  one that needs most of them on a runner misses them on slower cores);
 - the application container matches the release's Compose file (capabilities,
   limits, read-only root, init, one network) and runs under the AppArmor
   profile, seccomp, no-new-privileges and an empty capability set;

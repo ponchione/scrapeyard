@@ -384,7 +384,10 @@ failure before stopping leaves the current app running. Any failure or
 interruption after that leaves it stopped: a policy that cannot be installed,
 and also a start that fails, whose container would otherwise go on restarting
 and could come up later. The wrapper holds a lock under `/run/scrapeyard`, so
-a second deployment waits for the first. Do not resume ingress until
+a second deployment waits for the first. A container that Docker cannot stop
+(one that dies before it is up is restarted without end, and `docker stop`
+fails on it) is removed after its last output has been printed; the next start
+creates it again. Do not resume ingress until
 authenticated `/health/ready`,
 a known `/results/{id}` read, effective host/security policy, and exactly one
 application container/process have been verified. Compose health alone tests
@@ -583,6 +586,18 @@ permission. Compose also applies Playwright 1.58.0's pinned seccomp allowlist,
 enables no-new-privileges, drops every capability, and retains only
 `SYS_CHROOT` in the bounding set for Chromium after it enters its user
 namespace. The application process has no permitted or effective capabilities.
+
+The allowlist carries one addition. runc 1.3.3 (the release that fixed
+CVE-2025-31133, CVE-2025-52565 and CVE-2025-52881) opens
+`/proc/thread-self/fd` with `openat2` after it has loaded the filter, and a
+profile that refuses the call starts no container and no `docker exec`
+("unsafe procfs detected"). `openat2` is therefore allowed. runc answers
+`ENOSYS` for any system call numbered above the highest one a profile names,
+and the default `EPERM` for the rest, so the nine calls numbered between the
+old highest and `openat2` are named with `ENOSYS`: they answer as they did
+before. glibc falls back from `clone3` to `clone` on `ENOSYS` only; left to
+the default, no thread would start. Add a newer system call to the profile
+the same way, with every lower-numbered one it passes.
 Do not replace either policy with `unconfined`. `/data`, bounded `/tmp`, `/run`,
 home cache/config and Camoufox state tmpfs, and `/dev/shm` are the only writable
 areas.
