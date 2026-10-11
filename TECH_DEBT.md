@@ -41,8 +41,13 @@ it. Read [How to use this list](#how-to-use-this-list) and the
   policy, refused the host's own addresses, private ranges and the metadata
   address from its container, and completed `basic`, `dynamic` and `stealthy`
   fetches of a public page. TD-82 to TD-84 record what the lanes still do not
-  cover. TD-20 and TD-22 stay open until the rebuilt release has been
-  promoted and the host rebooted.
+  cover. The release rebuilt from `523d805` was then installed and started
+  by the boot service there. After a real reboot the unit had the
+  application healthy 34 seconds after boot, with the policy, the profile and
+  the attestation in its log, and the same checks passed again. A copy of the
+  release with one changed file, and the release itself made writable by
+  others, were both refused by `promote` with the running container
+  untouched. TD-20 and TD-22 stay open for what is listed under them.
 - **2026-10-10** (`2f6b70f` to the merge of pull request #12): deployment
   pass, begun because the owner is provisioning the production host.
   - A rehearsal lane now builds retained releases on a GitHub runner and
@@ -807,9 +812,19 @@ ingress and TD-22's release artifact selection.
   systemd start limit also counts successful starts, so "retries stay
   bounded" is met by slowing them down, not by giving up.
 
+**Done on the production host (2026-10-11, release `523d805`):** a real
+reboot. The unit stopped the application before Docker went down, Docker did
+not start it at boot, and the unit had it healthy 34 seconds after boot with
+the host rules, the egress policy, the AppArmor profile and the attestation in
+its log. From the application's container the probe's challenge, the host's
+own addresses, private ranges and the metadata address were refused, and
+`basic`, `dynamic` and `stealthy` fetches of a public page completed. The
+host's inbound firewall is a default `ufw`; the `INPUT` jump stayed ahead of
+its chains.
+
 **Still open:**
-- A real reboot and a power loss on the production host. A runner cannot be
-  rebooted; the rehearsal removes what a reboot loses.
+- A power loss on the production host: a reset with no shutdown, after which
+  nothing has stopped the container and the profile is gone.
 - All of the monitoring work below: readiness and metrics collection, and
   alerts. It needs the owner's choice of a monitoring service.
 - The health check Compose runs is still process liveness only.
@@ -966,11 +981,18 @@ format change to the rollback story.
   the lane and [DEPLOYMENT.md](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
   the commands to fetch a release.
 
-**Still open:** the acceptance checks below on the production host, under the
-real proxy and ingress: deploy a candidate, have a bad one refused, and roll
-back without build-network access. The rehearsal has no operator proxy, so
-its known run is one that fails before any fetch. Keep a previous release on
-the host and off it; the workflow artifact expires after 30 days.
+**Done on the production host (2026-10-11):** release `523d805` was fetched
+as the workflow's artifact, checked against the run's checksum, extracted as
+root and started with nothing built or pulled; it serves with no operator
+proxy, the owner's choice (TD-18). `promote` refused a copy with one changed
+file and the release itself while others could write to it, and left the
+running container as it was.
+
+**Still open:** a rollback on the production host. The only earlier release,
+`b371a37`, cannot start there (TD-79 to TD-81), so the first rollback will be
+from the next release to `523d805`. The same checks behind the real ingress
+(TD-19). Keep a previous release on the host and off it; the workflow
+artifact expires after 30 days.
 
 **Problem:**
 - The secure wrapper rebuilds Scrapeyard from the checkout on every deployment.
