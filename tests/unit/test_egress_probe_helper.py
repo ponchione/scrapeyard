@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import socket
+import socketserver
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+import pytest
 
 
 def _unused_port() -> int:
@@ -72,27 +76,73 @@ def test_controlled_egress_probe_serves_challenge_and_liveness_protocol():
     assert process.stderr.closed
 
 
+def _imported(*command: str) -> set[str]:
+    traced = subprocess.run(
+        [sys.executable, "-I", "-S", "-X", "importtime", *command], capture_output=True, text=True
+    )
+    return {
+        line.rsplit("|", 1)[1].strip()
+        for line in traced.stderr.splitlines()
+        if line.startswith("import time:")
+    }
+
+
 def test_the_health_check_compiles_no_module_it_can_do_without():
     # The probe's image has no bytecode and a read-only filesystem, so each
     # health check compiles whatever it imports, under a quarter of a CPU.
     # asyncio, argparse, secrets and socket.py cost 3.3 s, 0.7 s, 0.7 s and
     # 0.5 s of that on the first production host (2026-10-11).
-    traced = subprocess.run(
-        [sys.executable, "-I", "-S", "-X", "importtime", "security/egress_probe.py",
-         "--healthcheck", "--liveness-port", str(_unused_port())],
-        capture_output=True,
-        text=True,
-    )
+    arguments = ("--healthcheck", "--liveness-port", str(_unused_port()))
+    # What this interpreter loads for a script that imports the same three
+    # modules and does nothing: the check may load that and no more.
+    idle = _imported("-c", "from __future__ import annotations; import _socket, os, sys")
 
-    # Nothing listens there, so the check has imported all it uses and failed.
-    assert traced.returncode != 0 and "ConnectionRefusedError" in traced.stderr
-    imported = {
-        line.rsplit("|", 1)[1].strip()
-        for line in traced.stderr.splitlines()
-        if line.startswith("import time:")
-    }
-    assert "_socket" in imported
-    assert not imported & {"asyncio", "argparse", "secrets", "socket", "selectors", "ssl"}
+    # Nothing listens on the port; the check imports all it uses before that.
+    assert _imported("security/egress_probe.py", *arguments) - idle == set()
+    assert "_socket" in idle and "socket" not in idle and "asyncio" not in idle
+
+
+class _Liveness(socketserver.StreamRequestHandler):
+    def handle(self):
+        request = self.rfile.readline().decode().split()
+        self.wfile.write(self.server.answer(request).encode())
+
+
+@pytest.mark.parametrize(
+    ("answer", "healthy"),
+    [
+        (lambda request, port: f"SCRAPEYARD-EGRESS-LIVE/1 {request[1]} {port}\n", True),
+        (lambda request, port: f"SCRAPEYARD-EGRESS-LIVE/1 {request[1]} {port + 1}\n", False),
+        (lambda request, port: f"SCRAPEYARD-EGRESS-LIVE/1 {'0' * 32} {port}\n", False),
+        (lambda request, port: f"SCRAPEYARD-EGRESS-LIVE/1 {request[1]} {port}", False),
+        (lambda request, port: f"SCRAPEYARD-EGRESS-LIVE/1 {request[1]}", False),
+        (lambda request, port: "", False),
+    ],
+    ids=["right", "another-challenge-port", "another-nonce", "no-newline", "cut-short", "silent"],
+)
+def test_the_health_check_accepts_only_its_own_nonce_and_the_challenge_port(answer, healthy):
+    challenge_port = _unused_port()
+    requests = []
+    with socketserver.TCPServer(("127.0.0.1", 0), _Liveness) as server:
+        server.answer = lambda request: requests.append(request) or answer(request, challenge_port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            checked = subprocess.run(
+                [sys.executable, "security/egress_probe.py", "--healthcheck",
+                 "--challenge-port", str(challenge_port), "--liveness-port", str(server.server_address[1])],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    assert (checked.returncode == 0) is healthy, checked.stderr
+    assert len(requests) == 1 and requests[0][0] == "SCRAPEYARD-EGRESS-PROBE/1"
+    assert len(requests[0][1]) == 32 and int(requests[0][1], 16) >= 0
+    if not healthy:
+        assert "egress probe liveness check failed" in checked.stderr
 
 
 def test_the_probe_refuses_arguments_it_does_not_know():

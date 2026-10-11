@@ -338,6 +338,18 @@ def test_a_link_that_cannot_be_moved_stops_what_was_deployed(host):
     assert not list(host.releases.glob("current.new*"))
 
 
+def test_a_link_that_cannot_be_moved_says_so_when_the_stop_fails_too(host):
+    old = host.release("old")
+    new = host.release("new", 'rm -f "$TAKEN" && mkdir "$TAKEN" && touch "$TAKEN/in-the-way"\n')
+    host.current.symlink_to(old)
+
+    result = host.run("apply", str(new), TAKEN=str(host.current), DOCKER_PS_FAILS="yes")
+
+    assert result.returncode == 2
+    assert "could not be moved, and the application could not be stopped" in result.stderr
+    assert "the application was stopped" not in result.stderr
+
+
 def test_a_promotion_is_refused_before_deploying_when_its_link_cannot_be_written(host):
     old, new = host.release("old"), host.release("new")
     host.current.symlink_to(old)

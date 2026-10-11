@@ -6,9 +6,9 @@ from __future__ import annotations
 # The health check runs every two seconds under the probe's quarter-CPU quota,
 # in an image that ships no bytecode and on a read-only filesystem, so every
 # Python module it imports is compiled from source each time: asyncio takes
-# seconds there, and socket.py half a second. The check therefore uses only
-# modules built into the interpreter (_socket is the C module under socket.py),
-# and what the server needs is imported when the server starts.
+# seconds there, and socket.py half a second. The check therefore imports
+# nothing the interpreter has not already loaded except _socket, the C module
+# under socket.py. What the server needs is imported when the server starts.
 import _socket
 import os
 import sys

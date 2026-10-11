@@ -232,7 +232,8 @@ case "$ACTION" in
     if ! mv -T -- "$CURRENT.new" "$CURRENT"; then
       # It is running, and a reboot would bring back the other one. Leave
       # nothing running that the link does not name.
-      stop_application || true
+      stop_application || \
+        fail "the release deployed but $CURRENT could not be moved, and the application could not be stopped"
       fail "the release deployed but $CURRENT could not be moved; the application was stopped"
     fi
     ;;

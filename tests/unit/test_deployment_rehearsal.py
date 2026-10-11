@@ -354,20 +354,31 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     assert "! -user 0 -o -perm /022" in pack["run"]
 
 
-def _health_log(*seconds: float) -> list[dict[str, Any]]:
+def _health_log(*seconds: float, exit_code: int = 0) -> list[dict[str, Any]]:
     return [
-        {"Start": "2026-10-11T10:51:41.5Z", "End": f"2026-10-11T10:51:{41.5 + taken:012.9f}Z", "ExitCode": 0}
+        {"Start": "2026-10-11T10:51:41.5Z", "End": f"2026-10-11T10:51:{41.5 + taken:012.9f}Z", "ExitCode": exit_code}
         for taken in seconds
     ]
 
 
-def test_probe_health_compares_the_fastest_recorded_check(capsys):
+def test_probe_health_compares_the_fastest_check_that_passed():
     # Docker trims a timestamp's trailing zeros and may write a zone offset.
     assert probe_health.fastest_seconds(_health_log(0.2, 2.4, 0.31)) == pytest.approx(0.2)
-    offset = [{"Start": "2026-10-11T03:51:59.9-07:00", "End": "2026-10-11T03:52:00.150000001-07:00"}]
+    offset = [
+        {"Start": "2026-10-11T03:51:59.9-07:00", "End": "2026-10-11T03:52:00.150000001-07:00", "ExitCode": 0}
+    ]
     assert probe_health.fastest_seconds(offset) == pytest.approx(0.25, abs=1e-6)
+    # A check refused before the server was up is quick and proves nothing.
+    refused_then_slow = _health_log(0.04, exit_code=1) + _health_log(2.8)
+    assert probe_health.fastest_seconds(refused_then_slow) == pytest.approx(2.8)
 
-    for log, message in (([], "no health check"), ([{"Start": "soon", "End": "later"}], "not a Docker timestamp")):
+    backwards = [{"Start": "2026-11-01T01:59:59.5-07:00", "End": "2026-11-01T01:00:00.1-08:00", "ExitCode": 0}]
+    for log, message in (
+        ([], "no health check that passed"),
+        (_health_log(0.04, exit_code=1), "no health check that passed"),
+        ([{"Start": "soon", "End": "later", "ExitCode": 0}], "not a Docker timestamp"),
+        (backwards, "the clock was set back"),
+    ):
         with pytest.raises(ValueError, match=message):
             probe_health.fastest_seconds(log)
 
@@ -376,7 +387,7 @@ def test_probe_health_compares_the_fastest_recorded_check(capsys):
 def test_probe_health_fails_a_check_that_is_slow_every_time(seconds, status):
     done = subprocess.run(
         ["python3", "tests/rehearsal/probe_health.py"],
-        input=json.dumps(_health_log(*seconds)),
+        input=json.dumps(_health_log(0.03, exit_code=1) + _health_log(*seconds)),
         capture_output=True,
         text=True,
     )

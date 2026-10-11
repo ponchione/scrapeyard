@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -123,7 +124,7 @@ def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
     assert "ownership" in readme
 
 
-# The system calls numbered 428 and up on every Linux architecture, in order.
+# The system calls numbered 428 to 462 on every Linux architecture, in order.
 _NEWER_SYSCALLS = (
     "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "fspick", "pidfd_open",
     "clone3", "close_range", "openat2", "pidfd_getfd", "faccessat2", "process_madvise",
@@ -133,20 +134,43 @@ _NEWER_SYSCALLS = (
     "futex_wake", "futex_wait", "futex_requeue", "statmount", "listmount",
     "lsm_get_self_attr", "lsm_set_self_attr", "lsm_list_modules", "mseal",
 )
+# The 381 names of Playwright 1.58.0's list, none numbered above 427 on x86-64:
+# sha256 of them sorted and joined by newlines.
+_OLDER_SYSCALLS_SHA256 = "c1dc008431529a794c87715c0b8f8846a14c9106fc349a131fe79ca424f23e84"
 
 
-def _seccomp_rules() -> dict[str, dict]:
+def _seccomp_rules() -> dict[str, list[dict]]:
     profile = json.loads(Path("security/seccomp/chromium.json").read_text())
     assert profile["defaultAction"] == "SCMP_ACT_ERRNO" and "defaultErrnoRet" not in profile
-    return {name: rule for rule in profile["syscalls"] for name in rule["names"]}
+    rules: dict[str, list[dict]] = {}
+    for rule in profile["syscalls"]:
+        for name in rule["names"]:
+            rules.setdefault(name, []).append(rule)
+    return rules
+
+
+def _the_rule_that_always_applies(rules: dict[str, list[dict]], name: str) -> dict:
+    # Docker drops a rule whose `includes` or `excludes` (a capability, an
+    # architecture, a kernel version) do not hold, and `args` narrow one.
+    assert len(rules[name]) == 1, name
+    rule = rules[name][0]
+    assert (rule["args"], rule["includes"], rule["excludes"]) == ([], {}, {}), name
+    return rule
 
 
 def test_seccomp_profile_lets_a_hardened_runc_start_the_container() -> None:
     # runc 1.3.3 opens /proc/thread-self/fd with openat2 after loading the
     # filter. Refused, neither a container nor an exec starts (2026-10-11).
-    rule = _seccomp_rules()["openat2"]
+    assert _the_rule_that_always_applies(_seccomp_rules(), "openat2")["action"] == "SCMP_ACT_ALLOW"
 
-    assert rule["action"] == "SCMP_ACT_ALLOW" and rule["args"] == []
+
+def test_seccomp_profile_names_no_system_call_this_test_cannot_place() -> None:
+    # The test below needs each newer call's place in the kernel's numbering.
+    # One it does not know (463 and up) goes into the tuple above, with every
+    # call numbered below it, before it goes into the profile.
+    older = sorted(set(_seccomp_rules()) - set(_NEWER_SYSCALLS))
+
+    assert hashlib.sha256("\n".join(older).encode()).hexdigest() == _OLDER_SYSCALLS_SHA256
 
 
 def test_seccomp_profile_answers_enosys_below_its_newest_syscall() -> None:
@@ -161,8 +185,8 @@ def test_seccomp_profile_answers_enosys_below_its_newest_syscall() -> None:
 
     assert [name for name in below_newest if name not in rules] == []
     for name in below_newest:
-        rule = rules[name]
+        rule = _the_rule_that_always_applies(rules, name)
         assert rule["action"] == "SCMP_ACT_ALLOW" or (
             rule["action"] == "SCMP_ACT_ERRNO" and rule["errnoRet"] == 38
         ), name
-    assert rules["clone3"]["action"] == "SCMP_ACT_ERRNO"
+    assert rules["clone3"][0]["action"] == "SCMP_ACT_ERRNO"

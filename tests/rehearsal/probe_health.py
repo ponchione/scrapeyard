@@ -4,12 +4,13 @@
 The check runs every two seconds under a quarter of a CPU with a three-second
 deadline. On this runner a check that takes most of that deadline still passes;
 on a host with slower cores it does not, and no deployment starts there. The
-fastest of the recorded checks is compared, so one disturbed run does not fail
-the rehearsal while a check that became expensive does.
+fastest of the recorded checks that passed is compared, so one disturbed run
+does not fail the rehearsal while a check that became expensive does.
 """
 
 from __future__ import annotations
 
+import calendar
 import json
 import re
 import sys
@@ -26,14 +27,20 @@ def _seconds(moment: str) -> float:
     match = _MOMENT.match(moment)
     if match is None:
         raise ValueError(f"not a Docker timestamp: {moment!r}")
-    whole = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").timestamp()
+    # Read as UTC whatever zone it carries: this host's own zone must not matter.
+    whole = calendar.timegm(datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").timetuple())
     return whole + float(f"0.{match.group(2) or 0}")
 
 
 def fastest_seconds(log: list[dict[str, Any]]) -> float:
-    if not log:
-        raise ValueError("Docker has recorded no health check")
-    return min(_seconds(entry["End"]) - _seconds(entry["Start"]) for entry in log)
+    # A check that failed (the server was not up yet) ends early and says
+    # nothing about what a passing one costs.
+    passed = [_seconds(entry["End"]) - _seconds(entry["Start"]) for entry in log if entry["ExitCode"] == 0]
+    if not passed:
+        raise ValueError("Docker has recorded no health check that passed")
+    if min(passed) < 0:
+        raise ValueError("a health check ended before it started; the clock was set back")
+    return min(passed)
 
 
 def main() -> None:

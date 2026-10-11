@@ -311,24 +311,41 @@ def _wrapper_with_fake_docker(tmp_path, docker_script):
 
 
 # APP_STATE is what Docker reports for the application's container after a
-# stop. The container exists from the start with APP_EXISTS=yes, and otherwise
-# once the application has been started; REMOVAL=fails makes `docker rm` fail.
+# stop ("unreadable" fails the read). The container exists from the start with
+# APP_EXISTS=yes, and otherwise once the application has been started.
+# REMOVAL=fails makes every `docker rm` fail, and APP_ONEOFF=True makes the
+# container one that `docker compose run` created.
+_STATE = '{{index .Config.Labels "com.docker.compose.oneoff"}} {{.State.Status}}'
 _FAKE_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$CALLS"
 present() { [[ ! -e "$CALLS.removed" && ( "${APP_EXISTS:-}" == yes || -e "$CALLS.started" ) ]]; }
 case "$*" in
   "compose config --images") echo sha256:aaaaaaaa ;;
   "compose ps -q egress-probe") echo probe ;;
+  "compose stop scrapeyard")
+    if [[ -e "$CALLS.started" && "${SIGNAL_DURING_CLEANUP:-}" == yes ]]; then kill -TERM "$PPID"; fi ;;
   "compose ps --all --quiet scrapeyard") [[ "${DOCKER_PS:-}" != fails ]] || exit 1; ! present || echo app1 ;;
   "ps --all --quiet --filter id=app1") ! present || echo app1 ;;
-  "inspect --format {{.State.Status}} app1") echo "${APP_STATE:-exited}" ;;
-  "logs --tail 5 app1") echo "reopen exec fifo: function not implemented" ;;
+  'inspect --format {{index .Config.Labels "com.docker.compose.oneoff"}} {{.State.Status}} app1')
+    [[ "${APP_STATE:-}" != unreadable ]] || exit 1; echo "${APP_ONEOFF:-False} ${APP_STATE:-exited}" ;;
+  "inspect --format {{.HostConfig.RestartPolicy.Name}} app1") echo unless-stopped ;;
+  "logs --tail 50 app1") echo "ValidationError: input_value='c2VjcmV0'" ;;
   "rm --force app1") [[ "${REMOVAL:-works}" == works ]] || exit 1; touch "$CALLS.removed" ;;
   "inspect "*) echo abcdef123456 ;;
   "network inspect "*) echo br-release ;;
   "compose up -d --wait --no-build --pull never") touch "$CALLS.started"; exit "${START_STATUS:-0}" ;;
 esac
 """
+_CLEARING = [
+    "docker compose stop scrapeyard",
+    "docker compose ps --all --quiet scrapeyard",
+    f"docker inspect --format {_STATE} app1",
+    "docker logs --tail 50 app1",
+    "docker inspect --format {{.HostConfig.RestartPolicy.Name}} app1",
+    "docker update --restart=no app1",
+    "docker rm --force app1",
+    "docker ps --all --quiet --filter id=app1",
+]
 
 
 def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_path):
@@ -339,12 +356,7 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
     assert result.returncode == 1
     calls = Path(env["CALLS"]).read_text().splitlines()
     # The container is unless-stopped: left alone it would keep restarting.
-    assert calls[-4:] == [
-        "docker compose up -d --wait --no-build --pull never",
-        "docker compose stop scrapeyard",
-        "docker compose ps --all --quiet scrapeyard",
-        "docker inspect --format {{.State.Status}} app1",
-    ]
+    assert calls[-4:] == ["docker compose up -d --wait --no-build --pull never", *_CLEARING[:3]]
     assert b"the application is left stopped" in result.stderr
 
     Path(env["CALLS"]).write_text("")
@@ -354,31 +366,29 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
     )
 
 
-def test_a_container_docker_cannot_stop_is_removed_after_a_failed_start(tmp_path):
+@pytest.mark.parametrize("state", ["restarting", "created", "running", "paused", "unreadable"])
+def test_a_container_docker_cannot_stop_is_removed_after_a_failed_start(tmp_path, state):
     # runc 1.3.3 could not start a container under the profile of 2026-10-10.
     # Docker restarted it without end and `docker stop` reported "did not
     # receive an exit event", so the stop alone left it restarting.
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
 
     result = subprocess.run(
-        command, cwd=tmp_path, env=dict(env, START_STATUS="1", APP_STATE="restarting"), capture_output=True
+        command, cwd=tmp_path, env=dict(env, START_STATUS="1", APP_STATE=state), capture_output=True
     )
 
     assert result.returncode == 1
-    calls = Path(env["CALLS"]).read_text().splitlines()
-    assert calls[-7:] == [
-        "docker compose stop scrapeyard",
-        "docker compose ps --all --quiet scrapeyard",
-        "docker inspect --format {{.State.Status}} app1",
-        "docker logs --tail 5 app1",
-        "docker update --restart=no app1",
-        "docker rm --force app1",
-        "docker ps --all --quiet --filter id=app1",
-    ]
+    assert Path(env["CALLS"]).read_text().splitlines()[-len(_CLEARING) :] == _CLEARING
     stderr = result.stderr.decode()
-    assert "did not stop and is being removed; its last output:" in stderr
-    assert "reopen exec fifo: function not implemented" in stderr
+    shown = "unknown" if state == "unreadable" else state
+    kept = tmp_path / "lock" / "removed-container.log"
+    assert f"the application's container is {shown}, not stopped, and is being removed" in stderr
+    assert f"its last output is in {kept}" in stderr
     assert stderr.rstrip().endswith("failed; the application is left stopped")
+    # A start that fails on a setting prints part of it; the journal gets none.
+    assert kept.read_text() == "ValidationError: input_value='c2VjcmV0'\n"
+    assert kept.stat().st_mode & 0o777 == 0o600
+    assert "c2VjcmV0" not in stderr and b"c2VjcmV0" not in result.stdout
 
 
 def test_a_failed_start_says_so_when_its_container_cannot_be_removed(tmp_path):
@@ -393,15 +403,49 @@ def test_a_failed_start_says_so_when_its_container_cannot_be_removed(tmp_path):
 
     assert result.returncode == 1
     calls = Path(env["CALLS"]).read_text().splitlines()
-    assert calls.count("docker rm --force app1") == 5
+    assert calls.count("docker rm --force app1") == 3
+    # It keeps the policy it had: a later start must not find it without one.
+    assert calls[-1] == "docker update --restart=unless-stopped app1"
     stderr = result.stderr.decode()
     assert "the application is left stopped" not in stderr
     assert "could not be stopped or removed; see 'docker ps --all'" in stderr
 
 
+def test_a_signal_while_a_failed_start_is_cleared_does_not_cut_it_short(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, START_STATUS="1", APP_STATE="restarting", SIGNAL_DURING_CLEANUP="yes"),
+        capture_output=True,
+    )
+
+    # The start's own failure is reported, not the signal's 143.
+    assert result.returncode == 1
+    assert Path(env["CALLS"]).read_text().splitlines()[-len(_CLEARING) :] == _CLEARING
+    assert result.stderr.decode().rstrip().endswith("failed; the application is left stopped")
+
+
+def test_a_container_the_operator_ran_by_hand_is_left_alone(tmp_path):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+
+    result = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, START_STATUS="1", APP_STATE="running", APP_ONEOFF="True"),
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    assert calls[-1] == f"docker inspect --format {_STATE} app1"
+    assert not any(call.startswith(("docker rm", "docker update", "docker logs")) for call in calls)
+
+
 @pytest.mark.parametrize(
     ("fault", "removals"),
-    [({"APP_STATE": "restarting", "REMOVAL": "fails"}, 5), ({"DOCKER_PS": "fails"}, 0)],
+    [({"APP_STATE": "restarting", "REMOVAL": "fails"}, 3), ({"DOCKER_PS": "fails"}, 0)],
 )
 def test_a_deployment_is_refused_while_an_earlier_container_cannot_be_cleared(tmp_path, fault, removals):
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
@@ -415,7 +459,7 @@ def test_a_deployment_is_refused_while_an_earlier_container_cannot_be_cleared(tm
     assert b"the application's container could not be stopped or removed" in result.stderr
 
 
-def test_a_deployment_clears_a_container_left_restarting_and_keeps_one_that_stopped(tmp_path):
+def test_a_deployment_clears_a_container_that_never_ran_and_keeps_one_that_stopped(tmp_path):
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
 
     subprocess.run(
@@ -431,7 +475,7 @@ def test_a_deployment_clears_a_container_left_restarting_and_keeps_one_that_stop
     Path(env["CALLS"] + ".removed").unlink()
     subprocess.run(command, cwd=tmp_path, env=dict(env, APP_EXISTS="yes"), check=True, capture_output=True)
     calls = Path(env["CALLS"]).read_text().splitlines()
-    assert "docker inspect --format {{.State.Status}} app1" in calls
+    assert f"docker inspect --format {_STATE} app1" in calls
     assert not any(call.startswith(("docker rm", "docker update")) for call in calls)
 
 

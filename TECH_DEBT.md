@@ -22,14 +22,20 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     died before it was up. Allowing `openat2` alone then broke thread
     creation: runc answers `ENOSYS` only above the highest system call a
     profile names, so `clone3` began to answer `EPERM`. The nine calls
-    between are now named with `ENOSYS`. The runner's runc is older and
-    shows neither effect (TD-82).
+    between are now named with `ENOSYS`. Neither the runner's runc nor 1.5.2
+    needs `openat2` there, so no lane shows the effect (TD-82).
   - TD-81: Docker restarted that container without end and could not stop
     it ("did not receive an exit event"), so the wrapper's "the application
     is left stopped" was untrue, and the next deployment failed at its own
     first stop. The wrapper now removes a container that is not `exited`
     after the stop. Its first version, tried on the host, failed once
     because the removal can fail the same way; it is retried.
+  An independent review of the three fixes found nothing wrong with them and
+  five gaps around them, closed before the merge: the new seccomp test passed
+  two broken profiles, a container that could not be removed was left without
+  its restart policy, a signal cut the clearing of a failed start short, the
+  removed container's last output went to the journal, and nothing tested
+  what the health check verifies.
   With the three fixes applied by hand the application started, attested the
   policy, refused the host's own addresses, private ranges and the metadata
   address from its container, and completed `basic`, `dynamic` and `stealthy`
@@ -387,8 +393,10 @@ the next such difference only when the runner image happens to change.
 the deployment guide names for a host. Write `docker version` and
 `runc --version` into the lane's evidence, and state the versions in the
 guide. Raise the pins and the guide together.
-**Done when:** A lane's evidence shows the pinned versions, and a rehearsal of
-`b371a37` fails at its first deployment with runc's "unsafe procfs detected".
+**Done when:** A lane's evidence shows the pinned versions, and they are the
+ones the production host runs. With runc 1.3.3 among them, a rehearsal of
+`b371a37` fails at its first deployment with "unsafe procfs detected"; runc
+1.5.2 does not show it.
 
 ### TD-84 — No lane has run a release on Docker 29
 

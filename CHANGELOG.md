@@ -242,25 +242,28 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
-- The application's container starts under runc 1.3.3 and later. Those
-  versions open `/proc/thread-self/fd` with `openat2` after loading the
-  seccomp filter, and the profile, which predates that system call, refused
-  it: no container or `docker exec` started on a host with a patched runc.
-  The profile now allows `openat2`, and names the system calls numbered just
-  below it so that they still answer `ENOSYS`: with `openat2` listed alone
-  they answered `EPERM`, and glibc then cannot start a thread.
+- The application's container starts under runc 1.3.3. That version opens
+  `/proc/thread-self/fd` with `openat2` after loading the seccomp filter, and
+  the profile, which predates that system call, refused it: no container or
+  `docker exec` started on a host whose packages carry it. (runc 1.5.2 starts
+  under the old profile.) The profile now allows `openat2`, and names the
+  system calls numbered just below it so that on x86-64 they still answer
+  `ENOSYS`: with `openat2` listed alone they answered `EPERM`, and glibc then
+  cannot start a thread.
 - The egress probe's health check costs a fifth of a second of its quarter
   CPU instead of five. Its image carries no bytecode and its filesystem is
   read-only, so every check compiled `asyncio`, `argparse`, `secrets` and
   `socket.py` again; on a host with slower cores that passed the check's
   three-second deadline and no deployment started. The check now imports
-  only modules built into the interpreter.
+  only the C socket module beyond what the interpreter has already loaded.
 - A deployment whose application container cannot be stopped removes it. A
   container that died before it was up was restarted without end, and
   `docker stop` failed with "did not receive an exit event", so the deploy
   wrapper reported the application stopped while Docker went on restarting
-  it. The wrapper now prints the container's last output and removes it, and
-  says so when it cannot.
+  it. The wrapper now removes a container of the service that is not `exited`
+  after the stop, keeps its last output in a file only root can read, and
+  says so when it cannot remove it. A signal that arrives while a failed
+  start is being cleared no longer cuts the clearing short.
 - Replaying a recorded page whose next link names a refused host stops
   pagination with `unsafe_next_url`, as the live run does. Replay skipped the
   URL check and then failed the whole target while building the link's

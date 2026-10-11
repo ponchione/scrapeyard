@@ -66,18 +66,23 @@ else
 fi
 
 # Removes a container that Docker could not stop. A removal can fail the same
-# way as the stop while a start is under way, so it is tried again; without the
-# restart policy no further start follows it.
+# way as the stop while a start is under way, so it is tried again; with the
+# restart policy off, no further start follows it. A container that still
+# cannot be removed gets its policy back: left without one, it would be
+# started by a later deployment as a container that no longer restarts.
 remove_container() {
-  local container=$1 remaining
+  local container=$1 policy remaining
+  policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null) || policy=""
   docker update --restart=no "$container" >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5; do
+  for _ in 1 2 3; do
     docker rm --force "$container" >/dev/null 2>&1 || true
     if remaining=$(docker ps --all --quiet --filter "id=$container") && [[ -z "$remaining" ]]; then
       return 0
     fi
     sleep 1
   done
+  [[ -z "$policy" || "$policy" == "no" ]] || \
+    docker update --restart="$policy" "$container" >/dev/null 2>&1 || true
   return 1
 }
 
@@ -85,17 +90,25 @@ remove_container() {
 # one that is running, or that exits by itself and is restarted. Docker cannot
 # stop a container whose every start dies before it is up (2026-10-11, runc
 # 1.3.3 under a seccomp profile it could not start with): the stop reports
-# "did not receive an exit event" and the restarts go on. A container that is
-# not `exited` after the stop is therefore removed, once its last output has
-# been printed; the next start creates it again.
+# "did not receive an exit event" and the restarts go on. A container of the
+# service that is not `exited` after the stop is therefore removed, and the
+# next start creates it again. Its last output goes to a file only root can
+# read, not to this script's output: a start that fails on a setting can print
+# part of the setting. A container made with `docker compose run` is the
+# operator's and is left alone, as the stop leaves it.
 stop_application() {
-  local containers container failed=0
+  local containers container state failed=0
   docker compose stop scrapeyard >/dev/null 2>&1 || true
   containers=$(docker compose ps --all --quiet scrapeyard) || return 1
   for container in $containers; do
-    [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)" != "exited" ]] || continue
-    echo "scrapeyard secure compose deployment: the application's container did not stop and is being removed; its last output:" >&2
-    docker logs --tail 5 "$container" 2>&1 | cut -c1-300 >&2 || true
+    state=$(docker inspect --format \
+      '{{index .Config.Labels "com.docker.compose.oneoff"}} {{.State.Status}}' "$container" 2>/dev/null) || \
+      state="False unknown"
+    case "$state" in
+      "False exited" | "True "*) continue ;;
+    esac
+    (umask 077 && docker logs --tail 50 "$container" > "$LOCK_DIR/removed-container.log" 2>&1) || true
+    echo "scrapeyard secure compose deployment: the application's container is ${state#* }, not stopped, and is being removed; its last output is in $LOCK_DIR/removed-container.log" >&2
     remove_container "$container" || failed=1
   done
   return "$failed"
@@ -112,6 +125,9 @@ stop_application || fail "the application's container could not be stopped or re
 leave_stopped() {
   local status=$?
   trap - EXIT
+  # Stopping can take a minute, and an interrupted stop leaves the container
+  # restarting with nothing said.
+  trap '' INT TERM HUP
   if ((status != 0)); then
     if stop_application; then
       echo "scrapeyard secure compose deployment: failed; the application is left stopped" >&2

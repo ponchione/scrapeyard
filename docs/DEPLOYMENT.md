@@ -386,8 +386,12 @@ and also a start that fails, whose container would otherwise go on restarting
 and could come up later. The wrapper holds a lock under `/run/scrapeyard`, so
 a second deployment waits for the first. A container that Docker cannot stop
 (one that dies before it is up is restarted without end, and `docker stop`
-fails on it) is removed after its last output has been printed; the next start
-creates it again. Do not resume ingress until
+fails on it) is removed, and the next start creates it again. Its last output
+is kept in `/run/scrapeyard/removed-container.log`, which only root can read,
+and not in the wrapper's own output: a start that fails on a setting can print
+part of that setting. If the container cannot be removed either, the wrapper
+says so in place of "the application is left stopped"; look at
+`docker ps --all`. Do not resume ingress until
 authenticated `/health/ready`,
 a known `/results/{id}` read, effective host/security policy, and exactly one
 application container/process have been verified. Compose health alone tests
@@ -495,7 +499,10 @@ followed by moving the `current` link. Its output is printed when it ends;
 - **Failed after the application was stopped** (the policy could not be
   installed, the application did not start or did not attest the policy). The
   wrapper leaves the application stopped, not restarting, and the link stays
-  on the earlier release. Promote that release again to return to it.
+  on the earlier release. Promote that release again to return to it. If the
+  wrapper ends with "could not be stopped or removed" instead, Docker would
+  not let go of the container: it may still be restarting, and the next
+  deployment is refused until it has been cleared.
 - **Stopped** with `systemctl stop scrapeyard-promote.service`. It is reported
   as a failure and the link is not moved. Depending on how far it had got, the
   earlier release is still running or the application is stopped. `promote`
@@ -591,13 +598,16 @@ The allowlist carries one addition. runc 1.3.3 (the release that fixed
 CVE-2025-31133, CVE-2025-52565 and CVE-2025-52881) opens
 `/proc/thread-self/fd` with `openat2` after it has loaded the filter, and a
 profile that refuses the call starts no container and no `docker exec`
-("unsafe procfs detected"). `openat2` is therefore allowed. runc answers
+("unsafe procfs detected"). runc 1.5.2 starts under the older profile; the
+versions between were not tried. `openat2` is therefore allowed. runc answers
 `ENOSYS` for any system call numbered above the highest one a profile names,
 and the default `EPERM` for the rest, so the nine calls numbered between the
-old highest and `openat2` are named with `ENOSYS`: they answer as they did
-before. glibc falls back from `clone3` to `clone` on `ENOSYS` only; left to
-the default, no thread would start. Add a newer system call to the profile
-the same way, with every lower-numbered one it passes.
+old highest and `openat2` are named with `ENOSYS`: on x86-64, the only
+architecture the image is built for, they answer as they did before. glibc
+falls back from `clone3` to `clone` on `ENOSYS` only; left to the default, no
+thread would start. Add a newer system call to the profile the same way, with
+every lower-numbered one it passes, in a rule with no `args`, `includes` or
+`excludes`: Docker drops a rule whose conditions do not hold.
 Do not replace either policy with `unconfined`. `/data`, bounded `/tmp`, `/run`,
 home cache/config and Camoufox state tmpfs, and `/dev/shm` are the only writable
 areas.
