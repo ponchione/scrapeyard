@@ -30,12 +30,13 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     first stop. The wrapper now removes a container that is not `exited`
     after the stop. Its first version, tried on the host, failed once
     because the removal can fail the same way; it is retried.
-  An independent review of the three fixes found nothing wrong with them and
-  five gaps around them, closed before the merge: the new seccomp test passed
-  two broken profiles, a container that could not be removed was left without
-  its restart policy, a signal cut the clearing of a failed start short, the
-  removed container's last output went to the journal, and nothing tested
-  what the health check verifies.
+  An independent review found the probe and seccomp fixes sound and three
+  defects in the first version of TD-81's: a container that could not be
+  removed was left without its restart policy, a signal cut the clearing of a
+  failed start short, and the removed container's last output went to the
+  journal. It also found that the new seccomp test passed two broken
+  profiles and that nothing tested what the health check verifies. All were
+  closed before the merge and checked again by the same reviewer.
   With the three fixes applied by hand the application started, attested the
   policy, refused the host's own addresses, private ranges and the metadata
   address from its container, and completed `basic`, `dynamic` and `stealthy`

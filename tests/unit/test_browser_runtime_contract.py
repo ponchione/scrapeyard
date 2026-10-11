@@ -144,6 +144,10 @@ def _seccomp_rules() -> dict[str, list[dict]]:
     assert profile["defaultAction"] == "SCMP_ACT_ERRNO" and "defaultErrnoRet" not in profile
     rules: dict[str, list[dict]] = {}
     for rule in profile["syscalls"]:
+        # Docker reads keys without regard to case, so `Includes` beside
+        # `includes` would be a condition this test does not see.
+        assert set(rule) <= {"comment", "names", "action", "args", "includes", "excludes", "errnoRet"}
+        assert type(rule.get("errnoRet", 0)) is int
         for name in rule["names"]:
             rules.setdefault(name, []).append(rule)
     return rules

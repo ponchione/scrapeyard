@@ -314,7 +314,8 @@ def _wrapper_with_fake_docker(tmp_path, docker_script):
 # stop ("unreadable" fails the read). The container exists from the start with
 # APP_EXISTS=yes, and otherwise once the application has been started.
 # REMOVAL=fails makes every `docker rm` fail, and APP_ONEOFF=True makes the
-# container one that `docker compose run` created.
+# container one that `docker compose run` created. APP_POLICY is its restart
+# policy ("unreadable" fails the read).
 _STATE = '{{index .Config.Labels "com.docker.compose.oneoff"}} {{.State.Status}}'
 _FAKE_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$CALLS"
@@ -328,7 +329,8 @@ case "$*" in
   "ps --all --quiet --filter id=app1") ! present || echo app1 ;;
   'inspect --format {{index .Config.Labels "com.docker.compose.oneoff"}} {{.State.Status}} app1')
     [[ "${APP_STATE:-}" != unreadable ]] || exit 1; echo "${APP_ONEOFF:-False} ${APP_STATE:-exited}" ;;
-  "inspect --format {{.HostConfig.RestartPolicy.Name}} app1") echo unless-stopped ;;
+  "inspect --format {{.HostConfig.RestartPolicy.Name}} app1")
+    [[ "${APP_POLICY:-}" != unreadable ]] || exit 1; echo "${APP_POLICY:-unless-stopped}" ;;
   "logs --tail 50 app1") echo "ValidationError: input_value='c2VjcmV0'" ;;
   "rm --force app1") [[ "${REMOVAL:-works}" == works ]] || exit 1; touch "$CALLS.removed" ;;
   "inspect "*) echo abcdef123456 ;;
@@ -372,6 +374,11 @@ def test_a_container_docker_cannot_stop_is_removed_after_a_failed_start(tmp_path
     # Docker restarted it without end and `docker stop` reported "did not
     # receive an exit event", so the stop alone left it restarting.
     command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    # Output kept from an earlier removal, readable by others, is replaced.
+    kept = tmp_path / "lock" / "removed-container.log"
+    kept.parent.mkdir()
+    kept.write_text("an earlier container\n")
+    kept.chmod(0o644)
 
     result = subprocess.run(
         command, cwd=tmp_path, env=dict(env, START_STATUS="1", APP_STATE=state), capture_output=True
@@ -381,7 +388,6 @@ def test_a_container_docker_cannot_stop_is_removed_after_a_failed_start(tmp_path
     assert Path(env["CALLS"]).read_text().splitlines()[-len(_CLEARING) :] == _CLEARING
     stderr = result.stderr.decode()
     shown = "unknown" if state == "unreadable" else state
-    kept = tmp_path / "lock" / "removed-container.log"
     assert f"the application's container is {shown}, not stopped, and is being removed" in stderr
     assert f"its last output is in {kept}" in stderr
     assert stderr.rstrip().endswith("failed; the application is left stopped")
@@ -409,6 +415,30 @@ def test_a_failed_start_says_so_when_its_container_cannot_be_removed(tmp_path):
     stderr = result.stderr.decode()
     assert "the application is left stopped" not in stderr
     assert "could not be stopped or removed; see 'docker ps --all'" in stderr
+
+
+@pytest.mark.parametrize(
+    ("policy", "updates"), [("no", ["docker update --restart=no app1"]), ("", []), ("unreadable", [])]
+)
+def test_a_container_that_cannot_be_removed_is_not_given_a_policy_it_did_not_have(tmp_path, policy, updates):
+    command, env = _wrapper_with_fake_docker(tmp_path, _FAKE_DOCKER)
+    fake = Path(env["PATH"].split(":")[0]) / "docker"
+    # An empty answer cannot be asked for through the environment default.
+    fake.write_text(fake.read_text().replace('echo "${APP_POLICY:-unless-stopped}"', 'echo "${APP_POLICY-unless-stopped}"'))
+
+    result = subprocess.run(
+        command,
+        cwd=tmp_path,
+        env=dict(env, START_STATUS="1", APP_STATE="restarting", REMOVAL="fails", APP_POLICY=policy),
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    calls = Path(env["CALLS"]).read_text().splitlines()
+    # Unread, the policy is left as it is: switched off, it could not be put back.
+    assert [call for call in calls if call.startswith("docker update")] == updates
+    assert calls.count("docker rm --force app1") == 3
+    assert b"could not be stopped or removed" in result.stderr
 
 
 def test_a_signal_while_a_failed_start_is_cleared_does_not_cut_it_short(tmp_path):

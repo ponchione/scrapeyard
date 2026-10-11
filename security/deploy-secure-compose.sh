@@ -69,21 +69,28 @@ fi
 # way as the stop while a start is under way, so it is tried again; with the
 # restart policy off, no further start follows it. A container that still
 # cannot be removed gets its policy back: left without one, it would be
-# started by a later deployment as a container that no longer restarts.
+# started by a later deployment as a container that no longer restarts. For
+# the same reason the policy is switched off only once it has been read, and
+# the whole exchange ignores signals.
 remove_container() {
-  local container=$1 policy remaining
-  policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null) || policy=""
-  docker update --restart=no "$container" >/dev/null 2>&1 || true
-  for _ in 1 2 3; do
-    docker rm --force "$container" >/dev/null 2>&1 || true
-    if remaining=$(docker ps --all --quiet --filter "id=$container") && [[ -z "$remaining" ]]; then
-      return 0
+  local container=$1
+  (
+    trap '' INT TERM HUP
+    policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null) || policy=""
+    [[ -z "$policy" ]] || docker update --restart=no "$container" >/dev/null 2>&1 || true
+    for _ in 1 2 3; do
+      docker rm --force "$container" >/dev/null 2>&1 || true
+      if remaining=$(docker ps --all --quiet --filter "id=$container") && [[ -z "$remaining" ]]; then
+        exit 0
+      fi
+      sleep 1
+    done
+    if [[ -n "$policy" && "$policy" != "no" ]]; then
+      docker update --restart="$policy" "$container" >/dev/null 2>&1 || \
+        echo "scrapeyard secure compose deployment: the container's restart policy ($policy) could not be put back" >&2
     fi
-    sleep 1
-  done
-  [[ -z "$policy" || "$policy" == "no" ]] || \
-    docker update --restart="$policy" "$container" >/dev/null 2>&1 || true
-  return 1
+    exit 1
+  )
 }
 
 # Leaves no application container that can run. `docker compose stop` settles
@@ -107,7 +114,8 @@ stop_application() {
     case "$state" in
       "False exited" | "True "*) continue ;;
     esac
-    (umask 077 && docker logs --tail 50 "$container" > "$LOCK_DIR/removed-container.log" 2>&1) || true
+    install -m 600 /dev/null "$LOCK_DIR/removed-container.log" && \
+      docker logs --tail 50 "$container" 2>&1 | head -c 65536 >> "$LOCK_DIR/removed-container.log" || true
     echo "scrapeyard secure compose deployment: the application's container is ${state#* }, not stopped, and is being removed; its last output is in $LOCK_DIR/removed-container.log" >&2
     remove_container "$container" || failed=1
   done
@@ -124,10 +132,10 @@ stop_application || fail "the application's container could not be stopped or re
 # deployment.
 leave_stopped() {
   local status=$?
-  trap - EXIT
-  # Stopping can take a minute, and an interrupted stop leaves the container
-  # restarting with nothing said.
+  # Stopping can take a minute and a half, and an interrupted stop leaves the
+  # container restarting with nothing said.
   trap '' INT TERM HUP
+  trap - EXIT
   if ((status != 0)); then
     if stop_application; then
       echo "scrapeyard secure compose deployment: failed; the application is left stopped" >&2

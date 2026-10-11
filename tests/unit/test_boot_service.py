@@ -185,6 +185,8 @@ def test_promotion_deploys_inside_one_unit_and_then_moves_the_link(host):
     (asked,) = host.called("systemd-run")
     # A stopped oneshot unit is a failure; a stopped simple one reports success.
     assert "--service-type=oneshot" in asked.split()
+    # Longer than clearing a container Docker will not stop takes (about 90 s).
+    assert "--property TimeoutStopSec=140" in asked
     assert "--wait" in asked.split()
     assert "--unit scrapeyard-promote" in asked
     # The deployment and the link move are one command inside the unit, so a

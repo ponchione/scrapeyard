@@ -193,8 +193,10 @@ case "$ACTION" in
     [[ -z "$cursor" ]] || output_since=(--after-cursor "$cursor")
     echo "Deploying $release as $PROMOTE_UNIT.service (journalctl -fu $PROMOTE_UNIT to follow)..."
     status=0
+    # A stopped deployment may need a minute and a half to clear a container
+    # Docker will not stop; systemd's default would kill it at 90 seconds.
     systemd-run --quiet --wait --collect --unit "$PROMOTE_UNIT" --service-type=oneshot \
-      --property TimeoutStartSec=900 "$self" apply "$release" || status=$?
+      --property TimeoutStartSec=900 --property TimeoutStopSec=140 "$self" apply "$release" || status=$?
     # systemd 255 returns here as soon as a stopped unit's start job is
     # cancelled, while the deployment it interrupted is still stopping the
     # application. Judge the outcome only once the unit is gone.
