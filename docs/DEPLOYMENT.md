@@ -31,9 +31,9 @@ was rehearsed:
 
 | Package | Version |
 | --- | --- |
-| `docker-ce`, `docker-ce-cli` | 28.5.2 |
-| `containerd.io` | 1.7.29, which carries runc 1.3.3 |
-| `docker-compose-plugin` | 2.38.2 |
+| `docker-ce`, `docker-ce-cli` | 29.9.0 |
+| `containerd.io` | 2.4.1, which carries runc 1.5.2 |
+| `docker-compose-plugin` | 5.6.0 |
 
 The container smoke lane and the release rehearsal install the same versions
 before they build anything (`scripts/install_container_runtime.sh`), and fail
