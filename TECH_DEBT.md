@@ -6,6 +6,34 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-12** (`b4be34c` onwards): a pass on what could be fixed without
+  touching the production host, which was carrying retailer runs.
+  - TD-82 is closed. The smoke lane and the rehearsal install the Docker,
+    containerd, runc and Compose a host runs before they build anything. On
+    that runtime the release that started no container on the host fails in
+    the lane as well (run 38297741564: `2fa17b0`, the commit before the fix,
+    cannot start its application container), and `main` passes (run
+    38297729989).
+  - TD-19's runbook is written: the tunnel, the connector's unit, the routes
+    and the host's baseline are in the guide and under `security/`.
+  - TD-83: the seccomp profile is now Docker 29.9.0's default plus one rule,
+    generated and held to that by a test. An independent review found the
+    profile sound for starting containers on runc 1.3.3 and 1.5.2, and five
+    defects around it, all closed before the merge and checked again by the
+    same reviewer: `AF_VSOCK` sockets were still reachable through the
+    32-bit `socketcall` entry, which only AppArmor can close (it now does);
+    `setns` was allowed and no browser needs it; the test trusted the script
+    it checked; and the documents said the bounding set limits a user
+    namespace, which it does not. That last point is TD-87. The profile has
+    not run on the host.
+  - TD-84: the lanes pass on Docker 29.9.0, containerd.io 2.4.1 (runc 1.5.2)
+    and Compose 5.6.0, and a release built on 28.5.2 loads and runs there
+    (run 38306888178). The suspected difference is real: a release built
+    under one image store is refused under the other, in both directions.
+    The lanes and the guide now keep to Docker's classic store (TD-86 is
+    what that leaves). The host's own upgrade is all that is left of TD-84.
+  - TD-85: read in the code, a task left in the queue for a job the database
+    lost cannot fetch anything.
 - **2026-10-12** (`447da7a`; nothing in this repository changed): the
   production host was connected to Eyebox's staging ingest and tested. It
   still runs release `523d805`, and this entry was checked against the host
@@ -212,7 +240,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-86**) and use this template:
+7. **New findings** take the next free ID (**TD-88**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -244,6 +272,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
 | After the first Actions pass (2026-10-10, `166ceac`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,614 passed, 17 skipped, 90.44% coverage. On GitHub at the same commit: CI (Quality 3.10: 2,611 passed, 20 skipped; Quality 3.12: 2,614 passed, 17 skipped, with Chromium installed for the three real-browser tests; distribution build; live Redis), Dependency audit on both legs, Container security, browser smoke (4 min; image 3.36 GB), and release qualification quick (10 min) and full (23 min) all pass, with no deprecation or runner warnings. Eyebox's client tests (299 passed) and 54 configs pass |
 | After the deployment pass (2026-10-10, `2c0f4be`; 2,695 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
+| After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -365,14 +394,19 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Ready as single pull requests, in this order: TD-82, then TD-84.
+Nothing is ready that leaves the production host alone. The two entries
+under "Ready to implement" each wait for a window on it:
+- TD-84: pull request #25 raises the pinned runtime to Docker 29. Merge it
+  when the host is upgraded and rebooted, not before.
+- TD-83: the new seccomp profile reaches the host with the next release,
+  which is also the release TD-22 needs for its rollback.
 
 CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
 and rehearses it; dispatch it on the commit to release.
 
 **Coordinated:**
-- TD-83: needs a security review.
+- TD-87: needs a security review.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs. The host is up
@@ -380,12 +414,12 @@ and rehearses it; dispatch it on the commit to release.
   - TD-18 and TD-17 wait for the owner: what to do about the two beta
     retailers that refuse the host's address, and leave to run each beta job
     from it. Every retailer request from the host needs the owner's word.
-  - TD-19 needs its runbook written and one run from Eyebox's ingest.
+  - TD-19 needs one run from Eyebox's ingest.
   - TD-20 needs a monitoring service and TD-21 an off-host store, both the
     owner's choice.
   - TD-22 needs a second release on the host to roll back from.
 
-**Deferred:** TD-48, TD-49 and TD-85.
+**Deferred:** TD-48, TD-49, TD-85 and TD-86.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -395,7 +429,7 @@ and rehearses it; dispatch it on the commit to release.
 | --- | --- | --- | --- |
 | TD-17 | P2 | operational | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 | TD-18 | P1 | operational | Production forward-proxy selection and egress qualification are incomplete |
-| TD-19 | P1 | operational | The production ingress is in no runbook and no Eyebox run has used it |
+| TD-19 | P1 | operational | No Eyebox run has used the production ingress, and its rotation is untried |
 | TD-20 | P1 | operational | Secure startup after host/Docker restart and runtime monitoring are unqualified |
 | TD-21 | P1 | operational | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
@@ -403,85 +437,104 @@ and rehearses it; dispatch it on the commit to release.
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-82 | P2 | ready | The rehearsal runner's container runtime is older than a patched host's |
-| TD-83 | P2 | coordinated | The seccomp allowlist predates the system calls added since Linux 5.1 |
-| TD-84 | P2 | ready | No lane has run a release on Docker 29 |
+| TD-83 | P2 | ready | The seccomp profile derived from Docker's default has not run on the production host |
+| TD-84 | P2 | ready | The production host is held on Docker 28 |
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
+| TD-86 | P3 | deferred | A release loads only under the image store it was built on |
+| TD-87 | P2 | coordinated | Inside a user namespace a process in the container reaches packet and netfilter sockets |
 
 ## Ready to implement
 
-### TD-82 — The rehearsal runner's container runtime is older than a patched host's
+The code for both is written. Each waits for a window on the production host.
 
-**Priority:** P2 · **Area:** CI, deployment · **Risk:** low · **Contract:** none · **Depends on:** —
+### TD-84 — The production host is held on Docker 28
 
-**Problem:** The rehearsal and smoke lanes use whatever Docker, runc and
-Compose GitHub's `ubuntu-24.04` image carries (Docker 28.0.4 and Compose
-2.38.2 on 2026-10-10). The first production host, installed from Docker's
-repository a day later, got runc 1.3.3, and a release that had passed every
-lane could not start a container there (TD-80, fixed). The lanes still run
-the older runtime, so they would pass that release today, and they will meet
-the next such difference only when the runner image happens to change.
-**Code:** `.github/workflows/release-rehearsal.yml`, `.github/workflows/ci.yml`
-(the smoke job), `docs/DEPLOYMENT.md`.
-**Fix:** Before a lane builds anything, install pinned `docker-ce`,
-`containerd.io` and the Compose plugin from Docker's repository: the versions
-the deployment guide names for a host. Write `docker version` and
-`runc --version` into the lane's evidence, and state the versions in the
-guide. Raise the pins and the guide together.
-**Done when:** A lane's evidence shows the pinned versions, and they are the
-ones the production host runs. With runc 1.3.3 among them, a rehearsal of
-`b371a37` fails at its first deployment with "unsafe procfs detected"; runc
-1.5.2 does not show it.
+**Priority:** P2 · **Area:** deployment · **Risk:** medium · **Contract:** none · **Depends on:** a window on the host
 
-### TD-84 — No lane has run a release on Docker 29
-
-**Priority:** P2 · **Area:** deployment · **Risk:** medium · **Contract:** none · **Depends on:** TD-82
-
-**Problem:** The production host runs Docker 28.5.2 and Compose 2.38.2, held
-at those versions, because no lane has run anything newer. Docker's
-repository offered 29.9.0 and Compose 5.6.0 on 2026-10-11. One difference to
-check first: `release_artifact.py load` compares the IDs of the images it
-loads with the release's manifest, and Docker 29 is reported to store images
-with containerd on a new installation, which changes the ID an image is
-given. Nothing here has been run on it. On 2026-10-12 the four held packages
-(`docker-ce`, `docker-ce-cli`, `containerd.io` and the Compose plugin) were
-the host's only pending upgrades: until this entry is done the host takes no
+**Problem:** The production host runs Docker 28.5.2, containerd.io 1.7.29
+and Compose 2.38.2, held at those versions. On 2026-10-12 the four held
+packages were its only pending upgrades: until it moves, the host takes no
 fixes for them, security fixes included.
-**Code:** `scripts/release_artifact.py` (`load`, `verify`),
-`security/deploy-secure-compose.sh`, `scripts/run_deployment_rehearsal.sh`.
-**Fix:** With TD-82's pins, run the rehearsal on Docker 29 and Compose 5. Fix
-what fails, then raise the pins, the guide and the host.
-**Done when:** A dispatched rehearsal passes on Docker 29 and the production
-host has been upgraded and rebooted on it.
+
+**Done on 2026-10-12:** the smoke lane and the rehearsal pass on Docker
+29.9.0, containerd.io 2.4.1 (runc 1.5.2) and Compose 5.6.0, and a release
+built on 28.5.2 was loaded and rehearsed on them with every image removed
+first, which is the host's path (run 38306888178). Nothing in the release or
+the wrapper needed a change. The one thing that fails is a change of image
+store (TD-86), which an upgrade in place does not make.
+**Code:** `scripts/install_container_runtime.sh`, `docs/DEPLOYMENT.md`
+("Container runtime versions").
+**Fix:** Pull request #25 raises the pins and the guide. In one window:
+check Docker's repository for a newer 29 and raise the pins to it, let the
+lanes pass, merge, then on the host take the hold off, install the pinned
+versions, set `"features": {"containerd-snapshotter": false}` in
+`/etc/docker/daemon.json`, hold again and reboot.
+**Done when:** the host runs the pinned versions after a reboot, with the
+checks that follow any reboot passing, and `docker info` still names
+`overlay2`.
+
+### TD-83 — The seccomp profile derived from Docker's default has not run on the production host
+
+**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** the next release
+
+**Done on 2026-10-12:** `security/seccomp/chromium.json` is generated from
+Docker 29.9.0's default profile plus one rule (`clone` and `unshare`), the
+difference is recorded in `security/seccomp/README.md`, and the change was
+reviewed as a security change, twice. The smoke lane, with all three
+browsers, and the rehearsal pass under the runc the host runs (1.3.3, built
+with libseccomp 2.5.5).
+
+**Still open:**
+- A deployment on the production host. The profile and the AppArmor change
+  beside it (`deny network vsock`) ship with the next release; the wrapper
+  installs the AppArmor profile at every promotion and boot.
+- Nothing tests that the AppArmor denial refuses an `AF_ALG` or `AF_VSOCK`
+  socket opened through the 32-bit `socketcall` entry. The development host
+  has no AppArmor and no lane tries it; it rests on Moby's statement that
+  AppArmor's check does not depend on the entry used. A probe in the smoke
+  lane would settle it.
+- That runc's libseccomp does not know nine of the profile's newest names
+  (`statmount`, `listmount`, `mseal`, `uretprobe`, the four `*xattrat` calls
+  and `riscv_hwprobe`), so runc skips them there and they answer `ENOSYS`.
+  Harmless today; it changes by itself when the host's packages move.
+**Code:** `security/seccomp/`, `scripts/derive_seccomp_profile.py`,
+`security/apparmor/scrapeyard-chromium`,
+`tests/unit/test_browser_runtime_contract.py`.
+**Done when:** a release that carries the profile runs on the host, browser
+fetches in all three modes pass there, and the `socketcall` path is tested.
 
 ## Coordinated
 
 These need a decision, a security review, an Eyebox change, or real-traffic
 data before any code.
 
-### TD-83 — The seccomp allowlist predates the system calls added since Linux 5.1
+### TD-87 — Inside a user namespace a process in the container reaches packet and netfilter sockets
 
-**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** —
+**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** a security review
 
-**Problem:** `security/seccomp/chromium.json` is the profile Playwright
-publishes: Docker's default list of about 2020 plus `clone`, `setns` and
-`unshare` for Chromium's user-namespace sandbox. Its highest-numbered system
-call was `io_uring_register` (427) until TD-80 added `openat2`. Everything
-newer (`faccessat2`, `close_range`, `clone3`, `epoll_pwait2`, `landlock_*`,
-`process_madvise` and the rest) answers `ENOSYS`, and callers fall back. That
-works today: browser fetches passed on the production host on 2026-10-11. It
-holds only while every caller treats `ENOSYS` as an old kernel, and runc
-1.3.3 was the first that did not. The next one fails the same way, in
-production first (TD-82).
-**Code:** `security/seccomp/chromium.json`,
-`tests/unit/test_browser_runtime_contract.py`.
-**Fix:** Derive the profile again from the current Moby default plus the
-three user-namespace calls. Decide `clone3` on purpose: Moby answers `ENOSYS`
-because a filter cannot read its flags, and this profile already allows
-`clone` unfiltered. Keep the difference from the Moby default as a short list
-beside the profile, and have the change reviewed as a security change.
-**Done when:** The reviewed difference is recorded, and the smoke lane, the
-rehearsal and a deployment on a host with the current runc pass.
+**Problem:** found by the review of TD-83; older than it, and unchanged by
+it. The seccomp profile lets any process in the container call `clone` and
+`unshare` with any flags, because the browsers' sandboxes need user
+namespaces. The kernel gives a process every capability inside a user
+namespace it creates, whatever the container's bounding set holds. The
+filter's capability-gated rules stay closed there (`mount`, `bpf` and the
+rest were tried and refused), but in a new network namespace the process can
+open `AF_PACKET` and `NETLINK_NETFILTER` sockets: the kernel's packet and
+netfilter code, where local privilege escalations have been found before. A
+renderer cannot do this, since Chromium's own sandbox refuses it these
+calls. Code that has taken over the browser process, the driver or the
+application can.
+**Code:** `security/seccomp/chromium.json` (the added rule),
+`security/apparmor/scrapeyard-chromium` (`network,`).
+**Fix:** to be chosen in review. Two candidates, neither tried with the
+production browsers: deny the packet family and netfilter's netlink protocol
+in the AppArmor profile, if Chromium's use of route netlink survives it; and
+narrow the added rule to the flags the sandboxes use. The reviewer's
+experiment ran Playwright's Chromium and Firefox with the user, PID, network
+and IPC flags allowed and the mount, UTS and cgroup flags refused; with the
+IPC flag refused too, Firefox hung.
+**Done when:** the reviewed choice is in the profiles, and the smoke lane
+passes with rebrowser Chromium and Camoufox.
 
 ### TD-45 — Bundled browsers are months behind upstream
 
@@ -809,11 +862,12 @@ is not automatically evidence of safe destination filtering.
 
 Trusted local or fixture mode cannot close this item.
 
-### TD-19 — The production ingress is in no runbook and no Eyebox run has used it
+### TD-19 — No Eyebox run has used the production ingress, and its rotation is untried
 
 **Priority/ownership:** P1; Scrapeyard ingress/security. Until 2026-10-12
 this entry was "Restricted Hetzner HTTPS ingress and Railway credential
-handoff are incomplete".
+handoff are incomplete", and for part of that day "The production ingress is
+in no runbook and no Eyebox run has used it".
 
 **Done on 2026-10-12, by another route than the one planned below:** the
 owner's domain is on Cloudflare, so ingress is a Cloudflare Tunnel that the
@@ -846,14 +900,16 @@ nothing.
 **Still open:**
 - No scrape has been submitted from Railway. The first whole run from the
   staging ingest (TD-17) proves submit, poll and download.
-- None of it is in a runbook. [DEPLOYMENT.md](docs/DEPLOYMENT.md) does not
-  mention a tunnel. The connector's unit and its address restrictions, the
-  route list, and the host's firewall, SSH and update settings exist on the
-  host only, so the host cannot be rebuilt from what is written down.
-  Eyebox's runbook and topology still describe a reverse proxy on another
+- The runbook was written from the host on 2026-10-12
+  ([DEPLOYMENT.md](docs/DEPLOYMENT.md#ingress-through-a-tunnel), with the
+  connector's unit and the route list under `security/`, and a test that
+  holds the routes to the application's own). Nobody has yet rebuilt a host
+  from it. On the host the unit carries the host's own addresses in the unit
+  file; the guide puts them in a drop-in, which was not tried there.
+- Eyebox's runbook and topology still describe a reverse proxy on another
   provider's server (C-10).
-- Rotation is neither documented nor tried, for the service token (it expires
-  on 2027-10-12) or for the API credentials.
+- Rotation is documented and not tried, for the service token (it expires on
+  2027-10-12) and for the API credentials.
 - Not tried through the tunnel: a request over the size limit, and whether
   the edge's or the connector's logs hold a credential.
 - The zone's Browser Integrity Check answers 403 to some client signatures
@@ -1271,19 +1327,45 @@ TD-20.
   marker of the submission that was running. After the reset the queue held
   a task for a job the database did not have. When the marker expired, one
   run budget (45 minutes) later, the queue delivered the task again. It was
-  recorded as finished and the application logged nothing. Whether it
-  fetched the page was not established.
+  recorded as finished. Read on 2026-10-12, the code cannot fetch for such a
+  task: the queue carries the job and run identifiers only, the
+  configuration comes from the database (`get_queued_run_config`, called by
+  `_task_handler` in `src/scrapeyard/api/dependencies.py`), and without the
+  row the lookup raises `RunOwnershipError` and the handler returns before
+  `scrape_task`, logging "Skipping superseded or terminal queue delivery" at
+  INFO. The note made on the host that nothing was logged was not rechecked
+  against that.
 
 **Why deferred:** the owner accepted it for the beta on 2026-10-12: no code
 change and no release for it. Not tried: what Eyebox does when a run it was
 given a 202 for answers 404.
 
 **Revisit when:** a lost submission is seen in practice, or a second consumer
-relies on a 202. Start with the cheap half: establish what the worker does
-with a task whose job row is missing (`scrape_task`,
-`_load_job_execution_context` in `src/scrapeyard/queue/worker.py`). It should
-end without a fetch and say so in the log. `synchronous=FULL` adds a disk
-sync to every commit and has not been measured on the host.
+relies on a 202. A test that delivers a task for a job the database does not
+have would hold the reading above. `synchronous=FULL` adds a disk sync to
+every commit and has not been measured on the host.
+
+### TD-86 — A release loads only under the image store it was built on
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** a release's manifest and its Compose overlay name each image by
+the identifier Docker gave it when the release was built. Under Docker's
+classic image store that is the digest of the image's configuration; under
+containerd's image store, which a new installation of Docker 29 chooses, it
+is another digest. `release_artifact.py load` loads the archive and then
+finds no image with the recorded identifier. Tried on 2026-10-12 in three
+combinations (run 38306888178), each refused at the load before anything was
+stopped.
+
+**Why deferred:** the lanes and the guide keep to the classic store
+(`features.containerd-snapshotter: false`), the production host has it, and
+an upgrade in place keeps it. Nothing is lost today.
+
+**Revisit when:** Docker announces the end of the classic store, or a host
+has to use containerd's. The fix is to identify a loaded image by something
+both stores agree on, read from the archive itself, and to choose how an
+older release, which records one identifier only, is still loaded.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 
