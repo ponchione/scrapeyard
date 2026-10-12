@@ -17,7 +17,7 @@ One rule, at the top of the list:
   in further new namespaces inside it. Moby's default allows these calls
   with namespace flags only to a container that holds `CAP_SYS_ADMIN`, and
   this one holds no capability. Narrowing the rule to the user, PID and
-  network flags was tried and hangs Firefox.
+  network flags was tried and hangs Firefox, which also needs the IPC flag.
 
 `setns`, which the profile Playwright publishes also allows, is not in the
 rule: both browsers run sandboxed without it.
@@ -27,9 +27,10 @@ gives a process every capability inside a namespace it creates. What it can
 do there is bounded by this filter and by the AppArmor profile
 (`../apparmor/scrapeyard-chromium`). Docker decides the filter's
 capability-gated rules once, against the container's own bounding set, so
-`mount`, `pivot_root`, `bpf`, `keyctl` and the mount calls stay refused
-inside the namespace. What does open there is the network stack of a new
-network namespace: packet and netfilter sockets.
+`mount`, `umount2`, `sethostname`, `bpf` and the mount calls stay refused
+inside the namespace, and `pivot_root` and `keyctl` are in no rule at all.
+What does open there is the network stack of a new network namespace:
+packet and netfilter sockets.
 
 `cap_add: SYS_CHROOT` in Compose exists for the filter alone. Docker keeps
 the `chroot` rule only for a container whose bounding set holds that

@@ -133,8 +133,16 @@ _MOBY_DEFAULT_SHA256 = "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e2
 _BOUNDING_SET = {"CAP_SYS_CHROOT"}
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    # Python keeps the last of two equal keys and Docker's reader does not.
+    assert len({key for key, _ in pairs}) == len(pairs)
+    return dict(pairs)
+
+
 def _seccomp_profile() -> dict:
-    profile = json.loads(Path("security/seccomp/chromium.json").read_text())
+    profile = json.loads(
+        Path("security/seccomp/chromium.json").read_text(), object_pairs_hook=_no_duplicate_keys
+    )
     # Docker reads keys without regard to case, so `DefaultAction` beside
     # `defaultAction`, or `Includes` in a rule, would be a setting these
     # tests do not see. Every key is therefore one they know.

@@ -1,6 +1,6 @@
-# Derived from the Moby default container profile (as Docker 29.9.0
-# generates it), with one deliberate addition: Chromium may create
-# unprivileged user namespaces.
+# The rules of the Moby default container profile (the template in Docker
+# 29.9.0), with one deliberate addition: Chromium may create unprivileged
+# user namespaces.
 abi <abi/3.0>,
 
 include <tunables/global>
