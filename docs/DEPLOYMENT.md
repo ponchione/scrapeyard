@@ -35,9 +35,23 @@ was rehearsed:
 | `containerd.io` | 1.7.29, which carries runc 1.3.3 |
 | `docker-compose-plugin` | 2.38.2 |
 
+A host also keeps Docker's classic image store (`docker info` names the
+storage driver `overlay2`). A release names its images by identifier, and an
+image has another identifier under containerd's image store. Loaded there, a
+release built on the classic store is refused at the load, before the
+running application is stopped, and so is the reverse. An upgrade in place
+keeps the store a host has. A new installation of Docker 29 or later chooses
+containerd's unless `/etc/docker/daemon.json` says otherwise before Docker
+first starts:
+
+```json
+{ "features": { "containerd-snapshotter": false } }
+```
+
 The container smoke lane and the release rehearsal install the same versions
-before they build anything (`scripts/install_container_runtime.sh`), and fail
-when the engine, containerd, runc or Compose that then runs is another one.
+and select the same image store before they build anything
+(`scripts/install_container_runtime.sh`), and fail when the engine,
+containerd, runc, Compose or image store that then runs is another one.
 The rehearsal records them in `container-runtime.txt`. A runner image's own
 Docker is not a stand-in: a release that had passed every lane on the
 runner's runc started no container under the host's

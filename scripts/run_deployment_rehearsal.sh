@@ -317,6 +317,7 @@ docker_engine=$(docker version --format '{{.Server.Version}}')
 docker_compose=$(docker compose version --short)
 containerd=$(containerd --version 2>/dev/null | awk '{print $3}')
 runc=$(runc --version 2>/dev/null | awk 'NR == 1 {print $3}')
+image_store=$(docker info --format '{{.Driver}}')
 kernel=$(uname -r)
 EOF
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrapeyard-rehearsal.XXXXXX")"

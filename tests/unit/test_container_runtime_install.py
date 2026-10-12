@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -28,6 +29,7 @@ case "$*" in
   *Server.Version*) echo "$FAKE_ENGINE" ;;
   *Client.Version*) echo "$FAKE_CLIENT" ;;
   *RuncCommit*) echo "$FAKE_RUNC" ;;
+  *DriverStatus*) echo "$FAKE_STORE" ;;
   "compose version --short") echo "$FAKE_COMPOSE" ;;
   *) echo "unexpected docker $*" >&2; exit 64 ;;
 esac
@@ -78,6 +80,8 @@ def _run(
         "SHIM_DIR": str(shims),
         "SHIM_LOG": str(log),
         "SCRAPEYARD_RUNTIME_APT_DIR": str(apt),
+        "SCRAPEYARD_RUNTIME_DOCKER_DIR": str(tmp_path / "docker"),
+        "FAKE_STORE": "overlay2 [[Backing Filesystem extfs] [Supports d_type true]]",
         "FAKE_KEY": DOCKER_KEY,
         "FAKE_ENGINE": pins["DOCKER"],
         "FAKE_CLIENT": pins["DOCKER"],
@@ -109,6 +113,39 @@ def test_installer_installs_the_pinned_packages_and_checks_what_runs(tmp_path: P
     assert f"signed-by={apt}/keyrings/docker.asc" in source
     assert "https://download.docker.com/linux/ubuntu" in source
     assert "runc 1.3.3" in result.stdout
+    assert "image store overlay2" in result.stdout
+
+
+def test_installer_selects_the_classic_image_store_and_keeps_other_daemon_settings(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / "docker/daemon.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        '{"cgroup-parent": "/actions_job", "features": {"containerd-snapshotter": true, "cdi": true}}',
+        encoding="utf-8",
+    )
+
+    result, log, _ = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "cgroup-parent": "/actions_job",
+        "features": {"containerd-snapshotter": False, "cdi": True},
+    }
+    # Docker reads the file when it starts, so it is written before the restart.
+    assert log.index("apt-get install") < log.index("systemctl restart containerd docker")
+
+
+def test_installer_writes_the_image_store_setting_where_docker_has_no_settings_yet(
+    tmp_path: Path,
+) -> None:
+    result, _, _ = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "docker/daemon.json").read_text(encoding="utf-8")) == {
+        "features": {"containerd-snapshotter": False}
+    }
 
 
 def test_installer_reuses_a_repository_entry_the_image_already_has(tmp_path: Path) -> None:
@@ -158,6 +195,13 @@ def test_installer_stops_when_the_repository_lacks_a_pinned_version(tmp_path: Pa
         ({"FAKE_RUNC": "v1.2.5-0-g59923ef"}, "runc is 1.2.5, not the pinned 1.3.3"),
         ({"FAKE_RUNC": ""}, "runc is missing, not the pinned 1.3.3"),
         ({"FAKE_COMPOSE": "5.6.0"}, "Compose is 5.6.0, not the pinned 2.38.2"),
+        # A release built here would be refused by a host, and a host's by this daemon.
+        (
+            {"FAKE_STORE": "overlayfs [[driver-type io.containerd.snapshotter.v1]]"},
+            "Docker stores images with overlayfs [[driver-type io.containerd.snapshotter.v1]], "
+            "not with its classic image store",
+        ),
+        ({"FAKE_STORE": ""}, "Docker stores images with nothing it reports"),
     ],
 )
 def test_installer_fails_when_what_runs_is_not_what_is_pinned(

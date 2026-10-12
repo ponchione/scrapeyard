@@ -37,6 +37,20 @@ def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, mon
     release_artifact.load_images(bundle)
     assert calls == [(["docker", "image", "load", "--input", str(bundle / "images.tar")],)]
     calls.clear()
+
+    # Under another image store the archive loads and its images get other
+    # identifiers. The refusal has to say that, not only "No such image".
+    def no_such_image(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(release_artifact, "run", no_such_image)
+    with pytest.raises(ValueError, match="identifier depends on Docker's image store"):
+        release_artifact.load_images(bundle)
+    monkeypatch.setattr(release_artifact, "run", lambda *args, **kwargs: "sha256:" + "e" * 64)
+    with pytest.raises(ValueError, match="loaded image identity differs"):
+        release_artifact.load_images(bundle)
+    monkeypatch.setattr(release_artifact, "run", lambda *args, **kwargs: args[-1])
+    calls.clear()
     for change in ("content", "extra", "permission", "symlink", "incomplete"):
         image = bundle / "images.tar"
         if change == "content":

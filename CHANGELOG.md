@@ -74,6 +74,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The container lanes select Docker's classic image store and fail on any
+  other, and the deployment guide tells a host to keep it. A release names
+  its images by identifier, and an image has another identifier under
+  containerd's image store, which a new installation of Docker 29 chooses:
+  a release built on one store is refused on the other. Tried on Docker
+  29.9.0 in both directions; a release built on 28.5.2 loads and runs on
+  29.9.0 with the classic store, which is what an upgrade in place keeps.
+  `release_artifact.py load` now says so when it refuses, and the rehearsal
+  records the store in `container-runtime.txt`.
 - The seccomp profile (`security/seccomp/chromium.json`) is now the default
   profile of Docker 29.9.0 plus one rule that allows `clone` and `unshare`
   for the browsers' user-namespace sandboxes. It was an older default, by

@@ -19,14 +19,16 @@ RUNC_VERSION="1.3.3"
 REPOSITORY="https://download.docker.com/linux/ubuntu"
 REPOSITORY_KEY_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 APT_DIR="${SCRAPEYARD_RUNTIME_APT_DIR:-/etc/apt}"
+DOCKER_DIR="${SCRAPEYARD_RUNTIME_DOCKER_DIR:-/etc/docker}"
 
 usage() {
   cat <<'EOF'
 Usage: sudo scripts/install_container_runtime.sh
 
 Installs the pinned docker-ce, docker-ce-cli, containerd.io and
-docker-compose-plugin from Docker's repository, restarts Docker, and fails
-unless the running engine, containerd, runc and Compose are the pinned ones.
+docker-compose-plugin from Docker's repository, selects Docker's classic
+image store, restarts Docker, and fails unless the running engine,
+containerd, runc, Compose and image store are the pinned ones.
 EOF
 }
 
@@ -96,6 +98,21 @@ apt-get install -y -q --no-install-recommends --allow-downgrades --allow-change-
   -o Acquire::Retries=3 -o Dpkg::Options::=--force-confold \
   "docker-ce=$engine_package" "docker-ce-cli=$client_package" \
   "containerd.io=$containerd_package" "docker-compose-plugin=$compose_package"
+# A release names its images by identifier, and an image has another
+# identifier under containerd's image store than under Docker's classic one.
+# A host keeps the classic store; a new installation of Docker 29 would
+# choose the other, so say it and do not leave it to the runner image.
+python3 - "$DOCKER_DIR/daemon.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+settings = json.loads(path.read_text()) if path.exists() else {}
+settings.setdefault("features", {})["containerd-snapshotter"] = False
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(settings, indent=2) + "\n")
+PY
 systemctl restart containerd docker
 for _ in $(seq 1 60); do
   docker version --format '{{.Server.Version}}' > /dev/null 2>&1 && break
@@ -112,10 +129,14 @@ runc="$(docker info --format '{{.RuncCommit.ID}}')"
 runc="${runc#v}"
 runc="${runc%%-*}"
 compose="$(docker compose version --short)"
+image_store="$(docker info --format '{{.Driver}} {{.DriverStatus}}')"
 expect "Docker Engine" "$DOCKER_VERSION" "$engine"
 expect "the Docker client" "$DOCKER_VERSION" "$client"
 expect "containerd" "$CONTAINERD_VERSION" "$containerd"
 expect "runc" "$RUNC_VERSION" "$runc"
 expect "Compose" "$COMPOSE_VERSION" "$compose"
+[[ -n "$image_store" && "$image_store" != *io.containerd.snapshotter* ]] || \
+  fail "Docker stores images with ${image_store:-nothing it reports}, not with its classic image store"
 
-echo "Container runtime: Docker $engine, containerd $containerd, runc $runc, Compose $compose"
+echo "Container runtime: Docker $engine, containerd $containerd, runc $runc, Compose $compose," \
+  "image store ${image_store%% *}"

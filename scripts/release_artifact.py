@@ -241,7 +241,17 @@ def load_images(directory: Path) -> None:
         ["docker", "image", "load", "--input", str(directory / "images.tar")], check=True
     )
     for image in manifest["images"].values():
-        if run("docker", "image", "inspect", "--format", "{{.Id}}", image, cwd=directory) != image:
+        try:
+            loaded = run("docker", "image", "inspect", "--format", "{{.Id}}", image, cwd=directory)
+        except subprocess.CalledProcessError:
+            # The archive loaded, so the daemon gave its images other
+            # identifiers than the daemon that built the release did.
+            raise ValueError(
+                f"the loaded archive holds no image {image}; an image's identifier depends "
+                "on Docker's image store, so load a release where the store is the one it "
+                "was built on (docs/DEPLOYMENT.md, Container runtime versions)"
+            ) from None
+        if loaded != image:
             raise ValueError("loaded image identity differs from the retained release")
     print(f"Verified and loaded release {manifest['revision']}")
 
