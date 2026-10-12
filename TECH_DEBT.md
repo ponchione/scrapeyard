@@ -6,6 +6,27 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-12** (`447da7a`; nothing in this repository changed): the
+  production host was connected to Eyebox's staging ingest and tested. It
+  still runs release `523d805`, and this entry was checked against the host
+  that evening.
+  - Ingress is a Cloudflare Tunnel that the host opens outwards, not the
+    reverse proxy and address allow-list TD-19 planned. An Access service
+    token is checked at the edge and again by the connector, which forwards
+    only the routes Eyebox uses. Tested from outside and from the staging
+    ingest's container.
+  - A reset with no shutdown (TD-20) came back by itself in 31 seconds with
+    the databases and Redis intact. It lost two submissions acknowledged in
+    its last three seconds and left the queue ahead of the database: TD-85,
+    which the owner accepted for the beta.
+  - The settings file gained a daily limit of 400 pages for each host and a
+    24-hour cooldown after a denial. Until then the host ran with the
+    Compose defaults: no page limit, and six hours.
+  - One product page was requested for each of the four beta retailers
+    (TD-18). Two refused the host's address at the first request and two
+    served the page. The owner has not decided what to do about the two.
+  - No Eyebox run has used the host yet. TD-17 lists the limits the two
+    sides hold today; they do not agree.
 - **2026-10-11** (`b371a37`): first deployment on the production host, a
   rented four-core virtual machine (Ubuntu 24.04.4, kernel 6.8.0-146, Docker
   28.5.2 and containerd.io 1.7.29 from Docker's repository, Compose 2.38.2).
@@ -191,7 +212,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-85**) and use this template:
+7. **New findings** take the next free ID (**TD-86**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -354,12 +375,19 @@ and rehearses it; dispatch it on the commit to release.
 - TD-83: needs a security review.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
-- TD-17 to TD-22: deployment qualification; not single PRs. TD-19 needs the
-  owner's DNS name; TD-21 an off-host store.
+- TD-17 to TD-22: deployment qualification; not single PRs. The host is up
+  and connected (2026-10-12), so what is left is this:
+  - TD-18 and TD-17 wait for the owner: what to do about the two beta
+    retailers that refuse the host's address, and leave to run each beta job
+    from it. Every retailer request from the host needs the owner's word.
+  - TD-19 needs its runbook written and one run from Eyebox's ingest.
+  - TD-20 needs a monitoring service and TD-21 an off-host store, both the
+    owner's choice.
+  - TD-22 needs a second release on the host to roll back from.
 
-**Deferred:** TD-48 and TD-49.
+**Deferred:** TD-48, TD-49 and TD-85.
 
-**Consumer-side:** C-1 to C-9 are fixed in Eyebox.
+**Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
 ## Index
 
@@ -367,7 +395,7 @@ and rehearses it; dispatch it on the commit to release.
 | --- | --- | --- | --- |
 | TD-17 | P2 | operational | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 | TD-18 | P1 | operational | Production forward-proxy selection and egress qualification are incomplete |
-| TD-19 | P1 | operational | Restricted Hetzner HTTPS ingress and Railway credential handoff are incomplete |
+| TD-19 | P1 | operational | The production ingress is in no runbook and no Eyebox run has used it |
 | TD-20 | P1 | operational | Secure startup after host/Docker restart and runtime monitoring are unqualified |
 | TD-21 | P1 | operational | Unattended coordinated off-host backup and restoration are incomplete |
 | TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
@@ -378,6 +406,7 @@ and rehearses it; dispatch it on the commit to release.
 | TD-82 | P2 | ready | The rehearsal runner's container runtime is older than a patched host's |
 | TD-83 | P2 | coordinated | The seccomp allowlist predates the system calls added since Linux 5.1 |
 | TD-84 | P2 | ready | No lane has run a release on Docker 29 |
+| TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 
 ## Ready to implement
 
@@ -414,7 +443,10 @@ repository offered 29.9.0 and Compose 5.6.0 on 2026-10-11. One difference to
 check first: `release_artifact.py load` compares the IDs of the images it
 loads with the release's manifest, and Docker 29 is reported to store images
 with containerd on a new installation, which changes the ID an image is
-given. Nothing here has been run on it.
+given. Nothing here has been run on it. On 2026-10-12 the four held packages
+(`docker-ce`, `docker-ce-cli`, `containerd.io` and the Compose plugin) were
+the host's only pending upgrades: until this entry is done the host takes no
+fixes for them, security fixes included.
 **Code:** `scripts/release_artifact.py` (`load`, `verify`),
 `security/deploy-secure-compose.sh`, `scripts/run_deployment_rehearsal.sh`.
 **Fix:** With TD-82's pins, run the rehearsal on Docker 29 and Compose 5. Fix
@@ -604,6 +636,27 @@ are permanent errors, though: retrying the same result can't fix them. Queue
 wait, HTTP retry delays, execution and result transfer all add to the end-to-end
 time, even though each has its own budget.
 
+**Set but not qualified (2026-10-12):** the production host and Eyebox's
+staging ingest, which points at it, hold the values below. They were read
+from the running containers. No job has run between the two.
+
+| Limit | Production host | Staging ingest | Gap |
+| --- | --- | --- | --- |
+| Run duration / client wait | 2,700 s | waits 1,200 s | Ingest stops waiting 25 minutes before the server's budget ends. Runs took 20 to 25 minutes on a development machine whose cores are about 3.4 times as fast as the host's; nothing has been timed on the host. |
+| Result size | 16 MiB | 10 MiB | The hard-test pairing: a result between the two is rejected by Eyebox. |
+| Record count | 5,000 | 5,000 | None. |
+| Memory admission | 3,072 MiB (Compose default) | — | Never exercised on the host. |
+| Concurrency | 2 workers | 4 scheduled jobs at once | Two of four submissions wait in the queue, inside ingest's 1,200 s. |
+| Host guards | 400 pages a day for each host; 24-hour cooldown after a denial | — | One refused request stops every run against that retailer for a day. |
+
+Two things send traffic outside the schedule or interrupt it, and belong in
+the envelope:
+- With an API key configured, ingest's alert price check fetches a retailer
+  page through Scrapeyard before it sends an alert, whether or not scheduled
+  scraping is enabled.
+- The host installs security updates unattended and reboots at 10:30 UTC when
+  one needs it. Whether the beta schedules avoid that time was not checked.
+
 **Fix direction:**
 - Qualify one operating envelope for the exact launch allow-list: maximum useful
   records and bytes, acceptable queue age, run duration, transfer time, and
@@ -670,10 +723,36 @@ host's address ([DEPLOYMENT.md](docs/DEPLOYMENT.md#without-an-operator-proxy)).
 - The deploy wrapper accepts the mode, and the deployment rehearsal's last
   steps promote, start and attest a release with these settings.
 
-**Still open:** on the production host, the denial matrix below from the real
-container, with no proxy; and under TD-17, which retailers answer the host's
-address at all. The proxy selection work below is moot unless a proxy is
-adopted later.
+**Done on the production host:**
+- 2026-10-11: from the application's container, connections to the host's own
+  addresses, private ranges and the metadata address were refused, and
+  `basic`, `dynamic` and `stealthy` fetches of a public page completed
+  (recorded under TD-20).
+- 2026-10-12: one product page was requested, once, for each of the four beta
+  retailers, with the browser settings Eyebox's price check uses. Two refused
+  the first request (an HTTP 429 challenge page and an HTTP 403 denial). Two
+  served the page, and the price and stock were extracted. All four had
+  served the same settings from a home connection in September, so the
+  refusals are about the address.
+
+**Still open:**
+- The owner's decision for the two that refuse: a proxy on those targets
+  alone (`proxy:` in Eyebox's configs, which needs no change here), another
+  address, or leaving them out. Eyebox's greenlight G3.2 already plans a
+  pay-as-you-go residential proxy for retailers blocked from the host; the
+  decision above ruled out only a service-wide one. Whether Eyebox's beta
+  goal (150 products at two or more retailers, 40 at three or more) holds
+  without the two has not been computed.
+- One whole job for each beta retailer from the host (Eyebox's greenlight
+  G3.1). One product page says nothing about category pages, pagination or a
+  run's volume from this address.
+- The rest of the denial matrix below through the application on the host:
+  redirects and DNS rebinding. The lanes cover both against fixtures.
+- The per-retailer results are in the host's stored results and the
+  operator's notes only. They belong in Eyebox's greenlight document (C-10).
+
+The proxy selection work below is moot unless a service-wide proxy is adopted
+later.
 
 **Problem (as recorded before the decision):** production Compose enables untrusted submissions, and startup
 requires a nonempty, non-`direct` `SCRAPEYARD_PROXY_URL`. The stack supplies
@@ -730,12 +809,59 @@ is not automatically evidence of safe destination filtering.
 
 Trusted local or fixture mode cannot close this item.
 
-### TD-19 — Restricted Hetzner HTTPS ingress and Railway credential handoff are incomplete
+### TD-19 — The production ingress is in no runbook and no Eyebox run has used it
 
-**Priority/ownership:** P1; Scrapeyard ingress/security. Coordinate Railway's
-outbound-address inventory with [Eyebox item G](../eyebox/TECH-DEBT.md#g-railway-service-configuration-and-ordered-releases).
+**Priority/ownership:** P1; Scrapeyard ingress/security. Until 2026-10-12
+this entry was "Restricted Hetzner HTTPS ingress and Railway credential
+handoff are incomplete".
 
-**Problem:**
+**Done on 2026-10-12, by another route than the one planned below:** the
+owner's domain is on Cloudflare, so ingress is a Cloudflare Tunnel that the
+host opens outwards, with an Access service token. It replaces the reverse
+proxy, the certificate and the allow-list of Railway's addresses, and costs
+nothing.
+- The host's firewall still admits SSH only. From outside, its address
+  answers on no other port.
+- Access answers 401 to a request without the token, or with a wrong one.
+  The connector checks the token again and forwards seven routes: `/health`,
+  `POST /scrape`, `GET /scrape/acceptance`, `GET /jobs/{id}`,
+  `GET /jobs/{id}/runs/{run}`, `POST /jobs/{id}/cancel` and
+  `GET /results/{id}`. Thirty other paths and spellings (dot segments,
+  encoded and doubled slashes, upper case) got 404 from the connector or 400
+  from the edge. Readiness, metrics, the job list and the domain-guard routes
+  cannot be reached from outside.
+- The path filter cannot tell methods apart, so `PUT` and `DELETE /jobs/{id}`
+  reach the application. It refuses them: Eyebox's credential holds `submit`
+  and `read` for project `eyebox` only.
+- The connector's unit may reach the application's address, the resolver and
+  the public internet. Redis, the probe, loopback, the host's own addresses
+  and private ranges were tried from it and dropped.
+- Through the public name, a scrape of a public page was submitted, found
+  again through `/scrape/acceptance`, polled and read back.
+- Eyebox's ingest sends the token since its `03837e4`, and only to the
+  Scrapeyard origin. From the staging ingest's container on Railway,
+  `/health` answered 200 and an authenticated read reached the application.
+- The connector reconnected by itself after the reset under TD-20.
+
+**Still open:**
+- No scrape has been submitted from Railway. The first whole run from the
+  staging ingest (TD-17) proves submit, poll and download.
+- None of it is in a runbook. [DEPLOYMENT.md](docs/DEPLOYMENT.md) does not
+  mention a tunnel. The connector's unit and its address restrictions, the
+  route list, and the host's firewall, SSH and update settings exist on the
+  host only, so the host cannot be rebuilt from what is written down.
+  Eyebox's runbook and topology still describe a reverse proxy on another
+  provider's server (C-10).
+- Rotation is neither documented nor tried, for the service token (it expires
+  on 2027-10-12) or for the API credentials.
+- Not tried through the tunnel: a request over the size limit, and whether
+  the edge's or the connector's logs hold a credential.
+- The zone's Browser Integrity Check answers 403 to some client signatures
+  (Python's `urllib` is one) before Access sees the token. Eyebox's `httpx`
+  passes. Check it again when the client library changes.
+
+**Problem (as recorded before 2026-10-12; the reverse-proxy and address-list
+work below is moot unless the tunnel is given up):**
 - Production Compose exposes no host API port, and the deployment plan has no
   production reverse-proxy configuration.
 - Railway's documented static egress now assigns three IPv4 addresses, requires
@@ -822,11 +948,21 @@ own addresses, private ranges and the metadata address were refused, and
 host's inbound firewall is a default `ufw`; the `INPUT` jump stayed ahead of
 its chains.
 
+**Done on the production host (2026-10-12):** a power loss, as a kernel reset
+with no sync and no shutdown, so nothing had stopped the container. The host
+was back and the application healthy 31 seconds later with no operator
+command, and the application does not report healthy before its startup
+check of the egress policy passes. The filesystem, the three SQLite files
+(`integrity_check`) and Redis's append-only file were intact, and a run
+finished 40 seconds before the reset was still readable. What the reset lost
+is TD-85.
+
 **Still open:**
-- A power loss on the production host: a reset with no shutdown, after which
-  nothing has stopped the container and the profile is gone.
 - All of the monitoring work below: readiness and metrics collection, and
-  alerts. It needs the owner's choice of a monitoring service.
+  alerts. It needs the owner's choice of a monitoring service. Nothing
+  collects or alerts today: a stopped application, a full disk or a dead
+  tunnel would show as a failed Eyebox run or not at all. A credential for
+  the detailed health route exists on the host and nothing uses it.
 - The health check Compose runs is still process liveness only.
 - Nothing watches the host policy between deployments. The startup check
   covers forwarded traffic; the `INPUT` jump that keeps the application off
@@ -882,6 +1018,13 @@ A plain `docker compose up` is not enough.
 
 **Priority/ownership:** P1; Scrapeyard recovery. Eyebox owns its PostgreSQL
 recovery in [item I](../eyebox/TECH-DEBT.md#i-railway-postgresql-recovery-and-scheduled-maintenance).
+
+**State on the production host (2026-10-12):** no backup of any kind runs
+there, and no off-host store has been chosen. The two data volumes hold
+4.5 MB. The encryption key was generated on the host and is nowhere else, so
+a lost host loses the stored configurations with it, and Eyebox needs a new
+credential for the rebuilt one. Rebuilding also depends on the runbook TD-19
+still owes.
 
 **Problem:**
 - The repository has a tested helper for quiesced backup sets, but no complete
@@ -992,7 +1135,9 @@ running container as it was.
 `b371a37`, cannot start there (TD-79 to TD-81), so the first rollback will be
 from the next release to `523d805`. The same checks behind the real ingress
 (TD-19). Keep a previous release on the host and off it; the workflow
-artifact expires after 30 days.
+artifact expires after 30 days. On 2026-10-12 the host held `523d805` alone,
+and the artifacts of `523d805` and `b371a37` expire on 2026-11-10. After that
+the copy on the host is the only one until the workflow is dispatched again.
 
 **Problem:**
 - The secure wrapper rebuilds Scrapeyard from the checkout on every deployment.
@@ -1110,6 +1255,36 @@ Scrapeyard is a general service. Revisit only if one of these features blocks
 other work. If trimming, deprecate first with a validation warning, then
 remove.
 
+### TD-85 — A power loss loses the submissions accepted in its last seconds
+
+**Priority:** P2 · **Status:** deferred · **Contract:** `POST /scrape` answers 202 for a submission that a power loss can still lose; afterwards `GET /scrape/acceptance` and the run's poll answer 404
+
+**Problem:** found on the production host on 2026-10-12 by the reset under
+TD-20.
+- SQLite runs in WAL with `synchronous=NORMAL`
+  (`src/scrapeyard/storage/database.py`), so a commit reaches the disk when
+  the kernel writes it back, up to 30 seconds later on that host. Two
+  submissions answered 202 in the three seconds before the reset had no job
+  row afterwards. [JOB_LIFECYCLE.md](docs/JOB_LIFECYCLE.md) names the limit;
+  this is the first time it was measured.
+- Redis syncs every second, so it kept the queue entry and the in-progress
+  marker of the submission that was running. After the reset the queue held
+  a task for a job the database did not have. When the marker expired, one
+  run budget (45 minutes) later, the queue delivered the task again. It was
+  recorded as finished and the application logged nothing. Whether it
+  fetched the page was not established.
+
+**Why deferred:** the owner accepted it for the beta on 2026-10-12: no code
+change and no release for it. Not tried: what Eyebox does when a run it was
+given a 202 for answers 404.
+
+**Revisit when:** a lost submission is seen in practice, or a second consumer
+relies on a 202. Start with the cheap half: establish what the worker does
+with a task whose job row is missing (`scrape_task`,
+`_load_job_execution_context` in `src/scrapeyard/queue/worker.py`). It should
+end without a fetch and say so in the log. `synchronous=FULL` adds a disk
+sync to every commit and has not been measured on the host.
+
 ## Consumer-side follow-ups (fix in Eyebox)
 
 These were found while mapping the contract. They are fixed in `../eyebox`, not
@@ -1120,9 +1295,10 @@ here; record them in Eyebox's tracker when picked up.
 | C-1 | `POST /scrape` is sent with `retry=False`. A busy 503 (`Retry-After: 5`) falls through to `/scrape/acceptance`, gets a 404, and the run fails. Price check marks the result `UNAVAILABLE`. Retrying is safe, because the same key and bytes replay. | `ingest/scrapeyard_run.py` (submit), `pipeline/price_check.py`, `pipeline/offer_accuracy.py` |
 | C-2 | The alias backfill's `DELETE /domains/{host}/guard` needs `transport-admin` and an unscoped caller, so it gets a 403 that is never checked. | `ingest/pdp_alias_backfill.py` |
 | C-3 | `SCRAPEYARD_HEALTH_PROBE_API_KEY` and `SCRAPEYARD_LOCAL_DEVELOPMENT_UNAUTHENTICATED` are set but Scrapeyard reads neither. The smoke tool parses `dependencies.*` from a 503 on `/health`, but `/health` is now public liveness (`{"status":"ok"}`) and the detail lives at authenticated `/health/ready`. | `scripts/hard-test.sh`, `scripts/hard-test-cold-start.sh`, `ingest/scrapejob_smoke.py` |
-| C-4 | The wait-budget defaults disagree: the code and `.env.prod.example` use 300 s, while Compose defaults to 2,700 s. An operator who copies `.env.prod.example` overrides Compose. This feeds TD-17. | `ingest/config.py`, `.env.prod.example` |
+| C-4 | The wait-budget defaults disagree: the code and `.env.prod.example` use 300 s, while Compose defaults to 2,700 s. An operator who copies `.env.prod.example` overrides Compose. This feeds TD-17. On 2026-10-12 the staging ingest waited 1,200 s against the production host's 2,700 s, and ran four scheduled jobs at once against the host's two workers. | `ingest/config.py`, `.env.prod.example`, the staging service's variables |
 | C-5 | The hard-test Scrapeyard container runs without an init process (`Init=<nil>` on 2026-10-09), even though `DEPLOY.md` requires one. Launch it with `--init`. Optionally, Scrapeyard could warn at startup when it runs as PID 1. | `.hard-test/scrapeyard-local/` launcher |
 | C-6 | The docs disagree on webhooks. `DEPLOY.md` says Scrapeyard signs `X-Webhook-Signature`; it doesn't, as `README.md` correctly says. `AGENTS.md` and `README.md` say ingest "receives Scrapeyard webhooks", but production pulls. 51 configs still carry `webhook` blocks. `make scrape-live` without strip sends them, and Scrapeyard's dispatch-time SSRF check blocks `host.docker.internal`. | `DEPLOY.md`, `README.md`, `AGENTS.md`, `configs/` |
 | C-7 | 11 configs list 403 in `retryable_status`, which Scrapeyard never retries. `adaptive_domain` on 11 Brownells targets does nothing with `adaptive: false`. Both are cosmetic; keep the keys valid. | `configs/` |
 | C-8 | Target summary URLs have their query values redacted, so exact URL matching fails for 119 query-string targets across 8 configs, and diagnostics and the backfill fall back to position. This works today; don't add exact-URL logic without a Scrapeyard change. | `ingest/scrapejob_diagnostics.py`, `ingest/pdp_alias_backfill.py` |
 | C-9 | The docs disagree on the pinned production Scrapeyard revision: `ce8fc04` vs `5de7dc9`+. `scrapeyard_identity.source_run()` (legacy `runs[]` shape) is used only by tests. | `docs/hetzner-scrapeyard-deployment-runbook.md`, `docs/scrapeyard-work-orders.md`, `ingest/scrapeyard_identity.py` |
+| C-10 | The launch list (item 2), the runbook and the topology describe a reverse proxy on a Hetzner server. Since 2026-10-12 production is another provider's server behind a tunnel with a service token (TD-19), and the launch list shows the item open with none of that recorded. The results for the four beta retailers from the host's address (TD-18) are not in the greenlight document, whose Phase 3 is still unticked. | `GO-LIVE-TESTING-CHECKLIST.md`, `docs/hetzner-scrapeyard-deployment-runbook.md`, `docs/deployment-topology.md`, `docs/beta-retailer-greenlight.md` |
