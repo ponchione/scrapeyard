@@ -726,15 +726,23 @@ sudo security/install-chromium-apparmor-profile.sh install
 ```
 
 The profile is Moby's normal container boundary plus the single `userns`
-permission. Compose also applies a seccomp allowlist,
-enables no-new-privileges, drops every capability, and retains only
-`SYS_CHROOT` in the bounding set for Chromium after it enters its user
-namespace. The application process has no permitted or effective capabilities.
+permission, and like Moby's it denies `AF_ALG` and `AF_VSOCK` sockets.
+Compose also applies a seccomp allowlist, enables no-new-privileges, drops
+every capability, and keeps `SYS_CHROOT` alone in the container's bounding
+set. The application process has no permitted or effective capabilities.
+
+That one capability is there for the seccomp filter: Docker keeps the
+filter's `chroot` rule only for a container whose bounding set holds it, and
+the browsers' sandboxes call `chroot` inside their user namespace. The
+bounding set does not limit that namespace. The kernel gives a process every
+capability inside a user namespace it creates, so what a process can do
+there is bounded by the seccomp filter, whose capability-gated rules were
+decided when the container started, and by the AppArmor profile.
 
 The allowlist (`security/seccomp/chromium.json`) is the default profile of
-Docker 29.9.0 plus one rule: `clone`, `setns` and `unshare` are allowed
-whatever their arguments, because Chromium's sandbox creates user namespaces
-and the default allows that only with `CAP_SYS_ADMIN`.
+Docker 29.9.0 plus one rule: `clone` and `unshare` are allowed whatever
+their arguments, because the browsers' sandboxes create user namespaces and
+the default allows that only with `CAP_SYS_ADMIN`.
 [`security/seccomp/README.md`](../security/seccomp/README.md) records where
 the default comes from, the difference, and how to move to a newer one. Both
 files are generated or copied; edit neither.

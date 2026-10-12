@@ -75,14 +75,19 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ### Changed
 - The seccomp profile (`security/seccomp/chromium.json`) is now the default
-  profile of Docker 29.9.0 plus one rule that allows `clone`, `setns` and
-  `unshare` for Chromium's user-namespace sandbox. It was Moby's default of
-  2020, by way of Playwright. The container no longer may use `io_uring` or
-  open `AF_ALG` and `AF_VSOCK` sockets, and it gains the system calls Docker
-  has allowed every container since (`faccessat2`, `close_range`,
-  `pidfd_open`, `epoll_pwait2`, the `landlock` calls and others).
+  profile of Docker 29.9.0 plus one rule that allows `clone` and `unshare`
+  for the browsers' user-namespace sandboxes. It was an older default, by
+  way of Playwright, which also allowed `setns`. The container no longer may
+  use `io_uring`, `setns` into another namespace, or call `socket` for the
+  `AF_ALG` and `AF_VSOCK` families, and it gains the system calls Docker has
+  allowed every container since (`faccessat2`, `close_range`, `pidfd_open`,
+  `epoll_pwait2`, the `landlock` calls and others).
   `scripts/derive_seccomp_profile.py` writes the profile from the copied
   default, and `security/seccomp/README.md` records the difference.
+- The AppArmor profile denies `AF_VSOCK` sockets, as Moby's own profile
+  does. The seccomp filter covers the direct `socket` call only, and a
+  64-bit process can still reach `socketcall` through the 32-bit entry;
+  until now nothing closed that path for `AF_VSOCK`.
 - The container smoke lane and the release rehearsal replace the runner's
   Docker with the versions the deployment guide now names for a host
   (`scripts/install_container_runtime.sh`: Docker 28.5.2, containerd.io
@@ -262,10 +267,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `/proc/thread-self/fd` with `openat2` after loading the seccomp filter, and
   the profile, which predates that system call, refused it: no container or
   `docker exec` started on a host whose packages carry it. (runc 1.5.2 starts
-  under the old profile.) The profile now allows `openat2`, and names the
-  system calls numbered just below it so that on x86-64 they still answer
-  `ENOSYS`: with `openat2` listed alone they answered `EPERM`, and glibc then
-  cannot start a thread.
+  under the old profile.) The profile first allowed `openat2` and named the
+  system calls numbered just below it, because with `openat2` listed alone
+  `clone3` answered `EPERM` and glibc then cannot start a thread. It has
+  since been replaced by one derived from Docker's current default (under
+  Changed), which allows `openat2` and answers `ENOSYS` to `clone3`.
 - The egress probe's health check costs a fifth of a second of its quarter
   CPU instead of five. Its image carries no bytecode and its filesystem is
   read-only, so every check compiled `asyncio`, `argparse`, `secrets` and

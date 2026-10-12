@@ -12,13 +12,28 @@ Docker container gets by default, plus one rule.
 
 One rule, at the top of the list:
 
-- `clone`, `setns` and `unshare` are allowed whatever their arguments.
-  Chromium's sandbox puts its renderers in new user, PID and network
-  namespaces. Moby's default allows these calls with namespace flags only to
-  a container that holds `CAP_SYS_ADMIN`, and this one holds no capability.
-  What a process inside a new user namespace can then do is bounded by the
-  AppArmor profile (`../apparmor/scrapeyard-chromium`), by `no-new-privileges`
-  and by the bounding set, which holds `CAP_SYS_CHROOT` alone.
+- `clone` and `unshare` are allowed whatever their arguments. Chromium's and
+  Firefox's sandboxes create a user namespace and put their child processes
+  in further new namespaces inside it. Moby's default allows these calls
+  with namespace flags only to a container that holds `CAP_SYS_ADMIN`, and
+  this one holds no capability. Narrowing the rule to the user, PID and
+  network flags was tried and hangs Firefox.
+
+`setns`, which the profile Playwright publishes also allows, is not in the
+rule: both browsers run sandboxed without it.
+
+The container's bounding set does not limit a user namespace. The kernel
+gives a process every capability inside a namespace it creates. What it can
+do there is bounded by this filter and by the AppArmor profile
+(`../apparmor/scrapeyard-chromium`). Docker decides the filter's
+capability-gated rules once, against the container's own bounding set, so
+`mount`, `pivot_root`, `bpf`, `keyctl` and the mount calls stay refused
+inside the namespace. What does open there is the network stack of a new
+network namespace: packet and netfilter sockets.
+
+`cap_add: SYS_CHROOT` in Compose exists for the filter alone. Docker keeps
+the `chroot` rule only for a container whose bounding set holds that
+capability, and the sandboxes call `chroot` inside their namespace.
 
 `clone3` is left as the default has it: it answers `ENOSYS`. A seccomp filter
 cannot read the flags `clone3` is passed, which is why Moby refuses it, and
@@ -26,8 +41,11 @@ glibc falls back to `clone` on `ENOSYS`. Allowing it would add nothing that
 `clone` does not already give.
 
 Nothing is removed from the default. In particular the profile does not allow
-`io_uring`, or sockets of the `AF_ALG` and `AF_VSOCK` families, all of which
-the profile it replaced (Moby's of 2020, by way of Playwright) still did.
+`io_uring`, and it refuses `socket` for the `AF_ALG` and `AF_VSOCK`
+families, all of which the profile it replaced (an older default, by way of
+Playwright) allowed. The filter sees the direct `socket` call only. A 64-bit
+process can still reach `socketcall` through the 32-bit entry, so the
+AppArmor profile denies both families as well, as Moby's own does.
 
 ## Moving to a newer default
 

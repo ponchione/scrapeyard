@@ -1,5 +1,6 @@
-# Derived from the Moby default container profile, with one deliberate
-# addition: Chromium may create unprivileged user namespaces.
+# Derived from the Moby default container profile (as Docker 29.9.0
+# generates it), with one deliberate addition: Chromium may create
+# unprivileged user namespaces.
 abi <abi/3.0>,
 
 include <tunables/global>
@@ -8,6 +9,7 @@ profile "scrapeyard-chromium" flags=(attach_disconnected,mediate_deleted) {
   userns,
   network,
   deny network alg,
+  deny network vsock,
   capability,
   file,
   umount,

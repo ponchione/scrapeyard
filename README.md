@@ -155,7 +155,8 @@ as the non-root UID/GID 10001 with a Chromium-specific seccomp/AppArmor policy
 and no-new-privileges. Chromium uses unprivileged user namespaces; there is no
 setuid helper or startup root repair. The root filesystem is read-only, the
 process has no effective capabilities, and only `SYS_CHROOT` remains in the
-bounding set for Chromium's namespace sandbox. Only `/data` plus bounded tmpfs
+bounding set, which keeps the seccomp filter's `chroot` rule for the
+browsers' namespace sandboxes. Only `/data` plus bounded tmpfs
 mounts are writable. Existing volumes need the one-time ownership migration in
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 

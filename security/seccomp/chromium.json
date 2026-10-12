@@ -60,10 +60,9 @@
 	],
 	"syscalls": [
 		{
-			"comment": "Chromium's sandbox creates user namespaces without CAP_SYS_ADMIN",
+			"comment": "The browsers' sandboxes create user namespaces without CAP_SYS_ADMIN",
 			"names": [
 				"clone",
-				"setns",
 				"unshare"
 			],
 			"action": "SCMP_ACT_ALLOW"

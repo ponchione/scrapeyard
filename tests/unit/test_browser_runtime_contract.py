@@ -71,13 +71,13 @@ def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
     assert "seccomp:./security/seccomp/chromium.json" in compose
     assert "read_only: true" in compose
 
-    seccomp = Path("security/seccomp/chromium.json").read_text()
-    assert '"clone"' in seccomp
-    assert '"setns"' in seccomp
-    assert '"unshare"' in seccomp
     apparmor = Path("security/apparmor/scrapeyard-chromium").read_text()
     assert "userns," in apparmor
     assert "deny mount," in apparmor
+    # The seccomp filter refuses these two families on the direct `socket`
+    # call only. A 64-bit process still reaches `socketcall` through the
+    # 32-bit entry, so AppArmor closes them, as in Moby's own template.
+    assert "  network,\n  deny network alg,\n  deny network vsock,\n" in apparmor
 
 
 def test_docker_compose_is_private_and_local_override_is_loopback_only() -> None:
@@ -133,17 +133,34 @@ _MOBY_DEFAULT_SHA256 = "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e2
 _BOUNDING_SET = {"CAP_SYS_CHROOT"}
 
 
+def _seccomp_profile() -> dict:
+    profile = json.loads(Path("security/seccomp/chromium.json").read_text())
+    # Docker reads keys without regard to case, so `DefaultAction` beside
+    # `defaultAction`, or `Includes` in a rule, would be a setting these
+    # tests do not see. Every key is therefore one they know.
+    assert set(profile) == {"defaultAction", "defaultErrnoRet", "archMap", "syscalls"}
+    assert (profile["defaultAction"], profile["defaultErrnoRet"]) == ("SCMP_ACT_ERRNO", 1)
+    for rule in profile["syscalls"]:
+        assert set(rule) <= {"comment", "names", "action", "args", "includes", "excludes", "errnoRet"}
+        assert set(rule.get("includes", {})) <= {"arches", "caps", "minKernel"}
+        assert set(rule.get("excludes", {})) <= {"arches", "caps"}
+        # An empty list is no condition to Docker, and any kernel this runs
+        # on is newer than the one condition on a version the default has.
+        assert all(rule[side][key] for side in ("includes", "excludes") for key in rule.get(side, {}))
+        assert rule.get("includes", {}).get("minKernel", "4.8") == "4.8"
+        arguments = rule.get("args", [])
+        assert all(set(argument) <= {"index", "value", "valueTwo", "op"} for argument in arguments)
+        # runc matches a rule when ANY of several conditions on one argument
+        # holds, and when ALL conditions on different arguments hold.
+        assert len({argument["index"] for argument in arguments}) == len(arguments)
+    return profile
+
+
 def _rules_in_the_production_container(name: str) -> list[dict]:
     """The rules Docker keeps for one system call: the image is amd64 only."""
-    profile = json.loads(Path("security/seccomp/chromium.json").read_text())
-    assert (profile["defaultAction"], profile["defaultErrnoRet"]) == ("SCMP_ACT_ERRNO", 1)
     kept = []
-    for rule in profile["syscalls"]:
-        # Docker reads keys without regard to case, so `Includes` beside
-        # `includes` would be a condition this test does not see.
-        assert set(rule) <= {"comment", "names", "action", "args", "includes", "excludes", "errnoRet"}
+    for rule in _seccomp_profile()["syscalls"]:
         includes, excludes = rule.get("includes", {}), rule.get("excludes", {})
-        assert set(includes) <= {"arches", "caps", "minKernel"} and set(excludes) <= {"arches", "caps"}
         if name not in rule["names"]:
             continue
         if "amd64" in excludes.get("arches", []) or _BOUNDING_SET & set(excludes.get("caps", [])):
@@ -157,20 +174,27 @@ def _rules_in_the_production_container(name: str) -> list[dict]:
 
 
 def test_seccomp_profile_is_mobys_default_plus_the_user_namespace_rule() -> None:
-    # The whole difference from what every Docker container gets is the one
-    # rule in the script. Anything else is a change to review as one: move to
-    # a newer default as security/seccomp/README.md describes.
+    # The whole difference from what every Docker container gets is this one
+    # rule, written out here and not taken from the script that adds it.
+    # Anything else is a change to review as one: move to a newer default as
+    # security/seccomp/README.md describes.
     moby_default = Path("security/seccomp/moby-default.json").read_bytes()
-
     assert hashlib.sha256(moby_default).hexdigest() == _MOBY_DEFAULT_SHA256
+    expected = json.loads(moby_default)
+    expected["syscalls"].insert(
+        0,
+        {
+            "comment": "The browsers' sandboxes create user namespaces without CAP_SYS_ADMIN",
+            "names": ["clone", "unshare"],
+            "action": "SCMP_ACT_ALLOW",
+        },
+    )
+
+    assert _seccomp_profile() == expected
+    # And the file is what the script writes, so running it changes nothing.
     assert Path("security/seccomp/chromium.json").read_text() == derive_seccomp_profile.derive(
         moby_default.decode()
     )
-    assert derive_seccomp_profile.USER_NAMESPACE_RULE == {
-        "comment": "Chromium's sandbox creates user namespaces without CAP_SYS_ADMIN",
-        "names": ["clone", "setns", "unshare"],
-        "action": "SCMP_ACT_ALLOW",
-    }
 
 
 def test_seccomp_profile_lets_a_hardened_runc_start_the_container() -> None:
@@ -192,8 +216,20 @@ def test_seccomp_profile_answers_enosys_to_clone3() -> None:
     assert "args" not in rule
 
 
-def test_seccomp_profile_keeps_closed_what_mobys_default_closes() -> None:
-    # The profile this one replaced was Moby's of 2020 and still allowed
+def test_seccomp_profile_allows_no_namespace_call_the_sandboxes_do_not_make() -> None:
+    # `clone` and `unshare` are allowed whatever their flags. `setns`, which
+    # Playwright's profile also allowed, stays as in the default: neither
+    # browser's sandbox calls it.
+    for name in ("clone", "unshare"):
+        assert {"action": "SCMP_ACT_ALLOW"} in [
+            {key: rule[key] for key in rule if key not in ("names", "comment")}
+            for rule in _rules_in_the_production_container(name)
+        ]
+    assert _rules_in_the_production_container("setns") == []
+
+
+def test_seccomp_profile_refuses_io_uring_and_the_socket_families_moby_refuses() -> None:
+    # The profile this one replaced was an older default and still allowed
     # io_uring and every socket family.
     for name in ("io_uring_setup", "io_uring_enter", "io_uring_register"):
         assert _rules_in_the_production_container(name) == []
@@ -207,11 +243,13 @@ def test_seccomp_profile_keeps_closed_what_mobys_default_closes() -> None:
         admitted = False
         for rule in _rules_in_the_production_container("socket"):
             assert rule["action"] == "SCMP_ACT_ALLOW"
-            # No rule without a condition, and each condition is on the family.
-            assert rule.get("args") and all(arg["index"] == 0 for arg in rule["args"])
-            admitted |= all(compare[arg["op"]](arg["value"]) for arg in rule["args"])
+            # No rule without a condition, and the one condition is on the family.
+            (argument,) = rule["args"]
+            assert argument["index"] == 0
+            admitted |= compare[argument["op"]](argument["value"])
         return admitted
 
     assert admits(1) and admits(2) and admits(10) and admits(16)  # unix, inet, inet6, netlink
+    # On the direct `socket` call only: AppArmor closes the 32-bit path.
     assert not admits(38)  # AF_ALG: the kernel's crypto interface
     assert not admits(40)  # AF_VSOCK: the hypervisor's sockets
