@@ -74,6 +74,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The pinned container runtime is Docker 29.9.0, containerd.io 2.4.1 (runc
+  1.5.2) and Compose 5.6.0, up from 28.5.2, 1.7.29 (runc 1.3.3) and 2.38.2.
+  A host is upgraded in place, which keeps its classic image store, and
+  rebooted.
 - The container lanes select Docker's classic image store and fail on any
   other, and the deployment guide tells a host to keep it. A release names
   its images by identifier, and an image has another identifier under

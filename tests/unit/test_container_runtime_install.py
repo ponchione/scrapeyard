@@ -41,10 +41,10 @@ _MADISON = {
     "docker-ce-cli": ("5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
     # The packaging revision is not always 1, and the newest comes first.
     "containerd.io": (
+        "2.4.10-1~ubuntu.24.04~noble",
         "2.4.1-2~ubuntu.24.04~noble",
-        "1.7.29-2~ubuntu.24.04~noble",
+        "2.4.1-1~ubuntu.24.04~noble",
         "1.7.29-1~ubuntu.24.04~noble",
-        "1.7.2-1~ubuntu.24.04~noble",
     ),
     "docker-compose-plugin": ("5.6.0-1~ubuntu.24.04~noble", "2.38.2-1~ubuntu.24.04~noble"),
 }
@@ -86,7 +86,7 @@ def _run(
         "FAKE_ENGINE": pins["DOCKER"],
         "FAKE_CLIENT": pins["DOCKER"],
         "FAKE_CONTAINERD": pins["CONTAINERD"],
-        "FAKE_RUNC": f"v{pins['RUNC']}-0-gd842d771",
+        "FAKE_RUNC": f"v{pins['RUNC']}-0-g29dd3dc2",
         "FAKE_COMPOSE": pins["COMPOSE"],
         **overrides,
     }
@@ -101,18 +101,18 @@ def test_installer_installs_the_pinned_packages_and_checks_what_runs(tmp_path: P
 
     assert result.returncode == 0, result.stderr
     install = next(line for line in log.splitlines() if line.startswith("apt-get install "))
-    assert "docker-ce=5:28.5.2-1~ubuntu.24.04~noble" in install
-    assert "docker-ce-cli=5:28.5.2-1~ubuntu.24.04~noble" in install
-    # The newest packaging of the pinned version, and not 1.7.2 by prefix.
-    assert "containerd.io=1.7.29-2~ubuntu.24.04~noble" in install
-    assert "docker-compose-plugin=2.38.2-1~ubuntu.24.04~noble" in install
+    assert "docker-ce=5:29.9.0-1~ubuntu.24.04~noble" in install
+    assert "docker-ce-cli=5:29.9.0-1~ubuntu.24.04~noble" in install
+    # The newest packaging of the pinned version, and not 2.4.10 by prefix.
+    assert "containerd.io=2.4.1-2~ubuntu.24.04~noble" in install
+    assert "docker-compose-plugin=5.6.0-1~ubuntu.24.04~noble" in install
     assert "--allow-downgrades" in install
     assert log.index("apt-get update") < log.index("apt-get install")
     assert log.index("apt-get install") < log.index("systemctl restart containerd docker")
     source = (apt / "sources.list.d/docker.list").read_text(encoding="utf-8")
     assert f"signed-by={apt}/keyrings/docker.asc" in source
     assert "https://download.docker.com/linux/ubuntu" in source
-    assert "runc 1.3.3" in result.stdout
+    assert "runc 1.5.2" in result.stdout
     assert "image store overlay2" in result.stdout
 
 
@@ -175,26 +175,26 @@ def test_installer_refuses_a_repository_key_that_is_not_dockers(tmp_path: Path) 
 
 
 def test_installer_stops_when_the_repository_lacks_a_pinned_version(tmp_path: Path) -> None:
-    offered = {**_MADISON, "docker-compose-plugin": ("5.6.0-1~ubuntu.24.04~noble",)}
+    offered = {**_MADISON, "docker-compose-plugin": ("2.38.2-1~ubuntu.24.04~noble",)}
 
     result, log, _ = _run(tmp_path, offered=offered)
 
     assert result.returncode == 1
-    assert "does not offer docker-compose-plugin 2.38.2" in result.stderr
+    assert "does not offer docker-compose-plugin 5.6.0" in result.stderr
     assert "apt-get install" not in log
 
 
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ({"FAKE_ENGINE": "28.0.4"}, "Docker Engine is 28.0.4, not the pinned 28.5.2"),
-        ({"FAKE_CLIENT": "29.9.0"}, "the Docker client is 29.9.0, not the pinned 28.5.2"),
-        ({"FAKE_CONTAINERD": "1.7.27"}, "containerd is 1.7.27, not the pinned 1.7.29"),
-        # A runc the image put ahead of the packaged one: the release that
-        # could not start on the production host passes under this one.
-        ({"FAKE_RUNC": "v1.2.5-0-g59923ef"}, "runc is 1.2.5, not the pinned 1.3.3"),
-        ({"FAKE_RUNC": ""}, "runc is missing, not the pinned 1.3.3"),
-        ({"FAKE_COMPOSE": "5.6.0"}, "Compose is 5.6.0, not the pinned 2.38.2"),
+        ({"FAKE_ENGINE": "28.5.2"}, "Docker Engine is 28.5.2, not the pinned 29.9.0"),
+        ({"FAKE_CLIENT": "28.5.2"}, "the Docker client is 28.5.2, not the pinned 29.9.0"),
+        ({"FAKE_CONTAINERD": "1.7.29"}, "containerd is 1.7.29, not the pinned 2.4.1"),
+        # A runc the image put ahead of the packaged one: a release can pass
+        # under one runc and start no container under another.
+        ({"FAKE_RUNC": "v1.3.3-0-gd842d771"}, "runc is 1.3.3, not the pinned 1.5.2"),
+        ({"FAKE_RUNC": ""}, "runc is missing, not the pinned 1.5.2"),
+        ({"FAKE_COMPOSE": "2.38.2"}, "Compose is 2.38.2, not the pinned 5.6.0"),
         # A release built here would be refused by a host, and a host's by this daemon.
         (
             {"FAKE_STORE": "overlayfs [[driver-type io.containerd.snapshotter.v1]]"},
