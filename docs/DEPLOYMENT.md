@@ -726,25 +726,30 @@ sudo security/install-chromium-apparmor-profile.sh install
 ```
 
 The profile is Moby's normal container boundary plus the single `userns`
-permission. Compose also applies Playwright 1.58.0's pinned seccomp allowlist,
+permission. Compose also applies a seccomp allowlist,
 enables no-new-privileges, drops every capability, and retains only
 `SYS_CHROOT` in the bounding set for Chromium after it enters its user
 namespace. The application process has no permitted or effective capabilities.
 
-The allowlist carries one addition. runc 1.3.3 (the release that fixed
-CVE-2025-31133, CVE-2025-52565 and CVE-2025-52881) opens
-`/proc/thread-self/fd` with `openat2` after it has loaded the filter, and a
-profile that refuses the call starts no container and no `docker exec`
-("unsafe procfs detected"). runc 1.5.2 starts under the older profile; the
-versions between were not tried. `openat2` is therefore allowed. runc answers
-`ENOSYS` for any system call numbered above the highest one a profile names,
-and the default `EPERM` for the rest, so the nine calls numbered between the
-old highest and `openat2` are named with `ENOSYS`: on x86-64, the only
-architecture the image is built for, they answer as they did before. glibc
-falls back from `clone3` to `clone` on `ENOSYS` only; left to the default, no
-thread would start. Add a newer system call to the profile the same way, with
-every lower-numbered one it passes, in a rule with no `args`, `includes` or
-`excludes`: Docker drops a rule whose conditions do not hold.
+The allowlist (`security/seccomp/chromium.json`) is the default profile of
+Docker 29.9.0 plus one rule: `clone`, `setns` and `unshare` are allowed
+whatever their arguments, because Chromium's sandbox creates user namespaces
+and the default allows that only with `CAP_SYS_ADMIN`.
+[`security/seccomp/README.md`](../security/seccomp/README.md) records where
+the default comes from, the difference, and how to move to a newer one. Both
+files are generated or copied; edit neither.
+
+Two system calls decide whether anything starts, and a test holds each:
+- runc 1.3.3 (the release that fixed CVE-2025-31133, CVE-2025-52565 and
+  CVE-2025-52881) opens `/proc/thread-self/fd` with `openat2` after it has
+  loaded the filter. A profile that refuses the call starts no container and
+  no `docker exec` ("unsafe procfs detected"), which the profile used until
+  2026-10 did on the first production host.
+- `clone3` answers `ENOSYS`, as in the default. glibc falls back to `clone`
+  on `ENOSYS` only; with the default `EPERM` no thread would start. runc
+  answers `ENOSYS` by itself only for a system call numbered above the
+  highest one a profile names.
+
 Do not replace either policy with `unconfined`. `/data`, bounded `/tmp`, `/run`,
 home cache/config and Camoufox state tmpfs, and `/dev/shm` are the only writable
 areas.

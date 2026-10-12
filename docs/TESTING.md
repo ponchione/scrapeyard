@@ -216,7 +216,7 @@ short-lived digest-pinned host-network helper container with `NET_ADMIN`. It fai
 early with a focused prerequisite or port-conflict message. The host must
 support AppArmor and unprivileged user namespaces; the runner temporarily loads
 the repository's restrictive Chromium profile when it is not already present.
-It uses the pinned Playwright seccomp policy rather than disabling filtering.
+It uses the production seccomp profile rather than disabling filtering.
 Docker Desktop must have enough Linux VM resources and support the
 `linux/amd64` image. Camoufox may emit its upstream virtual-display or
 fingerprint warnings; warnings do not pass the lane in place of successful

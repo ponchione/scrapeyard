@@ -5,6 +5,8 @@ import json
 import re
 from pathlib import Path
 
+from scripts import derive_seccomp_profile
+
 
 def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
     dockerfile = Path("Dockerfile").read_text()
@@ -124,73 +126,92 @@ def test_readme_documents_dynamic_stealth_runtime_and_rebuild_flow() -> None:
     assert "ownership" in readme
 
 
-# The system calls numbered 428 to 462 on every Linux architecture, in order.
-_NEWER_SYSCALLS = (
-    "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "fspick", "pidfd_open",
-    "clone3", "close_range", "openat2", "pidfd_getfd", "faccessat2", "process_madvise",
-    "epoll_pwait2", "mount_setattr", "quotactl_fd", "landlock_create_ruleset",
-    "landlock_add_rule", "landlock_restrict_self", "memfd_secret", "process_mrelease",
-    "futex_waitv", "set_mempolicy_home_node", "cachestat", "fchmodat2", "map_shadow_stack",
-    "futex_wake", "futex_wait", "futex_requeue", "statmount", "listmount",
-    "lsm_get_self_attr", "lsm_set_self_attr", "lsm_list_modules", "mseal",
-)
-# The 381 names of Playwright 1.58.0's list, none numbered above 427 on x86-64:
-# sha256 of them sorted and joined by newlines.
-_OLDER_SYSCALLS_SHA256 = "c1dc008431529a794c87715c0b8f8846a14c9106fc349a131fe79ca424f23e84"
+# github.com/moby/profiles/seccomp v0.2.4, as Docker 29.9.0 vendors it.
+_MOBY_DEFAULT_SHA256 = "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334"
+# docker-compose.yml drops every capability and adds this one, and Docker
+# reads a rule's capabilities against the container's bounding set.
+_BOUNDING_SET = {"CAP_SYS_CHROOT"}
 
 
-def _seccomp_rules() -> dict[str, list[dict]]:
+def _rules_in_the_production_container(name: str) -> list[dict]:
+    """The rules Docker keeps for one system call: the image is amd64 only."""
     profile = json.loads(Path("security/seccomp/chromium.json").read_text())
-    assert profile["defaultAction"] == "SCMP_ACT_ERRNO" and "defaultErrnoRet" not in profile
-    rules: dict[str, list[dict]] = {}
+    assert (profile["defaultAction"], profile["defaultErrnoRet"]) == ("SCMP_ACT_ERRNO", 1)
+    kept = []
     for rule in profile["syscalls"]:
         # Docker reads keys without regard to case, so `Includes` beside
         # `includes` would be a condition this test does not see.
         assert set(rule) <= {"comment", "names", "action", "args", "includes", "excludes", "errnoRet"}
-        assert type(rule.get("errnoRet", 0)) is int
-        for name in rule["names"]:
-            rules.setdefault(name, []).append(rule)
-    return rules
+        includes, excludes = rule.get("includes", {}), rule.get("excludes", {})
+        assert set(includes) <= {"arches", "caps", "minKernel"} and set(excludes) <= {"arches", "caps"}
+        if name not in rule["names"]:
+            continue
+        if "amd64" in excludes.get("arches", []) or _BOUNDING_SET & set(excludes.get("caps", [])):
+            continue
+        if "arches" in includes and "amd64" not in includes["arches"]:
+            continue
+        if not set(includes.get("caps", [])) <= _BOUNDING_SET:
+            continue
+        kept.append(rule)
+    return kept
 
 
-def _the_rule_that_always_applies(rules: dict[str, list[dict]], name: str) -> dict:
-    # Docker drops a rule whose `includes` or `excludes` (a capability, an
-    # architecture, a kernel version) do not hold, and `args` narrow one.
-    assert len(rules[name]) == 1, name
-    rule = rules[name][0]
-    assert (rule["args"], rule["includes"], rule["excludes"]) == ([], {}, {}), name
-    return rule
+def test_seccomp_profile_is_mobys_default_plus_the_user_namespace_rule() -> None:
+    # The whole difference from what every Docker container gets is the one
+    # rule in the script. Anything else is a change to review as one: move to
+    # a newer default as security/seccomp/README.md describes.
+    moby_default = Path("security/seccomp/moby-default.json").read_bytes()
+
+    assert hashlib.sha256(moby_default).hexdigest() == _MOBY_DEFAULT_SHA256
+    assert Path("security/seccomp/chromium.json").read_text() == derive_seccomp_profile.derive(
+        moby_default.decode()
+    )
+    assert derive_seccomp_profile.USER_NAMESPACE_RULE == {
+        "comment": "Chromium's sandbox creates user namespaces without CAP_SYS_ADMIN",
+        "names": ["clone", "setns", "unshare"],
+        "action": "SCMP_ACT_ALLOW",
+    }
 
 
 def test_seccomp_profile_lets_a_hardened_runc_start_the_container() -> None:
     # runc 1.3.3 opens /proc/thread-self/fd with openat2 after loading the
     # filter. Refused, neither a container nor an exec starts (2026-10-11).
-    assert _the_rule_that_always_applies(_seccomp_rules(), "openat2")["action"] == "SCMP_ACT_ALLOW"
+    assert {"action": "SCMP_ACT_ALLOW"} in [
+        {key: rule[key] for key in rule if key not in ("names", "comment")}
+        for rule in _rules_in_the_production_container("openat2")
+    ]
 
 
-def test_seccomp_profile_names_no_system_call_this_test_cannot_place() -> None:
-    # The test below needs each newer call's place in the kernel's numbering.
-    # One it does not know (463 and up) goes into the tuple above, with every
-    # call numbered below it, before it goes into the profile.
-    older = sorted(set(_seccomp_rules()) - set(_NEWER_SYSCALLS))
+def test_seccomp_profile_answers_enosys_to_clone3() -> None:
+    # glibc falls back from clone3 to clone on ENOSYS alone: with EPERM no
+    # thread starts. A filter cannot read the flags clone3 is passed, so the
+    # profile leaves it as Moby has it and does not allow it.
+    (rule,) = _rules_in_the_production_container("clone3")
 
-    assert hashlib.sha256("\n".join(older).encode()).hexdigest() == _OLDER_SYSCALLS_SHA256
+    assert (rule["action"], rule["errnoRet"]) == ("SCMP_ACT_ERRNO", 38)
+    assert "args" not in rule
 
 
-def test_seccomp_profile_answers_enosys_below_its_newest_syscall() -> None:
-    # runc answers ENOSYS only above the highest-numbered system call a
-    # profile names; one that is lower and not named gets the default EPERM.
-    # glibc falls back from clone3 to clone on ENOSYS alone, so with openat2
-    # named and clone3 left out, no thread could start.
-    rules = _seccomp_rules()
-    named = [name for name in _NEWER_SYSCALLS if name in rules]
-    assert named, "the profile names none of the newer system calls"
-    below_newest = _NEWER_SYSCALLS[: _NEWER_SYSCALLS.index(named[-1])]
+def test_seccomp_profile_keeps_closed_what_mobys_default_closes() -> None:
+    # The profile this one replaced was Moby's of 2020 and still allowed
+    # io_uring and every socket family.
+    for name in ("io_uring_setup", "io_uring_enter", "io_uring_register"):
+        assert _rules_in_the_production_container(name) == []
 
-    assert [name for name in below_newest if name not in rules] == []
-    for name in below_newest:
-        rule = _the_rule_that_always_applies(rules, name)
-        assert rule["action"] == "SCMP_ACT_ALLOW" or (
-            rule["action"] == "SCMP_ACT_ERRNO" and rule["errnoRet"] == 38
-        ), name
-    assert rules["clone3"][0]["action"] == "SCMP_ACT_ERRNO"
+    def admits(family: int) -> bool:
+        compare = {
+            "SCMP_CMP_LT": family.__lt__,
+            "SCMP_CMP_EQ": family.__eq__,
+            "SCMP_CMP_NE": family.__ne__,
+        }
+        admitted = False
+        for rule in _rules_in_the_production_container("socket"):
+            assert rule["action"] == "SCMP_ACT_ALLOW"
+            # No rule without a condition, and each condition is on the family.
+            assert rule.get("args") and all(arg["index"] == 0 for arg in rule["args"])
+            admitted |= all(compare[arg["op"]](arg["value"]) for arg in rule["args"])
+        return admitted
+
+    assert admits(1) and admits(2) and admits(10) and admits(16)  # unix, inet, inet6, netlink
+    assert not admits(38)  # AF_ALG: the kernel's crypto interface
+    assert not admits(40)  # AF_VSOCK: the hypervisor's sockets

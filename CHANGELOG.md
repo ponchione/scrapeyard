@@ -74,6 +74,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The seccomp profile (`security/seccomp/chromium.json`) is now the default
+  profile of Docker 29.9.0 plus one rule that allows `clone`, `setns` and
+  `unshare` for Chromium's user-namespace sandbox. It was Moby's default of
+  2020, by way of Playwright. The container no longer may use `io_uring` or
+  open `AF_ALG` and `AF_VSOCK` sockets, and it gains the system calls Docker
+  has allowed every container since (`faccessat2`, `close_range`,
+  `pidfd_open`, `epoll_pwait2`, the `landlock` calls and others).
+  `scripts/derive_seccomp_profile.py` writes the profile from the copied
+  default, and `security/seccomp/README.md` records the difference.
 - The container smoke lane and the release rehearsal replace the runner's
   Docker with the versions the deployment guide now names for a host
   (`scripts/install_container_runtime.sh`: Docker 28.5.2, containerd.io
