@@ -31,9 +31,18 @@ concurrency:
 
 jobs:
   release-rehearsal:
-    name: Retained release / deploy and roll back
+    name: Trial / built on ${{ matrix.build }}, deployed on ${{ matrix.deploy }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {build: 28-classic, deploy: 29-classic}
+          - {build: 28-classic, deploy: 29-containerd}
+          - {build: 29-classic, deploy: 29-containerd}
+          - {build: 29-containerd, deploy: 29-classic}
+          - {build: 28-classic, deploy: 28-classic}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,9 +68,14 @@ jobs:
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "previous=$previous" >> "$GITHUB_OUTPUT"
           echo "releases=$RUNNER_TEMP/scrapeyard-releases" >> "$GITHUB_OUTPUT"
-      - name: Install the container runtime the deployment guide names
-        # Before anything is built: the runner image's Docker is replaced.
-        run: sudo ./scripts/install_container_runtime.sh
+      - name: Install the runtime the releases are built on
+        run: sudo --preserve-env=TRIAL_DOCKER,TRIAL_CONTAINERD,TRIAL_COMPOSE,TRIAL_RUNC,TRIAL_IMAGE_STORE ./scripts/install_container_runtime.sh
+        env:
+          TRIAL_DOCKER: ${{ startsWith(matrix.build, '29') && '29.9.0' || '28.5.2' }}
+          TRIAL_CONTAINERD: ${{ startsWith(matrix.build, '29') && '2.4.1' || '1.7.29' }}
+          TRIAL_COMPOSE: ${{ startsWith(matrix.build, '29') && '5.6.0' || '2.38.2' }}
+          TRIAL_RUNC: ${{ startsWith(matrix.build, '29') && '1.5.2' || '1.3.3' }}
+          TRIAL_IMAGE_STORE: ${{ endsWith(matrix.build, 'containerd') && 'containerd' || 'classic' }}
       - name: Show Docker runner capacity
         run: |
           docker version
@@ -79,6 +93,20 @@ jobs:
           python3 scripts/release_artifact.py create
           "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
           --revision "${{ steps.revisions.outputs.candidate }}"
+      - name: Remove every image, as on a host that never built one
+        run: |
+          docker system prune --all --force --volumes > /dev/null
+          docker image ls --all
+      - name: Install the runtime the releases are deployed on
+        run: sudo --preserve-env=TRIAL_DOCKER,TRIAL_CONTAINERD,TRIAL_COMPOSE,TRIAL_RUNC,TRIAL_IMAGE_STORE ./scripts/install_container_runtime.sh
+        env:
+          TRIAL_DOCKER: ${{ startsWith(matrix.deploy, '29') && '29.9.0' || '28.5.2' }}
+          TRIAL_CONTAINERD: ${{ startsWith(matrix.deploy, '29') && '2.4.1' || '1.7.29' }}
+          TRIAL_COMPOSE: ${{ startsWith(matrix.deploy, '29') && '5.6.0' || '2.38.2' }}
+          TRIAL_RUNC: ${{ startsWith(matrix.deploy, '29') && '1.5.2' || '1.3.3' }}
+          TRIAL_IMAGE_STORE: ${{ endsWith(matrix.deploy, 'containerd') && 'containerd' || 'classic' }}
+      - name: Show the images the deployment host starts with
+        run: docker image ls --all
       - name: Deploy the candidate, refuse bad deployments, roll back, and rehearse the boot service
         run: >-
           sudo env
@@ -96,7 +124,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: deployment-rehearsal-${{ github.run_attempt }}
+          name: deployment-rehearsal-${{ matrix.build }}-to-${{ matrix.deploy }}
           path: artifacts/deployment-rehearsal/
           if-no-files-found: warn
           retention-days: 30

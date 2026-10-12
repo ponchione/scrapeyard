@@ -9,12 +9,12 @@ set -euo pipefail
 #
 # Raise these together with "Container runtime versions" in
 # docs/DEPLOYMENT.md, and raise the production host with them.
-DOCKER_VERSION="28.5.2"
-CONTAINERD_VERSION="1.7.29"
-COMPOSE_VERSION="2.38.2"
+DOCKER_VERSION="${TRIAL_DOCKER:-28.5.2}"
+CONTAINERD_VERSION="${TRIAL_CONTAINERD:-1.7.29}"
+COMPOSE_VERSION="${TRIAL_COMPOSE:-2.38.2}"
 # The runc inside that containerd.io package. It starts every container, and
 # the seccomp profile has to let it through.
-RUNC_VERSION="1.3.3"
+RUNC_VERSION="${TRIAL_RUNC:-1.3.3}"
 
 REPOSITORY="https://download.docker.com/linux/ubuntu"
 REPOSITORY_KEY_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
@@ -96,6 +96,17 @@ apt-get install -y -q --no-install-recommends --allow-downgrades --allow-change-
   -o Acquire::Retries=3 -o Dpkg::Options::=--force-confold \
   "docker-ce=$engine_package" "docker-ce-cli=$client_package" \
   "containerd.io=$containerd_package" "docker-compose-plugin=$compose_package"
+# TRIAL ONLY: choose Docker's image store. A new installation of Docker 29
+# uses containerd's; an upgrade in place keeps the classic one.
+TRIAL_IMAGE_STORE="${TRIAL_IMAGE_STORE:-classic}" python3 - <<'PY'
+import json, os, pathlib
+path = pathlib.Path("/etc/docker/daemon.json")
+config = json.loads(path.read_text()) if path.exists() else {}
+config.setdefault("features", {})["containerd-snapshotter"] = os.environ["TRIAL_IMAGE_STORE"] == "containerd"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(config, indent=2) + "\n")
+print("daemon.json:", json.dumps(config))
+PY
 systemctl restart containerd docker
 for _ in $(seq 1 60); do
   docker version --format '{{.Server.Version}}' > /dev/null 2>&1 && break
@@ -118,4 +129,5 @@ expect "containerd" "$CONTAINERD_VERSION" "$containerd"
 expect "runc" "$RUNC_VERSION" "$runc"
 expect "Compose" "$COMPOSE_VERSION" "$compose"
 
+docker info --format 'Image store: driver={{.Driver}} {{.DriverStatus}}'
 echo "Container runtime: Docker $engine, containerd $containerd, runc $runc, Compose $compose"
