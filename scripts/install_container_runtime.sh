@@ -96,6 +96,16 @@ apt-get install -y -q --no-install-recommends --allow-downgrades --allow-change-
   -o Acquire::Retries=3 -o Dpkg::Options::=--force-confold \
   "docker-ce=$engine_package" "docker-ce-cli=$client_package" \
   "containerd.io=$containerd_package" "docker-compose-plugin=$compose_package"
+# TRIAL ONLY: what a new installation of Docker 29 does by default.
+python3 - <<'PY'
+import json, pathlib
+path = pathlib.Path("/etc/docker/daemon.json")
+config = json.loads(path.read_text()) if path.exists() else {}
+config.setdefault("features", {})["containerd-snapshotter"] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(config, indent=2) + "\n")
+print("daemon.json:", json.dumps(config))
+PY
 systemctl restart containerd docker
 for _ in $(seq 1 60); do
   docker version --format '{{.Server.Version}}' > /dev/null 2>&1 && break
@@ -118,4 +128,5 @@ expect "containerd" "$CONTAINERD_VERSION" "$containerd"
 expect "runc" "$RUNC_VERSION" "$runc"
 expect "Compose" "$COMPOSE_VERSION" "$compose"
 
+docker info --format 'Image store: driver={{.Driver}} {{.DriverStatus}}'
 echo "Container runtime: Docker $engine, containerd $containerd, runc $runc, Compose $compose"
