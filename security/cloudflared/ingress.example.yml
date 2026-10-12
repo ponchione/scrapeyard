@@ -1,0 +1,20 @@
+# The routes of the tunnel, in cloudflared's ingress format. For a remotely
+# managed tunnel the same rules are the tunnel's configuration in the
+# Cloudflare account, not a file on the host. Replace the three placeholders.
+ingress:
+  - hostname: scrapeyard.example.com
+    # The routes Eyebox calls, and nothing else: no readiness, no metrics, no
+    # job list, no schedule changes, no domain guards. A rule matches a path,
+    # never a method, so the application's own authorization still decides
+    # what a caller may do on these paths.
+    path: ^/(health|scrape|scrape/acceptance|jobs/[^/]+|jobs/[^/]+/cancel|jobs/[^/]+/runs/[^/]+|results/[^/]+)$
+    service: http://172.30.0.250:8420
+    originRequest:
+      # The connector checks the Access token itself, so a request that
+      # reached the tunnel some other way than through Access is refused.
+      access:
+        required: true
+        teamName: your-zero-trust-team
+        audTag:
+          - the-access-application-audience-tag
+  - service: http_status:404

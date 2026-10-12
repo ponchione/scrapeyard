@@ -48,6 +48,31 @@ lanes pass on it, and only then upgrade and reboot the host. A held package
 takes no fixes, security fixes included, so do not leave the hold in place
 for long.
 
+## Host baseline
+
+What the first production host was given besides Docker and the release, so
+that a lost host can be rebuilt from this guide:
+
+- Ubuntu 24.04 with every update applied, and the release's Docker versions
+  ([above](#container-runtime-versions)), held.
+- SSH by key only: `PasswordAuthentication no`,
+  `KbdInteractiveAuthentication no` and `PermitRootLogin no` in a file under
+  `/etc/ssh/sshd_config.d/`. Test a second login before closing the first.
+- An inbound firewall that admits SSH and nothing else (`ufw default deny
+  incoming`, `ufw allow 22/tcp`). Compose publishes no port. A default `ufw`
+  leaves the egress policy's `INPUT` jump alone ([Egress](#egress)); the
+  provider's own firewall, where there is one, may not filter traffic from
+  its other customers.
+- Unattended security updates, with `Unattended-Upgrade::Automatic-Reboot`
+  on at a fixed time of day. Nobody logs in to restart the host, and the
+  [boot service](#boot-service-and-promotion) brings Scrapeyard back. A run
+  in flight at that time is interrupted, so keep the consumer's schedule
+  clear of it.
+- Docker's `json-file` logs rotated in `/etc/docker/daemon.json`
+  (`max-size` 20m, `max-file` 5); unrotated, a busy container fills the disk.
+- No account in the `docker` group. Its members are root in all but name;
+  operate through `sudo`.
+
 ## Single-instance guard
 
 Before opening SQLite or starting the embedded worker pool and scheduler, the
@@ -91,6 +116,93 @@ scheduler, and worker separation are documented in [SCALING.md](SCALING.md).
   internal monitoring.
 - Always set `SCRAPEYARD_API_CREDENTIALS`; when no named or legacy credentials
   exist, the warned `local-development` caller receives all scopes.
+
+### Ingress through a tunnel
+
+When the consumer runs with another provider, ingress can be a tunnel that
+the host opens outwards instead of a reverse proxy. The host then accepts no
+inbound connection except SSH, and there is no published port, certificate
+or list of the consumer's addresses to maintain. The first production host
+uses a Cloudflare Tunnel behind a Cloudflare Access service token. The
+provider ends TLS at its edge, so it sees the API key and every request and
+result in clear; choose this only where that is acceptable.
+
+Set it up in this order:
+
+1. **Access application** for the public name, with one policy of the
+   service-auth kind that includes a single service token and nothing else.
+   Turn on the 401 answer for service-token requests, so a caller without
+   the token is refused and not sent to a login page. Note the application's
+   audience tag.
+2. **Tunnel**, with the routes in
+   [`security/cloudflared/ingress.example.yml`](../security/cloudflared/ingress.example.yml):
+   the public name, the paths Eyebox calls, the application's fixed address
+   on the deployment bridge, the Access check repeated by the connector, and
+   404 for everything else. Then a proxied DNS record for the name that
+   points at the tunnel.
+3. **Connector on the host.** Install `cloudflared` from Cloudflare's package
+   repository and add that origin to the unattended upgrades
+   (`"origin=cloudflared,label=cloudflared";` in
+   `Unattended-Upgrade::Origins-Pattern`): the connector is the only thing
+   between the edge and the application. Then:
+
+   ```bash
+   sudo useradd --system --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cloudflared
+   sudo install -d -m 700 /etc/cloudflared
+   sudo install -m 600 /dev/null /etc/cloudflared/tunnel-token   # then put the tunnel's token in it
+   sudo install -m 644 security/systemd/cloudflared-scrapeyard.service /etc/systemd/system/
+   # This host's own public addresses, which differ on every host:
+   sudo install -d /etc/systemd/system/cloudflared-scrapeyard.service.d
+   printf '[Service]\nIPAddressDeny=%s\n' '203.0.113.7/32 2001:db8::7/128' |
+     sudo tee /etc/systemd/system/cloudflared-scrapeyard.service.d/host-addresses.conf
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now cloudflared-scrapeyard.service
+   ```
+
+   The unit gives the connector no capability and no view of Docker, the
+   settings file or the releases. Whatever the tunnel's routes say, it can
+   connect to the application's address, the local resolver and the public
+   internet only: Redis, the probe, loopback, the host's own addresses and
+   private ranges are dropped.
+4. **The consumer** sends the service token's id and secret as
+   `CF-Access-Client-Id` and `CF-Access-Client-Secret` beside its
+   `X-API-Key`. Give it a credential limited to `submit` and `read` in its
+   own project ([Secrets](#secrets)).
+
+A route matches a path and never a method. `PUT` and `DELETE /jobs/{id}`
+therefore reach the application, and it is the credential's scopes that
+refuse them. Do not give the consumer's credential more than it needs on the
+strength of the route list.
+
+Check all of this after the setup and after any change to it, from outside:
+
+- Without the token, and with a wrong id or secret, Access answers 401.
+- With it, `/health` answers 200 and each route in the list reaches the
+  application, which then asks for its own key.
+- Readiness, metrics, the job list, pause and resume, the domain guards, and
+  odd spellings of an allowed path (dot segments, an encoded or doubled
+  slash, upper case) are answered by the connector or the edge, not by the
+  application.
+- The consumer's key is refused on `PUT` and `DELETE /jobs/{id}`.
+- A submission is found again through `/scrape/acceptance`, polled and read.
+- The host's own address answers on no port but SSH.
+
+And from the host, as the connector's unit (`systemd-run -p` with the same
+address properties), a connection to Redis, to the probe, to loopback and to
+the host's own addresses must time out.
+
+The edge may refuse a client before Access reads its token. The zone's
+Browser Integrity Check answers 403 to the default signature of Python's
+`urllib`, for one; `httpx`, `requests` and `curl` pass. Check again when the
+consumer changes its HTTP client.
+
+To rotate the service token, create a second one, add it to the policy, move
+the consumer to it, then remove the first from the policy and delete it. A
+service token expires (after a year by default) and every request is then
+refused with 401, so record the date. To rotate the tunnel's token, refresh
+it in the account, replace the file and restart the unit. API credentials
+rotate as [Secrets](#secrets) describes: deploy the old and the new one side
+by side, move the consumer, remove the old one.
 
 ## Egress
 
