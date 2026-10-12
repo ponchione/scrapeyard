@@ -23,6 +23,31 @@ assumption at the network layer.
 - Browser scraping egress is controlled by the host, orchestrator, proxy
   gateway, or firewall policy and attested before the application starts.
 
+## Container runtime versions
+
+A host installs these from Docker's package repository and holds them
+(`apt-mark hold`), so an unattended upgrade cannot move the host past what
+was rehearsed:
+
+| Package | Version |
+| --- | --- |
+| `docker-ce`, `docker-ce-cli` | 28.5.2 |
+| `containerd.io` | 1.7.29, which carries runc 1.3.3 |
+| `docker-compose-plugin` | 2.38.2 |
+
+The container smoke lane and the release rehearsal install the same versions
+before they build anything (`scripts/install_container_runtime.sh`), and fail
+when the engine, containerd, runc or Compose that then runs is another one.
+The rehearsal records them in `container-runtime.txt`. A runner image's own
+Docker is not a stand-in: a release that had passed every lane on the
+runner's runc started no container under the host's
+([seccomp allowlist](#container-privilege-and-filesystem-boundary)).
+
+Raise the versions in that script and in this table in one change, let the
+lanes pass on it, and only then upgrade and reboot the host. A held package
+takes no fixes, security fixes included, so do not leave the hold in place
+for long.
+
 ## Single-instance guard
 
 Before opening SQLite or starting the embedded worker pool and scheduler, the

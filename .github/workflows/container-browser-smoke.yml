@@ -11,6 +11,7 @@ on:
       - security/install-chromium-apparmor-profile.sh
       - security/install-docker-egress-policy.sh
       - scripts/container-entrypoint.sh
+      - scripts/install_container_runtime.sh
       - poetry.lock
       - pyproject.toml
       - scripts/run_container_browser_smoke.sh
@@ -44,10 +45,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the container runtime the deployment guide names
+        # Before anything is built: the runner image's Docker is replaced.
+        run: sudo ./scripts/install_container_runtime.sh
       - name: Show Docker runner capacity
         run: |
           docker version
           docker compose version
+          runc --version
           df -h . /var/lib/docker || true
           free -h
       - name: Build the production image and run real browser smoke tests

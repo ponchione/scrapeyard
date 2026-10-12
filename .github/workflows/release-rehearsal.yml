@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - docker-compose.yml
+      - scripts/install_container_runtime.sh
       - scripts/release_artifact.py
       - scripts/run_deployment_rehearsal.sh
       - security/**
@@ -58,10 +59,14 @@ jobs:
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "previous=$previous" >> "$GITHUB_OUTPUT"
           echo "releases=$RUNNER_TEMP/scrapeyard-releases" >> "$GITHUB_OUTPUT"
+      - name: Install the container runtime the deployment guide names
+        # Before anything is built: the runner image's Docker is replaced.
+        run: sudo ./scripts/install_container_runtime.sh
       - name: Show Docker runner capacity
         run: |
           docker version
           docker compose version
+          runc --version
           df -h . /var/lib/docker "$RUNNER_TEMP" || true
           free -h
       - name: Build, scan and qualify the previous release

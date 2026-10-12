@@ -74,6 +74,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The container smoke lane and the release rehearsal replace the runner's
+  Docker with the versions the deployment guide now names for a host
+  (`scripts/install_container_runtime.sh`: Docker 28.5.2, containerd.io
+  1.7.29 with runc 1.3.3, Compose 2.38.2) and fail when anything else runs.
+  The rehearsal records them in `container-runtime.txt`. Until now both ran
+  on the runner image's Docker, under whose runc a release passed that
+  started no container on the production host.
 - `security/deploy-secure-compose.sh` deploys without `SCRAPEYARD_PROXY_URL`
   when `SCRAPEYARD_UNTRUSTED_SUBMISSIONS` is `false`, for a deployment whose
   only submitter is its operator's own service. Otherwise it still requires

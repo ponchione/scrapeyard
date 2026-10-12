@@ -641,6 +641,12 @@ egress policy and the AppArmor profile, uses the production subnet, and
 refuses to start when an existing Docker network overlaps that subnet. Nothing
 is built or pulled.
 
+On GitHub, this lane and the smoke lane first replace the runner's Docker with
+the versions [DEPLOYMENT.md](DEPLOYMENT.md#container-runtime-versions) names
+for a host (`sudo ./scripts/install_container_runtime.sh`; it restarts Docker,
+so do not run it on a machine that serves). The rehearsal writes what it ran
+on to `container-runtime.txt` before its first deployment.
+
 In order, it:
 
 1. Deploys the candidate and checks what is running (below).

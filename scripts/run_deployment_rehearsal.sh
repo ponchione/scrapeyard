@@ -310,6 +310,15 @@ if [[ -e "$DIAGNOSTICS_DIR" && ! -d "$DIAGNOSTICS_DIR" ]]; then
 fi
 rm -rf -- "$DIAGNOSTICS_DIR"
 mkdir -p "$DIAGNOSTICS_DIR"
+# Written first, so a rehearsal that fails still says what started its
+# containers: a release can pass under one runc and not start under another.
+cat > "$DIAGNOSTICS_DIR/container-runtime.txt" <<EOF
+docker_engine=$(docker version --format '{{.Server.Version}}')
+docker_compose=$(docker compose version --short)
+containerd=$(containerd --version 2>/dev/null | awk '{print $3}')
+runc=$(runc --version 2>/dev/null | awk 'NR == 1 {print $3}')
+kernel=$(uname -r)
+EOF
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrapeyard-rehearsal.XXXXXX")"
 chmod 700 "$WORK_DIR"
 
@@ -1034,9 +1043,7 @@ candidate_revision=$(manifest_value "$CANDIDATE" revision)
 candidate_image=$(manifest_value "$CANDIDATE" images.scrapeyard)
 previous_revision=$(manifest_value "$PREVIOUS" revision)
 previous_image=$(manifest_value "$PREVIOUS" images.scrapeyard)
-docker_engine=$(docker version --format '{{.Server.Version}}')
-docker_compose=$(docker compose version --short)
-kernel=$(uname -r)
+$(<"$DIAGNOSTICS_DIR/container-runtime.txt")
 total_seconds=$((SECONDS - STARTED_AT))
 EOF
 scan_diagnostics
