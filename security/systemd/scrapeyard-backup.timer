@@ -1,0 +1,24 @@
+# Run the backup once a day. Install it as
+# /etc/systemd/system/scrapeyard-backup.timer beside
+# scrapeyard-backup.service and enable it with
+# "systemctl enable --now scrapeyard-backup.timer"; see docs/DEPLOYMENT.md
+# ("Persistence And Backups").
+
+[Unit]
+Description=Daily Scrapeyard backup
+
+[Timer]
+# A fixed time in UTC, whatever the host's own time zone is. A host set up as
+# the deployment guide says reboots for security updates at 10:30 UTC on the
+# days one needs it, and a reboot ends a backup that is running. A run waits
+# up to an hour for the application to be idle, so 04:40 leaves almost five
+# hours. Keep the consumer's schedule clear of the minutes after 04:40 too:
+# the application is down for about a minute once it is idle.
+OnCalendar=*-*-* 04:40:00 UTC
+AccuracySec=1min
+RandomizedDelaySec=0
+# A run missed while the host was down is made up for when it is up again.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

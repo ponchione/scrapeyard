@@ -1,0 +1,42 @@
+# Copy Scrapeyard's data and Redis's while the application is stopped, start
+# the application again, and encrypt the copy. Install it as
+# /etc/systemd/system/scrapeyard-backup.service together with
+# scrapeyard-backup.timer; see docs/DEPLOYMENT.md ("Persistence And Backups").
+#
+# It runs /usr/local/sbin/scrapeyard-backup, an installed copy of
+# security/backup.sh. Like scrapeyard-release, the copy is not read from the
+# promoted release, so the unit keeps working after a rollback to a release
+# that has no such script. The helper and the SQL a backup is checked against
+# do come from the promoted release.
+#
+# Its settings are optional and hold no secret. Set one in a drop-in, for
+# example "Environment=SCRAPEYARD_BACKUP_KEEP=14".
+
+[Unit]
+Description=Scrapeyard quiesced, encrypted backup
+# A run the timer missed while the host was down is started as soon as the
+# host is up, which is while scrapeyard.service is still starting the
+# application. Ordered after it, this unit's start waits for that start.
+# There is no Requires or Wants: a backup never pulls the application's unit
+# in or out by a dependency. It stops and starts it by name, and says so.
+After=docker.service scrapeyard.service
+ConditionPathExists=/srv/scrapeyard-releases/current/manifest.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scrapeyard-backup run
+# The script starts the application again whatever ends a run after it has
+# stopped it: a failed copy, a signal, a stop of this unit. A run that is
+# killed outright cannot do that. This command runs after every run, however
+# it ended, and starts scrapeyard.service if a run left the application
+# stopped. It also removes the unencrypted copy such a run leaves behind.
+ExecStopPost=/usr/local/sbin/scrapeyard-backup resume
+# A run waits up to an hour for the application to be idle, and its copy,
+# the application's start and an upload each have a limit of their own.
+# This one is above their sum, so it ends a run only when one of them hangs.
+TimeoutStartSec=3h
+# The default, stated because the script depends on it: a stop signals every
+# process of the run, so a hung copy ends and the script's own exit handler
+# can start the application.
+KillMode=control-group
+TimeoutStopSec=300
