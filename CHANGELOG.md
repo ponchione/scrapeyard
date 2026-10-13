@@ -101,6 +101,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   does. The seccomp filter covers the direct `socket` call only, and a
   64-bit process can still reach `socketcall` through the 32-bit entry;
   until now nothing closed that path for `AF_VSOCK`.
+- The container smoke lane opens `AF_ALG` and `AF_VSOCK` sockets through
+  the 32-bit `socketcall` entry from inside the application's container and
+  requires AppArmor's refusal, and runs the same attempts under a copy of
+  the profile without the two denials, where they have to succeed
+  (`tests/smoke/verify_confinement.py`). Until now the denials rested on
+  Moby's statement that AppArmor's check does not depend on the entry used.
 - The container smoke lane and the release rehearsal replace the runner's
   Docker with the versions the deployment guide now names for a host
   (`scripts/install_container_runtime.sh`: Docker 28.5.2, containerd.io

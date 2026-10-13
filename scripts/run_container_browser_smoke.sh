@@ -49,6 +49,9 @@ CREDENTIAL_DIR=""
 CLEANUP_COMPLETE=0
 EGRESS_POLICY_ACTIVE=0
 APPARMOR_PROFILE_ACTIVE=0
+CONTROL_PROFILE="scrapeyard-smoke-control"
+CONTROL_PROFILE_FILE=""
+CONTROL_PROFILE_ACTIVE=0
 HOST_LISTENER_PID=""
 POLICY_MODE=""
 SCRAPEYARD_EGRESS_INTERFACE=""
@@ -152,6 +155,25 @@ run_apparmor_profile() {
   esac
 }
 
+# Loads or removes the control profile: the application's own, without the
+# lines the confinement check rests on. It never confines the application.
+run_control_profile() {
+  local action=$1
+  case "$POLICY_MODE" in
+    root) apparmor_parser "$action" "$CONTROL_PROFILE_FILE" ;;
+    sudo) sudo -n apparmor_parser "$action" "$CONTROL_PROFILE_FILE" ;;
+    container)
+      docker run --rm --privileged --security-opt apparmor=unconfined \
+        -v /sys/kernel/security:/sys/kernel/security \
+        -v "$CONTROL_PROFILE_FILE:/control-profile:ro" \
+        ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 \
+        sh -c 'apt-get update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apparmor >/dev/null && apparmor_parser "$1" /control-profile' \
+        _ "$action"
+      ;;
+    *) fail "privileged policy runner was not selected" ;;
+  esac
+}
+
 apparmor_profile_loaded() {
   docker run --rm --privileged --security-opt apparmor=unconfined \
     -v /sys/kernel/security:/sys/kernel/security:ro \
@@ -182,6 +204,10 @@ cleanup_resources() {
     EGRESS_POLICY_ACTIVE=0
   fi
   timeout 90 docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans >/dev/null 2>&1
+  if ((CONTROL_PROFILE_ACTIVE == 1)); then
+    run_control_profile --remove >/dev/null 2>&1
+    CONTROL_PROFILE_ACTIVE=0
+  fi
   if ((APPARMOR_PROFILE_ACTIVE == 1)); then
     run_apparmor_profile remove >/dev/null 2>&1
     APPARMOR_PROFILE_ACTIVE=0
@@ -355,6 +381,36 @@ compose exec -T --user scrapeyard scrapeyard python - \
 
 compose exec -T --user scrapeyard scrapeyard python - \
   < tests/smoke/verify_fetch_sessions.py > "$DIAGNOSTICS_DIR/fetch-session-contract.jsonl"
+
+# What the confinement has to refuse, tried from inside the application's
+# container.
+compose exec -T --user scrapeyard scrapeyard python - \
+  < tests/smoke/verify_confinement.py > "$DIAGNOSTICS_DIR/confinement.json"
+
+# The same attempts in a container of the same image under the same seccomp
+# profile, and under a copy of the AppArmor profile without the lines that
+# check rests on. There they have to succeed: a refusal that would also come
+# without those lines proves nothing about them.
+CONTROL_PROFILE_FILE="$CREDENTIAL_DIR/control-profile"
+sed -e "s/\"scrapeyard-chromium\"/\"$CONTROL_PROFILE\"/g" \
+  -e '/^  deny network \(alg\|vsock\),$/d' \
+  security/apparmor/scrapeyard-chromium > "$CONTROL_PROFILE_FILE"
+# Loaded under the application's name it would replace the application's
+# profile on this host.
+grep -q "^profile \"$CONTROL_PROFILE\" " "$CONTROL_PROFILE_FILE" && \
+  ! grep -q '"scrapeyard-chromium"' "$CONTROL_PROFILE_FILE" || \
+  fail "the control profile did not take its own name"
+CONTROL_PROFILE_ACTIVE=1
+run_control_profile --replace
+docker run --rm -i --network none --read-only --user 10001:10001 \
+  --cap-drop ALL --cap-add SYS_CHROOT \
+  --security-opt no-new-privileges:true \
+  --security-opt "apparmor=$CONTROL_PROFILE" \
+  --security-opt seccomp=security/seccomp/chromium.json \
+  --entrypoint python "$IMAGE_ID" - --control \
+  < tests/smoke/verify_confinement.py > "$DIAGNOSTICS_DIR/confinement-control.json"
+run_control_profile --remove
+CONTROL_PROFILE_ACTIVE=0
 
 # Retrieve only the focused smoke project's bounded results/screenshots, never
 # the SQLite databases, profiles, credentials, or the complete /data tree.

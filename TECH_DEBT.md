@@ -488,20 +488,18 @@ with libseccomp 2.5.5).
 - A deployment on the production host. The profile and the AppArmor change
   beside it (`deny network vsock`) ship with the next release; the wrapper
   installs the AppArmor profile at every promotion and boot.
-- Nothing tests that the AppArmor denial refuses an `AF_ALG` or `AF_VSOCK`
-  socket opened through the 32-bit `socketcall` entry. The development host
-  has no AppArmor and no lane tries it; it rests on Moby's statement that
-  AppArmor's check does not depend on the entry used. A probe in the smoke
-  lane would settle it.
 - That runc's libseccomp does not know nine of the profile's newest names
   (`statmount`, `listmount`, `mseal`, `uretprobe`, the four `*xattrat` calls
   and `riscv_hwprobe`), so runc skips them there and they answer `ENOSYS`.
   Harmless today; it changes by itself when the host's packages move.
 **Code:** `security/seccomp/`, `scripts/derive_seccomp_profile.py`,
 `security/apparmor/scrapeyard-chromium`,
-`tests/unit/test_browser_runtime_contract.py`.
-**Done when:** a release that carries the profile runs on the host, browser
-fetches in all three modes pass there, and the `socketcall` path is tested.
+`tests/unit/test_browser_runtime_contract.py`,
+`tests/smoke/verify_confinement.py`.
+**Done when:** a release that carries the profile runs on the host, and
+browser fetches in all three modes pass there. The smoke lane tests the
+`socketcall` path since 2026-10-13 (`tests/smoke/verify_confinement.py`);
+run the same file against the host's container once the release is there.
 
 ## Coordinated
 

@@ -46,7 +46,9 @@ Nothing is removed from the default. In particular the profile does not allow
 families, all of which the profile it replaced (an older default, by way of
 Playwright) allowed. The filter sees the direct `socket` call only. A 64-bit
 process can still reach `socketcall` through the 32-bit entry, so the
-AppArmor profile denies both families as well, as Moby's own does.
+AppArmor profile denies both families as well, as Moby's own does. The
+container smoke lane opens both through that entry and requires AppArmor's
+refusal (`tests/smoke/verify_confinement.py`).
 
 ## Moving to a newer default
 

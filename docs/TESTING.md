@@ -274,6 +274,26 @@ asset/version, result ownership, and PNG contents. The runner copies
 only the `item14-smoke` result subtree to a temporary host directory to prove
 screenshots are retrievable, then removes that copy.
 
+`tests/smoke/verify_confinement.py` then tries, from inside the application's
+container, what the confinement has to refuse. The seccomp filter refuses the
+`AF_ALG` and `AF_VSOCK` socket families on the 64-bit `socket` call, which
+is the only spelling of it a filter can read. A 64-bit process can also ask
+through the 32-bit entry (`int 0x80`, `socketcall`), where the family sits
+behind a pointer, so the check opens both families that way and requires
+AppArmor's refusal (`EACCES`). A TCP socket opened through the same entry
+shows that the entry works. The lane then runs the same file in a second
+container of the same image, under the same seccomp profile and a copy of the
+AppArmor profile without the two denials, and requires each attempt to
+succeed there: a refusal that would also come without those lines proves
+nothing about them. The copy is loaded under its own name and removed when
+the lane ends. The check opens sockets and sends nothing, and it runs against
+a deployed container as well:
+
+```bash
+sudo docker exec -i <application container> python - \
+  < /srv/scrapeyard-releases/current/source/tests/smoke/verify_confinement.py
+```
+
 Plan for 4 CPU cores, 8 GiB RAM, and 15 GiB free disk; 2 cores and 6 GiB are a
 practical lower bound but take longer. Network access is needed only to pull
 base images and, during an uncached build, locked Python packages and upstream

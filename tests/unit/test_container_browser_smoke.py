@@ -10,8 +10,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
+from tests.smoke import verify_confinement
 from tests.smoke.fixture_site import PRIVATE_ORIGIN, PUBLIC_ORIGIN, create_server
 from tests.smoke.verify_api import (
     PRIVATE_LITERAL_ORIGIN,
@@ -53,6 +55,81 @@ def test_smoke_lane_probes_the_host_s_own_addresses_from_the_application() -> No
     # A container the policy does not name must reach it over the same bridge.
     assert 'fail "the host probe listener is not reachable from the deployment bridge"' in script
     assert script.count('kill "$HOST_LISTENER_PID"') == 2
+
+
+def test_smoke_lane_checks_the_confinement_against_a_control() -> None:
+    script = Path("scripts/run_container_browser_smoke.sh").read_text(encoding="utf-8")
+    check = script.index(
+        '< tests/smoke/verify_confinement.py > "$DIAGNOSTICS_DIR/confinement.json"'
+    )
+    control = script.index('--entrypoint python "$IMAGE_ID" - --control', check)
+    between = script[check:control]
+    # The control container differs from the application's in its AppArmor
+    # profile and in nothing else that decides a socket call.
+    for same in (
+        "--user 10001:10001",
+        "--cap-drop ALL --cap-add SYS_CHROOT",
+        "no-new-privileges:true",
+        "seccomp=security/seccomp/chromium.json",
+        '"apparmor=$CONTROL_PROFILE"',
+    ):
+        assert same in between
+    # Its profile is the application's without the lines under test, and
+    # those lines have to be there for the difference to exist.
+    assert "-e '/^  deny network \\(alg\\|vsock\\),$/d'" in between
+    profile = Path("security/apparmor/scrapeyard-chromium").read_text(encoding="utf-8")
+    assert "  deny network alg,\n" in profile and "  deny network vsock,\n" in profile
+    # Loaded under the application's name it would take the place of the
+    # application's profile, and it must not outlive the lane.
+    assert 'fail "the control profile did not take its own name"' in between
+    assert script.count("run_control_profile --remove") == 2
+
+
+_CONFINED_ANSWERS = {
+    "TCP socket, 32-bit entry": "accepted",
+    "AF_ALG socket": "EPERM",
+    "AF_VSOCK socket": "EPERM",
+    "AF_ALG socket, 32-bit entry": "EACCES",
+    "AF_VSOCK socket, 32-bit entry": "EACCES",
+}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "answers", "status"),
+    [
+        ([], {}, 0),
+        # AppArmor let a family through the entry the seccomp filter cannot read.
+        ([], {"AF_VSOCK socket, 32-bit entry": "accepted"}, 1),
+        ([], {"AF_ALG socket, 32-bit entry": "EAFNOSUPPORT"}, 1),
+        # On a kernel without the 32-bit entry every refusal would be the entry's.
+        ([], {"TCP socket, 32-bit entry": "ENOSYS"}, 1),
+        ([], {"an attempt nobody judges": "accepted"}, 1),
+        # Under the control profile a refusal means the check proves nothing.
+        (["--control"], {}, 1),
+        (
+            ["--control"],
+            {
+                "AF_ALG socket, 32-bit entry": "accepted",
+                "AF_VSOCK socket, 32-bit entry": "EAFNOSUPPORT",
+            },
+            0,
+        ),
+        (["--report"], {"AF_VSOCK socket, 32-bit entry": "accepted"}, 0),
+    ],
+)
+def test_confinement_check_judges_what_the_container_answered(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    answers: dict[str, str],
+    status: int,
+) -> None:
+    monkeypatch.setattr(verify_confinement.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(verify_confinement, "Entry32", lambda: None)
+    monkeypatch.setattr(
+        verify_confinement, "in_the_container", lambda _entry: {**_CONFINED_ANSWERS, **answers}
+    )
+
+    assert verify_confinement.main(arguments) == status
 
 
 def test_fixture_serves_deterministic_static_dynamic_redirect_and_protected_scenarios() -> None:
