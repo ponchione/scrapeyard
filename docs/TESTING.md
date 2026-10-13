@@ -720,10 +720,11 @@ In order, it:
 With `--boot-service` it goes on to the
 [boot service](DEPLOYMENT.md#boot-service-and-promotion), installed as the
 deployment guide describes, with the releases copied under a root-owned
-`/srv/scrapeyard-releases`. This part needs systemd. It stops Docker, unloads
-the AppArmor profile and unloads the bridge netfilter module for a moment, and
-it refuses to start if the paths it installs already exist. Each step ends
-with the same checks as a deployment:
+`/srv/scrapeyard-releases`. This part needs systemd, and `age` with
+`age-keygen` from the distribution's package for its last step. It stops
+Docker, unloads the AppArmor profile and unloads the bridge netfilter module
+for a moment, and it refuses to start if the paths it installs already exist.
+Each step ends with the same checks as a deployment:
 
 1. Promotions that must be refused with nothing moved: a release with a
    changed file, one with a file another account owns, and one that root owns
@@ -761,6 +762,29 @@ with the same checks as a deployment:
    its own log must show that it checked the host egress policy, and started
    without the policy it must still refuse to serve. Steps 1 to 8 keep a
    proxy set, because the previous release may predate this mode.
+10. The candidate's [scheduled backup](DEPLOYMENT.md#persistence-and-backups),
+    installed as the deployment guide describes, with a throwaway `age` key
+    pair of which the host is given the public half:
+    - A run with an upload hook that another account owns must be refused
+      with the application untouched.
+    - A run through `scrapeyard-backup.service` must stop the application,
+      copy, and bring it back through the boot service: a new invocation of
+      that unit, the checks that follow every deployment, and the
+      application's own log showing that it checked the egress policy. The
+      archive must be an `age` file that matches the checksum beside it, with
+      nothing else left in the backup directory, and the hook must have been
+      handed that file.
+    - `scrapeyard-backup restore-test` must restore the archive into its
+      isolated project and report the job list and the known run's job and
+      result identical to the witness, the stored configuration encrypted and
+      read back decrypted, and no route off the host. It must leave no
+      container, volume, network or file behind, and the deployment as it
+      was: the same container, the same invocation of the boot service, and
+      still exactly one egress policy jump.
+
+    The known run is a `failed` one, so this step compares no `complete` job
+    and no result of a fetched page. A candidate from before the backup
+    script skips the step.
 
 After each deployment it checks, from outside the application:
 
@@ -794,13 +818,16 @@ either generated credential appears in it. On exit it removes the project's
 containers, network and volumes, the rehearsal policy, the unreachable route
 and, if it loaded it, the AppArmor profile. With `--boot-service` it also
 removes the unit, the installed script, the settings file and its copies of
-the releases, starts Docker if a failed step left it stopped, and puts the
+the releases, the backup's script, units, archives and status file and
+anything a restore test left of its project, starts Docker if a failed step
+left it stopped, and puts the
 bridge netfilter module and setting back as they were before the run (a
 module the kernel will not unload stays loaded). It leaves the loaded images.
 
 The `Release artifact and deployment rehearsal` workflow builds, scans and
-qualifies both releases with `scripts/release_artifact.py create` and then
-runs the rehearsal with `--boot-service`. It packs the candidate with root as
+qualifies both releases with `scripts/release_artifact.py create`, installs
+`age` from the distribution's package, and then runs the rehearsal with
+`--boot-service`. It packs the candidate with root as
 the owner of every file, extracts the archive as the deployment guide says,
 and checks that the result verifies and holds nothing another account owns or
 can write to. On a pull request that touches the deployment files it uses the
@@ -811,11 +838,20 @@ days. It has read-only repository permission, SHA-pinned actions, no caches
 and a 120-minute timeout.
 
 The rehearsal does not cover a successful scrape through an operator proxy,
-the reverse proxy, a host reboot, or backups.
+the reverse proxy, a host reboot, a backup's upload to a store, a backup that
+has to wait for a busy application, or a restore onto another host
+(`scrapeyard-backup restore`).
 
 First run, 2026-10-10 on a GitHub runner (Ubuntu 24.04, Docker 28.0.4, Compose
 2.38.2), releases of `711aead` over `2f6b70f`: each release took 10 to 12
 minutes to build, scan and qualify, and the rehearsal passed in 125 seconds.
+
+First run with the backup step, 2026-10-13 on a GitHub runner (Docker 29.9.0,
+Compose 5.6.0), before the step was merged (run 38410891778): the rehearsal
+with `--boot-service` passed in 632 seconds. The backup had the application
+down for 17.3 seconds and wrote an archive of 10,715 bytes, and the restore
+test passed in 11.7 seconds with the known run's job identical to the
+witness.
 
 ## Dependency vulnerability audits
 
