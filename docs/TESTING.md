@@ -734,6 +734,15 @@ with the same checks as a deployment:
    promotion must work at once.
 3. A start of the boot service while a promotion is under way. The start
    waits, and must then start the release that was promoted.
+   Then, with the candidate running, two things that happen between
+   deployments. The policy's jumps are deleted from `DOCKER-USER` and
+   `INPUT`, as another firewall tool would, and nothing but the
+   [policy watch](DEPLOYMENT.md#the-policy-watch)'s timer may put them back,
+   with the application's container left as it was and the loss recorded.
+   And Redis is stopped under the application, whose container must turn
+   `unhealthy`: its health is its readiness. The application does not
+   recover from that by itself (TD-89), so the step ends by restarting the
+   boot service.
 4. A Docker restart, and a killed Docker daemon, which must be back within a
    minute.
 5. Docker stopped, then the egress policy, the bridge netfilter module and

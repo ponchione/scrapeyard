@@ -78,6 +78,9 @@ class _Host:
         self.releases = tmp_path / "releases"
         self.current = self.releases / "current"
         self.lock_dir = tmp_path / "lock"
+        self.restored_log = tmp_path / "state" / "policy-restored.log"
+        # What the release's installer finds: empty while the policy is in place.
+        self.policy_missing = tmp_path / "policy-missing"
         self.script = tmp_path / "manage-release.sh"
         text = MANAGE.read_text(encoding="utf-8")
         for old, new in (
@@ -85,6 +88,10 @@ class _Host:
             ("ENV_FILE=/etc/scrapeyard/deploy.env", f"ENV_FILE={self.env_file}"),
             ("CURRENT=/srv/scrapeyard-releases/current", f"CURRENT={self.current}"),
             ("LOCK_DIR=/run/scrapeyard", f"LOCK_DIR={self.lock_dir}"),
+            (
+                "RESTORED_LOG=/var/lib/scrapeyard/policy-restored.log",
+                f"RESTORED_LOG={self.restored_log}",
+            ),
             ("TRUSTED_OWNER=0", f"TRUSTED_OWNER={os.getuid()}"),
             ("TRUSTED_ROOT=/", f"TRUSTED_ROOT={tmp_path}"),
         ):
@@ -128,7 +135,9 @@ class _Host:
             'case "$1" in\n'
             '  ps) [[ "${DOCKER_PS_FAILS:-}" != yes ]] || exit 1\n'
             '      [[ "${NO_CONTAINER:-}" == yes ]] || echo app1 ;;\n'
-            '  inspect) echo "${RUNNING_IMAGE:-sha256:old}" ;;\n'
+            '  inspect) if [[ "$*" == *NetworkSettings* ]]; then echo "${NETWORK_ID-0123456789abcdef}"\n'
+            '           else echo "${RUNNING_IMAGE:-sha256:old}"; fi ;;\n'
+            '  network) echo "${BRIDGE_NAME:-}" ;;\n'
             'esac\n',
         )
         self.states = tmp_path / "promotion-states"
@@ -137,6 +146,7 @@ class _Host:
             PATH=f"{self.bin}:{os.environ['PATH']}",
             CALLS=str(self.calls),
             PROMOTION_STATES=str(self.states),
+            POLICY_MISSING=str(self.policy_missing),
         )
 
     def tool(self, name: str, body: str) -> None:
@@ -157,6 +167,22 @@ class _Host:
             ' >> "$CALLS"\n' + wrapper_body + '[[ "${WRAPPER_FAILS:-}" != yes ]]\n'
         )
         wrapper.chmod(0o755)
+        # The release's policy installer: `check` answers from a file, and an
+        # `install` that works empties it.
+        installer = security / "install-docker-egress-policy.sh"
+        installer.write_text(
+            "#!/bin/bash\n"
+            'echo "installer $1 interface=$SCRAPEYARD_EGRESS_INTERFACE id=$SCRAPEYARD_EGRESS_POLICY_ID"'
+            ' >> "$CALLS"\n'
+            'case "$1" in\n'
+            '  check) [[ "${INSTALLER_CANNOT_CHECK:-}" != yes ]] || { echo "usage: $0 [install|remove]" >&2; exit 2; }\n'
+            '         [[ -s "$POLICY_MISSING" ]] || exit 0\n'
+            '         echo "scrapeyard egress policy: not in place: $(<"$POLICY_MISSING")" >&2; exit 1 ;;\n'
+            '  install) [[ "${INSTALL_FAILS:-}" != yes ]] || exit 2\n'
+            '           [[ "${INSTALL_CHANGES_NOTHING:-}" == yes ]] || : > "$POLICY_MISSING" ;;\n'
+            "esac\n"
+        )
+        installer.chmod(0o755)
         return release
 
     def run(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
@@ -500,3 +526,120 @@ def test_a_tree_root_should_not_run_is_refused(host, problem, action):
     assert host.called("wrapper") == host.called("systemd-run") == []
     if problem == "group-writable":
         assert "tar --no-same-owner" in result.stderr
+
+
+_NO_JUMP = "iptables INPUT has no jump for br-0123456789ab"
+
+
+def test_watch_is_silent_and_changes_nothing_while_the_policy_is_in_place(host):
+    host.current.symlink_to(host.release("new"))
+
+    result = host.run("watch")
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    # The bridge is the application's own network's, and the policy the deployment's.
+    assert host.called("installer") == ["installer check interface=br-0123456789ab id=prod"]
+    assert not host.restored_log.exists()
+    assert host.called("systemctl restart") == []
+
+
+def test_watch_puts_a_missing_policy_back_and_records_what_was_missing(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+
+    result = host.run("watch", BRIDGE_NAME="br-custom")
+
+    assert result.returncode == 0, result.stderr
+    assert [call.split()[1] for call in host.called("installer")] == ["check", "install", "check"]
+    assert all("interface=br-custom" in call for call in host.called("installer"))
+    assert f"was not in place while the application ran: scrapeyard egress policy: not in place: {_NO_JUMP}" in result.stderr
+    assert "the host policy was put back" in result.stderr
+    (line,) = host.restored_log.read_text().splitlines()
+    assert line.endswith(f"not in place: {_NO_JUMP}")
+    # It is back, so the application is left running.
+    assert host.called("systemctl restart") == []
+    assert host.called("docker stop") == []
+
+
+@pytest.mark.parametrize("failure", ["INSTALL_FAILS", "INSTALL_CHANGES_NOTHING"])
+def test_watch_restarts_the_boot_service_when_the_policy_cannot_be_put_back(host, failure):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+
+    result = host.run("watch", **{failure: "yes"})
+
+    assert result.returncode == 2
+    # The boot service's start stops the application and starts it only behind
+    # a policy; it is queued, because it needs the lock this run holds.
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    assert "could not be put back" in result.stderr
+    assert not host.restored_log.exists()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"NO_CONTAINER": "yes"},  # nothing runs that the policy keeps in
+        {"DOCKER_DOWN": "yes"},
+        {"DOCKER_PS_FAILS": "yes"},
+        # A release from before the installer could check: nothing to ask.
+        {"INSTALLER_CANNOT_CHECK": "yes"},
+    ],
+)
+def test_watch_leaves_the_policy_alone_when_it_has_nothing_to_judge(host, state):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+
+    result = host.run("watch", **state)
+
+    assert result.returncode == 0, result.stderr
+    assert "installer install" not in " ".join(host.called("installer"))
+    assert host.called("systemctl restart") == []
+
+
+def test_watch_does_not_touch_the_policy_while_a_start_or_promotion_holds_the_lock(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+    host.lock_dir.mkdir(mode=0o700)
+
+    with (host.lock_dir / "release.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = host.run("watch")
+
+    # A deployment is replacing the policy itself, and may have it half built.
+    assert result.returncode == 0
+    assert host.called() == []
+
+
+def test_watch_runs_no_installer_from_a_tree_another_account_could_change(host):
+    release = host.release("new")
+    host.current.symlink_to(release)
+    host.policy_missing.write_text(_NO_JUMP)
+    (release / "source" / "security" / "install-docker-egress-policy.sh").chmod(0o775)
+
+    result = host.run("watch")
+
+    assert result.returncode == 2
+    assert "not owned by root, or others can write to it" in result.stderr
+    assert host.called("installer") == []
+
+
+def _watch_unit(name: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, delimiters=("=",))
+    parser.optionxform = str  # type: ignore[assignment,method-assign]
+    parser.read_string(Path(f"security/systemd/{name}").read_text(encoding="utf-8"))
+    return parser
+
+
+def test_policy_watch_units_run_the_installed_script_every_minute_without_filling_the_journal():
+    service = _watch_unit("scrapeyard-policy-watch.service")["Service"]
+    assert service["Type"] == "oneshot"
+    assert service["ExecStart"] == "/usr/local/sbin/scrapeyard-release watch"
+    # 1,440 runs a day: the manager's start and finish lines are dropped, and
+    # what the script prints must not be dropped with them.
+    assert service["LogLevelMax"] == "notice"
+    assert service["SyslogLevel"] == "warning"
+    timer = _watch_unit("scrapeyard-policy-watch.timer")
+    assert timer["Timer"]["OnUnitActiveSec"] == "1min"
+    assert timer["Timer"]["OnBootSec"] == "2min"
+    assert timer["Install"]["WantedBy"] == "timers.target"

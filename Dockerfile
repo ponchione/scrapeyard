@@ -148,8 +148,8 @@ RUN pip install --no-cache-dir --no-deps . && \
 USER 10001:10001
 EXPOSE 8420
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsS --max-time 3 http://127.0.0.1:8420/health/live >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["python", "-m", "scrapeyard.runtime.healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/scrapeyard-entrypoint"]
 CMD ["uvicorn", "scrapeyard.main:app", "--host", "0.0.0.0", "--port", "8420", "--workers", "1"]

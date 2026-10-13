@@ -1,0 +1,23 @@
+# Check, between deployments, that the host policy the application was
+# started behind is still in place, and put it back when it is not. Install
+# it as /etc/systemd/system/scrapeyard-policy-watch.service beside its timer;
+# see docs/DEPLOYMENT.md ("Boot service and promotion").
+#
+# The application checks the policy once, at its start. A firewall tool that
+# reloads or flushes the host's rules afterwards removes the policy's jumps,
+# and with them what keeps the application off the host's own addresses.
+
+[Unit]
+Description=Scrapeyard host policy check
+After=docker.service
+ConditionPathExists=/srv/scrapeyard-releases/current/manifest.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scrapeyard-release watch
+# It runs every minute and prints only when the policy was missing. Keep the
+# manager's own "Starting" and "Finished" lines out of the journal, and log
+# what the script does print as a warning, so it is not filtered with them.
+LogLevelMax=notice
+SyslogLevel=warning
+TimeoutStartSec=300

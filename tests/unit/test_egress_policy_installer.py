@@ -69,7 +69,12 @@ if args[:2] == ["-S", "DOCKER-USER"]:
         print(f"-A DOCKER-USER -i {interfaces.get(chain, 'br-test')} -j {chain}")
     raise SystemExit(0)
 if args and args[0] == "-S":
-    raise SystemExit(0 if args[1] in state["chains"] else 1)
+    if args[1] not in state["chains"]:
+        raise SystemExit(1)
+    print(f"-N {args[1]}")
+    for rule in state["chains"][args[1]]:
+        print(f"-A {args[1]} {rule}")
+    raise SystemExit(0)
 if args[:2] == ["-C", "DOCKER-USER"]:
     chain = args[args.index("-j") + 1]
     present = chain in state["jumps"] and interfaces.get(chain, "br-test") == interface
@@ -195,9 +200,11 @@ def _environment(bin_dir: Path, state_dir: Path) -> dict[str, str]:
     return environment
 
 
-def _run(installer: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    installer: Path, env: dict[str, str], action: str = "install"
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [os.fspath(installer), "install"],
+        [os.fspath(installer), action],
         env=env,
         capture_output=True,
         text=True,
@@ -603,3 +610,107 @@ def test_remove_takes_the_host_rules_away_with_the_forwarded_policy(tmp_path: Pa
         state = json.loads((state_dir / f"{tool}.json").read_text())
         assert state["input"] == [] and state["jumps"] == []
         assert set(state["chains"]) == {"DOCKER-USER"}
+
+
+def _installed(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+    installer = _installer(tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    env = _environment(_shim_bin(tmp_path), state_dir)
+    assert _run(installer, env).returncode == 0
+    return installer, env, state_dir
+
+
+def _edit(state_dir: Path, tool: str, change) -> None:
+    path = state_dir / f"{tool}.json"
+    state = json.loads(path.read_text())
+    change(state)
+    path.write_text(json.dumps(state, sort_keys=True))
+
+
+def test_check_finds_an_installed_policy_in_place_and_changes_nothing(tmp_path: Path) -> None:
+    installer, env, state_dir = _installed(tmp_path)
+    before = {path.name: path.read_bytes() for path in state_dir.iterdir()}
+
+    result = _run(installer, env, "check")
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert {path.name: path.read_bytes() for path in state_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize(
+    ("tool", "removal", "named"),
+    [
+        # What another firewall tool takes when it reloads the host's rules.
+        ("iptables", lambda state: state["input"].clear(), "iptables INPUT has no jump for br-test"),
+        ("iptables", lambda state: state["jumps"].clear(), "iptables DOCKER-USER has no jump for br-test"),
+        ("ip6tables", lambda state: state["input"].clear(), "ip6tables INPUT has no jump for br-test"),
+        ("ip6tables", lambda state: state["jumps"].clear(), "ip6tables DOCKER-USER has no jump for br-test"),
+        # A jump to a chain that was flushed filters nothing.
+        (
+            "iptables",
+            lambda state: state["chains"].update({"SY-EGRESS-test-A": ["-j RETURN"]}),
+            "iptables chain SY-EGRESS-test-A refuses nothing from 172.30.0.250",
+        ),
+        (
+            "iptables",
+            lambda state: state["chains"].update({"SY-HOST-test-A": []}),
+            "iptables chain SY-HOST-test-A does not refuse 172.30.0.250",
+        ),
+    ],
+)
+def test_check_names_what_is_missing_and_install_puts_it_back(
+    tmp_path: Path, tool: str, removal, named: str
+) -> None:
+    installer, env, state_dir = _installed(tmp_path)
+    _edit(state_dir, tool, removal)
+    damaged = {path.name: path.read_bytes() for path in state_dir.iterdir()}
+
+    result = _run(installer, env, "check")
+
+    assert result.returncode == 1
+    assert f"not in place: {named}" in result.stderr
+    assert {path.name: path.read_bytes() for path in state_dir.iterdir()} == damaged
+    assert _run(installer, env).returncode == 0
+    assert _run(installer, env, "check").returncode == 0
+
+
+def test_check_reports_a_bridge_hook_that_was_switched_off(tmp_path: Path) -> None:
+    installer, env, _state_dir = _installed(tmp_path)
+    _bridge_netfilter(tmp_path, iptables="0", ip6tables="1")
+
+    result = _run(installer, env, "check")
+
+    assert result.returncode == 1
+    assert "net.bridge.bridge-nf-call-iptables is not 1" in result.stderr
+    # A check does not switch it back on; an install does.
+    assert (tmp_path / "bridge" / "bridge-nf-call-iptables").read_text().strip() == "0"
+
+
+def test_check_answers_one_for_jumps_an_install_would_refuse_too(tmp_path: Path) -> None:
+    installer, env, state_dir = _installed(tmp_path)
+    # A second policy chain is jumped to: nobody can say which one filters.
+    _edit(
+        state_dir,
+        "iptables",
+        lambda state: (
+            state["chains"].update({"SY-EGRESS-test-B": []}),
+            state["jumps"].append("SY-EGRESS-test-B"),
+            state["interfaces"].update({"SY-EGRESS-test-B": "br-test"}),
+        ),
+    )
+
+    result = _run(installer, env, "check")
+
+    # Exit 2 is what an installer without this action answers; this one ran.
+    assert result.returncode == 1
+    assert "iptables DOCKER-USER jumps are not as an install leaves them" in result.stderr
+
+
+def test_an_action_the_installer_does_not_know_is_a_usage_error(tmp_path: Path) -> None:
+    installer, env, state_dir = _installed(tmp_path)
+
+    result = _run(installer, env, "verify")
+
+    assert result.returncode == 2
+    assert "usage:" in result.stderr

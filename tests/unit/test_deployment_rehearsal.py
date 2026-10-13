@@ -287,6 +287,17 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         "systemctl start docker.service >/dev/null 2>&1",
         "already exists; use an isolated host",
         "the AppArmor profile is already loaded; use an isolated host",
+        # Between deployments: the policy's jumps are taken away under the
+        # running application, and only the timer starts the check.
+        'install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_UNIT" "$WATCH_UNIT_FILE"',
+        'done < <(policy_jumps; host_policy_jumps)',
+        'systemctl enable --now "$WATCH_TIMER"',
+        "putting the policy back restarted the application",
+        'systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1\n    systemctl stop "$WATCH_UNIT"',
+        'rm -rf -- "$WATCH_UNIT_FILE" "$WATCH_TIMER_FILE" "$(dirname -- "$RESTORED_LOG")"',
+        # The container's health is the application's readiness, not its liveness.
+        "the application stayed healthy with Redis stopped",
+        "await_unit redis-back ",
         # The last steps run the settings a host without an operator proxy
         # uses: the application's own log must show that it checked the policy.
         "printf \"SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'\\n\"",

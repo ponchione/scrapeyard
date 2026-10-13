@@ -87,7 +87,10 @@ services:
     volumes:
       - scrapeyard-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8420/health"]
+      # Readiness, asked from inside with a health-detail credential out of
+      # the container's own settings; liveness when the deployment has none.
+      # `up --wait` therefore returns only once the application is ready.
+      test: ["CMD", "python", "-m", "scrapeyard.runtime.healthcheck"]
       interval: 30s
       timeout: 10s
       start_period: 30s

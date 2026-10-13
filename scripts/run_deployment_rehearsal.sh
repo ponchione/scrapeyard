@@ -99,11 +99,17 @@ UNIT_DROP_IN="/etc/systemd/system/$UNIT.d"
 ENV_DIR="/etc/scrapeyard"
 RELEASES_ROOT="/srv/scrapeyard-releases"
 MANAGE="/usr/local/sbin/scrapeyard-release"
+WATCH_UNIT="scrapeyard-policy-watch.service"
+WATCH_TIMER="scrapeyard-policy-watch.timer"
+WATCH_UNIT_FILE="/etc/systemd/system/$WATCH_UNIT"
+WATCH_TIMER_FILE="/etc/systemd/system/$WATCH_TIMER"
+RESTORED_LOG="/var/lib/scrapeyard/policy-restored.log"
 if ((BOOT_SERVICE == 1)); then
   for command in systemctl systemd-run apparmor_parser; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required for --boot-service"
   done
   for path in "$ENV_DIR" "$UNIT_FILE" "$UNIT_DROP_IN" "$MANAGE" "$RELEASES_ROOT/current" \
+    "$WATCH_UNIT_FILE" "$WATCH_TIMER_FILE" "$(dirname -- "$RESTORED_LOG")" \
     "$RELEASES_ROOT/$(basename -- "$CANDIDATE")" "$RELEASES_ROOT/$(basename -- "$PREVIOUS")"; do
     [[ ! -e "$path" && ! -L "$path" ]] || fail "$path already exists; use an isolated host"
   done
@@ -234,9 +240,12 @@ cleanup_resources() {
   local ids
   if ((BOOT_SERVICE_ACTIVE == 1)); then
     systemctl stop "$PROMOTE_UNIT" >/dev/null 2>&1
+    systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1
+    systemctl stop "$WATCH_UNIT" >/dev/null 2>&1
     systemctl disable --now "$UNIT" >/dev/null 2>&1
     rm -rf -- "$UNIT_FILE" "$UNIT_DROP_IN" "$ENV_DIR" "$MANAGE" "$RELEASES_ROOT/current" \
       "$RELEASES_ROOT/current.new"
+    rm -rf -- "$WATCH_UNIT_FILE" "$WATCH_TIMER_FILE" "$(dirname -- "$RESTORED_LOG")"
     systemctl daemon-reload >/dev/null 2>&1
     systemctl reset-failed "$UNIT" >/dev/null 2>&1
     # A step that stopped Docker may have failed before starting it again,
@@ -898,6 +907,53 @@ PY
   promote promote-candidate-again "$BOOT_CANDIDATE"
   verify_runtime promote-candidate-again "$BOOT_CANDIDATE" candidate
   verify_api promote-candidate-again --known "$WORK_DIR/known-run.json"
+
+  echo "Removing the policy's jumps as another firewall tool would; the watch must put them back..."
+  install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_UNIT" "$WATCH_UNIT_FILE"
+  install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_TIMER" "$WATCH_TIMER_FILE"
+  systemctl daemon-reload
+  # With the policy in place a run changes nothing and records nothing.
+  systemctl start "$WATCH_UNIT" || fail "the policy watch failed with the policy in place"
+  [[ ! -e "$RESTORED_LOG" ]] || fail "the policy watch took a policy that was in place for missing"
+  WATCHED_CONTAINER="$APP_CONTAINER"
+  while read -r _append jump; do
+    # shellcheck disable=SC2086  # a rule is several words
+    iptables -D $jump
+  done < <(policy_jumps; host_policy_jumps)
+  [[ -z "$(policy_jumps)$(host_policy_jumps)" ]] || fail "the policy's jumps could not be removed"
+  # Nothing starts the check but its timer, as on a host.
+  systemctl enable --now "$WATCH_TIMER" > "$DIAGNOSTICS_DIR/policy-watch-enable.log" 2>&1
+  WATCH_DEADLINE=$((SECONDS + 150))
+  until [[ -n "$(policy_jumps)" && -n "$(host_policy_jumps)" && -s "$RESTORED_LOG" ]]; do
+    ((SECONDS < WATCH_DEADLINE)) || fail "the policy watch did not put the policy's jumps back"
+    sleep 2
+  done
+  systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1
+  cp -- "$RESTORED_LOG" "$DIAGNOSTICS_DIR/policy-restored.log"
+  grep -q "INPUT has no jump" "$RESTORED_LOG" && grep -q "DOCKER-USER has no jump" "$RESTORED_LOG" || \
+    fail "the policy watch did not record which jumps were missing"
+  verify_runtime policy-restored "$BOOT_CANDIDATE" candidate
+  [[ "$APP_CONTAINER" == "$WATCHED_CONTAINER" ]] || fail "putting the policy back restarted the application"
+  verify_api policy-restored --known "$WORK_DIR/known-run.json"
+
+  echo "Stopping Redis under the running application; its health must follow its readiness..."
+  REDIS_CONTAINER="$(service_containers redis)"
+  docker stop "$REDIS_CONTAINER" >/dev/null
+  UNREADY_AT=$SECONDS
+  until [[ "$(docker inspect --format '{{.State.Health.Status}}' "$APP_CONTAINER")" == "unhealthy" ]]; do
+    ((SECONDS < UNREADY_AT + 240)) || fail "the application stayed healthy with Redis stopped"
+    sleep 5
+  done
+  echo "unhealthy_after_seconds=$((SECONDS - UNREADY_AT))" > "$DIAGNOSTICS_DIR/readiness-follows-redis.txt"
+  docker start "$REDIS_CONTAINER" >/dev/null
+  # The embedded worker does not come back by itself once it has lost Redis
+  # (TD-89), so the application stays unready, and now shows it. A restart of
+  # the boot service is what recovers it.
+  BEFORE="$(invocation)"
+  systemctl restart "$UNIT"
+  await_unit redis-back "$BEFORE"
+  verify_runtime redis-back "$BOOT_CANDIDATE" candidate
+  verify_api redis-back --known "$WORK_DIR/known-run.json"
 
   echo "Restarting Docker; the boot service must bring the release back..."
   record_image_events

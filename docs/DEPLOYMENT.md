@@ -545,8 +545,11 @@ says so in place of "the application is left stopped"; look at
 `docker ps --all`. Do not resume ingress until
 authenticated `/health/ready`,
 a known `/results/{id}` read, effective host/security policy, and exactly one
-application container/process have been verified. Compose health alone tests
-liveness. Retain redacted evidence of those checks after each transition.
+application container/process have been verified. The container's health
+is the application's readiness when the deployment has a `health-detail`
+credential, so the wrapper's start has already waited for it; a deployment
+without one is checked for liveness only. Retain redacted evidence of those
+checks after each transition.
 
 Rollback uses the identical command with the **previous known-good bundle**;
 no build, registry, dependency or browser downloads are needed. Keep its source
@@ -624,12 +627,17 @@ sudo install -m 600 /dev/null /etc/scrapeyard/deploy.env   # then fill it in
 sudo ln -s "$RELEASE" /srv/scrapeyard-releases/current
 sudo install -m 755 "$RELEASE/source/security/manage-release.sh" /usr/local/sbin/scrapeyard-release
 sudo install -m 644 "$RELEASE/source/security/systemd/scrapeyard.service" /etc/systemd/system/
+sudo install -m 644 "$RELEASE/source/security/systemd/scrapeyard-policy-watch.service" \
+  "$RELEASE/source/security/systemd/scrapeyard-policy-watch.timer" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now scrapeyard.service
+sudo systemctl enable --now scrapeyard-policy-watch.timer
 ```
 
-Repeat the two `install` lines and `systemctl daemon-reload` from a later
-release to take a newer script or unit.
+Repeat the `install` lines and `systemctl daemon-reload` from a later release
+to take a newer script or unit. The [policy watch](#the-policy-watch) needs
+the script of the release that introduced it: with an older installed script
+its unit fails every minute with the script's usage.
 
 Promote a later release, or roll back to a retained one, with one command:
 
@@ -722,6 +730,40 @@ a release built from a commit before `2c0f4be` does not have them.
 `systemctl restart scrapeyard.service` deploys the promoted release again. It
 is not the way to promote another one: it stops the application before the
 wrapper has verified anything.
+
+### The policy watch
+
+The application checks the host policy once, at its start. Between
+deployments another firewall tool can take the policy away without the
+application noticing: reloading or flushing the host's rules removes the
+jumps in `DOCKER-USER` and `INPUT`, and after that the application reaches
+the host's own addresses and whatever the forwarded policy refused.
+
+`scrapeyard-policy-watch.timer` runs `scrapeyard-release watch` every minute.
+It asks the promoted release's installer whether the policy is in place
+(`install-docker-egress-policy.sh check`, which changes nothing): the bridge
+netfilter setting, the `DOCKER-USER` jump for the deployment's bridge and a
+chain behind it that still refuses, and the `INPUT` jump with its refusal of
+the application's address. What it then does:
+
+- **In place:** nothing, and it prints nothing. The unit keeps its own start
+  and finish lines out of the journal.
+- **Missing:** it installs the policy again with the same installer, checks
+  once more, and leaves the application running. The journal gets a warning
+  that names what was missing, and `/var/lib/scrapeyard/policy-restored.log`
+  gets a line with the time and the same text. Until an alert reads that
+  file (TD-20), it is the record that the policy was gone for up to a
+  minute.
+- **Missing, and it cannot be put back:** it restarts `scrapeyard.service`
+  and fails. The boot service stops the application and starts it only
+  behind an installed policy, retrying for as long as it takes, so the
+  application stays down in the meantime.
+- **Nothing to judge:** while a start or a promotion holds the release lock,
+  while the application is not running, or when the promoted release is
+  older than the `check` action, it does nothing.
+
+It reads the jumps and the chains; it does not send a packet. A rule that
+another tool inserts ahead of the policy's jump is not something it sees.
 
 ## Container privilege and filesystem boundary
 

@@ -6,6 +6,8 @@ ENV_FILE=/etc/scrapeyard/deploy.env
 CURRENT=/srv/scrapeyard-releases/current
 LOCK_DIR=/run/scrapeyard
 PROMOTE_UNIT=scrapeyard-promote
+BOOT_UNIT=scrapeyard.service
+RESTORED_LOG=/var/lib/scrapeyard/policy-restored.log
 TRUSTED_OWNER=0
 TRUSTED_ROOT=/
 
@@ -18,6 +20,7 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: scrapeyard-release promote RELEASE_DIRECTORY
        scrapeyard-release start | stop    (run by scrapeyard.service)
+       scrapeyard-release watch           (run by scrapeyard-policy-watch.timer)
 
 Installed as /usr/local/sbin/scrapeyard-release. promote deploys a retained
 release with the settings in /etc/scrapeyard/deploy.env and, once it is
@@ -127,6 +130,18 @@ stop_application() {
   # Without --time, the container's own grace period applies.
   # shellcheck disable=SC2086  # one container ID a word
   [[ -z "$containers" ]] || timeout 90 docker stop $containers >/dev/null
+}
+
+# The bridge of the network the application's container is on, as the
+# release's deployment script finds it.
+deployment_bridge() {
+  local network bridge
+  network=$(timeout 20 docker inspect --format \
+    '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' "$1") || return 1
+  [[ "$network" =~ ^[a-f0-9]{12,64}$ ]] || return 1
+  bridge=$(timeout 20 docker network inspect --format \
+    '{{index .Options "com.docker.network.bridge.name"}}' "$network") || return 1
+  printf '%s\n' "${bridge:-br-${network:0:12}}"
 }
 
 promotion_is_under_way() {
@@ -248,6 +263,54 @@ case "$ACTION" in
     check_release "$release"
     load_settings
     deploy "$release"
+    ;;
+  watch)
+    # Between deployments nothing else looks at the host policy. The
+    # application checks it once, at its start, and another firewall tool
+    # that reloads or flushes the host's rules takes the policy's jumps with
+    # it: after that the application reaches the host's own addresses, and
+    # whatever the forwarded policy refused. This puts a missing policy back
+    # and says so. It prints nothing while the policy is in place.
+    [[ $# -eq 0 ]] || usage
+    # A start or a promotion is replacing the policy itself; look next time.
+    install -d -m 700 "$LOCK_DIR"
+    exec 7>>"$LOCK_DIR/release.lock"
+    flock --nonblock 7 || exit 0
+    [[ -L "$CURRENT" ]] || exit 0
+    systemctl is-active --quiet docker.service || exit 0
+    load_settings
+    # With no application running there is nothing to keep it from, and a
+    # start installs the policy before the application.
+    containers=$(application_containers) || exit 0
+    [[ -n "$containers" ]] || exit 0
+    check_ancestors "$CURRENT"
+    release=$(realpath -- "$CURRENT")
+    check_release "$release"
+    bridge=$(deployment_bridge "${containers%%$'\n'*}") || \
+      fail "the bridge of the application's network could not be found"
+    export SCRAPEYARD_EGRESS_INTERFACE=${SCRAPEYARD_EGRESS_INTERFACE:-$bridge}
+    export SCRAPEYARD_EGRESS_POLICY_ID=${SCRAPEYARD_EGRESS_POLICY_ID:-prod}
+    installer="$release/source/security/install-docker-egress-policy.sh"
+    status=0
+    found=$("$installer" check 2>&1) || status=$?
+    case "$status" in
+      0) exit 0 ;;
+      1) ;;
+      # A release from before its installer could check answers with its usage.
+      *) exit 0 ;;
+    esac
+    echo "scrapeyard release: the host policy was not in place while the application ran: $found" >&2
+    if "$installer" install && "$installer" check; then
+      install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
+      printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$found" >> "$RESTORED_LOG"
+      echo "scrapeyard release: the host policy was put back" >&2
+      exit 0
+    fi
+    # The boot service's start stops the application first and starts it only
+    # behind an installed policy, and goes on retrying. It needs the lock this
+    # run holds, so it is only queued here.
+    systemctl restart --no-block "$BOOT_UNIT" || true
+    fail "the host policy could not be put back; $BOOT_UNIT was restarted, which keeps the application stopped until the policy is installed"
     ;;
   stop)
     [[ $# -eq 0 ]] || usage

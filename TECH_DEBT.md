@@ -240,7 +240,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-89**) and use this template:
+7. **New findings** take the next free ID (**TD-90**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -406,6 +406,8 @@ CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 and rehearses it; dispatch it on the commit to release.
 
 **Coordinated:**
+- TD-89: needs the owner's choice between three fixes; it changes what the
+  application does when Redis goes away.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs. The host is up
@@ -441,6 +443,7 @@ and rehearses it; dispatch it on the commit to release.
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
+| TD-89 | P1 | coordinated | The embedded worker does not come back after it loses Redis |
 
 ## Ready to implement
 
@@ -504,6 +507,46 @@ run the same file against the host's container once the release is there.
 
 These need a decision, a security review, an Eyebox change, or real-traffic
 data before any code.
+
+### TD-89 — The embedded worker does not come back after it loses Redis
+
+**Priority:** P1 · **Area:** queue, supervision · **Risk:** medium · **Contract:** a submission is answered 202 and its run stays `queued` · **Depends on:** the owner's choice of fix
+
+**Problem:** found on 2026-10-13 while trying TD-20's health check against a
+local instance (this checkout, a throwaway Redis 7.4.5).
+- The arq worker runs as one task (`WorkerPool.start`). A Redis connection
+  error in its poll ends the task, and nothing starts it again.
+- Measured: a job submitted before the outage completed in under four
+  seconds. Redis was stopped for six seconds and started again. `/health`
+  answered 200 and `/health/ready` 503 (`worker runner task failed:
+  ConnectionError`), still so a minute later. A job submitted then was
+  answered 202 and its run was still `queued` 45 seconds on, when the
+  instance was stopped.
+- Until TD-20's change the container stayed `healthy` in that state. Now it
+  turns `unhealthy`, and Docker does not restart an unhealthy container.
+- On a host, Redis and the application stop and start together at a reboot
+  and at a restart of Docker. It takes Redis alone going away under a
+  running application: a crash, the kernel's out-of-memory killer, an
+  operator's `docker restart`. Not seen on the production host.
+
+**Code:** `src/scrapeyard/queue/pool.py` (`WorkerPool.start`,
+`background_ok`), `src/scrapeyard/main.py` (the lifespan).
+**Fix:** one of three, none tried:
+- End the process when the runner task ends outside a shutdown. The
+  container's restart policy starts it again, through the start every
+  deployment takes (policy check, reconciliation of queued and running
+  runs). Runs that were executing are abandoned and reconciled.
+- Start the worker again in place, with a pause between attempts. It has to
+  settle what becomes of runs that were executing when Redis went away, and
+  must not run one twice.
+- Leave the application alone and have the host's minute check restart
+  `scrapeyard.service` once the container has been unhealthy for some
+  minutes. No application change; any other cause of a lasting 503 (a full
+  disk) then restarts it as well.
+
+**Done when:** the rehearsal stops Redis under the running application,
+starts it again, and a job submitted afterwards runs with no operator
+command. Its Redis step restarts the boot service by hand today.
 
 ### TD-45 — Bundled browsers are months behind upstream
 
@@ -988,12 +1031,16 @@ is TD-85.
   collects or alerts today: a stopped application, a full disk or a dead
   tunnel would show as a failed Eyebox run or not at all. A credential for
   the detailed health route exists on the host and nothing uses it.
-- The health check Compose runs is still process liveness only.
-- Nothing watches the host policy between deployments. The startup check
-  covers forwarded traffic; the `INPUT` jump that keeps the application off
-  the host's own addresses (added for TD-78) can be removed by another
-  firewall tool without the application noticing. An alert on a missing jump
-  belongs with the monitoring work.
+- Since 2026-10-13 a timer checks the host policy every minute and puts a
+  missing one back (`scrapeyard-release watch`,
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch)). What it leaves for
+  the monitoring work is the alert: it writes a line to
+  `/var/lib/scrapeyard/policy-restored.log` and nothing reads that yet. It
+  does not see a rule another tool inserts ahead of the policy's jump.
+- Since the same day the container's health is the application's readiness.
+  Docker does not restart an unhealthy container, so an application that
+  stays unready (TD-89 is one way) is visible in `docker ps` and to nothing
+  else until the monitoring work.
 
 **Problem:**
 - Before 2026-10-10, `security/deploy-secure-compose.sh` installed policy

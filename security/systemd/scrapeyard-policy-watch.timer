@@ -1,0 +1,14 @@
+# Runs scrapeyard-policy-watch.service every minute. Install it as
+# /etc/systemd/system/scrapeyard-policy-watch.timer and enable it:
+#   systemctl enable --now scrapeyard-policy-watch.timer
+
+[Unit]
+Description=Scrapeyard host policy check, every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

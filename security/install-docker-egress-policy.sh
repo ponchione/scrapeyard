@@ -253,8 +253,16 @@ require_bridge_netfilter() {
   fi
 }
 
-[[ "$ACTION" == "install" || "$ACTION" == "remove" ]] || \
-  fail "usage: $0 [install|remove]"
+[[ "$ACTION" == "install" || "$ACTION" == "remove" || "$ACTION" == "check" ]] || \
+  fail "usage: $0 [install|remove|check]"
+if [[ "$ACTION" == "check" ]]; then
+  # Whatever stops a check means the policy cannot be vouched for. Exit 2
+  # stays what an installer from before this action answers to it.
+  fail() {
+    echo "scrapeyard egress policy: $*" >&2
+    exit 1
+  }
+fi
 ((EUID == 0)) || fail "host root privileges are required"
 [[ "$NETWORK_INTERFACE" =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]] || \
   fail "SCRAPEYARD_EGRESS_INTERFACE must name the deployment bridge (max 15 characters)"
@@ -272,6 +280,49 @@ iptables -S DOCKER-USER >/dev/null 2>&1 || fail "iptables DOCKER-USER chain is r
 install -d -m 700 "$LOCK_DIR"
 exec 8>>"$LOCK_DIR/egress-policy.lock"
 flock --wait 120 8 || fail "another policy installation has held $LOCK_DIR/egress-policy.lock for two minutes"
+
+# Says what an install put in place is no longer there, and changes nothing.
+# Another firewall tool that flushes or reloads the host's rules takes the
+# jumps with it, and the application checks the policy at its start only.
+missing_policy() {
+  local tool=$1 source=$2 key=$3 chain rules host_chain="" interface jumped
+  [[ "$(cat "$BRIDGE_NETFILTER_DIR/$key" 2>/dev/null)" == 1 ]] || \
+    echo "net.bridge.$key is not 1, so same-bridge traffic passes no rule"
+  # The rules are read whole before they are searched: a search that stops
+  # at its first match would end the listing early and look like a failure.
+  if ! chain=$(active_chain "$tool"); then
+    echo "$tool DOCKER-USER jumps are not as an install leaves them"
+  elif [[ -z "$chain" ]]; then
+    echo "$tool DOCKER-USER has no jump for $NETWORK_INTERFACE"
+  else
+    rules=$("$tool" -S "$chain" 2>/dev/null) || rules=""
+    grep -q -- " -s $source\(/[0-9]*\)\? .*-j REJECT" <<<"$rules" || \
+      echo "$tool chain $chain refuses nothing from $source"
+  fi
+  while read -r interface jumped; do
+    [[ "$interface" != "$NETWORK_INTERFACE" ]] || host_chain=$jumped
+  done < <(host_jumps "$tool")
+  if [[ -z "$host_chain" ]]; then
+    echo "$tool INPUT has no jump for $NETWORK_INTERFACE, so the host's own addresses are open to $source"
+  else
+    rules=$("$tool" -S "$host_chain" 2>/dev/null) || rules=""
+    grep -q -- " -s $source\(/[0-9]*\)\? -j REJECT" <<<"$rules" || \
+      echo "$tool chain $host_chain does not refuse $source"
+  fi
+}
+
+if [[ "$ACTION" == "check" ]]; then
+  if [[ -n "$APP_SOURCE_V6" ]]; then
+    command -v ip6tables >/dev/null 2>&1 || fail "ip6tables is required for IPv6 policy"
+  fi
+  MISSING=$(
+    missing_policy iptables "$APP_SOURCE" bridge-nf-call-iptables
+    [[ -z "$APP_SOURCE_V6" ]] || \
+      missing_policy ip6tables "$APP_SOURCE_V6" bridge-nf-call-ip6tables
+  )
+  [[ -z "$MISSING" ]] || fail "not in place: ${MISSING//$'\n'/; }"
+  exit 0
+fi
 
 if [[ "$ACTION" == "remove" ]]; then
   IN_USE=()

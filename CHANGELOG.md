@@ -74,6 +74,25 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The container's health check is the application's readiness. Compose and
+  the image run `python -m scrapeyard.runtime.healthcheck`, which asks
+  `/health/ready` from inside the container with a `health-detail`
+  credential from the container's own settings; until now both asked the
+  public liveness route, which answers while Redis, a database or a
+  background task is gone. `docker compose up --wait`, and with it every
+  deployment and boot, now returns only for an application that is ready,
+  and `docker ps` shows `unhealthy` otherwise. A deployment with no
+  `health-detail` credential is checked for liveness as before. Docker does
+  not restart an unhealthy container.
+- A timer checks the host egress policy every minute between deployments and
+  puts a missing one back (`scrapeyard-release watch`,
+  `security/systemd/scrapeyard-policy-watch.timer`). The application checks
+  the policy once, at its start, and another firewall tool that reloads the
+  host's rules removes the policy's jumps, the `INPUT` one that keeps the
+  application off the host's own addresses included. The installer gained a
+  read-only `check` action for it. A policy that cannot be put back restarts
+  the boot service, which keeps the application stopped until it can.
+  Install the newer `scrapeyard-release` with the two units.
 - The pinned container runtime is Docker 29.9.0, containerd.io 2.4.1 (runc
   1.5.2) and Compose 5.6.0, up from 28.5.2, 1.7.29 (runc 1.3.3) and 2.38.2.
   A host is upgraded in place, which keeps its classic image store, and

@@ -182,11 +182,13 @@ security/install-chromium-apparmor-profile.sh install
 docker compose up -d --wait "${start_options[@]}"
 
 # Where Docker cannot use AppArmor it starts the container unconfined, under
-# the profile's name, and says nothing (a daemon inside a container manager
-# does). None of the profile's denials exists then. What the kernel reports
+# the profile's name, and says nothing (seen with a daemon that has a
+# container manager's variable in its environment). None of the profile's
+# denials exists then. What the kernel reports
 # for the container's first process is the one thing to go by; `docker
 # inspect` repeats what was asked for.
-confinement=$(docker compose exec -T scrapeyard cat /proc/1/attr/current 2>/dev/null) || confinement=""
+confinement=$(docker compose exec -T scrapeyard cat /proc/1/attr/current </dev/null 2>/dev/null) || \
+  confinement=""
 [[ "$confinement" == "scrapeyard-chromium (enforce)" ]] || \
   fail "the application runs as '${confinement:-unknown}', not under the scrapeyard-chromium AppArmor profile"
 

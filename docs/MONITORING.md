@@ -69,6 +69,17 @@ capacity returns a degraded `200`;
 insufficient free disk or any other failed required dependency/background task
 returns `503`. Liveness never performs these operations.
 
+The container's own health check asks readiness, not liveness: Compose and
+the image run `python -m scrapeyard.runtime.healthcheck`, which calls
+`/health/ready` from inside the container with a `health-detail` credential
+taken from the container's settings and is healthy on a `200`. `docker ps`
+therefore shows `unhealthy` after three failed checks, a minute and a half
+into a failed dependency or background task, and `docker compose up --wait`
+returns only for an application that is ready. A deployment with no
+`health-detail` credential is checked for liveness, as before. Docker does
+not restart an unhealthy container; the status is for an operator or an
+alert to read.
+
 The two synchronous result-filesystem probes are single-flight and run in a
 dedicated two-thread executor. A timed-out probe continues to occupy only its
 own one-probe slot, is logged as still running, and is reused by concurrent or
