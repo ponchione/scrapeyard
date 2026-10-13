@@ -768,6 +768,12 @@ namespaces, `chroot` and to read the route table, which stay allowed. The
 container smoke lane tries each of these from a namespace of its own
 (`tests/smoke/verify_confinement.py`).
 
+All of this is AppArmor's doing. On a host without AppArmor, Docker starts
+the container with no profile and none of these denials exists; the deploy
+wrapper refuses such a host, because it cannot install the profile, and a
+plain `docker compose up` does not. The profile still allows every other
+capability inside such a namespace (TD-88).
+
 The allowlist (`security/seccomp/chromium.json`) is the default profile of
 Docker 29.9.0 plus one rule: `clone` and `unshare` are allowed whatever
 their arguments, because the browsers' sandboxes create user namespaces and

@@ -91,6 +91,7 @@ def test_smoke_lane_checks_the_confinement_against_a_control() -> None:
     # application's profile, and it must not outlive the lane.
     assert 'fail "the control profile did not take its own name"' in between
     assert script.count("run_control_profile --remove") == 2
+    assert "the control AppArmor profile $CONTROL_PROFILE could not be removed" in script
 
 
 _CONFINED_ANSWERS: dict[str, dict[str, object]] = {
@@ -109,6 +110,7 @@ _CONFINED_ANSWERS: dict[str, dict[str, object]] = {
         "raw IP socket": "EPERM",
         "netfilter: create a table": "EPERM",
         "route netlink: create a link": "EPERM",
+        "traffic control: add a queueing discipline": "EPERM",
         "raise the loopback interface": "EPERM",
         "route netlink: list the links": "accepted",
         "chroot": "accepted",
@@ -144,6 +146,13 @@ _UNCONFINED_ANSWERS: dict[str, dict[str, object]] = {
         ([], _CONFINED_ANSWERS, "own_namespaces", {"netfilter: create a table": "accepted"}, 1),
         ([], _CONFINED_ANSWERS, "own_namespaces", {"route netlink: create a link": "EOPNOTSUPP"}, 1),
         ([], _CONFINED_ANSWERS, "own_namespaces", {"raise the loopback interface": "accepted"}, 1),
+        (
+            [],
+            _CONFINED_ANSWERS,
+            "own_namespaces",
+            {"traffic control: add a queueing discipline": "accepted"},
+            1,
+        ),
         # A host that gives the namespace no capability refuses for its own
         # reasons, and one that cannot make the namespace tried nothing.
         (

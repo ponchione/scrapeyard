@@ -111,7 +111,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   inside a user namespace too, so each of those is now refused there, while
   the namespaces, `chroot` and route reads the sandboxes use still work. The
   smoke lane tries each from a namespace of its own, and under a control
-  profile without the denials, where they succeed.
+  profile without the denials, where they succeed. An independent review
+  tried the routes round the denial (nested and mapped namespaces, `exec`,
+  the 32-bit entry, profile changes, `docker exec`) and found none.
 - The container smoke lane opens `AF_ALG` and `AF_VSOCK` sockets through
   the 32-bit `socketcall` entry from inside the application's container and
   requires AppArmor's refusal, and runs the same attempts under a copy of

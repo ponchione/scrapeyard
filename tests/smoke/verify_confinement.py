@@ -6,8 +6,13 @@ the runtime user. It runs the same way against a deployed container:
     docker exec -i <application container> python - < tests/smoke/verify_confinement.py
 
 It opens sockets and closes them again; no packet leaves the process. What
-it changes (a link and a netfilter table in a network namespace of its own)
-ends with the child process that made the namespace.
+it creates (a link, a queueing discipline and a netfilter table in a network
+namespace of its own) ends with the child process that made the namespace.
+One thing outlasts it: where an attempt is accepted, the kernel may load the
+module behind it (`vsock`, `af_alg`, `dummy` and the like), and a module
+stays loaded until the host restarts. Under the application's profile every
+such attempt is refused before that. Under the control profile, or with
+`--report` in a container whose profile lacks a denial, they are not.
 
 `--control` is for a container that runs under a copy of the AppArmor profile
 without the lines these checks rest on. There every attempt has to succeed,
@@ -172,6 +177,16 @@ def _create_link() -> str:
     )
 
 
+def _add_queueing_discipline() -> str:
+    request, acknowledge, create, exclusive = 0x1, 0x4, 0x400, 0x200
+    loopback, root, handle = 1, 0xFFFFFFFF, 0x00010000
+    discipline = struct.pack("=BxHiIII", socket.AF_UNSPEC, 0, loopback, handle, root, 0)
+    discipline += _attribute(1, b"pfifo\0")  # TCA_KIND
+    return _netlink(
+        NETLINK_ROUTE, [(36, request | acknowledge | create | exclusive, discipline)]  # RTM_NEWQDISC
+    )
+
+
 def _list_links() -> str:
     request, dump = 0x1, 0x300
     link = struct.pack("=BxHiII", socket.AF_UNSPEC, 0, 0, 0, 0)
@@ -197,7 +212,8 @@ def _in_own_namespaces(entry: Entry32) -> dict[str, object]:
         seen["own user and network namespace"] = _refusal(ctypes.get_errno())
         return seen
     seen["own user and network namespace"] = "accepted"
-    # The kernel does hand them over; what follows is refused all the same.
+    # The kernel does hand them over. A host that gave the namespace nothing
+    # would refuse what follows by itself.
     seen["holds CAP_NET_ADMIN and CAP_NET_RAW there"] = _holds(CAP_NET_ADMIN) and _holds(
         CAP_NET_RAW
     )
@@ -206,6 +222,7 @@ def _in_own_namespaces(entry: Entry32) -> dict[str, object]:
     seen["raw IP socket"] = direct_socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
     seen["netfilter: create a table"] = _attempt(_create_netfilter_table)
     seen["route netlink: create a link"] = _attempt(_create_link)
+    seen["traffic control: add a queueing discipline"] = _attempt(_add_queueing_discipline)
     seen["raise the loopback interface"] = _attempt(_raise_loopback)
     # What has to keep working there: the browsers read the route table, and
     # their sandboxes call chroot inside the namespace.
@@ -265,6 +282,7 @@ CONFINED: dict[str, dict[str, object]] = {
         "raw IP socket": "EPERM",
         "netfilter: create a table": "EPERM",
         "route netlink: create a link": "EPERM",
+        "traffic control: add a queueing discipline": "EPERM",
         "raise the loopback interface": "EPERM",
         "route netlink: list the links": "accepted",
         "chroot": "accepted",
@@ -292,6 +310,7 @@ CONTROL: dict[str, dict[str, object]] = {
         # EOPNOTSUPP is a kernel without the dummy link type, asked after the
         # capability was accepted.
         "route netlink: create a link": ("accepted", "EOPNOTSUPP"),
+        "traffic control: add a queueing discipline": "accepted",
         "raise the loopback interface": "accepted",
         "route netlink: list the links": "accepted",
         "chroot": "accepted",

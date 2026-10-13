@@ -205,7 +205,8 @@ cleanup_resources() {
   fi
   timeout 90 docker compose "${COMPOSE_ARGS[@]}" down -v --remove-orphans >/dev/null 2>&1
   if ((CONTROL_PROFILE_ACTIVE == 1)); then
-    run_control_profile --remove >/dev/null 2>&1
+    run_control_profile --remove >/dev/null 2>&1 || \
+      echo "container/browser smoke: the control AppArmor profile $CONTROL_PROFILE could not be removed; remove it with apparmor_parser --remove" >&2
     CONTROL_PROFILE_ACTIVE=0
   fi
   if ((APPARMOR_PROFILE_ACTIVE == 1)); then

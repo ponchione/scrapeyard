@@ -240,7 +240,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-88**) and use this template:
+7. **New findings** take the next free ID (**TD-89**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -418,7 +418,7 @@ and rehearses it; dispatch it on the commit to release.
     owner's choice.
   - TD-22 needs a second release on the host to roll back from.
 
-**Deferred:** TD-48, TD-49, TD-85 and TD-86.
+**Deferred:** TD-48, TD-49, TD-85, TD-86 and TD-88.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -440,6 +440,7 @@ and rehearses it; dispatch it on the commit to release.
 | TD-84 | P2 | ready | The production host is held on Docker 28 |
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
+| TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
 
 ## Ready to implement
 
@@ -1334,6 +1335,31 @@ an upgrade in place keeps it. Nothing is lost today.
 has to use containerd's. The fix is to identify a loaded image by something
 both stores agree on, read from the archive itself, and to choose how an
 older release, which records one identifier only, is still loaded.
+
+### TD-88 — The AppArmor profile allows every capability but two inside a user namespace
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the review of TD-87 on 2026-10-13. The profile's
+`capability,` line allows them all, and the fix for TD-87 denies
+`net_admin` and `net_raw` by name. Inside a user namespace a process in the
+container still holds the rest. Tried under the profile on a runner (runs
+38404612920 and 38404934394): it could inject a uevent into its own network
+namespace, bind port 80 there, and create mount, UTS, IPC, PID, cgroup and
+time namespaces, while `mount` and `sethostname` stayed refused. The review
+found nothing behind these that compares with what TD-87 closed.
+
+**Why deferred:** the sandboxes need some of them (`sys_admin` to create
+their namespaces and write the identity maps, `sys_chroot`), and which others
+Chromium and Firefox use has not been established. A list that is one
+capability short stops browser fetches, or makes a browser run with a weaker
+sandbox without saying so.
+
+**Revisit when:** a kernel flaw is reported behind a capability a user
+namespace gives, or the browsers are replaced (TD-45), which is the moment
+to measure what their sandboxes use. The change is to replace `capability,`
+with the list both browsers need, proved in the smoke lane with all three,
+and to check that each browser still reports its sandbox as active.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 

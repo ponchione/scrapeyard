@@ -216,6 +216,9 @@ short-lived digest-pinned host-network helper container with `NET_ADMIN`. It fai
 early with a focused prerequisite or port-conflict message. The host must
 support AppArmor and unprivileged user namespaces; the runner temporarily loads
 the repository's restrictive Chromium profile when it is not already present.
+A profile of that name that is already loaded is replaced by this checkout's,
+for every running container at once, and is not put back: do not run the lane
+on a host that serves.
 It uses the production seccomp profile rather than disabling filtering.
 Docker Desktop must have enough Linux VM resources and support the
 `linux/amd64` image. Camoufox may emit its upstream virtual-display or
@@ -286,24 +289,36 @@ shows that the entry works.
 The same file then gives a child process a user and a network namespace of
 its own, where the kernel hands it every capability, and requires what
 follows to be refused: a packet socket through either entry, a raw IP
-socket, a new netfilter table, a new link, and raising the loopback
-interface. It also requires that the child does hold `CAP_NET_ADMIN` and
-`CAP_NET_RAW` there, so the refusals are the AppArmor profile's and not a
-host's that gives a namespace nothing, and that `chroot` and reading the
-link table still work, which the browsers' sandboxes need.
+socket, a new netfilter table, a new link, a new queueing discipline, and
+raising the loopback interface. It also requires that the child does hold
+`CAP_NET_ADMIN` and `CAP_NET_RAW` there, which rules out a host that gives a
+namespace nothing, and that `chroot` and reading the link table still work,
+which the browsers' sandboxes need. That a refusal is the profile's own rests
+on the control below.
 
 The lane then runs the file in a second container of the same image, under
 the same seccomp profile and a copy of the AppArmor profile without the
 denials under test, and requires each attempt to succeed there: a refusal
 that would also come without those lines proves nothing about them. The copy
-is loaded under its own name and removed when the lane ends. The check sends
-no packet, and what it creates ends with its child process. It runs against a
-deployed container as well:
+is loaded under its own name and removed when the lane ends.
+
+The check sends no packet, and what it creates ends with its child process,
+with one exception: where an attempt is accepted the kernel may load the
+module behind it, and a loaded module stays until the host restarts. The
+control container accepts them all, so the lane leaves `vsock`, `af_alg`,
+`dummy` and their relatives loaded on the machine it ran on. In the
+application's container every such attempt is refused before the kernel
+looks for a module, which makes the check safe against a deployed container
+that runs under the release's profile:
 
 ```bash
 sudo docker exec -i <application container> python - \
   < /srv/scrapeyard-releases/current/source/tests/smoke/verify_confinement.py
 ```
+
+Do not pass `--report` or `--control` to it there. Against a container whose
+profile lacks a denial, as after a rollback to a release from before
+2026-10-13, the attempts succeed and load those modules on the host.
 
 Plan for 4 CPU cores, 8 GiB RAM, and 15 GiB free disk; 2 cores and 6 GiB are a
 practical lower bound but take longer. Network access is needed only to pull
