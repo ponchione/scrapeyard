@@ -80,6 +80,34 @@ def test_healthy_only_while_the_application_reports_ready(application: _Applicat
     assert application.asked == ["/health/ready", "/health/ready"]
 
 
+def test_it_asks_with_the_credential_that_holds_the_fewest_scopes(application: _Application) -> None:
+    # A consumer's credential may hold the scope too. Readiness is rate-limited
+    # by credential, so the check must not spend, or wait on, the consumer's.
+    consumer_first = json.dumps(
+        {
+            "client": {"secret": _CLIENT, "scopes": ["submit", "read", "health-detail"]},
+            "monitor": {"secret": _MONITOR, "scopes": ["health-detail"]},
+        }
+    )
+
+    assert healthcheck.readiness_key({"SCRAPEYARD_API_CREDENTIALS": consumer_first}) == _MONITOR
+    # Named credentials before a key from before them, which holds every scope.
+    assert (
+        healthcheck.readiness_key(
+            {"SCRAPEYARD_API_CREDENTIALS": consumer_first, "SCRAPEYARD_API_KEYS": "legacy-key-0123456789"}
+        )
+        == _MONITOR
+    )
+    assert _check(application, {"SCRAPEYARD_API_CREDENTIALS": consumer_first}) is True
+
+
+def test_a_key_no_header_can_carry_is_unhealthy_and_is_not_printed(
+    application: _Application, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert _check(application, {"SCRAPEYARD_API_KEYS": "secret-with-a\nnewline-0123"}) is False
+    assert "secret-with-a" not in "".join(capfd.readouterr())
+
+
 def test_without_a_health_detail_credential_it_checks_liveness(
     application: _Application,
 ) -> None:
@@ -124,7 +152,7 @@ def test_compose_and_the_image_run_the_readiness_check() -> None:
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     check = compose["services"]["scrapeyard"]["healthcheck"]
     assert check["test"] == ["CMD", "python", "-m", "scrapeyard.runtime.healthcheck"]
-    # Docker's deadline has to be longer than the check's own.
+    # Docker's deadline for the whole check is the one that decides.
     assert int(check["timeout"].removesuffix("s")) > healthcheck._TIMEOUT_SECONDS
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     assert 'CMD ["python", "-m", "scrapeyard.runtime.healthcheck"]' in dockerfile

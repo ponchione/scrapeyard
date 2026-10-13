@@ -736,9 +736,10 @@ with the same checks as a deployment:
    waits, and must then start the release that was promoted.
    Then, with the candidate running, two things that happen between
    deployments. The policy's jumps are deleted from `DOCKER-USER` and
-   `INPUT`, as another firewall tool would, and nothing but the
-   [policy watch](DEPLOYMENT.md#the-policy-watch)'s timer may put them back,
-   with the application's container left as it was and the loss recorded.
+   `INPUT`, as a flush of the host's rules would, after the
+   [policy watch](DEPLOYMENT.md#the-policy-watch)'s timer has run once, and
+   only a later run of the timer may put them back, with the application
+   not started again and the loss recorded.
    And Redis is stopped under the application, whose container must turn
    `unhealthy`: its health is its readiness. The application does not
    recover from that by itself (TD-89), so the step ends by restarting the

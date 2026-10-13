@@ -12,6 +12,10 @@ ALLOW_CIDRS="${SCRAPEYARD_EGRESS_ALLOW_CIDRS:-}"
 NETWORK_INTERFACE="${SCRAPEYARD_EGRESS_INTERFACE:-}"
 POLICY_ID="${SCRAPEYARD_EGRESS_POLICY_ID:-}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# The renderer imports from the tree this script is in. In a retained release
+# that tree is checksummed, and bytecode written into it makes the next start
+# refuse the release.
+export PYTHONDONTWRITEBYTECODE=1
 POLICY_RENDERER="${SCRAPEYARD_EGRESS_POLICY_RENDERER:-${SCRIPT_DIR}/render-egress-policy.py}"
 LEGACY_CHAIN="SY-EGRESS-${POLICY_ID}"
 CHAIN_A="${LEGACY_CHAIN}-A"
@@ -282,12 +286,24 @@ exec 8>>"$LOCK_DIR/egress-policy.lock"
 flock --wait 120 8 || fail "another policy installation has held $LOCK_DIR/egress-policy.lock for two minutes"
 
 # Says what an install put in place is no longer there, and changes nothing.
-# Another firewall tool that flushes or reloads the host's rules takes the
-# jumps with it, and the application checks the policy at its start only.
+# A flush of the host's rules, or a restore of rules saved before the install,
+# takes the jumps with it, and the application checks the policy at its start
+# only. It reads that the jumps and the refusals exist. It does not judge
+# their order: a rule put ahead of a jump, or ahead of the refusals inside a
+# chain, is not seen.
 missing_policy() {
-  local tool=$1 source=$2 key=$3 chain rules host_chain="" interface jumped
+  local tool=$1 source key=$3 pattern chain rules host_chain="" interface jumped
+  # iptables lists an address in its canonical spelling, whatever the
+  # settings spell.
+  source=$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_address(sys.argv[1]))' "$2" 2>/dev/null) || \
+    source=$2
+  pattern=" -s ${source//./\\.}(/[0-9]+)? "
   [[ "$(cat "$BRIDGE_NETFILTER_DIR/$key" 2>/dev/null)" == 1 ]] || \
     echo "net.bridge.$key is not 1, so same-bridge traffic passes no rule"
+  # Docker's own jump: without it no forwarded packet reaches DOCKER-USER,
+  # and an install cannot put it back. A flush of the host's rules takes it.
+  "$tool" -C FORWARD -j DOCKER-USER >/dev/null 2>&1 || \
+    echo "$tool FORWARD does not jump to DOCKER-USER, so forwarded traffic passes no rule of the policy (restart Docker)"
   # The rules are read whole before they are searched: a search that stops
   # at its first match would end the listing early and look like a failure.
   if ! chain=$(active_chain "$tool"); then
@@ -296,7 +312,7 @@ missing_policy() {
     echo "$tool DOCKER-USER has no jump for $NETWORK_INTERFACE"
   else
     rules=$("$tool" -S "$chain" 2>/dev/null) || rules=""
-    grep -q -- " -s $source\(/[0-9]*\)\? .*-j REJECT" <<<"$rules" || \
+    grep -Eq -- "$pattern.*-j REJECT" <<<"$rules" || \
       echo "$tool chain $chain refuses nothing from $source"
   fi
   while read -r interface jumped; do
@@ -306,7 +322,7 @@ missing_policy() {
     echo "$tool INPUT has no jump for $NETWORK_INTERFACE, so the host's own addresses are open to $source"
   else
     rules=$("$tool" -S "$host_chain" 2>/dev/null) || rules=""
-    grep -q -- " -s $source\(/[0-9]*\)\? -j REJECT" <<<"$rules" || \
+    grep -Eq -- "$pattern-j REJECT" <<<"$rules" || \
       echo "$tool chain $host_chain does not refuse $source"
   fi
 }

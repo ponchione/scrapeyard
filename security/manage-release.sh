@@ -266,9 +266,9 @@ case "$ACTION" in
     ;;
   watch)
     # Between deployments nothing else looks at the host policy. The
-    # application checks it once, at its start, and another firewall tool
-    # that reloads or flushes the host's rules takes the policy's jumps with
-    # it: after that the application reaches the host's own addresses, and
+    # application checks it once, at its start. A flush of the host's rules,
+    # or a restore of rules saved earlier, takes the policy's jumps with it:
+    # after that the application reaches the host's own addresses, and
     # whatever the forwarded policy refused. This puts a missing policy back
     # and says so. It prints nothing while the policy is in place.
     [[ $# -eq 0 ]] || usage
@@ -290,27 +290,49 @@ case "$ACTION" in
       fail "the bridge of the application's network could not be found"
     export SCRAPEYARD_EGRESS_INTERFACE=${SCRAPEYARD_EGRESS_INTERFACE:-$bridge}
     export SCRAPEYARD_EGRESS_POLICY_ID=${SCRAPEYARD_EGRESS_POLICY_ID:-prod}
+    # The installer runs Python from the release. Bytecode written beside it
+    # would change the checksummed tree, and the next start would refuse it.
+    export PYTHONDONTWRITEBYTECODE=1
     installer="$release/source/security/install-docker-egress-policy.sh"
+    # What a run could not put back, so that the next run does not restart
+    # the boot service for the same finding again.
+    unrestored="$LOCK_DIR/policy-unrestored"
     status=0
     found=$("$installer" check 2>&1) || status=$?
     case "$status" in
-      0) exit 0 ;;
+      0)
+        rm -f -- "$unrestored"
+        exit 0
+        ;;
       1) ;;
       # A release from before its installer could check answers with its usage.
-      *) exit 0 ;;
+      2) exit 0 ;;
+      *) fail "the release's policy check ended with status $status: $found" ;;
     esac
     echo "scrapeyard release: the host policy was not in place while the application ran: $found" >&2
     if "$installer" install && "$installer" check; then
-      install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
+      [[ -d "$(dirname -- "$RESTORED_LOG")" ]] || install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
       printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$found" >> "$RESTORED_LOG"
+      rm -f -- "$unrestored"
       echo "scrapeyard release: the host policy was put back" >&2
       exit 0
     fi
-    # The boot service's start stops the application first and starts it only
-    # behind an installed policy, and goes on retrying. It needs the lock this
-    # run holds, so it is only queued here.
-    systemctl restart --no-block "$BOOT_UNIT" || true
-    fail "the host policy could not be put back; $BOOT_UNIT was restarted, which keeps the application stopped until the policy is installed"
+    # It is still missing. The application is stopped here and now, and the
+    # boot service is asked to start it again: that start installs the policy
+    # first, the application checks it before it serves, and a start that
+    # fails is retried. The restart needs the lock this run holds, so it is
+    # only queued. This is done once for a finding: if the application then
+    # runs and the finding is the same, restarting it again every minute
+    # would change nothing.
+    if [[ "$(cat -- "$unrestored" 2>/dev/null)" == "$found" ]]; then
+      fail "the host policy is still not in place after $BOOT_UNIT was restarted for it, and the application is running: $found"
+    fi
+    printf '%s' "$found" > "$unrestored"
+    stop_application || \
+      echo "scrapeyard release: the application could not be stopped" >&2
+    systemctl restart --no-block "$BOOT_UNIT" || \
+      fail "the host policy could not be put back and $BOOT_UNIT could not be restarted; see whether the application is stopped"
+    fail "the host policy could not be put back; the application was stopped and $BOOT_UNIT restarted, which starts it only behind an installed policy"
     ;;
   stop)
     [[ $# -eq 0 ]] || usage

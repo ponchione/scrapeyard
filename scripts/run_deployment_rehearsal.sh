@@ -915,25 +915,41 @@ PY
   # With the policy in place a run changes nothing and records nothing.
   systemctl start "$WATCH_UNIT" || fail "the policy watch failed with the policy in place"
   [[ ! -e "$RESTORED_LOG" ]] || fail "the policy watch took a policy that was in place for missing"
-  WATCHED_CONTAINER="$APP_CONTAINER"
+  WATCHED_STARTED_AT="$(docker inspect --format '{{.State.StartedAt}}' "$APP_CONTAINER")"
+  # Nothing starts the check from here on but its timer, as on a host. A
+  # timer enabled this long after boot runs the check at once, with the
+  # policy still in place. The jumps are deleted after that run, so only a
+  # later run of the timer can put them back.
+  last_trigger() {
+    systemctl show --property LastTriggerUSec --value "$WATCH_TIMER"
+  }
+  systemctl enable --now "$WATCH_TIMER" > "$DIAGNOSTICS_DIR/policy-watch-enable.log" 2>&1
+  WATCH_DEADLINE=$((SECONDS + 180))
+  until FIRST_TRIGGER="$(last_trigger)" && [[ -n "$FIRST_TRIGGER" && "$FIRST_TRIGGER" != "n/a" ]] && \
+        [[ "$(systemctl is-active "$WATCH_UNIT" || true)" != "activating" ]]; do
+    ((SECONDS < WATCH_DEADLINE)) || fail "the policy watch's timer did not run it"
+    sleep 1
+  done
+  [[ ! -e "$RESTORED_LOG" ]] || fail "the policy watch took a policy that was in place for missing"
   while read -r _append jump; do
     # shellcheck disable=SC2086  # a rule is several words
     iptables -D $jump
   done < <(policy_jumps; host_policy_jumps)
   [[ -z "$(policy_jumps)$(host_policy_jumps)" ]] || fail "the policy's jumps could not be removed"
-  # Nothing starts the check but its timer, as on a host.
-  systemctl enable --now "$WATCH_TIMER" > "$DIAGNOSTICS_DIR/policy-watch-enable.log" 2>&1
-  WATCH_DEADLINE=$((SECONDS + 150))
+  WATCH_DEADLINE=$((SECONDS + 180))
   until [[ -n "$(policy_jumps)" && -n "$(host_policy_jumps)" && -s "$RESTORED_LOG" ]]; do
     ((SECONDS < WATCH_DEADLINE)) || fail "the policy watch did not put the policy's jumps back"
     sleep 2
   done
+  [[ "$(last_trigger)" != "$FIRST_TRIGGER" ]] || fail "the policy's jumps came back without a later run of the timer"
   systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1
   cp -- "$RESTORED_LOG" "$DIAGNOSTICS_DIR/policy-restored.log"
   grep -q "INPUT has no jump" "$RESTORED_LOG" && grep -q "DOCKER-USER has no jump" "$RESTORED_LOG" || \
     fail "the policy watch did not record which jumps were missing"
   verify_runtime policy-restored "$BOOT_CANDIDATE" candidate
-  [[ "$APP_CONTAINER" == "$WATCHED_CONTAINER" ]] || fail "putting the policy back restarted the application"
+  # A stop and a start keep a container's identifier; its start time tells.
+  [[ "$(docker inspect --format '{{.State.StartedAt}}' "$APP_CONTAINER")" == "$WATCHED_STARTED_AT" ]] || \
+    fail "putting the policy back restarted the application"
   verify_api policy-restored --known "$WORK_DIR/known-run.json"
 
   echo "Stopping Redis under the running application; its health must follow its readiness..."

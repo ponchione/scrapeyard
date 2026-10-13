@@ -123,6 +123,7 @@ class _Host:
             "systemctl",
             'echo "systemctl $*" >> "$CALLS"\n'
             'if [[ "$*" == "is-active --quiet docker.service" ]]; then [[ "${DOCKER_DOWN:-}" != yes ]]; exit; fi\n'
+            'if [[ "$1" == restart ]]; then [[ "${RESTART_FAILS:-}" != yes ]]; exit; fi\n'
             'state=inactive\n'
             'if [[ -s "$PROMOTION_STATES" ]]; then\n'
             '  state=$(head -n 1 "$PROMOTION_STATES"); sed -i 1d "$PROMOTION_STATES"\n'
@@ -174,8 +175,12 @@ class _Host:
             "#!/bin/bash\n"
             'echo "installer $1 interface=$SCRAPEYARD_EGRESS_INTERFACE id=$SCRAPEYARD_EGRESS_POLICY_ID"'
             ' >> "$CALLS"\n'
+            # As the real one does: it runs Python that imports from the release.
+            '[[ "$1" != install ]] || python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import policy_source"'
+            ' "$(dirname "$0")"\n'
             'case "$1" in\n'
             '  check) [[ "${INSTALLER_CANNOT_CHECK:-}" != yes ]] || { echo "usage: $0 [install|remove]" >&2; exit 2; }\n'
+            '         [[ -z "${CHECK_STATUS:-}" ]] || exit "$CHECK_STATUS"\n'
             '         [[ -s "$POLICY_MISSING" ]] || exit 0\n'
             '         echo "scrapeyard egress policy: not in place: $(<"$POLICY_MISSING")" >&2; exit 1 ;;\n'
             '  install) [[ "${INSTALL_FAILS:-}" != yes ]] || exit 2\n'
@@ -183,6 +188,7 @@ class _Host:
             "esac\n"
         )
         installer.chmod(0o755)
+        (security / "policy_source.py").write_text("RULES = ()\n")
         return release
 
     def run(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
@@ -559,21 +565,73 @@ def test_watch_puts_a_missing_policy_back_and_records_what_was_missing(host):
     # It is back, so the application is left running.
     assert host.called("systemctl restart") == []
     assert host.called("docker stop") == []
+    # The installer's Python left no bytecode in the release: a release whose
+    # files changed is refused at the next start.
+    assert not list(host.current.resolve().rglob("__pycache__"))
 
 
 @pytest.mark.parametrize("failure", ["INSTALL_FAILS", "INSTALL_CHANGES_NOTHING"])
-def test_watch_restarts_the_boot_service_when_the_policy_cannot_be_put_back(host, failure):
+def test_watch_stops_the_application_when_the_policy_cannot_be_put_back(host, failure):
     host.current.symlink_to(host.release("new"))
     host.policy_missing.write_text(_NO_JUMP)
 
     result = host.run("watch", **{failure: "yes"})
 
     assert result.returncode == 2
-    # The boot service's start stops the application and starts it only behind
-    # a policy; it is queued, because it needs the lock this run holds.
-    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
-    assert "could not be put back" in result.stderr
+    # Stopped here, not left to the restart: a restart that could not be
+    # queued would leave it running without the policy.
+    stopped = host.called().index("docker stop app1")
+    assert host.called()[stopped + 1 :] == ["systemctl restart --no-block scrapeyard.service"]
+    assert "the application was stopped and scrapeyard.service restarted" in result.stderr
     assert not host.restored_log.exists()
+
+    # A restart that could not be queued is not reported as one.
+    host.policy_missing.write_text("iptables DOCKER-USER has no jump for br-0123456789ab")
+    unqueued = host.run("watch", RESTART_FAILS="yes", **{failure: "yes"})
+    assert unqueued.returncode == 2
+    assert "scrapeyard.service could not be restarted" in unqueued.stderr
+    assert "scrapeyard.service restarted," not in unqueued.stderr
+
+
+def test_watch_restarts_the_boot_service_once_for_a_finding_and_then_only_reports_it(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+
+    first = host.run("watch", INSTALL_CHANGES_NOTHING="yes")
+    # The boot service brought the application back, and the finding stands:
+    # the check and the application's own start disagree.
+    host.calls.write_text("")
+    second = host.run("watch", INSTALL_CHANGES_NOTHING="yes")
+
+    assert (first.returncode, second.returncode) == (2, 2)
+    # Stopping and restarting it every minute for the same finding would
+    # take the service down for nothing.
+    assert host.called("docker stop") == host.called("systemctl restart") == []
+    assert "still not in place after scrapeyard.service was restarted for it" in second.stderr
+
+    # Another finding is a new one, and a policy found in place forgets both.
+    host.policy_missing.write_text("iptables DOCKER-USER has no jump for br-0123456789ab")
+    host.calls.write_text("")
+    assert host.run("watch", INSTALL_CHANGES_NOTHING="yes").returncode == 2
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    host.policy_missing.write_text("")
+    assert host.run("watch").returncode == 0
+    host.policy_missing.write_text(_NO_JUMP)
+    host.calls.write_text("")
+    assert host.run("watch", INSTALL_CHANGES_NOTHING="yes").returncode == 2
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+
+
+@pytest.mark.parametrize("status", ["3", "126", "127", "137"])
+def test_watch_does_not_take_a_check_that_broke_for_an_installer_without_one(host, status):
+    host.current.symlink_to(host.release("new"))
+
+    result = host.run("watch", CHECK_STATUS=status)
+
+    # Only 2 is what an installer without the action answers.
+    assert result.returncode == 2
+    assert f"policy check ended with status {status}" in result.stderr
+    assert "installer install" not in " ".join(host.called("installer"))
 
 
 @pytest.mark.parametrize(

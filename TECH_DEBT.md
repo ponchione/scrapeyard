@@ -1031,16 +1031,19 @@ is TD-85.
   collects or alerts today: a stopped application, a full disk or a dead
   tunnel would show as a failed Eyebox run or not at all. A credential for
   the detailed health route exists on the host and nothing uses it.
-- Since 2026-10-13 a timer checks the host policy every minute and puts a
-  missing one back (`scrapeyard-release watch`,
-  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch)). What it leaves for
-  the monitoring work is the alert: it writes a line to
+- A timer can check the host policy every minute and put a missing one back
+  (`scrapeyard-release watch`,
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch), since 2026-10-13).
+  What it leaves for the monitoring work is the alert: it writes a line to
   `/var/lib/scrapeyard/policy-restored.log` and nothing reads that yet. It
-  does not see a rule another tool inserts ahead of the policy's jump.
+  does not judge the order of rules, so a rule put ahead of the policy's is
+  not seen.
 - Since the same day the container's health is the application's readiness.
   Docker does not restart an unhealthy container, so an application that
   stays unready (TD-89 is one way) is visible in `docker ps` and to nothing
-  else until the monitoring work.
+  else until the monitoring work. A start now fails for an application that
+  runs and is not ready, low disk included, and leaves it stopped; whether
+  low disk should fail a start is the owner's to confirm.
 
 **Problem:**
 - Before 2026-10-10, `security/deploy-secure-compose.sh` installed policy

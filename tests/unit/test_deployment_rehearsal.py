@@ -292,6 +292,11 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         'install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_UNIT" "$WATCH_UNIT_FILE"',
         'done < <(policy_jumps; host_policy_jumps)',
         'systemctl enable --now "$WATCH_TIMER"',
+        # The timer's first run finds the policy in place; a later one has to
+        # be what restores it, and the application must not have been started
+        # again (a restart keeps the container's identifier).
+        "the policy's jumps came back without a later run of the timer",
+        'WATCHED_STARTED_AT="$(docker inspect --format \'{{.State.StartedAt}}\' "$APP_CONTAINER")"',
         "putting the policy back restarted the application",
         'systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1\n    systemctl stop "$WATCH_UNIT"',
         'rm -rf -- "$WATCH_UNIT_FILE" "$WATCH_TIMER_FILE" "$(dirname -- "$RESTORED_LOG")"',

@@ -68,12 +68,24 @@ if args[:2] == ["-S", "DOCKER-USER"]:
     for chain in state["jumps"]:
         print(f"-A DOCKER-USER -i {interfaces.get(chain, 'br-test')} -j {chain}")
     raise SystemExit(0)
+if args[:2] == ["-C", "FORWARD"]:
+    # Docker's own jump from FORWARD; a flush of the host's rules removes it.
+    raise SystemExit(0 if state.get("forward", True) else 1)
 if args and args[0] == "-S":
     if args[1] not in state["chains"]:
         raise SystemExit(1)
+    # As iptables lists a chain: addresses in their canonical spelling with a
+    # prefix length, and a REJECT with its default answer spelled out.
+    import ipaddress
     print(f"-N {args[1]}")
     for rule in state["chains"][args[1]]:
-        print(f"-A {args[1]} {rule}")
+        words = rule.split()
+        for index, word in enumerate(words[:-1]):
+            if word in ("-s", "-d"):
+                words[index + 1] = ipaddress.ip_network(words[index + 1], strict=False).compressed
+        if words[-2:] == ["-j", "REJECT"]:
+            words += ["--reject-with", "icmp6-port-unreachable" if tool == "ip6tables" else "icmp-port-unreachable"]
+        print(f"-A {args[1]} {' '.join(words)}")
     raise SystemExit(0)
 if args[:2] == ["-C", "DOCKER-USER"]:
     chain = args[args.index("-j") + 1]
@@ -646,6 +658,12 @@ def test_check_finds_an_installed_policy_in_place_and_changes_nothing(tmp_path: 
         ("iptables", lambda state: state["jumps"].clear(), "iptables DOCKER-USER has no jump for br-test"),
         ("ip6tables", lambda state: state["input"].clear(), "ip6tables INPUT has no jump for br-test"),
         ("ip6tables", lambda state: state["jumps"].clear(), "ip6tables DOCKER-USER has no jump for br-test"),
+        # Docker's jump into DOCKER-USER, which an install cannot put back.
+        (
+            "iptables",
+            lambda state: state.update({"forward": False}),
+            "iptables FORWARD does not jump to DOCKER-USER",
+        ),
         # A jump to a chain that was flushed filters nothing.
         (
             "iptables",
@@ -669,10 +687,11 @@ def test_check_names_what_is_missing_and_install_puts_it_back(
     result = _run(installer, env, "check")
 
     assert result.returncode == 1
-    assert f"not in place: {named}" in result.stderr
+    assert named in result.stderr and "not in place: " in result.stderr
     assert {path.name: path.read_bytes() for path in state_dir.iterdir()} == damaged
     assert _run(installer, env).returncode == 0
-    assert _run(installer, env, "check").returncode == 0
+    # An install puts back everything but Docker's own jump.
+    assert _run(installer, env, "check").returncode == (1 if "FORWARD" in named else 0)
 
 
 def test_check_reports_a_bridge_hook_that_was_switched_off(tmp_path: Path) -> None:
@@ -714,3 +733,38 @@ def test_an_action_the_installer_does_not_know_is_a_usage_error(tmp_path: Path) 
 
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+@pytest.mark.parametrize("spelling", ["2001:DB8:0:0::250", "2001:0db8::0250", "2001:db8:0:0:0:0:0:250"])
+def test_check_knows_an_address_by_any_spelling_of_it(tmp_path: Path, spelling: str) -> None:
+    # iptables lists 2001:db8::250/128 whatever the settings spell. A check
+    # that looked for the settings' spelling would call an installed policy
+    # missing every time it ran.
+    installer = _installer(tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    env = dict(_environment(_shim_bin(tmp_path), state_dir), SCRAPEYARD_EGRESS_SOURCE_V6=spelling)
+    assert _run(installer, env).returncode == 0
+
+    result = _run(installer, env, "check")
+
+    assert (result.returncode, result.stderr) == (0, "")
+
+
+def test_an_install_leaves_no_bytecode_beside_the_renderer(tmp_path: Path) -> None:
+    # In a retained release the renderer's tree is checksummed.
+    installer = _installer(tmp_path)
+    renderer = tmp_path / "tree" / "render.py"
+    renderer.parent.mkdir()
+    (renderer.parent / "rules.py").write_text("ROWS = ['4\\tdeny\\t10.0.0.0/8', '6\\tdeny\\tfc00::/7']\n")
+    renderer.write_text("import rules\nprint('\\n'.join(rules.ROWS))\n")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    env = dict(
+        _environment(_shim_bin(tmp_path), state_dir),
+        SCRAPEYARD_EGRESS_POLICY_RENDERER=os.fspath(renderer),
+    )
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+
+    assert _run(installer, env).returncode == 0
+    assert not list(renderer.parent.rglob("__pycache__"))

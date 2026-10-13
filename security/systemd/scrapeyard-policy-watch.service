@@ -3,9 +3,10 @@
 # it as /etc/systemd/system/scrapeyard-policy-watch.service beside its timer;
 # see docs/DEPLOYMENT.md ("Boot service and promotion").
 #
-# The application checks the policy once, at its start. A firewall tool that
-# reloads or flushes the host's rules afterwards removes the policy's jumps,
-# and with them what keeps the application off the host's own addresses.
+# The application checks the policy once, at its start. A flush of the host's
+# rules afterwards, or a restore of rules saved earlier, removes the policy's
+# jumps, and with them what keeps the application off the host's own
+# addresses.
 
 [Unit]
 Description=Scrapeyard host policy check

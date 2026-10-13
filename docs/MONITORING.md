@@ -72,13 +72,19 @@ returns `503`. Liveness never performs these operations.
 The container's own health check asks readiness, not liveness: Compose and
 the image run `python -m scrapeyard.runtime.healthcheck`, which calls
 `/health/ready` from inside the container with a `health-detail` credential
-taken from the container's settings and is healthy on a `200`. `docker ps`
-therefore shows `unhealthy` after three failed checks, a minute and a half
-into a failed dependency or background task, and `docker compose up --wait`
-returns only for an application that is ready. A deployment with no
-`health-detail` credential is checked for liveness, as before. Docker does
-not restart an unhealthy container; the status is for an operator or an
-alert to read.
+taken from the container's settings and is healthy on a `200`. Of several
+credentials that hold the scope it takes the one with the fewest scopes, so
+give monitoring a credential of its own: readiness is rate-limited by
+credential, and a `429` is unhealthy like any other answer. `docker ps`
+shows `unhealthy` after three failed checks, 30 seconds apart. A deployment
+with no `health-detail` credential is checked for liveness, as before.
+Docker does not restart an unhealthy container; the status is for an
+operator or an alert to read.
+
+A start waits on the same check. `docker compose up --wait` succeeds only
+for an application that is ready, so the deploy wrapper now fails a start
+whose application runs and stays unready, and leaves it stopped; see
+[DEPLOYMENT.md](DEPLOYMENT.md#retained-release-artifacts-and-rollback).
 
 The two synchronous result-filesystem probes are single-flight and run in a
 dedicated two-thread executor. A timed-out probe continues to occupy only its

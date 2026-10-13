@@ -548,8 +548,14 @@ a known `/results/{id}` read, effective host/security policy, and exactly one
 application container/process have been verified. The container's health
 is the application's readiness when the deployment has a `health-detail`
 credential, so the wrapper's start has already waited for it; a deployment
-without one is checked for liveness only. Retain redacted evidence of those
-checks after each transition.
+without one is checked for liveness only. That also changes what a start
+does with an application that runs and is not ready, because a dependency or
+a background task is failing or free disk is under its floor: the start
+fails after about two minutes and the wrapper leaves the application
+stopped, where it used to leave it serving. The boot service then retries
+with its growing pauses, and nothing the application does for itself, its
+retention cleanup included, happens until a start succeeds. Retain redacted
+evidence of those checks after each transition.
 
 Rollback uses the identical command with the **previous known-good bundle**;
 no build, registry, dependency or browser downloads are needed. Keep its source
@@ -734,17 +740,21 @@ wrapper has verified anything.
 ### The policy watch
 
 The application checks the host policy once, at its start. Between
-deployments another firewall tool can take the policy away without the
-application noticing: reloading or flushing the host's rules removes the
-jumps in `DOCKER-USER` and `INPUT`, and after that the application reaches
-the host's own addresses and whatever the forwarded policy refused.
+deployments the policy can be taken away without the application noticing: a
+flush of the host's rules (`iptables -F`), or a restore of rules saved before
+the policy was installed (`iptables-restore`, which `netfilter-persistent`
+runs), removes the jumps in `DOCKER-USER` and `INPUT`. After that the
+application reaches the host's own addresses and whatever the forwarded
+policy refused. `ufw` does not do this: its reload, and disabling and
+enabling it, left both jumps in place when tried on Ubuntu 24.04.
 
 `scrapeyard-policy-watch.timer` runs `scrapeyard-release watch` every minute.
 It asks the promoted release's installer whether the policy is in place
 (`install-docker-egress-policy.sh check`, which changes nothing): the bridge
-netfilter setting, the `DOCKER-USER` jump for the deployment's bridge and a
-chain behind it that still refuses, and the `INPUT` jump with its refusal of
-the application's address. What it then does:
+netfilter setting, Docker's own jump from `FORWARD` to `DOCKER-USER`, the
+`DOCKER-USER` jump for the deployment's bridge with a chain behind it that
+still refuses the application's address, and the `INPUT` jump with its
+refusal. What it then does:
 
 - **In place:** nothing, and it prints nothing. The unit keeps its own start
   and finish lines out of the journal.
@@ -752,18 +762,25 @@ the application's address. What it then does:
   once more, and leaves the application running. The journal gets a warning
   that names what was missing, and `/var/lib/scrapeyard/policy-restored.log`
   gets a line with the time and the same text. Until an alert reads that
-  file (TD-20), it is the record that the policy was gone for up to a
-  minute.
-- **Missing, and it cannot be put back:** it restarts `scrapeyard.service`
-  and fails. The boot service stops the application and starts it only
-  behind an installed policy, retrying for as long as it takes, so the
-  application stays down in the meantime.
+  file (TD-20), it is the record that the policy was gone, for a minute or
+  so if the watch was running.
+- **Missing, and it cannot be put back:** it stops the application, restarts
+  `scrapeyard.service` and fails. The boot service starts the application
+  only behind an installed policy, which the application then checks itself,
+  and retries for as long as it takes. Docker's jump from `FORWARD` is the
+  case an install cannot repair: restart Docker, which restarts the boot
+  service with it. This is done once for a finding. If the application runs
+  again afterwards and the watch finds the same thing, it fails every minute
+  with that finding and leaves the application alone, since stopping it again
+  would change nothing.
 - **Nothing to judge:** while a start or a promotion holds the release lock,
   while the application is not running, or when the promoted release is
   older than the `check` action, it does nothing.
 
-It reads the jumps and the chains; it does not send a packet. A rule that
-another tool inserts ahead of the policy's jump is not something it sees.
+It reads that the jumps and the refusals exist. It does not judge their
+order and sends no packet: a rule that another tool puts ahead of a jump, or
+ahead of the refusals inside one of the policy's chains, is not something it
+sees.
 
 ## Container privilege and filesystem boundary
 
