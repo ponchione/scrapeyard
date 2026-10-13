@@ -770,11 +770,14 @@ container smoke lane tries each of these from a namespace of its own
 
 All of this is AppArmor's doing. Where Docker applies no AppArmor profile (a
 host without AppArmor, or a daemon that cannot use it, such as one running
-inside a container manager), it starts the container unconfined and none of
-these denials exists. The deploy wrapper refuses such a host: it requires
-`name=apparmor` among the daemon's security options before it stops
-anything. A plain `docker compose up` does not. The profile still allows
-every other capability inside such a namespace (TD-88).
+inside a container manager), it starts the container unconfined, under the
+profile's name, and none of these denials exists. The deploy wrapper guards
+against both. Before it stops anything it refuses a host whose Docker
+reports no AppArmor. After the start it reads what the kernel reports for
+the container's first process, and unless that is `scrapeyard-chromium
+(enforce)` the deployment fails and the application is left stopped. A plain
+`docker compose up` checks neither. The profile still allows every other
+capability inside such a namespace (TD-88).
 
 The allowlist (`security/seccomp/chromium.json`) is the default profile of
 Docker 29.9.0 plus one rule: `clone` and `unshare` are allowed whatever

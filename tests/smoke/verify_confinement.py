@@ -13,9 +13,9 @@ module behind it (`vsock`, `af_alg`, `dummy` and the like), and a module
 stays loaded until the host restarts. Under the application's profile each
 of those attempts is refused before that; the one module the attempts ask
 for regardless is `nfnetlink`, which a host with Docker's bridge networks
-has loaded already. Under a profile that lacks a denial the attempts
-succeed, whatever arguments this file is given: it tries everything first
-and judges afterwards.
+has loaded already. Under a profile that lacks a denial, the attempts that
+denial would have refused succeed, whatever arguments this file is given:
+it tries everything first and judges afterwards.
 
 `--control` is for a container that runs under a copy of the AppArmor profile
 without the lines these checks rest on. There every attempt has to succeed,

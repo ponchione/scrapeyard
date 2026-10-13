@@ -231,7 +231,9 @@ def test_secure_release_deploy_is_offline_and_stops_before_policy_changes(tmp_pa
     docker.write_text("""#!/bin/bash
 echo "docker $*" >> "$CALLS"
 case "$*" in
-  "info --format "*) [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
+  "info --format "*) [[ "${DOCKER_DOWN:-}" != yes ]] || { echo "[]"; exit 1; }
+    [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
+  "compose exec -T scrapeyard cat /proc/1/attr/current") echo "${APP_LABEL-scrapeyard-chromium (enforce)}" ;;
   "compose config --images") echo sha256:aaaaaaaa ;;
   "image inspect "*) [[ "${MISSING_IMAGE:-}" != yes ]] ;;
   "compose ps -q egress-probe") echo probe ;;
@@ -272,9 +274,9 @@ esac
         < calls.index("install-docker-egress-policy.sh")
         < calls.index("docker compose up -d --wait --no-build --pull never")
     )
-    # NO_APPARMOR: a daemon that applies no profile would start the
-    # application under a profile name it ignores.
-    for failure in ("INVALID_RELEASE", "MISSING_IMAGE", "FAIL_POLICY", "NO_APPARMOR"):
+    # A host with no AppArmor, or a daemon that does not answer, is refused
+    # before anything is stopped.
+    for failure in ("INVALID_RELEASE", "MISSING_IMAGE", "FAIL_POLICY", "NO_APPARMOR", "DOCKER_DOWN"):
         log.write_text("")
         result = subprocess.run(
             command, cwd=tmp_path, env=dict(env, **{failure: "yes"}), capture_output=True
@@ -283,11 +285,33 @@ esac
         calls = log.read_text()
         assert "docker compose up -d --wait --no-build --pull never\n" not in calls
         if failure == "NO_APPARMOR":
-            assert "would run unconfined" in result.stderr.decode()
+            assert "Docker reports no AppArmor on this host" in result.stderr.decode()
+        if failure == "DOCKER_DOWN":
+            assert "the Docker daemon did not answer" in result.stderr.decode()
         if failure != "FAIL_POLICY":
             assert "docker compose stop scrapeyard" not in calls
         else:
             assert "the application is left stopped" in result.stderr.decode()
+    # Docker starts a container unconfined, under the profile's name, where
+    # it cannot use AppArmor. Only the kernel's label says so, after the start.
+    for label in ("unconfined", "docker-default (enforce)", "scrapeyard-chromium (complain)", ""):
+        log.write_text("")
+        result = subprocess.run(
+            command, cwd=tmp_path, env=dict(env, APP_LABEL=label), capture_output=True
+        )
+        assert result.returncode == 2, label
+        assert "not under the scrapeyard-chromium AppArmor profile" in result.stderr.decode()
+        assert "the application is left stopped" in result.stderr.decode()
+        calls = log.read_text().splitlines()
+        started = calls.index("docker compose up -d --wait --no-build --pull never")
+        assert "docker compose stop scrapeyard" in calls[started:]
+
+
+# A start that succeeded ends with the kernel being asked what confines it.
+_STARTED_AND_JUDGED = [
+    "docker compose up -d --wait --no-build --pull never",
+    "docker compose exec -T scrapeyard cat /proc/1/attr/current",
+]
 
 
 def _wrapper_with_fake_docker(tmp_path, docker_script):
@@ -340,7 +364,9 @@ _FAKE_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$CALLS"
 present() { [[ ! -e "$CALLS.removed" && ( "${APP_EXISTS:-}" == yes || -e "$CALLS.started" ) ]]; }
 case "$*" in
-  "info --format "*) [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
+  "info --format "*) [[ "${DOCKER_DOWN:-}" != yes ]] || { echo "[]"; exit 1; }
+    [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
+  "compose exec -T scrapeyard cat /proc/1/attr/current") echo "${APP_LABEL-scrapeyard-chromium (enforce)}" ;;
   "compose config --images") echo sha256:aaaaaaaa ;;
   "compose ps -q egress-probe") echo probe ;;
   "compose stop scrapeyard")
@@ -383,9 +409,7 @@ def test_a_start_that_fails_leaves_the_application_stopped_not_restarting(tmp_pa
 
     Path(env["CALLS"]).write_text("")
     subprocess.run(command, cwd=tmp_path, env=env, check=True, capture_output=True)
-    assert Path(env["CALLS"]).read_text().splitlines()[-1] == (
-        "docker compose up -d --wait --no-build --pull never"
-    )
+    assert Path(env["CALLS"]).read_text().splitlines()[-2:] == _STARTED_AND_JUDGED
 
 
 @pytest.mark.parametrize("state", ["restarting", "created", "running", "paused", "unreadable"])
@@ -559,7 +583,7 @@ def test_a_deployment_needs_a_proxy_unless_submissions_are_first_party(tmp_path)
         check=True,
         capture_output=True,
     )
-    assert calls.read_text().splitlines()[-1] == "docker compose up -d --wait --no-build --pull never"
+    assert calls.read_text().splitlines()[-2:] == _STARTED_AND_JUDGED
 
 
 @pytest.mark.parametrize(

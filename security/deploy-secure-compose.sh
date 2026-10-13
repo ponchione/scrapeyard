@@ -42,12 +42,14 @@ install -d -m 700 "$LOCK_DIR"
 exec 9>>"$LOCK_DIR/deploy.lock"
 flock --wait 600 9 || fail "another deployment has held $LOCK_DIR/deploy.lock for ten minutes"
 
-# The application's confinement is an AppArmor profile, and Docker applies one
-# only where it finds AppArmor usable itself. A daemon that does not (one
-# running inside a container manager, for one) starts the application under a
-# profile name it ignores, with none of the profile's denials.
-[[ "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" == *name=apparmor* ]] || \
-  fail "Docker applies no AppArmor profile on this host, so the application would run unconfined"
+# The application's confinement is an AppArmor profile. A host where Docker
+# reports no AppArmor at all is refused here, before anything is stopped.
+# That Docker reports it does not mean it applies a profile; the start is
+# judged by the kernel's own word, further down.
+security_options=$(docker info --format '{{.SecurityOptions}}' 2>/dev/null) || \
+  fail "the Docker daemon did not answer"
+[[ "$security_options" == *name=apparmor* ]] || \
+  fail "Docker reports no AppArmor on this host, so the application would run unconfined"
 
 # Building cannot expose application traffic and makes the later application
 # start independent of Compose's implicit missing-image behavior.
@@ -178,5 +180,14 @@ security/install-chromium-apparmor-profile.sh install
 # The app's lifespan verifies the narrowly allowed probe liveness channel
 # before and after the host rule rejects its separate challenge listener.
 docker compose up -d --wait "${start_options[@]}"
+
+# Where Docker cannot use AppArmor it starts the container unconfined, under
+# the profile's name, and says nothing (a daemon inside a container manager
+# does). None of the profile's denials exists then. What the kernel reports
+# for the container's first process is the one thing to go by; `docker
+# inspect` repeats what was asked for.
+confinement=$(docker compose exec -T scrapeyard cat /proc/1/attr/current 2>/dev/null) || confinement=""
+[[ "$confinement" == "scrapeyard-chromium (enforce)" ]] || \
+  fail "the application runs as '${confinement:-unknown}', not under the scrapeyard-chromium AppArmor profile"
 
 echo "Scrapeyard started with connected-IP egress policy attested"

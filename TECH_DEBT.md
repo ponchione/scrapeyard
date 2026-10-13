@@ -1355,8 +1355,8 @@ with what TD-87 closed.
 and Firefox use has not been established. With `sys_admin` denied as well, a
 process could not write its identity maps or create network, PID and IPC
 namespaces, and with `sys_chroot` denied `chroot` was refused (run
-38406757802); that both browsers' sandboxes take those steps is read from
-their sources, not measured. A list that is one capability short stops
+38406757802); that both browsers' sandboxes take those steps is the
+reviewer's recollection of their sources, not measured. A list that is one capability short stops
 browser fetches, or makes a browser run with a weaker sandbox without saying
 so.
 
