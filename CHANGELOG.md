@@ -114,6 +114,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   profile without the denials, where they succeed. An independent review
   tried the routes round the denial (nested and mapped namespaces, `exec`,
   the 32-bit entry, profile changes, `docker exec`) and found none.
+- `security/deploy-secure-compose.sh` refuses to deploy where Docker applies
+  no AppArmor profile (`name=apparmor` missing from the daemon's security
+  options), before it stops anything. Such a daemon starts the application
+  under a profile name it ignores, and every denial above is the profile's.
 - The container smoke lane opens `AF_ALG` and `AF_VSOCK` sockets through
   the 32-bit `socketcall` entry from inside the application's container and
   requires AppArmor's refusal, and runs the same attempts under a copy of

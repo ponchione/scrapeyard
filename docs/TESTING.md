@@ -307,18 +307,22 @@ with one exception: where an attempt is accepted the kernel may load the
 module behind it, and a loaded module stays until the host restarts. The
 control container accepts them all, so the lane leaves `vsock`, `af_alg`,
 `dummy` and their relatives loaded on the machine it ran on. In the
-application's container every such attempt is refused before the kernel
-looks for a module, which makes the check safe against a deployed container
-that runs under the release's profile:
+application's container each of those attempts is refused before the kernel
+looks for a module (`nfnetlink` is asked for when the netfilter socket is
+opened, and a host with Docker's bridge networks has it loaded already),
+which makes the check safe against a deployed container that runs under the
+release's profile:
 
 ```bash
 sudo docker exec -i <application container> python - \
   < /srv/scrapeyard-releases/current/source/tests/smoke/verify_confinement.py
 ```
 
-Do not pass `--report` or `--control` to it there. Against a container whose
-profile lacks a denial, as after a rollback to a release from before
-2026-10-13, the attempts succeed and load those modules on the host.
+Run it there without arguments: `--report` exits 0 whatever it finds, and
+`--control` judges by the control's expectations. Against a container whose
+profile lacks a denial, as after a rollback to a release from before the
+denials, the attempts succeed and load those modules on the host, whatever
+the arguments.
 
 Plan for 4 CPU cores, 8 GiB RAM, and 15 GiB free disk; 2 cores and 6 GiB are a
 practical lower bound but take longer. Network access is needed only to pull

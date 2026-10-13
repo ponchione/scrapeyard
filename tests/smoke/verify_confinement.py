@@ -10,9 +10,12 @@ it creates (a link, a queueing discipline and a netfilter table in a network
 namespace of its own) ends with the child process that made the namespace.
 One thing outlasts it: where an attempt is accepted, the kernel may load the
 module behind it (`vsock`, `af_alg`, `dummy` and the like), and a module
-stays loaded until the host restarts. Under the application's profile every
-such attempt is refused before that. Under the control profile, or with
-`--report` in a container whose profile lacks a denial, they are not.
+stays loaded until the host restarts. Under the application's profile each
+of those attempts is refused before that; the one module the attempts ask
+for regardless is `nfnetlink`, which a host with Docker's bridge networks
+has loaded already. Under a profile that lacks a denial the attempts
+succeed, whatever arguments this file is given: it tries everything first
+and judges afterwards.
 
 `--control` is for a container that runs under a copy of the AppArmor profile
 without the lines these checks rest on. There every attempt has to succeed,

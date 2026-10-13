@@ -231,6 +231,7 @@ def test_secure_release_deploy_is_offline_and_stops_before_policy_changes(tmp_pa
     docker.write_text("""#!/bin/bash
 echo "docker $*" >> "$CALLS"
 case "$*" in
+  "info --format "*) [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
   "compose config --images") echo sha256:aaaaaaaa ;;
   "image inspect "*) [[ "${MISSING_IMAGE:-}" != yes ]] ;;
   "compose ps -q egress-probe") echo probe ;;
@@ -271,7 +272,9 @@ esac
         < calls.index("install-docker-egress-policy.sh")
         < calls.index("docker compose up -d --wait --no-build --pull never")
     )
-    for failure in ("INVALID_RELEASE", "MISSING_IMAGE", "FAIL_POLICY"):
+    # NO_APPARMOR: a daemon that applies no profile would start the
+    # application under a profile name it ignores.
+    for failure in ("INVALID_RELEASE", "MISSING_IMAGE", "FAIL_POLICY", "NO_APPARMOR"):
         log.write_text("")
         result = subprocess.run(
             command, cwd=tmp_path, env=dict(env, **{failure: "yes"}), capture_output=True
@@ -279,6 +282,8 @@ esac
         assert result.returncode != 0
         calls = log.read_text()
         assert "docker compose up -d --wait --no-build --pull never\n" not in calls
+        if failure == "NO_APPARMOR":
+            assert "would run unconfined" in result.stderr.decode()
         if failure != "FAIL_POLICY":
             assert "docker compose stop scrapeyard" not in calls
         else:
@@ -335,6 +340,7 @@ _FAKE_DOCKER = """#!/bin/bash
 echo "docker $*" >> "$CALLS"
 present() { [[ ! -e "$CALLS.removed" && ( "${APP_EXISTS:-}" == yes || -e "$CALLS.started" ) ]]; }
 case "$*" in
+  "info --format "*) [[ "${NO_APPARMOR:-}" == yes ]] || echo "[name=apparmor,profile=default name=seccomp,profile=builtin]" ;;
   "compose config --images") echo sha256:aaaaaaaa ;;
   "compose ps -q egress-probe") echo probe ;;
   "compose stop scrapeyard")

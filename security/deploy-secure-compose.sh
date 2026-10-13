@@ -42,6 +42,13 @@ install -d -m 700 "$LOCK_DIR"
 exec 9>>"$LOCK_DIR/deploy.lock"
 flock --wait 600 9 || fail "another deployment has held $LOCK_DIR/deploy.lock for ten minutes"
 
+# The application's confinement is an AppArmor profile, and Docker applies one
+# only where it finds AppArmor usable itself. A daemon that does not (one
+# running inside a container manager, for one) starts the application under a
+# profile name it ignores, with none of the profile's denials.
+[[ "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" == *name=apparmor* ]] || \
+  fail "Docker applies no AppArmor profile on this host, so the application would run unconfined"
+
 # Building cannot expose application traffic and makes the later application
 # start independent of Compose's implicit missing-image behavior.
 start_options=()

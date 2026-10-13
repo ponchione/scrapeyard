@@ -1344,16 +1344,21 @@ older release, which records one identifier only, is still loaded.
 `capability,` line allows them all, and the fix for TD-87 denies
 `net_admin` and `net_raw` by name. Inside a user namespace a process in the
 container still holds the rest. Tried under the profile on a runner (runs
-38404612920 and 38404934394): it could inject a uevent into its own network
-namespace, bind port 80 there, and create mount, UTS, IPC, PID, cgroup and
-time namespaces, while `mount` and `sethostname` stayed refused. The review
-found nothing behind these that compares with what TD-87 closed.
+38404612920 and 38404934394): the kernel accepted a uevent the process sent
+on its own network namespace's uevent socket, which takes `CAP_SYS_ADMIN`
+over that namespace, and the process created mount, UTS, IPC, PID, cgroup
+and time namespaces, while `mount` and `sethostname` stayed refused. The
+reviewer's reading, from one pass, is that nothing behind these compares
+with what TD-87 closed.
 
-**Why deferred:** the sandboxes need some of them (`sys_admin` to create
-their namespaces and write the identity maps, `sys_chroot`), and which others
-Chromium and Firefox use has not been established. A list that is one
-capability short stops browser fetches, or makes a browser run with a weaker
-sandbox without saying so.
+**Why deferred:** the sandboxes need some of them, and which others Chromium
+and Firefox use has not been established. With `sys_admin` denied as well, a
+process could not write its identity maps or create network, PID and IPC
+namespaces, and with `sys_chroot` denied `chroot` was refused (run
+38406757802); that both browsers' sandboxes take those steps is read from
+their sources, not measured. A list that is one capability short stops
+browser fetches, or makes a browser run with a weaker sandbox without saying
+so.
 
 **Revisit when:** a kernel flaw is reported behind a capability a user
 namespace gives, or the browsers are replaced (TD-45), which is the moment
