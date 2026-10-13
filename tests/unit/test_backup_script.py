@@ -846,6 +846,9 @@ def test_restore_test_restores_into_an_isolated_project_and_removes_it(host):
     assert application["restart"] == isolated["services"]["redis"]["restart"] == "no"
     assert application["environment"]["SCRAPEYARD_EGRESS_POLICY_PROBE_HOST"] == ""
     assert application["environment"]["SCRAPEYARD_UNTRUSTED_SUBMISSIONS"] == "false"
+    # A deployment's proxy named by a host name cannot be resolved from a
+    # network nothing leaves, and the application would refuse to start.
+    assert application["environment"]["SCRAPEYARD_PROXY_URL"] == ""
     assert application["networks"]["backend"]["ipv4_address"] == "172.30.1.250"
     # The deployment was not stopped, and nothing of the test is left.
     assert not host.called("systemctl stop") and not host.called("systemctl start")

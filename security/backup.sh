@@ -1024,16 +1024,20 @@ case "$ACTION" in
     require_internal_network
     # The release's Compose file gives the application its confinement. This
     # file changes only what an isolated copy needs: its own network, no
-    # restarts, and no egress probe. The application checks the host egress
-    # policy at startup only while its probe is configured, and a production
-    # host is not given a second firewall policy for a test. The copy also
-    # never removes old history, so it can be compared with the original.
+    # restarts, no egress probe and no proxy. The application checks the host
+    # egress policy at startup only while its probe is configured, and a
+    # production host is not given a second firewall policy for a test. A
+    # deployment's proxy is of no use to a copy that can reach nothing, and
+    # one named by a host name would keep it from starting: the application
+    # resolves that name at its start. The copy also never removes old
+    # history, so it can be compared with the original.
     cat > "$STAGE/isolated.yml" <<YAML
 services:
   scrapeyard:
     restart: "no"
     environment:
       SCRAPEYARD_UNTRUSTED_SUBMISSIONS: "false"
+      SCRAPEYARD_PROXY_URL: ""
       SCRAPEYARD_EGRESS_POLICY_PROBE_HOST: ""
       SCRAPEYARD_EGRESS_POLICY_PROBE_PORT: "0"
       SCRAPEYARD_EGRESS_POLICY_PROBE_LIVENESS_PORT: "0"
