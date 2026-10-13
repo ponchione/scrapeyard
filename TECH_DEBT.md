@@ -240,7 +240,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-90**) and use this template:
+7. **New findings** take the next free ID (**TD-92**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -430,78 +430,23 @@ and rehearses it; dispatch it on the commit to release.
 | --- | --- | --- | --- |
 | TD-17 | P2 | operational | Eyebox and Scrapeyard limits lack a jointly qualified operating envelope |
 | TD-18 | P1 | operational | Production forward-proxy selection and egress qualification are incomplete |
-| TD-19 | P1 | operational | No Eyebox run has used the production ingress, and its rotation is untried |
+| TD-19 | P1 | operational | The production ingress's rotation is untried, and no host has been rebuilt from its runbook |
 | TD-20 | P1 | operational | Secure startup after host/Docker restart and runtime monitoring are unqualified |
 | TD-21 | P1 | operational | Unattended coordinated off-host backup and restoration are incomplete |
-| TD-22 | P2 | operational | Deployment and rollback lack retained, qualified release artifacts |
 | TD-24 | P3 | coordinated | Browser reuse and its script cache are tuned on fixtures, not real traffic |
 | TD-45 | P1 | coordinated | Bundled browsers are months behind upstream |
 | TD-48 | P3 | deferred | Stored configs are duplicated and uncompressed |
 | TD-49 | P3 | deferred | Config and engine features Eyebox doesn't use |
-| TD-83 | P2 | ready | The seccomp profile derived from Docker's default has not run on the production host |
-| TD-84 | P2 | ready | The production host is held on Docker 28 |
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
 | TD-89 | P1 | coordinated | The embedded worker does not come back after it loses Redis |
+| TD-90 | P2 | coordinated | A browser fetch of a name that changes its answer reaches the container's own loopback |
+| TD-91 | P3 | ready | Compose passes the secret-reference allowlist and none of the secrets it names |
 
 ## Ready to implement
 
-The code for both is written. Each waits for a window on the production host.
-
-### TD-84 — The production host is held on Docker 28
-
-**Priority:** P2 · **Area:** deployment · **Risk:** medium · **Contract:** none · **Depends on:** a window on the host
-
-**Problem:** The production host runs Docker 28.5.2, containerd.io 1.7.29
-and Compose 2.38.2, held at those versions. On 2026-10-12 the four held
-packages were its only pending upgrades: until it moves, the host takes no
-fixes for them, security fixes included.
-
-**Done on 2026-10-12:** the smoke lane and the rehearsal pass on Docker
-29.9.0, containerd.io 2.4.1 (runc 1.5.2) and Compose 5.6.0, and a release
-built on 28.5.2 was loaded and rehearsed on them with every image removed
-first, which is the host's path (run 38306888178). Nothing in the release or
-the wrapper needed a change. The one thing that fails is a change of image
-store (TD-86), which an upgrade in place does not make.
-**Code:** `scripts/install_container_runtime.sh`, `docs/DEPLOYMENT.md`
-("Container runtime versions").
-**Fix:** Pull request #25 raises the pins and the guide. In one window:
-check Docker's repository for a newer 29 and raise the pins to it, let the
-lanes pass, merge, then on the host take the hold off, install the pinned
-versions, set `"features": {"containerd-snapshotter": false}` in
-`/etc/docker/daemon.json`, hold again and reboot.
-**Done when:** the host runs the pinned versions after a reboot, with the
-checks that follow any reboot passing, and `docker info` still names
-`overlay2`.
-
-### TD-83 — The seccomp profile derived from Docker's default has not run on the production host
-
-**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** the next release
-
-**Done on 2026-10-12:** `security/seccomp/chromium.json` is generated from
-Docker 29.9.0's default profile plus one rule (`clone` and `unshare`), the
-difference is recorded in `security/seccomp/README.md`, and the change was
-reviewed as a security change, twice. The smoke lane, with all three
-browsers, and the rehearsal pass under the runc the host runs (1.3.3, built
-with libseccomp 2.5.5).
-
-**Still open:**
-- A deployment on the production host. The profile and the AppArmor change
-  beside it (`deny network vsock`) ship with the next release; the wrapper
-  installs the AppArmor profile at every promotion and boot.
-- That runc's libseccomp does not know nine of the profile's newest names
-  (`statmount`, `listmount`, `mseal`, `uretprobe`, the four `*xattrat` calls
-  and `riscv_hwprobe`), so runc skips them there and they answer `ENOSYS`.
-  Harmless today; it changes by itself when the host's packages move.
-**Code:** `security/seccomp/`, `scripts/derive_seccomp_profile.py`,
-`security/apparmor/scrapeyard-chromium`,
-`tests/unit/test_browser_runtime_contract.py`,
-`tests/smoke/verify_confinement.py`.
-**Done when:** a release that carries the profile runs on the host, and
-browser fetches in all three modes pass there. The smoke lane tests the
-`socketcall` path since 2026-10-13 (`tests/smoke/verify_confinement.py`);
-run the same file against the host's container once the release is there.
+Nothing is.
 
 ## Coordinated
 
@@ -547,6 +492,64 @@ local instance (this checkout, a throwaway Redis 7.4.5).
 **Done when:** the rehearsal stops Redis under the running application,
 starts it again, and a job submitted afterwards runs with no operator
 command. Its Redis step restarts the boot service by hand today.
+
+### TD-90 — A browser fetch of a name that changes its answer reaches the container's own loopback
+
+**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** a fix that judges the `Host` header would refuse requests whose `Host` is not one the deployment names · **Depends on:** the owner's choice of fix, and Eyebox for the names it calls
+
+**Problem:** found on the production host on 2026-10-13 by TD-18's check.
+- The guard resolves a name before a fetch and refuses a non-public answer.
+  A browser resolves the name again by itself when it connects. For that
+  race the [guide](docs/DEPLOYMENT.md#egress) relies on the host policy,
+  which refuses private destinations at the network. The host policy never
+  sees a connection that stays inside the container.
+- Tried with a name whose first answer is a public address and whose later
+  answers are `127.0.0.1`, port 8420: in one of four `dynamic` fetches the
+  browser loaded the application's own `GET /health` from loopback, and the
+  run completed with that body in its result. A plain client in the same
+  container that looked the name up twice reached it in two of four tries.
+  `basic` fetches connect to the address they checked and did not reach it
+  in five.
+- What is there to reach: the API on port 8420, of which `/health` and
+  `/health/live` answer without a credential and say `{"status":"ok"}`.
+  Every other route needs an API key, which a page does not have. Nothing
+  else listens on the container's loopback. So today a hostile page learns
+  that the API exists. The same route would reach anything later added to
+  loopback, or any route that trusted a local caller.
+- Not tried: a name that changes to the container's own bridge address,
+  which stays inside the container the same way.
+
+**Code:** `src/scrapeyard/main.py` (the middleware stack),
+`src/scrapeyard/engine/` (the browser guard), `docs/DEPLOYMENT.md` ("Egress").
+**Fix:** to be chosen. The usual defence is on the receiving side: refuse a
+request whose `Host` header is not a name the deployment was told to answer
+to (the bridge address, the service name, the public name), which leaves a
+rebound name with a 400 and nothing to read. It needs a setting, a default
+that does not break Eyebox's local stack, and the tunnel's forwarded name.
+The alternative is to keep the browsers from connecting to the container's
+own addresses, which Chromium's and Firefox's resolvers do not offer as one
+switch.
+**Done when:** the smoke lane fetches a name that rebinds to loopback with
+each browser fetcher and no result holds the API's answer, and the guide's
+"Egress" section says what closes the case the host policy cannot see.
+
+### TD-91 — Compose passes the secret-reference allowlist and none of the secrets it names
+
+**Priority:** P3 · **Area:** deployment · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:** `docker-compose.yml` hands the application
+`SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` and no `SCRAPEYARD_SECRET_*` value.
+A job that refers to `${SCRAPEYARD_SECRET_PROXY_URL}`, as
+[SECRET_STORAGE.md](docs/SECRET_STORAGE.md) describes, cannot resolve it
+under the shipped Compose file, whatever the host's settings hold, so a
+proxy login can only be the service-wide `SCRAPEYARD_PROXY_URL` or be
+written into the job. Reported from the production host on 2026-10-13 and
+read in the Compose file; not tried.
+**Code:** `docker-compose.yml` (the `scrapeyard` service's environment).
+**Fix:** pass the names a deployment may define, or an env file of them,
+into the container, and rehearse one reference.
+**Done when:** the rehearsal resolves one `SCRAPEYARD_SECRET_*` reference
+in a submitted job through the deploy wrapper.
 
 ### TD-45 — Bundled browsers are months behind upstream
 
@@ -657,7 +660,7 @@ measured effect instead of fixture numbers.
 ## Operational and deployment qualification
 
 These entries need operator work and deployed evidence. They are not single PRs.
-For TD-17 to TD-22, read the deployment assessment and the linked source before
+For TD-17 to TD-21, read the deployment assessment and the linked source before
 implementing.
 - Reuse existing scripts and settings.
 - Record local implementation checks separately from operator- or
@@ -800,7 +803,31 @@ host's address ([DEPLOYMENT.md](docs/DEPLOYMENT.md#without-an-operator-proxy)).
   served the same settings from a home connection in September, so the
   refusals are about the address.
 
+- 2026-10-13: redirects and DNS answers through the application, every job
+  sent direct. The redirector was our own: a throwaway process on a CI
+  runner behind a temporary tunnel, which redirects to a fixed list of
+  destinations and nowhere else. The names were public test names that
+  resolve to the address written into them.
+  - Fetched, as controls: the redirector's page, and its redirect to a
+    public page, with `basic` and `dynamic`.
+  - Refused, with nothing of the destination in any result: an HTTP redirect
+    to the container's loopback, the metadata address, the bridge gateway,
+    Redis and a private range (`basic`, all five; `dynamic`, the first
+    three; `stealthy`, loopback); a page's own meta refresh and script
+    navigation to loopback and to the metadata address (`dynamic`); a
+    subrequest to loopback from a fetched page (`dynamic`, `stealthy`); and
+    names that resolve to loopback, the metadata address and the gateway
+    (`basic`, `dynamic`).
+  - A name whose first answer is a public address and whose later answers
+    are `127.0.0.1`: `basic` did not reach loopback in five tries, since it
+    connects to the address it checked. `dynamic` reached the application's
+    own `/health` there in one of four. That is TD-90.
+
 **Still open:**
+- The host's settings name a proxy since 2026-10-13, set by the owner's
+  other work on the retailers that refuse the host's address; a job that is
+  to leave from the host's own address says `proxy: {url: direct}`. This
+  pass did not test it, and the decision above predates it.
 - The owner's decision for the two that refuse: a proxy on those targets
   alone (`proxy:` in Eyebox's configs, which needs no change here), another
   address, or leaving them out. Eyebox's greenlight G3.2 already plans a
@@ -811,8 +838,6 @@ host's address ([DEPLOYMENT.md](docs/DEPLOYMENT.md#without-an-operator-proxy)).
 - One whole job for each beta retailer from the host (Eyebox's greenlight
   G3.1). One product page says nothing about category pages, pagination or a
   run's volume from this address.
-- The rest of the denial matrix below through the application on the host:
-  redirects and DNS rebinding. The lanes cover both against fixtures.
 - The per-retailer results are in the host's stored results and the
   operator's notes only. They belong in Eyebox's greenlight document (C-10).
 
@@ -874,12 +899,13 @@ is not automatically evidence of safe destination filtering.
 
 Trusted local or fixture mode cannot close this item.
 
-### TD-19 — No Eyebox run has used the production ingress, and its rotation is untried
+### TD-19 — The production ingress's rotation is untried, and no host has been rebuilt from its runbook
 
 **Priority/ownership:** P1; Scrapeyard ingress/security. Until 2026-10-12
 this entry was "Restricted Hetzner HTTPS ingress and Railway credential
-handoff are incomplete", and for part of that day "The production ingress is
-in no runbook and no Eyebox run has used it".
+handoff are incomplete", for part of that day "The production ingress is
+in no runbook and no Eyebox run has used it", and until 2026-10-13 "No
+Eyebox run has used the production ingress, and its rotation is untried".
 
 **Done on 2026-10-12, by another route than the one planned below:** the
 owner's domain is on Cloudflare, so ingress is a Cloudflare Tunnel that the
@@ -909,9 +935,25 @@ nothing.
   `/health` answered 200 and an authenticated read reached the application.
 - The connector reconnected by itself after the reset under TD-20.
 
+**Done on 2026-10-13:**
+- A scrape of a public test page was submitted from the staging ingest's
+  container on Railway with ingest's own run client, polled as an exact run
+  and downloaded, in four seconds. A whole retailer run from there is
+  TD-17's.
+- Requests over the size limit, through the public name: a body of exactly
+  262,144 bytes reached validation (422), and one byte more was refused
+  with 413 by the application, as were 300 KiB and 5 MiB, with and without
+  a `Content-Length`. Neither the edge nor the connector cut them short,
+  and the application answered `/health` afterwards.
+- Credentials in logs: every credential on the host (the API credentials,
+  the encryption key, the service token's secret, the tunnel token, and the
+  proxy logins) was searched for, in 14 spellings, in Docker's container
+  logs, the whole journal with the connector's unit, `/var/log`, the
+  application's own log directory and the operator's tool output. None was
+  found. The edge's log of Access decisions holds the service token's
+  identifier and not its secret; this plan has no request log to read.
+
 **Still open:**
-- No scrape has been submitted from Railway. The first whole run from the
-  staging ingest (TD-17) proves submit, poll and download.
 - The runbook was written from the host on 2026-10-12
   ([DEPLOYMENT.md](docs/DEPLOYMENT.md#ingress-through-a-tunnel), with the
   connector's unit and the route list under `security/`, and a test that
@@ -922,8 +964,6 @@ nothing.
   provider's server (C-10).
 - Rotation is documented and not tried, for the service token (it expires on
   2027-10-12) and for the API credentials.
-- Not tried through the tunnel: a request over the size limit, and whether
-  the edge's or the connector's logs hold a credential.
 - The zone's Browser Integrity Check answers 403 to some client signatures
   (Python's `urllib` is one) before Access sees the token. Eyebox's `httpx`
   passes. Check it again when the client library changes.
@@ -973,7 +1013,7 @@ and [Caddy certificate challenges](https://caddyserver.com/docs/automatic-https)
 ### TD-20 — Secure startup after host/Docker restart and runtime monitoring are unqualified
 
 **Priority/ownership:** P1; Scrapeyard host supervision. Coordinate with TD-19's
-ingress and TD-22's release artifact selection.
+ingress and the [retained releases](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback).
 
 **Implementation update (2026-10-10):**
 - `security/systemd/scrapeyard.service` and `security/manage-release.sh`
@@ -1097,6 +1137,11 @@ A plain `docker compose up` is not enough.
 **Priority/ownership:** P1; Scrapeyard recovery. Eyebox owns its PostgreSQL
 recovery in [item I](../eyebox/TECH-DEBT.md#i-railway-postgresql-recovery-and-scheduled-maintenance).
 
+**Retained releases (from TD-22, closed 2026-10-13):** the host keeps the
+running release and the one before it. Off the host they exist only as the
+release workflow's artifacts, which expire 30 days after their run. A
+release belongs in the off-host store with the backups.
+
 **State on the production host (2026-10-12):** no backup of any kind runs
 there, and no off-host store has been chosen. The two data volumes hold
 4.5 MB. The encryption key was generated on the host and is nowhere else, so
@@ -1148,112 +1193,6 @@ and [release qualification](scripts/run_release_qualification.sh).
 
 A manifest-only check or a provider disk snapshot does not close this item.
 
-### TD-22 — Deployment and rollback lack retained, qualified release artifacts
-
-**Priority/ownership:** P2; Scrapeyard release delivery. Integrates with TD-20;
-coordinate joint release IDs with Eyebox item G. TD-48 would add an on-disk
-format change to the rollback story.
-
-**Implementation update (2026-09-07):**
-- [`scripts/release_artifact.py`](scripts/release_artifact.py) now builds a
-  committed revision, gates publication on the existing scan and quick
-  qualification, and keeps source and security files, reports, and all three
-  runtime images in a checksummed bundle.
-- The secure wrapper's `--release DIRECTORY` path verifies and loads that bundle
-  before stopping the app, preserves the policy/attestation ordering, and
-  disables builds and pulls.
-- The [rollback procedure](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
-  covers keeping the previous release, the key and backup prerequisites, and
-  schema compatibility.
-- Local validation:
-  - Ruff and mypy passed.
-  - The full suite passed 2,084 tests, with 16 live Redis skips (88.51%
-    coverage).
-  - The expanded release, wrapper and CI checks passed 22 tests with warnings
-    treated as errors.
-- Artifact creation was attempted locally and correctly refused before
-  building, because `scrapeyard_backend` already owns the qualification lane's
-  fixed `172.30.0.0/24` subnet.
-- No qualified candidate was published, and no running deployment was changed.
-
-**Implementation update (2026-10-10):**
-- The `Release artifact and deployment rehearsal` workflow ran
-  `release_artifact.py create` to completion for the first time, on a GitHub
-  runner: 10 to 12 minutes for each release, scan and quick qualification
-  included.
-- `scripts/run_deployment_rehearsal.sh` then deploys the candidate with the
-  production Compose file, in untrusted mode, through the wrapper the release
-  retains. Neither container lane does that: both overlays turn untrusted
-  mode off. It checks the images, the confinement, the host policy, one
-  instance and the API after each step:
-  - a release with a changed file is refused with the running application
-    untouched;
-  - a policy that cannot be installed leaves the application stopped;
-  - started without the policy, or with it on another bridge, the application
-    reports the reachable challenge and never serves;
-  - a rollback and a roll-forward keep a known run readable, and its
-    submission is replayed, not run again;
-  - no image is pulled.
-- A manual dispatch uploads the rehearsed release. Run 38071059498 uploaded
-  `scrapeyard-release-f100488…` (1.3 GB, kept 30 days). Since `2c0f4be` the
-  archive records root as the owner of every file and the workflow checks
-  what extracting it gives.
-- [TESTING.md](docs/TESTING.md#release-and-deployment-rehearsal) describes
-  the lane and [DEPLOYMENT.md](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
-  the commands to fetch a release.
-
-**Done on the production host (2026-10-11):** release `523d805` was fetched
-as the workflow's artifact, checked against the run's checksum, extracted as
-root and started with nothing built or pulled; it serves with no operator
-proxy, the owner's choice (TD-18). `promote` refused a copy with one changed
-file and the release itself while others could write to it, and left the
-running container as it was.
-
-**Still open:** a rollback on the production host. The only earlier release,
-`b371a37`, cannot start there (TD-79 to TD-81), so the first rollback will be
-from the next release to `523d805`. The same checks behind the real ingress
-(TD-19). Keep a previous release on the host and off it; the workflow
-artifact expires after 30 days. On 2026-10-12 the host held `523d805` alone,
-and the artifacts of `523d805` and `b371a37` expire on 2026-11-10. After that
-the copy on the host is the only one until the workflow is dispatched again.
-
-**Problem:**
-- The secure wrapper rebuilds Scrapeyard from the checkout on every deployment.
-- CI builds and scans images, but the checked-in workflow doesn't provide a
-  retained production image or a tested rollback path that is independent of a
-  new dependency or browser download.
-- Rebuilding an older revision doesn't prove that the previously qualified
-  artifact is available during an incident.
-
-**Start here:** [Dockerfile](Dockerfile),
-[container-security workflow](.github/workflows/container-security.yml),
-[security scan](scripts/run_container_security_scan.sh),
-[deploy wrapper](security/deploy-secure-compose.sh), and
-[qualification runner](scripts/run_release_qualification.sh).
-
-**Work:**
-- Keep the built, scanned and qualified image by immutable digest or verified
-  archive, together with its source revision and the matching Compose and
-  security configuration.
-- Add the smallest explicit promotion and rollback path that uses that artifact
-  without rebuilding, and preserves the stop, dependency, policy and attestation
-  ordering.
-- Keep a previous known-good artifact, and enough local disk to restore it.
-- Record the pre-release backup and key requirements and SQLite migration
-  compatibility. When an older binary can't use the new schema, choose between
-  a data restore and a forward repair.
-- Preserve the existing local build workflow where it is useful.
-
-**Done when:**
-- The retained candidate is deployed, a failed qualification is rejected, and
-  the previous compatible release is restored without build-network access.
-- Readiness, known result reads, the effective security policy, and a single
-  application instance are verified after both transitions.
-- If schema rollback requires it, the documented data-restore branch is
-  exercised in isolation.
-- Image and config identifiers and the commands used are recorded, so another
-  operator can repeat the rollback.
-
 ## Deferred
 
 These were considered on 2026-10-09 and deliberately not scheduled. Each one
@@ -1261,7 +1200,7 @@ records why and what would change that.
 
 ### TD-48 — Stored configs are duplicated and uncompressed
 
-**Priority:** P3 · **Status:** deferred · **Contract:** changes the on-disk format and so affects rollback (TD-22)
+**Priority:** P3 · **Status:** deferred · **Contract:** changes the on-disk format and so affects [rollback](docs/DEPLOYMENT.md#retained-release-artifacts-and-rollback)
 
 **Problem:**
 - `config_yaml` is stored in both `jobs` and `job_runs`
@@ -1280,14 +1219,15 @@ records why and what would change that.
 **Why deferred:**
 - Compressing before encrypting (a `syenc:v2` envelope read alongside v1)
   changes the on-disk format, so an older binary couldn't read new rows. That
-  breaks the TD-22 rollback story.
+  breaks the rollback to a retained release, which was rehearsed on the
+  production host on 2026-10-13 between two releases with the same schema.
 - Compression before encryption of attacker-influenced plaintext needs a
   security review.
 - The startup-memory symptom is already gone without a format change: the
   secret migration pages through rows.
 
-**Revisit when:** jobs.db grows past a few hundred MB, or TD-22's rollback
-process covers format migrations. A cheaper intermediate step is moving the
+**Revisit when:** jobs.db grows past a few hundred MB, or the rollback
+procedure covers format migrations. A cheaper intermediate step is moving the
 configs to a side table, which still needs a migration but involves no crypto
 change.
 
