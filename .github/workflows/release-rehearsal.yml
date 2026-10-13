@@ -62,6 +62,12 @@ jobs:
       - name: Install the container runtime the deployment guide names
         # Before anything is built: the runner image's Docker is replaced.
         run: sudo ./scripts/install_container_runtime.sh
+      - name: Install age for the backup rehearsal
+        # The distribution's package, as the deployment guide installs it on a host.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
+          dpkg-query -W age
       - name: Show Docker runner capacity
         run: |
           docker version

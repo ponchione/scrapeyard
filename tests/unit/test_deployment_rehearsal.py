@@ -242,6 +242,11 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
             "promote promote-no-proxy ",
             "expect_refusal_without_policy unprotected-start-no-proxy",
             "await_unit boot-no-proxy ",
+            'if "$BACKUP" run > ',
+            'systemctl start "$BACKUP_UNIT.service"',
+            "await_unit backup ",
+            '"$BACKUP" restore-test "$BACKUP_ARCHIVE"',
+            "verify_runtime restore-test ",
         )
     ]
     assert steps == sorted(steps)
@@ -315,6 +320,67 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
     assert "timeout" not in promote
 
 
+def test_boot_service_phase_backs_up_through_the_unit_and_restores_in_isolation():
+    text = RUNNER.read_text(encoding="utf-8")
+    step = text[
+        text.index("# ---- Scheduled backup and isolated restore test") : text.index(
+            "# ---- end of the backup step"
+        )
+    ]
+    for contract in (
+        # The script and both units are the candidate's, installed as documented.
+        'install -m 755 "$BOOT_CANDIDATE/source/security/backup.sh" "$BACKUP"',
+        '"$BOOT_CANDIDATE/source/security/systemd/$BACKUP_UNIT.timer" /etc/systemd/system/',
+        'systemctl enable --now "$BACKUP_UNIT.timer"',
+        # The host is given the public half of the key and nothing else.
+        'age-keygen -y "$WORK_DIR/backup-identity" > "$ENV_DIR/backup-recipients"',
+        # A hook root does not own is refused, with the application untouched.
+        'chown 65534:65534 "$ENV_DIR/backup-upload"',
+        "a refused backup disturbed the running application",
+        # The backup runs as the timer would start it, and the application it
+        # stopped is back under a new invocation of the boot service, with
+        # the images, confinement and egress policy of any other start.
+        'systemctl start "$BACKUP_UNIT.service" || BACKUP_OUTCOME=$?',
+        'await_unit backup "$BEFORE"',
+        'verify_runtime backup "$BOOT_CANDIDATE" candidate',
+        'verify_direct_egress backup "$BACKUP_STARTED_EPOCH"',
+        'verify_api backup --known "$WORK_DIR/known-run.json"',
+        # What was written is an age file, alone with its checksum, and the
+        # hook was handed that file.
+        '[[ "$(head -c 21 "$BACKUP_ARCHIVE")" == "age-encryption.org/v1" ]]',
+        'cmp -s "$BACKUP_ARCHIVE" "$WORK_DIR/uploaded-backup"',
+        'status["uploaded"] is True and status["application_down_seconds"] > 0',
+        # The restore test is given the private half, proves what it read,
+        # leaves nothing, and leaves the deployment as it was.
+        '"$BACKUP" restore-test "$BACKUP_ARCHIVE" --identity "$WORK_DIR/backup-identity"',
+        "'encryption envelopes under key rehearsal'",
+        "newest failed job: [0-9a-f-]{8,}",
+        '[[ -z "$(restore_test_resources)" ]]',
+        "the restore test disturbed the running application",
+        'verify_runtime restore-test "$BOOT_CANDIDATE" candidate',
+    ):
+        assert contract in step, contract
+    # Nothing in the step but the backup itself stops or starts the
+    # application, so what is verified afterwards is the backup's own restart.
+    for forbidden in ("promote ", "deploy ", "docker stop", "docker start", "systemctl restart", '"$UNIT"'):
+        assert forbidden not in step, forbidden
+    # Before anything is deployed, a host that already has a backup installed
+    # is refused, and afterwards everything the step installed is removed.
+    for contract in (
+        'BACKUP="/usr/local/sbin/scrapeyard-backup"',
+        '"/etc/systemd/system/$BACKUP_UNIT.timer" "$BACKUP_DIR" "$BACKUP_STATUS_DIR"; do',
+        'systemctl disable --now "$BACKUP_UNIT.timer"',
+        'rm -rf -- "$BACKUP" "/etc/systemd/system/$BACKUP_UNIT.service"',
+        'label=com.docker.compose.project=$PROJECT-restore-test" | \\\n    xargs -r docker volume rm',
+    ):
+        assert contract in text, contract
+    cleanup = text[text.index("cleanup_resources() {") : text.index("on_exit() {")]
+    # A backup still running would start the boot service again after it was disabled.
+    assert cleanup.index('systemctl stop "$BACKUP_UNIT.service"') < cleanup.index(
+        'systemctl disable --now "$UNIT"'
+    )
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="the refusal is for an unprivileged caller")
 def test_runner_refuses_to_run_without_root(tmp_path):
     result = subprocess.run(
@@ -353,6 +419,11 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     assert all(commands.index(command) < rehearsal for command in created)
     assert commands[rehearsal].startswith("sudo env ")
     assert "run_deployment_rehearsal.sh --boot-service" in commands[rehearsal]
+    # The backup step encrypts with age, from the distribution's own package
+    # as on a host, not from a download.
+    installs = [i for i, c in enumerate(commands) if "apt-get install" in c and " age" in c]
+    assert installs and installs[0] < rehearsal
+    assert not any("github.com/FiloSottile/age" in command for command in commands)
     uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
     evidence, release = uploads
     assert evidence["if"] == "always()"

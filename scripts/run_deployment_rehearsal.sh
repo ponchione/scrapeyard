@@ -19,11 +19,15 @@ With --boot-service it then installs the candidate's systemd unit as the
 deployment guide does and checks a refused and an interrupted promotion, a
 Docker restart, a Docker crash, a Docker start with everything a reboot loses
 gone, a recreated deployment network, a start that fails until its setting is
-repaired, and a promoted rollback. That part needs systemd. It stops Docker,
-unloads the AppArmor profile and switches the bridge netfilter hook off for a
-moment, and the paths it installs must not exist yet: /etc/scrapeyard,
-/etc/systemd/system/scrapeyard.service, /usr/local/sbin/scrapeyard-release
-and /srv/scrapeyard-releases/current.
+repaired, and a promoted rollback. It ends with the candidate's scheduled
+backup, run through its unit with a throwaway age key, and a restore of that
+archive into an isolated project. That part needs systemd, age and age-keygen.
+It stops Docker, unloads the AppArmor profile and switches the bridge
+netfilter hook off for a moment, and the paths it installs must not exist
+yet: /etc/scrapeyard, /etc/systemd/system/scrapeyard.service,
+/usr/local/sbin/scrapeyard-release, /srv/scrapeyard-releases/current, and the
+backup's /usr/local/sbin/scrapeyard-backup, units, /var/backups/scrapeyard
+and /var/lib/scrapeyard.
 
 Run it as root on a Docker host that runs nothing else. It installs the host
 egress policy and the AppArmor profile, as a production deployment does, and
@@ -104,6 +108,10 @@ WATCH_TIMER="scrapeyard-policy-watch.timer"
 WATCH_UNIT_FILE="/etc/systemd/system/$WATCH_UNIT"
 WATCH_TIMER_FILE="/etc/systemd/system/$WATCH_TIMER"
 RESTORED_LOG="/var/lib/scrapeyard/policy-restored.log"
+BACKUP="/usr/local/sbin/scrapeyard-backup"
+BACKUP_UNIT="scrapeyard-backup"
+BACKUP_DIR="/var/backups/scrapeyard"
+BACKUP_STATUS_DIR="/var/lib/scrapeyard"
 if ((BOOT_SERVICE == 1)); then
   for command in systemctl systemd-run apparmor_parser; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required for --boot-service"
@@ -116,6 +124,16 @@ if ((BOOT_SERVICE == 1)); then
   [[ -f "$CANDIDATE/source/security/systemd/$UNIT" && \
      -x "$CANDIDATE/source/security/manage-release.sh" ]] || \
     fail "the candidate release has no boot service to rehearse"
+  # A candidate from before the backup script is still rehearsed, without it.
+  if [[ -f "$CANDIDATE/source/security/backup.sh" ]]; then
+    for command in age age-keygen; do
+      command -v "$command" >/dev/null 2>&1 || fail "$command is required to rehearse the candidate's backup"
+    done
+    for path in "$BACKUP" "/etc/systemd/system/$BACKUP_UNIT.service" \
+      "/etc/systemd/system/$BACKUP_UNIT.timer" "$BACKUP_DIR" "$BACKUP_STATUS_DIR"; do
+      [[ ! -e "$path" && ! -L "$path" ]] || fail "$path already exists; use an isolated host"
+    done
+  fi
   # The simulated reboot unloads the profile, which must then be this run's own.
   ! grep -q '^scrapeyard-chromium ' /sys/kernel/security/apparmor/profiles 2>/dev/null || \
     fail "the AppArmor profile is already loaded; use an isolated host"
@@ -164,6 +182,13 @@ project_resources() {
     network) docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" ;;
     volume) docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" ;;
   esac
+}
+
+# What the candidate's restore test creates, in a project of its own.
+restore_test_resources() {
+  docker ps -aq --filter "label=com.docker.compose.project=$PROJECT-restore-test"
+  docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT-restore-test"
+  docker network ls -q --filter "label=com.docker.compose.project=$PROJECT-restore-test"
 }
 
 assert_no_project_resources() {
@@ -240,6 +265,13 @@ cleanup_resources() {
   local ids
   if ((BOOT_SERVICE_ACTIVE == 1)); then
     systemctl stop "$PROMOTE_UNIT" >/dev/null 2>&1
+    # The backup's timer and unit go first: a backup that is still running
+    # would start the boot service again.
+    systemctl disable --now "$BACKUP_UNIT.timer" >/dev/null 2>&1
+    systemctl stop "$BACKUP_UNIT.service" >/dev/null 2>&1
+    rm -rf -- "$BACKUP" "/etc/systemd/system/$BACKUP_UNIT.service" \
+      "/etc/systemd/system/$BACKUP_UNIT.timer" "$BACKUP_DIR" "$BACKUP_STATUS_DIR"
+    systemctl reset-failed "$BACKUP_UNIT.service" >/dev/null 2>&1
     systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1
     systemctl stop "$WATCH_UNIT" >/dev/null 2>&1
     systemctl disable --now "$UNIT" >/dev/null 2>&1
@@ -273,6 +305,14 @@ cleanup_resources() {
   fi
   ids="$(project_resources container)"
   [[ -z "$ids" ]] || docker rm -f -v $ids >/dev/null 2>&1
+  # A restore test that is interrupted removes its own project; this is for
+  # one that could not.
+  docker ps -aq --filter "label=com.docker.compose.project=$PROJECT-restore-test" | \
+    xargs -r docker rm -f -v >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT-restore-test" | \
+    xargs -r docker volume rm >/dev/null 2>&1
+  docker network ls -q --filter "label=com.docker.compose.project=$PROJECT-restore-test" | \
+    xargs -r docker network rm >/dev/null 2>&1
   remove_egress_policy >/dev/null 2>&1
   ids="$(project_resources network)"
   [[ -z "$ids" ]] || docker network rm $ids >/dev/null 2>&1
@@ -1096,6 +1136,96 @@ PY
   verify_runtime boot-no-proxy "$BOOT_CANDIDATE" candidate
   verify_direct_egress boot-no-proxy "$BOOT_STARTED_EPOCH"
   verify_api boot-no-proxy --known "$WORK_DIR/known-run.json"
+
+  # ---- Scheduled backup and isolated restore test (TD-21) -------------------
+  # The candidate is promoted and running without a proxy here, as on a host.
+  if [[ -f "$BOOT_CANDIDATE/source/security/backup.sh" ]]; then
+    echo "Installing the candidate's backup script and timer as the deployment guide does..."
+    install -m 755 "$BOOT_CANDIDATE/source/security/backup.sh" "$BACKUP"
+    install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$BACKUP_UNIT.service" \
+      "$BOOT_CANDIDATE/source/security/systemd/$BACKUP_UNIT.timer" /etc/systemd/system/
+    # A throwaway key pair. The host gets the public half only; the private
+    # half stays in the work directory, as an operator's stays off the host.
+    age-keygen -o "$WORK_DIR/backup-identity" 2>/dev/null
+    age-keygen -y "$WORK_DIR/backup-identity" > "$ENV_DIR/backup-recipients"
+    chmod 644 "$ENV_DIR/backup-recipients"
+    systemctl daemon-reload
+    systemctl enable --now "$BACKUP_UNIT.timer" > "$DIAGNOSTICS_DIR/backup-timer-enable.log" 2>&1
+    systemctl list-timers --no-pager "$BACKUP_UNIT.timer" > "$DIAGNOSTICS_DIR/backup-timer.txt" 2>&1
+    grep -q -F "$BACKUP_UNIT.service" "$DIAGNOSTICS_DIR/backup-timer.txt" || \
+      fail "the backup timer is not waiting to start the backup unit"
+
+    echo "Offering an upload hook another account owns; the backup must be refused with nothing stopped..."
+    printf '#!/bin/bash\ncp -- "$1" "%s/uploaded-backup"\n' "$WORK_DIR" > "$ENV_DIR/backup-upload"
+    chmod 755 "$ENV_DIR/backup-upload"
+    chown 65534:65534 "$ENV_DIR/backup-upload"
+    RUNNING_BEFORE="$APP_CONTAINER"
+    BEFORE="$(invocation)"
+    if "$BACKUP" run > "$DIAGNOSTICS_DIR/backup-foreign-hook.log" 2>&1; then
+      fail "a backup went ahead with an upload hook that another account owns"
+    fi
+    grep -q -F 'backup-upload is not owned by root, or others can write to it' \
+      "$DIAGNOSTICS_DIR/backup-foreign-hook.log" || fail "the backup was refused for another reason than its hook's owner"
+    [[ "$(invocation)" == "$BEFORE" && "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && \
+      app_is_running || fail "a refused backup disturbed the running application"
+    chown 0:0 "$ENV_DIR/backup-upload"
+
+    echo "Backing up through the unit; the application must come back through the boot service..."
+    BEFORE="$(invocation)"
+    BACKUP_STARTED_EPOCH="$(date +%s)"
+    BACKUP_OUTCOME=0
+    systemctl start "$BACKUP_UNIT.service" || BACKUP_OUTCOME=$?
+    journalctl --no-pager --output cat --unit "$BACKUP_UNIT.service" --since "@$BACKUP_STARTED_EPOCH" \
+      > "$DIAGNOSTICS_DIR/backup-run.log" 2>&1
+    ((BACKUP_OUTCOME == 0)) || fail "the backup unit failed; see backup-run.log"
+    # Stopped and started through the unit, and by nothing else: a new
+    # invocation, with the policy and the confinement as after any start.
+    await_unit backup "$BEFORE"
+    verify_runtime backup "$BOOT_CANDIDATE" candidate
+    verify_direct_egress backup "$BACKUP_STARTED_EPOCH"
+    verify_api backup --known "$WORK_DIR/known-run.json"
+    cp -- "$BACKUP_STATUS_DIR/backup-status.json" "$DIAGNOSTICS_DIR/backup-status.json"
+    BACKUP_ARCHIVE="$(python3 - "$BACKUP_STATUS_DIR/backup-status.json" <<'PY'
+import json
+import sys
+
+status = json.load(open(sys.argv[1], encoding="utf-8"))
+# The hook ran, and the application was down for a time that was measured.
+assert status["uploaded"] is True and status["application_down_seconds"] > 0, status
+print(status["archive"])
+PY
+    )" || fail "the backup's status file does not describe a completed, uploaded backup"
+    (cd "$BACKUP_DIR" && sha256sum --check --status "$(basename -- "$BACKUP_ARCHIVE").sha256") || \
+      fail "the archive does not match the checksum written beside it"
+    cmp -s "$BACKUP_ARCHIVE" "$WORK_DIR/uploaded-backup" || fail "the upload hook was not given the archive"
+    # Encrypted to the recipient, and nothing unencrypted left beside it.
+    [[ "$(head -c 21 "$BACKUP_ARCHIVE")" == "age-encryption.org/v1" ]] || fail "the archive is not an age file"
+    [[ "$(find "$BACKUP_DIR" -mindepth 1 | wc -l)" == 2 ]] || \
+      fail "the backup left more than the archive and its checksum in $BACKUP_DIR"
+
+    echo "Restoring the archive into an isolated project beside the running deployment..."
+    RUNNING_BEFORE="$APP_CONTAINER"
+    BEFORE="$(invocation)"
+    "$BACKUP" restore-test "$BACKUP_ARCHIVE" --identity "$WORK_DIR/backup-identity" \
+      > "$DIAGNOSTICS_DIR/restore-test.log" 2>&1 || fail "the restore test failed; see restore-test.log"
+    for proof in 'Restore test passed' 'identical to the witness' 'no route off the host' \
+      'encryption envelopes under key rehearsal'; do
+      grep -q -F -- "$proof" "$DIAGNOSTICS_DIR/restore-test.log" || fail "the restore test did not report: $proof"
+    done
+    # The known run failed before any fetch, so it is the witness's failed job.
+    grep -q -E 'newest failed job: [0-9a-f-]{8,}' "$DIAGNOSTICS_DIR/restore-test.log" || \
+      fail "the restore test compared no job"
+    [[ -z "$(restore_test_resources)" ]] || fail "the restore test left containers, volumes or a network behind"
+    [[ "$(find "$BACKUP_DIR" -mindepth 1 | wc -l)" == 2 ]] || fail "the restore test left files in $BACKUP_DIR"
+    [[ "$(invocation)" == "$BEFORE" && "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && \
+      app_is_running || fail "the restore test disturbed the running application"
+    # One egress policy, on the deployment's bridge: the test installed none.
+    verify_runtime restore-test "$BOOT_CANDIDATE" candidate
+    verify_api restore-test --known "$WORK_DIR/known-run.json"
+  else
+    echo "The candidate has no backup script; its backup is not rehearsed."
+  fi
+  # ---- end of the backup step -----------------------------------------------
 fi
 
 # Promotion and rollback must work from the retained archives alone.
