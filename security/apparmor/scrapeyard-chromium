@@ -1,6 +1,15 @@
 # The rules of the Moby default container profile (the template in Docker
-# 29.9.0), with one deliberate addition: Chromium may create unprivileged
-# user namespaces.
+# 29.9.0), with two deliberate differences.
+#
+# Chromium may create unprivileged user namespaces (`userns`).
+#
+# The kernel gives a process every capability inside a user namespace it
+# creates, whatever the container's bounding set holds, and with a network
+# namespace of its own that reaches the kernel's packet sockets, netfilter,
+# traffic control and the rest of what CAP_NET_ADMIN and CAP_NET_RAW open.
+# AppArmor judges a capability by the profile wherever it is used, so denying
+# the two here refuses them inside such a namespace as well. No browser
+# sandbox uses either. The packet family is denied by name besides.
 abi <abi/3.0>,
 
 include <tunables/global>
@@ -10,7 +19,10 @@ profile "scrapeyard-chromium" flags=(attach_disconnected,mediate_deleted) {
   network,
   deny network alg,
   deny network vsock,
+  deny network packet,
   capability,
+  deny capability net_admin,
+  deny capability net_raw,
   file,
   umount,
 

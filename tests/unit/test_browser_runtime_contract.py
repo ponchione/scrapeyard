@@ -78,6 +78,11 @@ def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
     # call only. A 64-bit process still reaches `socketcall` through the
     # 32-bit entry, so AppArmor closes them, as in Moby's own template.
     assert "  network,\n  deny network alg,\n  deny network vsock,\n" in apparmor
+    # The bounding set does not reach into a user namespace, where the kernel
+    # hands out every capability. AppArmor does, so the profile denies the
+    # two that open a new network namespace's packet and netfilter code.
+    assert "  capability,\n  deny capability net_admin,\n  deny capability net_raw,\n" in apparmor
+    assert "  deny network packet,\n" in apparmor
 
 
 def test_docker_compose_is_private_and_local_override_is_loopback_only() -> None:

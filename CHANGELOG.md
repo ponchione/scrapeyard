@@ -101,6 +101,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   does. The seccomp filter covers the direct `socket` call only, and a
   64-bit process can still reach `socketcall` through the 32-bit entry;
   until now nothing closed that path for `AF_VSOCK`.
+- The AppArmor profile denies the `net_admin` and `net_raw` capabilities and
+  packet sockets (TD-87). The seccomp profile lets any process in the
+  container create user namespaces, which the browsers' sandboxes need, and
+  the kernel gives a process every capability inside one it creates,
+  whatever the container's bounding set holds. With a network namespace of
+  its own it could open packet and raw sockets, create netfilter tables and
+  links, and configure traffic control. AppArmor applies a capability denial
+  inside a user namespace too, so each of those is now refused there, while
+  the namespaces, `chroot` and route reads the sandboxes use still work. The
+  smoke lane tries each from a namespace of its own, and under a control
+  profile without the denials, where they succeed.
 - The container smoke lane opens `AF_ALG` and `AF_VSOCK` sockets through
   the 32-bit `socketcall` entry from inside the application's container and
   requires AppArmor's refusal, and runs the same attempts under a copy of

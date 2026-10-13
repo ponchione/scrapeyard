@@ -281,13 +281,24 @@ is the only spelling of it a filter can read. A 64-bit process can also ask
 through the 32-bit entry (`int 0x80`, `socketcall`), where the family sits
 behind a pointer, so the check opens both families that way and requires
 AppArmor's refusal (`EACCES`). A TCP socket opened through the same entry
-shows that the entry works. The lane then runs the same file in a second
-container of the same image, under the same seccomp profile and a copy of the
-AppArmor profile without the two denials, and requires each attempt to
-succeed there: a refusal that would also come without those lines proves
-nothing about them. The copy is loaded under its own name and removed when
-the lane ends. The check opens sockets and sends nothing, and it runs against
-a deployed container as well:
+shows that the entry works.
+
+The same file then gives a child process a user and a network namespace of
+its own, where the kernel hands it every capability, and requires what
+follows to be refused: a packet socket through either entry, a raw IP
+socket, a new netfilter table, a new link, and raising the loopback
+interface. It also requires that the child does hold `CAP_NET_ADMIN` and
+`CAP_NET_RAW` there, so the refusals are the AppArmor profile's and not a
+host's that gives a namespace nothing, and that `chroot` and reading the
+link table still work, which the browsers' sandboxes need.
+
+The lane then runs the file in a second container of the same image, under
+the same seccomp profile and a copy of the AppArmor profile without the
+denials under test, and requires each attempt to succeed there: a refusal
+that would also come without those lines proves nothing about them. The copy
+is loaded under its own name and removed when the lane ends. The check sends
+no packet, and what it creates ends with its child process. It runs against a
+deployed container as well:
 
 ```bash
 sudo docker exec -i <application container> python - \

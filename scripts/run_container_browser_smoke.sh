@@ -393,7 +393,8 @@ compose exec -T --user scrapeyard scrapeyard python - \
 # without those lines proves nothing about them.
 CONTROL_PROFILE_FILE="$CREDENTIAL_DIR/control-profile"
 sed -e "s/\"scrapeyard-chromium\"/\"$CONTROL_PROFILE\"/g" \
-  -e '/^  deny network \(alg\|vsock\),$/d' \
+  -e '/^  deny network \(alg\|vsock\|packet\),$/d' \
+  -e '/^  deny capability net_\(admin\|raw\),$/d' \
   security/apparmor/scrapeyard-chromium > "$CONTROL_PROFILE_FILE"
 # Loaded under the application's name it would replace the application's
 # profile on this host.

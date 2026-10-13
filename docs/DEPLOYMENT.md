@@ -739,8 +739,10 @@ load the path-independent host profile:
 sudo security/install-chromium-apparmor-profile.sh install
 ```
 
-The profile is Moby's normal container boundary plus the single `userns`
-permission, and like Moby's it denies `AF_ALG` and `AF_VSOCK` sockets.
+The profile is Moby's normal container boundary plus the `userns`
+permission, and like Moby's it denies `AF_ALG` and `AF_VSOCK` sockets. It
+also denies the `net_admin` and `net_raw` capabilities and packet sockets,
+for the reason given below.
 Compose also applies a seccomp allowlist, enables no-new-privileges, drops
 every capability, and keeps `SYS_CHROOT` alone in the container's bounding
 set. The application process has no permitted or effective capabilities.
@@ -752,6 +754,19 @@ bounding set does not limit that namespace. The kernel gives a process every
 capability inside a user namespace it creates, so what a process can do
 there is bounded by the seccomp filter, whose capability-gated rules were
 decided when the container started, and by the AppArmor profile.
+
+With a network namespace of its own beside the user namespace, such a
+process holds `CAP_NET_ADMIN` and `CAP_NET_RAW` over a network stack: packet
+and raw sockets, netfilter tables, links and traffic control, which is kernel
+code where local privilege escalations have been found before. A renderer
+cannot get there, because the browser's own sandbox refuses it the calls;
+code that has taken over the browser process, the driver or the application
+could. AppArmor judges a capability by the profile wherever it is used,
+inside a user namespace too, so the profile denies those two capabilities
+and the packet family. Neither browser's sandbox uses them: it needs the
+namespaces, `chroot` and to read the route table, which stay allowed. The
+container smoke lane tries each of these from a namespace of its own
+(`tests/smoke/verify_confinement.py`).
 
 The allowlist (`security/seccomp/chromium.json`) is the default profile of
 Docker 29.9.0 plus one rule: `clone` and `unshare` are allowed whatever

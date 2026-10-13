@@ -29,8 +29,11 @@ do there is bounded by this filter and by the AppArmor profile
 capability-gated rules once, against the container's own bounding set, so
 `mount`, `umount2`, `sethostname`, `bpf` and the mount calls stay refused
 inside the namespace, and `pivot_root` and `keyctl` are in no rule at all.
-What does open there is the network stack of a new network namespace:
-packet and netfilter sockets.
+What would open there is the network stack of a new network namespace:
+packet and raw sockets, netfilter, links and traffic control. A filter
+cannot close that without refusing the namespaces the sandboxes need, so the
+AppArmor profile does: it denies `CAP_NET_ADMIN` and `CAP_NET_RAW`, which
+AppArmor applies inside a user namespace as well, and the packet family.
 
 `cap_add: SYS_CHROOT` in Compose exists for the filter alone. Docker keeps
 the `chroot` rule only for a container whose bounding set holds that

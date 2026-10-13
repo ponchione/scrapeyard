@@ -406,7 +406,6 @@ CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
 and rehearses it; dispatch it on the commit to release.
 
 **Coordinated:**
-- TD-87: needs a security review.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-22: deployment qualification; not single PRs. The host is up
@@ -441,7 +440,6 @@ and rehearses it; dispatch it on the commit to release.
 | TD-84 | P2 | ready | The production host is held on Docker 28 |
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
-| TD-87 | P2 | coordinated | Inside a user namespace a process in the container reaches packet and netfilter sockets |
 
 ## Ready to implement
 
@@ -505,34 +503,6 @@ run the same file against the host's container once the release is there.
 
 These need a decision, a security review, an Eyebox change, or real-traffic
 data before any code.
-
-### TD-87 — Inside a user namespace a process in the container reaches packet and netfilter sockets
-
-**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** none · **Depends on:** a security review
-
-**Problem:** found by the review of TD-83; older than it, and unchanged by
-it. The seccomp profile lets any process in the container call `clone` and
-`unshare` with any flags, because the browsers' sandboxes need user
-namespaces. The kernel gives a process every capability inside a user
-namespace it creates, whatever the container's bounding set holds. The
-filter's capability-gated rules stay closed there (`mount`, `bpf` and the
-rest were tried and refused), but in a new network namespace the process can
-open `AF_PACKET` and `NETLINK_NETFILTER` sockets: the kernel's packet and
-netfilter code, where local privilege escalations have been found before. A
-renderer cannot do this, since Chromium's own sandbox refuses it these
-calls. Code that has taken over the browser process, the driver or the
-application can.
-**Code:** `security/seccomp/chromium.json` (the added rule),
-`security/apparmor/scrapeyard-chromium` (`network,`).
-**Fix:** to be chosen in review. Two candidates, neither tried with the
-production browsers: deny the packet family and netfilter's netlink protocol
-in the AppArmor profile, if Chromium's use of route netlink survives it; and
-narrow the added rule to the flags the sandboxes use. The reviewer's
-experiment ran Playwright's Chromium and Firefox with the user, PID, network
-and IPC flags allowed and the mount, UTS and cgroup flags refused; with the
-IPC flag refused too, Firefox hung.
-**Done when:** the reviewed choice is in the profiles, and the smoke lane
-passes with rebrowser Chromium and Camoufox.
 
 ### TD-45 — Bundled browsers are months behind upstream
 

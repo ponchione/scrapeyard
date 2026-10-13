@@ -65,7 +65,7 @@ def test_smoke_lane_checks_the_confinement_against_a_control() -> None:
     control = script.index('--entrypoint python "$IMAGE_ID" - --control', check)
     between = script[check:control]
     # The control container differs from the application's in its AppArmor
-    # profile and in nothing else that decides a socket call.
+    # profile and in nothing else that decides a socket call or a capability.
     for same in (
         "--user 10001:10001",
         "--cap-drop ALL --cap-add SYS_CHROOT",
@@ -76,57 +76,111 @@ def test_smoke_lane_checks_the_confinement_against_a_control() -> None:
         assert same in between
     # Its profile is the application's without the lines under test, and
     # those lines have to be there for the difference to exist.
-    assert "-e '/^  deny network \\(alg\\|vsock\\),$/d'" in between
+    assert "-e '/^  deny network \\(alg\\|vsock\\|packet\\),$/d'" in between
+    assert "-e '/^  deny capability net_\\(admin\\|raw\\),$/d'" in between
     profile = Path("security/apparmor/scrapeyard-chromium").read_text(encoding="utf-8")
-    assert "  deny network alg,\n" in profile and "  deny network vsock,\n" in profile
+    for line in (
+        "deny network alg,",
+        "deny network vsock,",
+        "deny network packet,",
+        "deny capability net_admin,",
+        "deny capability net_raw,",
+    ):
+        assert f"  {line}\n" in profile
     # Loaded under the application's name it would take the place of the
     # application's profile, and it must not outlive the lane.
     assert 'fail "the control profile did not take its own name"' in between
     assert script.count("run_control_profile --remove") == 2
 
 
-_CONFINED_ANSWERS = {
-    "TCP socket, 32-bit entry": "accepted",
-    "AF_ALG socket": "EPERM",
-    "AF_VSOCK socket": "EPERM",
-    "AF_ALG socket, 32-bit entry": "EACCES",
-    "AF_VSOCK socket, 32-bit entry": "EACCES",
+_CONFINED_ANSWERS: dict[str, dict[str, object]] = {
+    "container": {
+        "TCP socket, 32-bit entry": "accepted",
+        "AF_ALG socket": "EPERM",
+        "AF_VSOCK socket": "EPERM",
+        "AF_ALG socket, 32-bit entry": "EACCES",
+        "AF_VSOCK socket, 32-bit entry": "EACCES",
+    },
+    "own_namespaces": {
+        "own user and network namespace": "accepted",
+        "holds CAP_NET_ADMIN and CAP_NET_RAW there": True,
+        "packet socket": "EACCES",
+        "packet socket, 32-bit entry": "EACCES",
+        "raw IP socket": "EPERM",
+        "netfilter: create a table": "EPERM",
+        "route netlink: create a link": "EPERM",
+        "raise the loopback interface": "EPERM",
+        "route netlink: list the links": "accepted",
+        "chroot": "accepted",
+    },
+}
+_UNCONFINED_ANSWERS: dict[str, dict[str, object]] = {
+    "container": {
+        **_CONFINED_ANSWERS["container"],
+        "AF_ALG socket, 32-bit entry": "accepted",
+        "AF_VSOCK socket, 32-bit entry": "EAFNOSUPPORT",
+    },
+    "own_namespaces": {
+        name: True if answer is True else "accepted"
+        for name, answer in _CONFINED_ANSWERS["own_namespaces"].items()
+    },
 }
 
 
 @pytest.mark.parametrize(
-    ("arguments", "answers", "status"),
+    ("arguments", "base", "where", "answers", "status"),
     [
-        ([], {}, 0),
+        ([], _CONFINED_ANSWERS, "container", {}, 0),
         # AppArmor let a family through the entry the seccomp filter cannot read.
-        ([], {"AF_VSOCK socket, 32-bit entry": "accepted"}, 1),
-        ([], {"AF_ALG socket, 32-bit entry": "EAFNOSUPPORT"}, 1),
+        ([], _CONFINED_ANSWERS, "container", {"AF_VSOCK socket, 32-bit entry": "accepted"}, 1),
+        ([], _CONFINED_ANSWERS, "container", {"AF_ALG socket, 32-bit entry": "EAFNOSUPPORT"}, 1),
         # On a kernel without the 32-bit entry every refusal would be the entry's.
-        ([], {"TCP socket, 32-bit entry": "ENOSYS"}, 1),
-        ([], {"an attempt nobody judges": "accepted"}, 1),
-        # Under the control profile a refusal means the check proves nothing.
-        (["--control"], {}, 1),
+        ([], _CONFINED_ANSWERS, "container", {"TCP socket, 32-bit entry": "ENOSYS"}, 1),
+        ([], _CONFINED_ANSWERS, "container", {"an attempt nobody judges": "accepted"}, 1),
+        # Each thing a network namespace of the process's own must not give it.
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"packet socket": "accepted"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"packet socket, 32-bit entry": "accepted"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"raw IP socket": "accepted"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"netfilter: create a table": "accepted"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"route netlink: create a link": "EOPNOTSUPP"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"raise the loopback interface": "accepted"}, 1),
+        # A host that gives the namespace no capability refuses for its own
+        # reasons, and one that cannot make the namespace tried nothing.
         (
-            ["--control"],
-            {
-                "AF_ALG socket, 32-bit entry": "accepted",
-                "AF_VSOCK socket, 32-bit entry": "EAFNOSUPPORT",
-            },
-            0,
+            [],
+            _CONFINED_ANSWERS,
+            "own_namespaces",
+            {"holds CAP_NET_ADMIN and CAP_NET_RAW there": False},
+            1,
         ),
-        (["--report"], {"AF_VSOCK socket, 32-bit entry": "accepted"}, 0),
+        ([], {**_CONFINED_ANSWERS, "own_namespaces": {}}, "own_namespaces",
+         {"own user and network namespace": "EPERM"}, 1),
+        # What the browsers' sandboxes need there must not be refused with the rest.
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"chroot": "EPERM"}, 1),
+        ([], _CONFINED_ANSWERS, "own_namespaces", {"route netlink: list the links": "EPERM"}, 1),
+        # Under the control profile a refusal means the check proves nothing.
+        (["--control"], _CONFINED_ANSWERS, "container", {}, 1),
+        (["--control"], _UNCONFINED_ANSWERS, "container", {}, 0),
+        (["--control"], _UNCONFINED_ANSWERS, "own_namespaces", {"raw IP socket": "EPERM"}, 1),
+        (["--control"], _UNCONFINED_ANSWERS, "own_namespaces",
+         {"route netlink: create a link": "EOPNOTSUPP"}, 0),
+        (["--report"], _UNCONFINED_ANSWERS, "container", {}, 0),
     ],
 )
 def test_confinement_check_judges_what_the_container_answered(
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
-    answers: dict[str, str],
+    base: dict[str, dict[str, object]],
+    where: str,
+    answers: dict[str, object],
     status: int,
 ) -> None:
+    seen = {**base, where: {**base[where], **answers}}
     monkeypatch.setattr(verify_confinement.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(verify_confinement, "Entry32", lambda: None)
+    monkeypatch.setattr(verify_confinement, "in_the_container", lambda _entry: seen["container"])
     monkeypatch.setattr(
-        verify_confinement, "in_the_container", lambda _entry: {**_CONFINED_ANSWERS, **answers}
+        verify_confinement, "in_own_namespaces", lambda _entry: seen["own_namespaces"]
     )
 
     assert verify_confinement.main(arguments) == status
