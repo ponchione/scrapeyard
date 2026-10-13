@@ -144,6 +144,16 @@ deployment_bridge() {
   printf '%s\n' "${bridge:-br-${network:0:12}}"
 }
 
+# Adds a line to the watch's record. The record is never in the way of what
+# it records: a line that cannot be written is said and the run goes on.
+record_policy() {
+  local directory
+  directory=$(dirname -- "$RESTORED_LOG")
+  { [[ -d "$directory" ]] || install -d -m 755 "$directory"; } 2>/dev/null && \
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1//$'\n'/; }" 2>/dev/null >> "$RESTORED_LOG" || \
+    echo "scrapeyard release: $RESTORED_LOG could not be written" >&2
+}
+
 promotion_is_under_way() {
   case "$(systemctl is-active "$PROMOTE_UNIT.service" 2>/dev/null || true)" in
     active|activating|deactivating|reloading) return 0 ;;
@@ -310,13 +320,12 @@ case "$ACTION" in
       *) fail "the release's policy check ended with status $status: $found" ;;
     esac
     echo "scrapeyard release: the host policy was not in place while the application ran: $found" >&2
-    [[ -d "$(dirname -- "$RESTORED_LOG")" ]] || install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
     remaining=""
     if "$installer" install >/dev/null; then
       status=0
       remaining=$("$installer" check 2>&1) || status=$?
       if ((status == 0)); then
-        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$found" >> "$RESTORED_LOG"
+        record_policy "$found"
         rm -f -- "$unrestored"
         echo "scrapeyard release: the host policy was put back" >&2
         exit 0
@@ -330,8 +339,9 @@ case "$ACTION" in
       # The boot service was restarted for exactly this, and the application
       # runs again all the same: its own check at a start covers the forwarded
       # policy and not, for one, the jump that keeps it off the host's own
-      # addresses. Stopping it every minute would change nothing, so it is
-      # left running without what the finding names, and this run fails.
+      # addresses. (Or an operator started it.) Stopping it every minute
+      # would change nothing, so it is left running without what the finding
+      # names, and this run fails.
       fail "the host policy is still not in place after $BOOT_UNIT was restarted for it, and the application is running without it: $remaining"
     fi
     # The application is stopped here and now, and the boot service is asked
@@ -341,7 +351,7 @@ case "$ACTION" in
     # is only queued.
     stop_application || \
       echo "scrapeyard release: the application could not be stopped" >&2
-    printf '%s NOT PUT BACK: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$remaining" >> "$RESTORED_LOG"
+    record_policy "NOT PUT BACK: $remaining"
     systemctl restart --no-block "$BOOT_UNIT" || \
       fail "the host policy could not be put back and $BOOT_UNIT could not be restarted; see whether the application is stopped: $remaining"
     # Only now: a finding counts as dealt with once the restart was queued.

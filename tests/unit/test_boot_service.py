@@ -635,6 +635,35 @@ def test_watch_restarts_the_boot_service_once_for_a_finding_and_then_only_report
     assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
 
 
+@pytest.mark.parametrize("unrestorable", [False, True])
+def test_a_record_that_cannot_be_written_does_not_stop_the_repair_or_the_restart(host, unrestorable):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+    # A file where the record's directory belongs: no line can be written.
+    host.restored_log.parent.write_text("")
+
+    result = host.run("watch", **({"INSTALL_CHANGES_NOTHING": "yes"} if unrestorable else {}))
+
+    assert "policy-restored.log could not be written" in result.stderr
+    if unrestorable:
+        assert result.returncode == 2
+        assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    else:
+        assert result.returncode == 0
+        assert [call.split()[1] for call in host.called("installer")] == ["check", "install", "check"]
+        assert host.policy_missing.read_text() == ""
+
+
+def test_a_finding_of_several_lines_is_one_line_in_the_record(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text("first part\nsecond part")
+
+    assert host.run("watch").returncode == 0
+
+    (line,) = host.restored_log.read_text().splitlines()
+    assert line.endswith("first part; second part")
+
+
 def test_watch_knows_a_finding_again_although_an_install_switched_its_chain(host):
     host.current.symlink_to(host.release("new"))
     host.policy_missing.write_text("iptables chain SY-HOST-prod-A does not refuse 172.30.0.250")

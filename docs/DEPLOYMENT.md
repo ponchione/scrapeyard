@@ -784,8 +784,9 @@ refusal. What it then does:
   and change nothing. It fails every minute with the finding, and **the
   application runs without what the finding names** until the cause is
   removed. The finding is remembered under `/run/scrapeyard` without the
-  name of the chain, which changes with every install, and is forgotten
-  when the policy is found in place or put back, and at a reboot.
+  `-A` or `-B` at the end of a chain's name, which changes with every
+  install, and is forgotten when the policy is found in place or put back,
+  and at a reboot.
 - **Nothing to judge:** while a start or a promotion holds the release lock,
   while the application is not running, or when the promoted release is
   older than the `check` action, it does nothing.
