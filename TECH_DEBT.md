@@ -1037,7 +1037,10 @@ is TD-85.
   What it leaves for the monitoring work is the alert: it writes a line to
   `/var/lib/scrapeyard/policy-restored.log` and nothing reads that yet. It
   does not judge the order of rules, so a rule put ahead of the policy's is
-  not seen.
+  not seen. When something keeps removing the `INPUT` jump faster than the
+  watch restores it, the application is stopped and restarted once and then
+  runs without that jump, with the watch failing: whether it should stay
+  stopped instead is the owner's to decide.
 - Since the same day the container's health is the application's readiness.
   Docker does not restart an unhealthy container, so an application that
   stays unready (TD-89 is one way) is visible in `docker ps` and to nothing

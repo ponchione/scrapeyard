@@ -736,7 +736,7 @@ with the same checks as a deployment:
    waits, and must then start the release that was promoted.
    Then, with the candidate running, two things that happen between
    deployments. The policy's jumps are deleted from `DOCKER-USER` and
-   `INPUT`, as a flush of the host's rules would, after the
+   `INPUT`, as a restore of rules saved earlier would, after the
    [policy watch](DEPLOYMENT.md#the-policy-watch)'s timer has run once, and
    only a later run of the timer may put them back, with the application
    not started again and the loss recorded.

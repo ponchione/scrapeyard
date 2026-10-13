@@ -908,7 +908,7 @@ PY
   verify_runtime promote-candidate-again "$BOOT_CANDIDATE" candidate
   verify_api promote-candidate-again --known "$WORK_DIR/known-run.json"
 
-  echo "Removing the policy's jumps as another firewall tool would; the watch must put them back..."
+  echo "Removing the policy's jumps as a restore of saved rules would; the watch must put them back..."
   install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_UNIT" "$WATCH_UNIT_FILE"
   install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$WATCH_TIMER" "$WATCH_TIMER_FILE"
   systemctl daemon-reload

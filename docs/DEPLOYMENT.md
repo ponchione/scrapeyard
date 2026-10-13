@@ -740,13 +740,16 @@ wrapper has verified anything.
 ### The policy watch
 
 The application checks the host policy once, at its start. Between
-deployments the policy can be taken away without the application noticing: a
-flush of the host's rules (`iptables -F`), or a restore of rules saved before
-the policy was installed (`iptables-restore`, which `netfilter-persistent`
-runs), removes the jumps in `DOCKER-USER` and `INPUT`. After that the
-application reaches the host's own addresses and whatever the forwarded
-policy refused. `ufw` does not do this: its reload, and disabling and
-enabling it, left both jumps in place when tried on Ubuntu 24.04.
+deployments the policy can be taken away without the application noticing.
+A restore of rules saved before the policy was installed (`iptables-restore`,
+which `netfilter-persistent` runs) removes the jumps in `DOCKER-USER` and
+`INPUT`, and after it the application reaches the host's own addresses and
+whatever the forwarded policy refused. A flush of the host's rules
+(`iptables -F`) removes them too, and Docker's own jump from `FORWARD` with
+them: what the application then reaches depends on the `FORWARD` chain's
+policy, nothing forwarded under `DROP` and everything under `ACCEPT`. `ufw`
+does neither: its reload, and disabling and enabling it, left both jumps in
+place when tried on Ubuntu 24.04.
 
 `scrapeyard-policy-watch.timer` runs `scrapeyard-release watch` every minute.
 It asks the promoted release's installer whether the policy is in place
@@ -764,15 +767,25 @@ refusal. What it then does:
   gets a line with the time and the same text. Until an alert reads that
   file (TD-20), it is the record that the policy was gone, for a minute or
   so if the watch was running.
-- **Missing, and it cannot be put back:** it stops the application, restarts
-  `scrapeyard.service` and fails. The boot service starts the application
-  only behind an installed policy, which the application then checks itself,
-  and retries for as long as it takes. Docker's jump from `FORWARD` is the
-  case an install cannot repair: restart Docker, which restarts the boot
-  service with it. This is done once for a finding. If the application runs
-  again afterwards and the watch finds the same thing, it fails every minute
-  with that finding and leaves the application alone, since stopping it again
-  would change nothing.
+- **Missing, and it cannot be put back:** it stops the application, writes a
+  `NOT PUT BACK` line to the same file, restarts `scrapeyard.service` and
+  fails. The boot service installs the policy before it starts the
+  application, and the application checks the forwarded policy before it
+  serves, so for anything that check covers the application stays down until
+  the policy is in place, with the boot service retrying. Docker's jump from
+  `FORWARD` is one such case, and an install cannot repair it: restart
+  Docker, which restarts the boot service with it.
+- **Still missing after that restart, with the application running:** the
+  application's own check does not cover everything the watch looks at. It
+  does not cover the `INPUT` jump, nor an IPv6 policy. If something keeps
+  removing one of those, the application comes back from the restart and
+  the next run finds the same thing. The watch does not stop it a second
+  time for the same finding, which would take the service down every minute
+  and change nothing. It fails every minute with the finding, and **the
+  application runs without what the finding names** until the cause is
+  removed. The finding is remembered under `/run/scrapeyard` without the
+  name of the chain, which changes with every install, and is forgotten
+  when the policy is found in place or put back, and at a reboot.
 - **Nothing to judge:** while a start or a promotion holds the release lock,
   while the application is not running, or when the promoted release is
   older than the `check` action, it does nothing.

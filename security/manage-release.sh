@@ -294,8 +294,8 @@ case "$ACTION" in
     # would change the checksummed tree, and the next start would refuse it.
     export PYTHONDONTWRITEBYTECODE=1
     installer="$release/source/security/install-docker-egress-policy.sh"
-    # What a run could not put back, so that the next run does not restart
-    # the boot service for the same finding again.
+    # What an earlier run could not put back and restarted the boot service
+    # for, so that the same finding does not restart it again.
     unrestored="$LOCK_DIR/policy-unrestored"
     status=0
     found=$("$installer" check 2>&1) || status=$?
@@ -310,29 +310,43 @@ case "$ACTION" in
       *) fail "the release's policy check ended with status $status: $found" ;;
     esac
     echo "scrapeyard release: the host policy was not in place while the application ran: $found" >&2
-    if "$installer" install && "$installer" check; then
-      [[ -d "$(dirname -- "$RESTORED_LOG")" ]] || install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
-      printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$found" >> "$RESTORED_LOG"
-      rm -f -- "$unrestored"
-      echo "scrapeyard release: the host policy was put back" >&2
-      exit 0
+    [[ -d "$(dirname -- "$RESTORED_LOG")" ]] || install -d -m 755 "$(dirname -- "$RESTORED_LOG")"
+    remaining=""
+    if "$installer" install >/dev/null; then
+      status=0
+      remaining=$("$installer" check 2>&1) || status=$?
+      if ((status == 0)); then
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$found" >> "$RESTORED_LOG"
+        rm -f -- "$unrestored"
+        echo "scrapeyard release: the host policy was put back" >&2
+        exit 0
+      fi
     fi
-    # It is still missing. The application is stopped here and now, and the
-    # boot service is asked to start it again: that start installs the policy
-    # first, the application checks it before it serves, and a start that
-    # fails is retried. The restart needs the lock this run holds, so it is
-    # only queued. This is done once for a finding: if the application then
-    # runs and the finding is the same, restarting it again every minute
-    # would change nothing.
-    if [[ "$(cat -- "$unrestored" 2>/dev/null)" == "$found" ]]; then
-      fail "the host policy is still not in place after $BOOT_UNIT was restarted for it, and the application is running: $found"
+    # Some of it is still missing. An install switches between two chains, so
+    # the chain a finding names changes from run to run and is left out of
+    # what is compared.
+    remaining=$(sed -E 's/\b(SY-[A-Za-z0-9_-]*)-[AB]\b/\1/g' <<<"${remaining:-the policy could not be installed; $found}")
+    if [[ -n "$remaining" && "$(cat -- "$unrestored" 2>/dev/null)" == "$remaining" ]]; then
+      # The boot service was restarted for exactly this, and the application
+      # runs again all the same: its own check at a start covers the forwarded
+      # policy and not, for one, the jump that keeps it off the host's own
+      # addresses. Stopping it every minute would change nothing, so it is
+      # left running without what the finding names, and this run fails.
+      fail "the host policy is still not in place after $BOOT_UNIT was restarted for it, and the application is running without it: $remaining"
     fi
-    printf '%s' "$found" > "$unrestored"
+    # The application is stopped here and now, and the boot service is asked
+    # to start it again: that start installs the policy first, the
+    # application checks the forwarded policy before it serves, and a start
+    # that fails is retried. The restart needs the lock this run holds, so it
+    # is only queued.
     stop_application || \
       echo "scrapeyard release: the application could not be stopped" >&2
+    printf '%s NOT PUT BACK: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$remaining" >> "$RESTORED_LOG"
     systemctl restart --no-block "$BOOT_UNIT" || \
-      fail "the host policy could not be put back and $BOOT_UNIT could not be restarted; see whether the application is stopped"
-    fail "the host policy could not be put back; the application was stopped and $BOOT_UNIT restarted, which starts it only behind an installed policy"
+      fail "the host policy could not be put back and $BOOT_UNIT could not be restarted; see whether the application is stopped: $remaining"
+    # Only now: a finding counts as dealt with once the restart was queued.
+    printf '%s' "$remaining" > "$unrestored"
+    fail "the host policy could not be put back; the application was stopped and $BOOT_UNIT restarted: $remaining"
     ;;
   stop)
     [[ $# -eq 0 ]] || usage

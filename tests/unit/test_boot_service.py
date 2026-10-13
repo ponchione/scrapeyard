@@ -184,7 +184,12 @@ class _Host:
             '         [[ -s "$POLICY_MISSING" ]] || exit 0\n'
             '         echo "scrapeyard egress policy: not in place: $(<"$POLICY_MISSING")" >&2; exit 1 ;;\n'
             '  install) [[ "${INSTALL_FAILS:-}" != yes ]] || exit 2\n'
-            '           [[ "${INSTALL_CHANGES_NOTHING:-}" == yes ]] || : > "$POLICY_MISSING" ;;\n'
+            # What an install leaves missing: nothing, everything, a named
+            # part, or the same with the chain it just switched to.
+            '           if [[ -n "${INSTALL_LEAVES:-}" ]]; then printf %s "$INSTALL_LEAVES" > "$POLICY_MISSING"\n'
+            '           elif [[ "${INSTALL_SWITCHES_CHAIN:-}" == yes ]]; then\n'
+            '             sed -i -E "s/-A /-X /; s/-B /-A /; s/-X /-B /" "$POLICY_MISSING"\n'
+            '           elif [[ "${INSTALL_CHANGES_NOTHING:-}" != yes ]]; then : > "$POLICY_MISSING"; fi ;;\n'
             "esac\n"
         )
         installer.chmod(0o755)
@@ -552,6 +557,9 @@ def test_watch_is_silent_and_changes_nothing_while_the_policy_is_in_place(host):
 def test_watch_puts_a_missing_policy_back_and_records_what_was_missing(host):
     host.current.symlink_to(host.release("new"))
     host.policy_missing.write_text(_NO_JUMP)
+    # Whatever the caller's environment says, the installer's Python must not
+    # write into the release.
+    host.env.pop("PYTHONDONTWRITEBYTECODE", None)
 
     result = host.run("watch", BRIDGE_NAME="br-custom")
 
@@ -583,7 +591,9 @@ def test_watch_stops_the_application_when_the_policy_cannot_be_put_back(host, fa
     stopped = host.called().index("docker stop app1")
     assert host.called()[stopped + 1 :] == ["systemctl restart --no-block scrapeyard.service"]
     assert "the application was stopped and scrapeyard.service restarted" in result.stderr
-    assert not host.restored_log.exists()
+    # The record says the policy is gone, not that it was put back.
+    (line,) = host.restored_log.read_text().splitlines()
+    assert " NOT PUT BACK: " in line
 
     # A restart that could not be queued is not reported as one.
     host.policy_missing.write_text("iptables DOCKER-USER has no jump for br-0123456789ab")
@@ -608,6 +618,9 @@ def test_watch_restarts_the_boot_service_once_for_a_finding_and_then_only_report
     # take the service down for nothing.
     assert host.called("docker stop") == host.called("systemctl restart") == []
     assert "still not in place after scrapeyard.service was restarted for it" in second.stderr
+    assert "the application is running without it" in second.stderr
+    # One line for the loss, not one a minute.
+    assert len(host.restored_log.read_text().splitlines()) == 1
 
     # Another finding is a new one, and a policy found in place forgets both.
     host.policy_missing.write_text("iptables DOCKER-USER has no jump for br-0123456789ab")
@@ -620,6 +633,49 @@ def test_watch_restarts_the_boot_service_once_for_a_finding_and_then_only_report
     host.calls.write_text("")
     assert host.run("watch", INSTALL_CHANGES_NOTHING="yes").returncode == 2
     assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+
+
+def test_watch_knows_a_finding_again_although_an_install_switched_its_chain(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text("iptables chain SY-HOST-prod-A does not refuse 172.30.0.250")
+
+    statuses = []
+    for _ in range(4):
+        # Each install switches to the other chain, which the finding names.
+        statuses.append(host.run("watch", INSTALL_SWITCHES_CHAIN="yes").returncode)
+
+    assert statuses == [2, 2, 2, 2]
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    assert host.called().count("docker stop app1") == 1
+
+
+def test_watch_counts_what_an_install_left_missing_not_what_it_first_found(host):
+    host.current.symlink_to(host.release("new"))
+    left = "iptables FORWARD does not jump to DOCKER-USER"
+    host.policy_missing.write_text(f"{_NO_JUMP}; {left}")
+
+    first = host.run("watch", INSTALL_LEAVES=left)
+    # The boot service's start put the jumps back as well; what an install
+    # cannot repair is found again, alone.
+    second = host.run("watch", INSTALL_LEAVES=left)
+
+    assert (first.returncode, second.returncode) == (2, 2)
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    assert left in host.restored_log.read_text() and _NO_JUMP not in host.restored_log.read_text()
+
+
+def test_a_restart_that_could_not_be_queued_does_not_count_as_one(host):
+    host.current.symlink_to(host.release("new"))
+    host.policy_missing.write_text(_NO_JUMP)
+
+    assert host.run("watch", INSTALL_CHANGES_NOTHING="yes", RESTART_FAILS="yes").returncode == 2
+    host.calls.write_text("")
+    again = host.run("watch", INSTALL_CHANGES_NOTHING="yes")
+
+    # The finding was not dealt with, so it is dealt with now.
+    assert again.returncode == 2
+    assert host.called("systemctl restart") == ["systemctl restart --no-block scrapeyard.service"]
+    assert "the application was stopped and scrapeyard.service restarted" in again.stderr
 
 
 @pytest.mark.parametrize("status", ["3", "126", "127", "137"])

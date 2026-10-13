@@ -94,8 +94,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   keeps the application off the host's own addresses included. The
   installer gained a read-only `check` action for it, and no longer writes
   bytecode into the tree it runs from. A policy that cannot be put back
-  stops the application and restarts the boot service, which starts it only
-  behind an installed policy. Install the newer `scrapeyard-release` with
+  stops the application and restarts the boot service, once for a finding;
+  what the application's own start check does not cover (the `INPUT` jump,
+  an IPv6 policy) can then leave it running without that part, with the
+  watch failing every minute. Install the newer `scrapeyard-release` with
   the two units.
 - The pinned container runtime is Docker 29.9.0, containerd.io 2.4.1 (runc
   1.5.2) and Compose 5.6.0, up from 28.5.2, 1.7.29 (runc 1.3.3) and 2.38.2.
