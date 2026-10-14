@@ -362,6 +362,9 @@ async def test_successful_poll_records_the_worker_last_success(monkeypatch):
 async def test_start_initializes_redis_and_worker_once(monkeypatch):
     pool = _make_pool(job_timeout_seconds=37.5)
     fake_redis = MagicMock()
+    # A delivery a previous process left in progress is released at start.
+    fake_redis.zrange = AsyncMock(return_value=[b"run-left-running"])
+    fake_redis.delete = AsyncMock(return_value=1)
     fake_worker = MagicMock()
     fake_worker.async_run = AsyncMock()
     wait_for_timeouts: list[float] = []
@@ -402,6 +405,8 @@ async def test_start_initializes_redis_and_worker_once(monkeypatch):
     create_task_mock.assert_called_once()
     assert wait_for_timeouts == [7.0]
     assert pool.redis is fake_redis
+    fake_redis.zrange.assert_awaited_once_with("test-queue", 0, -1)
+    fake_redis.delete.assert_awaited_once_with("arq:in-progress:run-left-running")
 
 
 @pytest.mark.asyncio
@@ -481,6 +486,44 @@ async def test_stop_waits_for_pending_tasks_and_closes_worker(monkeypatch):
     assert pool._worker is None
     assert pool._runner_task is None
     assert pool._started is False
+
+
+@pytest.mark.asyncio
+async def test_stop_succeeds_when_the_runner_fails_while_it_stops(monkeypatch, caplog):
+    # Docker stops Redis and the application together at a reboot; the
+    # runner can lose Redis while the stop is draining. It has ended either
+    # way, and the instance guard must not be kept for it.
+    pool = _make_pool()
+
+    async def _runner() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise ConnectionError("Connection closed by server.") from None
+
+    runner_task = asyncio.create_task(_runner())
+    await asyncio.sleep(0)
+    closed: list[bool] = []
+
+    async def _close() -> None:
+        closed.append(True)
+
+    worker = SimpleNamespace(
+        allow_pick_jobs=True, tasks={}, main_task=runner_task, close=_close
+    )
+    pool._started = True
+    pool._worker = worker
+    pool._runner_task = runner_task
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: MagicMock(workers_shutdown_grace_seconds=1),
+    )
+
+    await pool.stop()
+
+    assert closed == [True]
+    assert pool.shutdown_pending is False
+    assert "Embedded worker ended during shutdown: ConnectionError" in caplog.text
 
 
 @pytest.mark.asyncio

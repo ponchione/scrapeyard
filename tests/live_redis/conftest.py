@@ -146,6 +146,8 @@ async def redis_relay(_live_redis_env, monkeypatch) -> AsyncIterator[RedisRelay]
     """Point the application at Redis through a relay the test can cut.
 
     Ask for it before ``live_app`` or ``client`` so that they connect through it.
+    The worker gets one slot, so that one delivery left in progress after a
+    cut would keep any other from starting.
     """
     dsn = os.environ["SCRAPEYARD_REDIS_DSN"]
     unreachable = _unreachable_redis(dsn)
@@ -158,6 +160,7 @@ async def redis_relay(_live_redis_env, monkeypatch) -> AsyncIterator[RedisRelay]
         "SCRAPEYARD_REDIS_DSN",
         f"redis://127.0.0.1:{relay.port}/{target.database}",
     )
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_MAX_CONCURRENT", "1")
     _clear_singletons()
     try:
         yield relay

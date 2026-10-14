@@ -1010,6 +1010,10 @@ PY
   docker logs --since "$LOST_SINCE" "$APP_CONTAINER" > "$DIAGNOSTICS_DIR/worker-loss.log" 2>&1 || true
   grep -q 'Embedded worker ended outside a shutdown' "$DIAGNOSTICS_DIR/worker-loss.log" || \
     fail "the application ended without saying that its worker had lost Redis"
+  # Through its own shutdown, not a forced end: the single-instance guard is
+  # released only at the end of a shutdown that finished.
+  grep -q 'Released single-instance guard' "$DIAGNOSTICS_DIR/worker-loss.log" || \
+    fail "the application that lost Redis did not finish its own shutdown"
   docker start "$REDIS_CONTAINER" >/dev/null
   BACK_AT=$SECONDS
   until [[ "$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' "$APP_CONTAINER")" == \

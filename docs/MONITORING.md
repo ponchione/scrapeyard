@@ -82,10 +82,13 @@ Docker does not restart an unhealthy container; the status is for an
 operator or an alert to read. One cause does not wait for that: when the
 embedded worker ends outside a shutdown, as it does when Redis goes away
 under it, the process ends itself with a `CRITICAL` line saying so, and the
-container's restart policy starts it again through a full start. Until Redis
-is back each start fails, and Docker keeps trying, at most a minute apart. A
-shutdown that has not finished 10 seconds after the shutdown grace is ended
-with exit status 70.
+container's restart policy starts it again through a full start. Runs under
+way get the shutdown grace to finish and are then cancelled, as at any stop.
+Until Redis is back each start fails, and Docker keeps trying, at most a
+minute apart. A shutdown that has not finished 10 seconds after the shutdown
+grace is ended with exit status 70. The next start releases the queue
+deliveries the ended process could not mark finished (a `WARNING` line counts
+them), so they do not hold the worker's slots until their keys expire.
 
 A start waits on the same check. `docker compose up --wait` succeeds only
 for an application that is ready, so the deploy wrapper now fails a start

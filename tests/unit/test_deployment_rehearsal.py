@@ -332,6 +332,7 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         # An application whose worker loses Redis ends, and comes back by
         # Docker's restart alone, ready to run new work (TD-89).
         "the application did not end after its worker lost Redis",
+        "the application that lost Redis did not finish its own shutdown",
         "the application came back through the boot service, not by itself",
         "python3 tests/rehearsal/verify_deployment.py run",
         "a job submitted after Redis came back did not run",

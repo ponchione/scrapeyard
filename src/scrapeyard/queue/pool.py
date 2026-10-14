@@ -189,8 +189,15 @@ class _PriorityWorker(Worker):
         if not self._pool:
             return
         # A job whose result could not be written, because Redis went away,
-        # ends with that error. It was the job's to report, not the close's.
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        # ends with that error: it is logged, and does not fail the close.
+        outcomes = await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        for job_id, outcome in zip(list(self.tasks), outcomes, strict=True):
+            if isinstance(outcome, Exception):
+                logger.warning(
+                    "Queue delivery %s ended with %s while the worker closed",
+                    job_id,
+                    type(outcome).__name__,
+                )
         try:
             await self.pool.delete(self.health_check_key)
         except (RedisError, OSError) as exc:
@@ -388,6 +395,7 @@ class WorkerPool:
             raise
 
         self._redis = redis
+        await self._release_abandoned_deliveries(redis)
         self._worker = _PriorityWorker(
             functions=[func(cast(Any, self._run_job), name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
             redis_pool=self._redis,
@@ -407,6 +415,31 @@ class WorkerPool:
         )
         self._runner_task.add_done_callback(self._runner_finished)
         self._started = True
+
+    async def _release_abandoned_deliveries(self, redis: ArqRedis) -> None:
+        # A delivery the previous process was running keeps arq's in-progress
+        # key for the job timeout when its end could not be written: Redis
+        # was gone (which now ends the process, TD-89) or the process was
+        # killed. Admission counts those deliveries as running, so a full set
+        # of them would admit nothing new until the keys expired. One process
+        # holds the queue (the instance guard), so none of them is running:
+        # each is released to be delivered again, and the task handler skips
+        # a run that is no longer queued.
+        members = await redis.zrange(self._queue_name, 0, -1)
+        keys = [
+            f"{in_progress_key_prefix}{member.decode() if isinstance(member, bytes) else member}"
+            for member in members
+        ]
+        if not keys:
+            return
+        released = int(await redis.delete(*keys))
+        if released:
+            logger.warning(
+                "Released %d queue deliveries a previous process left in progress "
+                "queue=%s",
+                released,
+                self._queue_name,
+            )
 
     def _runner_finished(self, task: asyncio.Task[None]) -> None:
         # stop() ends the runner itself, and a cancellation from anywhere
@@ -431,8 +464,7 @@ class WorkerPool:
         if self._worker is None:
             raise RuntimeError("WorkerPool.stop() called but worker was never started")
 
-        # A runner that had already ended was reported by _runner_finished;
-        # what ended it is not a failure of this stop.
+        # A runner that had already ended was reported by _runner_finished.
         runner_ended_before_stop = (
             self._runner_task is not None and self._runner_task.done()
         )
@@ -469,13 +501,21 @@ class WorkerPool:
 
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
-        if self._runner_task is not None and not runner_ended_before_stop:
+        if self._runner_task is not None:
             try:
                 await deadline.run(self._runner_task)
             except AwaitableCancelled:
                 pass
             except asyncio.TimeoutError:
                 unresolved_phases.append("runner")
+            except Exception as exc:
+                # The runner has ended, which is what the stop needs. What
+                # ended it (Redis going away, most often) was reported if it
+                # came before the stop, and is not a failure of the stop.
+                if not runner_ended_before_stop:
+                    logger.warning(
+                        "Embedded worker ended during shutdown: %s", type(exc).__name__
+                    )
 
         active_jobs_unresolved = any(not task.done() for task in pending)
         if active_jobs_unresolved:

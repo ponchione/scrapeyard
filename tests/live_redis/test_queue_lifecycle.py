@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from arq.connections import RedisSettings
-from arq.constants import abort_jobs_ss, job_key_prefix
+from arq.constants import abort_jobs_ss, in_progress_key_prefix, job_key_prefix
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from scrapeyard.api.dependencies import (
@@ -740,16 +740,16 @@ async def test_worker_that_loses_redis_asks_once_to_end_and_a_restart_runs_new_w
     first_pool = get_worker_pool()
     runner_exits = client._transport.app.state.live_runner_exits
 
-    async def _submit() -> str:
+    async def _submit() -> tuple[str, str]:
         response = await client.post(
             "/scrape",
             content=_async_scrape_yaml(),
             headers={"content-type": "application/x-yaml"},
         )
         assert response.status_code == 202
-        return response.json()["job_id"]
+        return response.json()["job_id"], response.json()["run_id"]
 
-    running_job = await _submit()
+    running_job, running_run = await _submit()
     await asyncio.wait_for(started.wait(), timeout=10)
 
     await redis_relay.cut()
@@ -760,7 +760,8 @@ async def test_worker_that_loses_redis_asks_once_to_end_and_a_restart_runs_new_w
     assert len(runner_exits) == 1
     assert isinstance(runner_exits[0], ConnectionError | RedisConnectionError)
     assert first_pool.background_ok is False
-    # The run under way when Redis went away still finishes, and records it.
+    # The run under way when Redis went away still finishes and records it,
+    # but cannot tell Redis: its delivery stays marked in progress.
     release.set()
     assert await _await_terminal_status(client, running_job) == "complete"
 
@@ -777,8 +778,11 @@ async def test_worker_that_loses_redis_asks_once_to_end_and_a_restart_runs_new_w
     second_pool.on_runner_exit = runner_exits.append
     await second_pool.start()
     try:
+        # One slot, so the delivery left in progress must have been released,
+        # or nothing new would start before its key expired.
+        assert not await second_pool.redis.exists(f"{in_progress_key_prefix}{running_run}")
         started.clear()
-        new_job = await _submit()
+        new_job, _new_run = await _submit()
         assert await _await_terminal_status(client, new_job) == "complete"
         results = await client.get(f"/results/{new_job}")
         assert "ran through the outage" in json.dumps(results.json()["results"])
