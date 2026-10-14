@@ -40,6 +40,13 @@ REDIS_LOADED=""
 REDIS_EXPIRED=""
 MANIFEST_SHA256=""
 RESTORING=0
+APP=""
+REDIS=""
+IMAGE=""
+VOLUME=""
+OWNER=""
+UNPACKED_MB=0
+LATE_JOBS=()
 
 fail() {
   echo "scrapeyard backup: $*" >&2
@@ -166,13 +173,38 @@ require_root_file() {
 }
 
 # The host must not be able to read its own backups, so this file holds public
-# keys only. A private key in it is a mistake to stop at, not a setting.
+# keys only. A private key in it is a mistake to stop at, not a setting,
+# whatever else the file holds. What a recipient is, age decides: a line it
+# does not accept would otherwise be found when the archive is encrypted,
+# after the application has been stopped and started for nothing.
 check_recipients() {
   require_root_file "$RECIPIENTS"
   ! grep -q 'AGE-SECRET-KEY' "$RECIPIENTS" || \
-    fail "$RECIPIENTS holds a private key; it takes public keys only, and that key must now be replaced"
-  grep -q -E '^(age1|ssh-ed25519 |ssh-rsa )' "$RECIPIENTS" || \
-    fail "$RECIPIENTS names no recipient (a line starting with age1)"
+    fail "$RECIPIENTS holds a private key; it takes public keys only, and while that key is on this host the host can read its own backups"
+  age --encrypt --recipients-file "$RECIPIENTS" --output /dev/null </dev/null || \
+    fail "age does not accept $RECIPIENTS: every line must be a recipient (age1...) or a comment"
+}
+
+# A backup restarts the application, and the unit's start reads the whole
+# settings file. A line it cannot read would be found only then, with the
+# application already stopped and nothing to start it. The values are read in
+# a subshell and go no further.
+check_settings() {
+  (load_settings) || \
+    fail "the application could not be started again with $ENV_FILE as it is; nothing was stopped"
+}
+
+# Megabytes free on the filesystem a path is on.
+free_mb() {
+  df --output=avail -BM "$1" | tail -n 1 | tr -dc 0-9
+}
+
+# require_free PATH MEGABYTES WHAT
+require_free() {
+  local free
+  free=$(free_mb "$1") || free=""
+  [[ "$free" =~ ^[0-9]+$ ]] || fail "the free space of $1 could not be read"
+  ((free >= $2)) || fail "$3 needs $2 MB free in $1, which has $free"
 }
 
 # No hook is not an error. One that exists is run as root with the archive,
@@ -244,6 +276,40 @@ image_user() {
   echo "$user"
 }
 
+# What is deployed: the promoted release, the two running containers, the
+# image and the account the application runs as, and the volume its /data is.
+# Anything unexpected is refused. It is called before anything is stopped.
+describe_deployment() {
+  local project=$1 mount
+  check_ancestors "$CURRENT"
+  RELEASE=$(realpath -- "$CURRENT")
+  check_release "$RELEASE"
+  [[ -f "$RELEASE/source/scripts/qualification_backup.py" && -d "$RELEASE/source/sql" ]] || \
+    fail "the promoted release has no backup helper; nothing was stopped"
+  APP=$(service_container "$project" scrapeyard)
+  REDIS=$(service_container "$project" redis)
+  IMAGE=$(docker_within 20 inspect --format '{{.Image}}' "$APP") || \
+    fail "Docker did not describe the application; nothing was stopped"
+  [[ "$IMAGE" == "$(release_image "$RELEASE" scrapeyard)" ]] || \
+    fail "the application does not run the promoted release's image; nothing was stopped"
+  mount=$(docker_within 20 inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}}:{{.Name}}{{end}}{{end}}' "$APP") || \
+    fail "Docker did not describe the application; nothing was stopped"
+  [[ "$mount" =~ ^volume:[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || \
+    fail "the application's /data is not a named volume; nothing was stopped"
+  VOLUME=${mount#volume:}
+  OWNER=$(image_user "$IMAGE")
+}
+
+# The megabytes a copy will read, measured while the application runs: the
+# volume is mounted read-only into a container that has no network.
+data_mb() {
+  docker_within 300 run --rm --init --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true --pids-limit 64 --user "$OWNER" --entrypoint du \
+    --mount "type=volume,source=$VOLUME,target=/source,readonly" \
+    "$IMAGE" -sm /source/db /source/results /source/adaptive | awk '{sum += $1} END {print sum + 0}'
+}
+
 # Seconds since a `date +%s%N` reading, to one decimal place.
 elapsed_since() {
   local tenths=$((($(date +%s%N) - $1) / 100000000))
@@ -256,6 +322,8 @@ elapsed_since() {
 # with 4 for anything else, of which only the kind is printed.
 #   ready           /health/ready answers 200
 #   witness         ready and idle; prints what a restore is compared with
+#   restored JOB... ready; prints the same of a restored copy, leaving out
+#                   the jobs named, which were accepted after the witness
 #   envelope JOB    the job's stored configuration is an encryption envelope;
 #                   prints its key ID
 #   no-route        the container has no route off the host
@@ -307,6 +375,10 @@ def require_ready(credentials):
         print("no credential in SCRAPEYARD_API_CREDENTIALS holds the health-detail scope", file=sys.stderr)
         sys.exit(NEVER)
     status, body, _headers = get("/health/ready", monitors[0])
+    if status == 503:
+        # Not backed up, idle or not: a backup would stop it and start it.
+        print("unhealthy: /health/ready answered HTTP 503", file=sys.stderr)
+        sys.exit(NOT_NOW)
     if status != 200:
         print(f"not ready: /health/ready answered HTTP {status}", file=sys.stderr)
         sys.exit(NOT_NOW)
@@ -327,16 +399,23 @@ def require_idle(credentials):
 
 
 def list_jobs(credentials):
-    """Every job some credential may read, and a credential that reads it."""
-    jobs, readers = {}, {}
+    """Every job some credential may read, a credential that reads it, and the
+    projects those credentials cover (None when one of them covers all)."""
+    jobs, readers, projects, everything = {}, {}, set(), False
+    # The requests are made with the consumer's own credential and count
+    # towards its rate limit, so each asks for the largest page the API allows.
+    largest = os.environ.get("SCRAPEYARD_ADMIN_READ_MAX_LIMIT", "")
+    page = f"limit={int(largest)}&" if largest.isdigit() and int(largest) > 0 else ""
     for credential in credentials.values():
         if "read" not in credential["scopes"]:
             continue
+        everything = everything or not credential.get("projects")
         # A credential limited to projects must name one in every list request.
         for project in credential.get("projects") or [None]:
+            projects.add(project)
             offset = 0
             while True:
-                query = f"/jobs?offset={offset}"
+                query = f"/jobs?{page}offset={offset}"
                 if project is not None:
                     query += "&project=" + urllib.parse.quote(project, safe="")
                 status, body, headers = get(query, credential["secret"])
@@ -348,7 +427,7 @@ def list_jobs(credentials):
                 if headers.get("X-Scrapeyard-Has-More") != "true":
                     break
                 offset = int(headers["X-Scrapeyard-Next-Offset"])
-    return jobs, readers
+    return jobs, readers, None if everything else sorted(projects)
 
 
 def sample(job_id, secret):
@@ -360,7 +439,12 @@ def sample(job_id, secret):
     # The next run is worked out from the clock, not read from what is stored.
     detail.pop("next_run_at", None)
     status, body, _headers = get("/results/" + urllib.parse.quote(job_id, safe=""), secret)
-    result = canonical(json.loads(body)) if status == 200 else body
+    # 404 is the API's answer for a job that has no result. Any other answer
+    # (a rate limit, an error) is not the job's result, and a witness that
+    # held it would have a restore compare one refusal with another.
+    if status not in (200, 404):
+        raise Refusal(f"a result read answered HTTP {status}")
+    result = canonical(json.loads(body)) if status == 200 else b""
     return {
         "job_id": job_id,
         "detail_sha256": digest(canonical(detail)),
@@ -372,9 +456,15 @@ def sample(job_id, secret):
     }
 
 
-def witness(credentials):
-    require_idle(credentials)
-    jobs, readers = list_jobs(credentials)
+def witness(credentials, restored=False, left_out=()):
+    # The original is asked while it is idle, so that what it reports is what
+    # the copy holds. A restored copy is asked as soon as it is ready: a job
+    # accepted after the witness is queued in it, and it runs that job.
+    settled = require_ready if restored else require_idle
+    settled(credentials)
+    jobs, readers, projects = list_jobs(credentials)
+    for job_id in left_out:
+        jobs.pop(job_id, None)
     samples = {}
     for status in ("complete", "failed"):
         matching = [job for job in jobs.values() if job["status"] == status]
@@ -385,9 +475,11 @@ def witness(credentials):
         )
         samples[status] = newest and sample(newest["job_id"], readers[newest["job_id"]])
     # A job accepted while the lists were read would be in the data and not here.
-    require_idle(credentials)
+    settled(credentials)
     document = {
         "format": "scrapeyard-backup-witness-v1",
+        # The projects the job list covers; null when it covers all of them.
+        "projects": projects,
         "jobs": [jobs[job_id] for job_id in sorted(jobs)],
         "samples": samples,
     }
@@ -429,6 +521,8 @@ try:
         require_ready(settings)
     elif mode == "witness":
         witness(settings)
+    elif mode == "restored":
+        witness(settings, restored=True, left_out=sys.argv[2:])
     elif mode == "envelope":
         envelope(sys.argv[2])
     elif mode == "no-route":
@@ -450,7 +544,7 @@ PY
 # stop. The lock is the one scrapeyard-release takes. It is held for each
 # question only, a second or two, so a promotion never waits for this wait.
 wait_until_idle() {
-  local project=$1 deadline=$((SECONDS + IDLE_TIMEOUT)) app answer
+  local project=$1 deadline=$((SECONDS + IDLE_TIMEOUT)) app answer last="" said=""
   install -d -m 700 "$LOCK_DIR"
   exec 7>>"$LOCK_DIR/release.lock"
   while :; do
@@ -460,17 +554,25 @@ wait_until_idle() {
         fail "$UNIT is no longer active; nothing was stopped"
       app=$(running_containers "$project" scrapeyard) || app=""
       answer=1
+      last="no application container is running"
       if [[ "$app" =~ ^[a-f0-9]+$ ]]; then
         answer=0
-        ask_application "$app" witness > "$STAGE/archive/witness.json" || answer=$?
+        ask_application "$app" witness > "$STAGE/archive/witness.json" 2> "$STAGE/asked.log" || answer=$?
+        last=$(tail -n 1 "$STAGE/asked.log")
       fi
       case "$answer" in
         0) return 0 ;;
-        2) fail "the application cannot be asked whether it is idle; nothing was stopped" ;;
+        2) fail "the application cannot be asked whether it is idle (${last:-no reason given}); nothing was stopped" ;;
       esac
       flock --unlock 7
+    else
+      last="a start, a promotion or the policy watch holds the release lock"
     fi
-    ((SECONDS < deadline)) || fail "the application was not idle within ${IDLE_TIMEOUT}s; nothing was stopped"
+    # Why it waits is said when the reason changes, and again if the wait ends.
+    [[ "$last" == "$said" ]] || echo "scrapeyard backup: waiting: ${last:-no reason given}" >&2
+    said=$last
+    ((SECONDS < deadline)) || \
+      fail "the application was not idle within ${IDLE_TIMEOUT}s (its last answer: ${last:-none}); nothing was stopped"
     sleep "$IDLE_POLL"
   done
 }
@@ -570,12 +672,40 @@ snapshot() {
 # from tar straight into age, so the plaintext is never one file on disk.
 package() {
   local name=$1 created=$2 release=$3 image=$4 project=$5
+  # The lock keeps starts and promotions out between the witness and the
+  # stop. It does not keep submissions out: a job accepted in that second is
+  # in the copied database and not in the witness. Such jobs are named in the
+  # description, so that a restore test leaves out exactly those and still
+  # fails for any other difference. The database is opened immutable: the
+  # set's manifest lists its files, and a reader that left one would spoil it.
   python3 - "$created" "$(basename -- "$release")" "$image" "$project" "$REDIS_KEYS" "$MANIFEST_SHA256" \
-    > "$STAGE/archive/metadata.json" <<'PY'
+    "$STAGE/archive/witness.json" "$STAGE/out/set/payload/db/jobs.db" \
+    > "$STAGE/archive/metadata.json" <<'PY' || fail "the copied jobs.db could not be compared with the witness"
 import json
+import sqlite3
 import sys
+import urllib.parse
 
-created, release, image, project, keys, manifest = sys.argv[1:]
+created, release, image, project, keys, manifest, witness_path, database_path = sys.argv[1:]
+witness = json.load(open(witness_path, encoding="utf-8"))
+witnessed = {job["job_id"] for job in witness["jobs"]}
+covered = witness["projects"]
+database = sqlite3.connect(f"file:{urllib.parse.quote(database_path)}?mode=ro&immutable=1", uri=True)
+try:
+    stored = database.execute("SELECT job_id, project FROM jobs").fetchall()
+finally:
+    database.close()
+late = sorted(
+    job_id
+    for job_id, job_project in stored
+    if job_id not in witnessed and (covered is None or job_project in covered)
+)
+if late:
+    print(
+        f"scrapeyard backup: {len(late)} job(s) were accepted after the witness was taken; "
+        "they are in the archive and named in its metadata.json",
+        file=sys.stderr,
+    )
 description = {
     "format": "scrapeyard-host-backup-v1",
     "created_at": created,
@@ -584,11 +714,12 @@ description = {
     "compose_project": project,
     "redis_keys": int(keys),
     "manifest_sha256": manifest,
+    "accepted_after_witness": late,
 }
 print(json.dumps(description, indent=2, sort_keys=True))
 PY
   mv -T -- "$STAGE/out/set" "$STAGE/archive/set"
-  rm -rf -- "$STAGE/copy" "$STAGE/out" "$STAGE/create.json"
+  rm -rf -- "$STAGE/copy" "$STAGE/out" "$STAGE/create.json" "$STAGE/asked.log"
   PARTIAL="$BACKUP_DIR/.$name.partial"
   tar --zstd -C "$STAGE/archive" --owner=0 --group=0 --numeric-owner -cf - . | \
     age --encrypt --recipients-file "$RECIPIENTS" --output "$PARTIAL" || \
@@ -651,10 +782,12 @@ compose() {
     docker_within "$SNAPSHOT_TIMEOUT" compose --progress quiet --project-name "$PROJECT" "$@")
 }
 
+# What exists of the restore test's project. A listing that fails is a
+# failure, not an empty list: "removed" is said of what was looked for.
 isolated_resources() {
-  docker_within 60 ps -aq --filter "label=com.docker.compose.project=$PROJECT"
-  docker_within 60 volume ls -q --filter "label=com.docker.compose.project=$PROJECT"
-  docker_within 60 network ls -q --filter "label=com.docker.compose.project=$PROJECT"
+  docker_within 60 ps -aq --filter "label=com.docker.compose.project=$PROJECT" &&
+    docker_within 60 volume ls -q --filter "label=com.docker.compose.project=$PROJECT" &&
+    docker_within 60 network ls -q --filter "label=com.docker.compose.project=$PROJECT"
 }
 
 # Removes every container, volume and network of the restore test's project.
@@ -673,19 +806,39 @@ remove_isolated_project() {
   [[ -z "$ids" ]] || docker_within 120 network rm $ids >/dev/null 2>&1 || true
 }
 
-require_internal_network() {
-  [[ "$(docker_within 20 network inspect --format '{{.Internal}}' "${PROJECT}_backend" 2>/dev/null)" == true ]] || \
+# Two things, asked before the application is started on the network. That
+# Docker holds it to be internal: nothing on it is routed off the host. And
+# that its bridge has no address of this host's: nothing on it reaches the
+# host's own services either, sshd among them. The second is asked of the
+# kernel. Docker 28 and later leave the bridge without an address when asked;
+# 27.5.1 refuses the option, and 26.1.4 takes it and gives the bridge an
+# address all the same (tried on a runner, 2026-10-13).
+require_isolated_network() {
+  local described bridge addresses
+  described=$(docker_within 20 network inspect --format '{{.Internal}} {{.Id}}' "${PROJECT}_backend" 2>/dev/null) || \
+    described=""
+  [[ "$described" =~ ^true\ [a-f0-9]{64}$ ]] || \
     fail "the restore test's network is not internal; the application was not started on it"
+  bridge="br-${described:5:12}"
+  addresses=$(ip -4 -o address show dev "$bridge") || \
+    fail "the restore test's bridge $bridge could not be read; the application was not started on its network"
+  [[ -z "$addresses" ]] || \
+    fail "the restore test's bridge has an address of this host's, so the copy could reach the host's own services; the application was not started on it"
 }
 
-# The end of a restore test, however it ends: nothing of it stays on the host.
+# The end of a restore test, however it ends: nothing of it stays on the
+# host, and if that cannot be confirmed it is said, and the test has failed.
 finish_restore_test() {
-  local status=$?
+  local status=$? left
   trap '' INT TERM HUP
   trap - EXIT
   set +e
   remove_isolated_project
   [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"
+  if ! left=$(isolated_resources) || [[ -n "$left" ]]; then
+    echo "scrapeyard backup: $PROJECT could not be removed, or Docker did not say what is left of it; see docker ps -a, docker volume ls and docker network ls" >&2
+    ((status != 0)) || status=2
+  fi
   exit "$status"
 }
 
@@ -706,11 +859,17 @@ finish_restore() {
 # out of it, and selects the retained release that made it: a set validates
 # against the SQL of the release that wrote it, and no other.
 unpack_archive() {
-  local archive=$1 identity=$2 unexpected part name created keys manifest
+  local archive=$1 identity=$2 unexpected part name created keys manifest bytes
   [[ -f "$archive" ]] || fail "no such archive: $archive"
   [[ -n "$(find "$identity" -maxdepth 0 -type f -user "$TRUSTED_OWNER" ! -perm /077 -print 2>/dev/null)" ]] || \
     fail "the identity must be a regular file of root's that nobody else can read (mode 600)"
   install -d -m 700 "$BACKUP_DIR"
+  # What the archive unpacks to is measured before any of it is written: the
+  # disk a test would fill is the disk the deployment writes to.
+  bytes=$(age --decrypt --identity "$identity" "$archive" | zstd -dc | wc -c) || \
+    fail "the archive could not be decrypted"
+  UNPACKED_MB=$((bytes / 1048576 + 1))
+  require_free "$BACKUP_DIR" $((UNPACKED_MB + MIN_FREE_MB)) "unpacking the archive ($UNPACKED_MB MB, and $MIN_FREE_MB MB beside)"
   STAGE=$(mktemp -d "$BACKUP_DIR/.stage.XXXXXX")
   age --decrypt --identity "$identity" "$archive" | \
     tar --zstd -x -C "$STAGE" --no-same-owner --no-same-permissions -f - || \
@@ -722,7 +881,10 @@ unpack_archive() {
   for part in metadata.json witness.json redis/dump.rdb set/manifest.json; do
     [[ -f "$STAGE/$part" ]] || fail "the archive has no $part"
   done
-  read -r name created keys manifest < <(python3 - "$STAGE/metadata.json" <<'PY'
+  {
+    read -r name created keys manifest
+    read -r -a LATE_JOBS
+  } < <(python3 - "$STAGE/metadata.json" <<'PY'
 import json
 import re
 import sys
@@ -735,15 +897,24 @@ try:
         str(described["redis_keys"]),
         described["manifest_sha256"],
     )
-    patterns = (r"[A-Za-z0-9][A-Za-z0-9._-]*", r"[0-9TZ:-]+", r"[0-9]+", r"[a-f0-9]{64}")
-    if described["format"] != "scrapeyard-host-backup-v1" or not all(
-        isinstance(field, str) and re.fullmatch(pattern, field)
-        for field, pattern in zip(fields, patterns)
+    patterns = (r"[A-Za-z0-9][A-Za-z0-9._-]*", r"[0-9TZ:-]+", r"0|[1-9][0-9]{0,11}", r"[a-f0-9]{64}")
+    late = described["accepted_after_witness"]
+    if (
+        described["format"] != "scrapeyard-host-backup-v1"
+        or not all(
+            isinstance(field, str) and re.fullmatch(pattern, field)
+            for field, pattern in zip(fields, patterns)
+        )
+        or not isinstance(late, list)
+        or len(late) > 1000
+        # They are passed on as arguments and printed, and they come from the archive.
+        or not all(isinstance(job, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", job) for job in late)
     ):
         raise ValueError
 except Exception:
     sys.exit(1)
 print(*fields)
+print(*late)
 PY
   ) || true
   [[ -n "${manifest:-}" ]] || fail "the archive's metadata.json is not one this script writes"
@@ -806,7 +977,10 @@ echo "$loaded $expired"'
 # Fills the project's two volumes from the unpacked archive. Compose creates
 # them, so they are the volumes its services mount afterwards.
 restore_volumes() {
-  local owner=$1 loaded="" expired=""
+  local owner=$1 loaded="" expired="" docker_root
+  docker_root=$(docker_within 20 info --format '{{.DockerRootDir}}') || \
+    fail "Docker did not say where it keeps its volumes"
+  require_free "$docker_root" $((UNPACKED_MB + MIN_FREE_MB)) "restoring into fresh volumes ($UNPACKED_MB MB, and $MIN_FREE_MB MB beside)"
   compose run --rm --no-deps -T --entrypoint python \
     -v "$STAGE/set:/backup/set:ro" \
     -v "$RELEASE/source/scripts/qualification_backup.py:/release/scripts/qualification_backup.py:ro" \
@@ -835,7 +1009,7 @@ shift
 case "$ACTION" in
   run)
     [[ $# -eq 0 ]] || usage
-    require_commands docker systemctl flock timeout age tar zstd sha256sum python3 df
+    require_commands docker systemctl flock timeout age tar zstd sha256sum python3 df awk
     for setting in KEEP IDLE_TIMEOUT IDLE_POLL MIN_FREE_MB SNAPSHOT_TIMEOUT UPLOAD_TIMEOUT; do
       [[ "${!setting}" =~ ^(0|[1-9][0-9]{0,6})$ ]] || fail "a SCRAPEYARD_BACKUP_ setting is not a whole number: $setting"
     done
@@ -858,12 +1032,17 @@ case "$ACTION" in
     [[ -L "$CURRENT" ]] || fail "$CURRENT is not a link to a promoted release"
     install -d -m 700 "$BACKUP_DIR"
     check_ancestors "$BACKUP_DIR/archive"
-    free_mb=$(df --output=avail -BM "$BACKUP_DIR" | tail -n 1 | tr -dc 0-9)
-    ((free_mb >= MIN_FREE_MB)) || \
-      fail "$BACKUP_DIR has ${free_mb} MB free, under the $MIN_FREE_MB the backup wants; nothing was stopped"
+    check_settings
     ! promotion_is_under_way || fail "a promotion is under way; nothing was stopped"
     [[ "$(systemctl is-active "$UNIT" 2>/dev/null || true)" == active ]] || \
       fail "$UNIT is not active, so no application is running to back up; nothing was stopped"
+    describe_deployment "$project"
+    # The copy of the files and the set made from it are on the disk together
+    # for a moment, and a copy that runs out of room is found only with the
+    # application stopped.
+    data=$(data_mb) || fail "the application's data could not be measured; nothing was stopped"
+    require_free "$BACKUP_DIR" $((2 * data + MIN_FREE_MB)) \
+      "nothing was stopped: a backup of $data MB of data (twice that, and $MIN_FREE_MB MB beside)"
 
     STAGE=$(mktemp -d "$BACKUP_DIR/.stage.XXXXXX")
     mkdir -p "$STAGE/archive/redis"
@@ -874,24 +1053,11 @@ case "$ACTION" in
     wait_until_idle "$project"
     waited=$((SECONDS - waiting_since))
 
-    # The lock is held from here, and a promotion may have moved the link
-    # during the wait, so what is deployed is read only now.
-    check_ancestors "$CURRENT"
-    release=$(realpath -- "$CURRENT")
-    check_release "$release"
-    [[ -f "$release/source/scripts/qualification_backup.py" && -d "$release/source/sql" ]] || \
-      fail "the promoted release has no backup helper; nothing was stopped"
-    app=$(service_container "$project" scrapeyard)
-    redis=$(service_container "$project" redis)
-    image=$(docker_within 20 inspect --format '{{.Image}}' "$app") || fail "Docker did not describe the application"
-    [[ "$image" == "$(release_image "$release" scrapeyard)" ]] || \
-      fail "the application does not run the promoted release's image; nothing was stopped"
-    volume=$(docker_within 20 inspect --format \
-      '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}}:{{.Name}}{{end}}{{end}}' "$app") || \
-      fail "Docker did not describe the application"
-    [[ "$volume" =~ ^volume:[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || \
-      fail "the application's /data is not a named volume; nothing was stopped"
-    owner=$(image_user "$image")
+    # The lock is held from here. A promotion may have moved the link during
+    # the wait, and the settings file may have been edited, so what is
+    # deployed and what a start would read are both looked at again.
+    describe_deployment "$project"
+    check_settings
 
     echo "The application is idle; stopping it through $UNIT..."
     created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -902,9 +1068,12 @@ case "$ACTION" in
     : > "$STOP_MARKER"
     APPLICATION_STOPPED=1
     timeout --kill-after=10 180 systemctl stop "$UNIT" || fail "$UNIT could not be stopped"
-    [[ -z "$(running_containers "$project" scrapeyard)" ]] || \
-      fail "the application is still running after $UNIT was stopped"
-    snapshot "$redis" "$release" "$image" "${volume#volume:}" "$owner"
+    # systemctl reports success for a stop whose own command failed, and a
+    # Docker that does not answer says nothing about what is running.
+    left=$(running_containers "$project" scrapeyard) || \
+      fail "Docker did not say whether the application has stopped"
+    [[ -z "$left" ]] || fail "the application is still running after $UNIT was stopped"
+    snapshot "$REDIS" "$RELEASE" "$IMAGE" "$VOLUME" "$OWNER"
 
     # The application comes back before anything is compressed or encrypted.
     back=yes
@@ -916,7 +1085,7 @@ case "$ACTION" in
     fi
     [[ "$back" == no ]] || echo "The application is back and ready; it was down for ${down}s"
 
-    package "$name" "$created" "$release" "$image" "$project"
+    package "$name" "$created" "$RELEASE" "$IMAGE" "$project"
     archive="$BACKUP_DIR/$name"
     sum=$(sha256sum < "$archive" | cut -d' ' -f1)
     size=$(stat -c %s "$archive")
@@ -933,7 +1102,7 @@ case "$ACTION" in
     fi
     [[ "$back" == yes ]] || \
       fail "the archive was written, but the application did not come back ready; see systemctl status $UNIT"
-    write_status "$archive" "$size" "$sum" "$uploading" "$down" "$waited" "$(basename -- "$release")"
+    write_status "$archive" "$size" "$sum" "$uploading" "$down" "$waited" "$(basename -- "$RELEASE")"
     echo "Backup complete"
     ;;
   resume)
@@ -954,10 +1123,11 @@ case "$ACTION" in
     ;;
   restore-test|restore)
     [[ $# -eq 3 && "$2" == "--identity" ]] || usage
-    require_commands docker systemctl flock timeout age tar zstd sha256sum python3 cmp du
+    require_commands docker systemctl flock timeout age tar zstd sha256sum python3 cmp du df wc ip
     docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
     [[ "$READY_TIMEOUT" =~ ^[1-9][0-9]{0,6}$ && "$SNAPSHOT_TIMEOUT" =~ ^[1-9][0-9]{0,6}$ ]] || \
       fail "a SCRAPEYARD_BACKUP_ timeout is not a whole number above zero"
+    [[ "$MIN_FREE_MB" =~ ^(0|[1-9][0-9]{0,6})$ ]] || fail "SCRAPEYARD_BACKUP_MIN_FREE_MB is not a whole number"
     started_at=$(date +%s%N)
     take_backup_lock
     sweep_leftovers
@@ -1001,7 +1171,8 @@ case "$ACTION" in
     PROJECT="$deployment-restore-test"
     trap finish_restore_test EXIT
     trap 'exit 143' INT TERM HUP
-    if [[ -n "$(isolated_resources)" ]]; then
+    left=$(isolated_resources) || fail "Docker did not list what an earlier restore test may have left of $PROJECT"
+    if [[ -n "$left" ]]; then
       echo "Removing what an earlier restore test left of $PROJECT..."
       remove_isolated_project
     fi
@@ -1015,13 +1186,17 @@ case "$ACTION" in
     validate_set "$image" "$owner"
     echo "Decrypted, unpacked and validated in $(elapsed_since "$started_at")s"
 
-    # Created here and not by Compose, so that what makes it internal is in
-    # plain sight. Nothing on it can leave the host: no retailer request and
-    # no webhook, whatever the restored jobs and deliveries ask for.
+    # Created here and not by Compose, so that what isolates it is in plain
+    # sight. Internal: nothing on it can leave the host, no retailer request
+    # and no webhook, whatever the restored jobs and deliveries ask for. And
+    # with no address of the host's on its bridge: the copy cannot reach the
+    # host's own services, which the deployment's egress policy would refuse
+    # it and which no policy covers here.
     docker_within 60 network create --internal --subnet "$RESTORE_NETWORK_PREFIX.0/24" \
+      --opt com.docker.network.bridge.gateway_mode_ipv4=isolated \
       --label "com.docker.compose.project=$PROJECT" "${PROJECT}_backend" >/dev/null || \
-      fail "the restore test's network could not be created; is $RESTORE_NETWORK_PREFIX.0/24 in use on this host?"
-    require_internal_network
+      fail "the restore test's network could not be created; is $RESTORE_NETWORK_PREFIX.0/24 in use on this host, or is Docker older than 28.0?"
+    require_isolated_network
     # The release's Compose file gives the application its confinement. This
     # file changes only what an isolated copy needs: its own network, no
     # restarts, no egress probe and no proxy. The application checks the host
@@ -1074,11 +1249,11 @@ YAML
       fail "the isolated Redis holds $present keys after loading $REDIS_LOADED"
     fi
 
-    require_internal_network
+    require_isolated_network
     compose up -d --no-deps --no-build --pull never scrapeyard || fail "the isolated application could not be started"
     isolated_app=$(service_container "$PROJECT" scrapeyard)
     deadline=$((SECONDS + READY_TIMEOUT))
-    until ask_application "$isolated_app" witness > "$STAGE/restored.json" 2> "$STAGE/asked.log"; do
+    until ask_application "$isolated_app" restored "${LATE_JOBS[@]}" > "$STAGE/restored.json" 2> "$STAGE/asked.log"; do
       if [[ -z "$(docker_within 20 ps -q --filter "id=$isolated_app")" ]]; then
         # Kept where only root can read it: a start that fails on a setting
         # can print part of the setting.
@@ -1093,6 +1268,13 @@ YAML
     done
     ready_after=$(elapsed_since "$started_at")
 
+    # What the kernel reports for the container's first process, as the
+    # deployment's own wrapper reads it. `docker inspect` repeats what was
+    # asked for, and Docker starts a container unconfined where it cannot use
+    # AppArmor.
+    confinement=$(docker_within 20 exec "$isolated_app" cat /proc/1/attr/current 2>/dev/null) || confinement=""
+    [[ "$confinement" == "scrapeyard-chromium (enforce)" ]] || \
+      fail "the isolated application runs as '${confinement:-unknown}', not under the scrapeyard-chromium AppArmor profile"
     ask_application "$isolated_app" no-route || fail "the isolated application has a route off the host"
     if ! cmp -s "$STAGE/witness.json" "$STAGE/restored.json"; then
       python3 - "$STAGE/witness.json" "$STAGE/restored.json" >&2 <<'PY'
@@ -1138,19 +1320,20 @@ PY
       key_id=$(ask_application "$isolated_app" envelope "$job") || \
         fail "a restored job's configuration is not stored as an encryption envelope"
     done
-    # shellcheck disable=SC2016  # a Go template
-    confinement=$(docker_within 20 inspect --format \
-      '{{.AppArmorProfile}}, read-only root {{.HostConfig.ReadonlyRootfs}}, networks{{range $name, $_ := .NetworkSettings.Networks}} {{$name}}{{end}}' \
-      "$isolated_app")
 
     remove_isolated_project
     rm -rf -- "$STAGE"
     STAGE=""
-    [[ -z "$(isolated_resources)" ]] || fail "the restore test could not remove all of $PROJECT; see docker ps -a"
-    echo "Isolated application: AppArmor $confinement (internal), no route off the host"
-    echo "Ready and idle ${ready_after}s after the start of the test"
+    left=$(isolated_resources) || \
+      fail "Docker did not say what is left of $PROJECT; see docker ps -a, docker volume ls and docker network ls"
+    [[ -z "$left" ]] || fail "the restore test could not remove all of $PROJECT; see docker ps -a, docker volume ls and docker network ls"
+    echo "Isolated application: confined as $confinement by the kernel's label, on ${PROJECT}_backend (internal, no address of the host's on its bridge), no route off the host"
+    echo "Ready ${ready_after}s after the start of the test"
     echo "Redis: $REDIS_KEYS keys in the dump, $REDIS_LOADED loaded and $REDIS_EXPIRED expired since the backup; $present present under the append-only file"
     echo "Job list: $jobs jobs, identical to the witness"
+    if ((${#LATE_JOBS[@]} > 0)); then
+      echo "Accepted after the witness was taken, in the archive and not compared: ${LATE_JOBS[*]}"
+    fi
     echo "Newest complete job: $complete; newest failed job: $failed (job, decrypted configuration and result identical where there is one)"
     if [[ -n "$key_id" ]]; then
       echo "Stored configurations are encryption envelopes under key $key_id, and were read back decrypted"
