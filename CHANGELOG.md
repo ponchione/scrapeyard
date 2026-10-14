@@ -13,6 +13,23 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+### Deployment qualification
+- Qualified on the production host on 2026-10-13 and 14 (TD-22, TD-83 and
+  TD-84, now closed):
+  - A release built, scanned and rehearsed by the release workflow was
+    promoted there, rolled back to the release before it and promoted
+    again, with readiness, a stored result read back byte for byte, a
+    replayed submission, the confinement, the host policy and the tunnel
+    checked after each step. Each promotion took 32 to 63 seconds.
+  - The seccomp profile derived from Docker's default and the AppArmor
+    profile ran there, with browser fetches in all three modes, and the
+    confinement check refused `AF_ALG` and `AF_VSOCK` through the 32-bit
+    entry and, with the release after it, every attempt TD-87 closed.
+  - Docker was upgraded in place to 29.9.0, containerd.io 2.4.1 (runc
+    1.5.2) and Compose 5.6.0 with the classic image store kept, and the
+    host was rebooted twice, once by unattended upgrades; the boot service
+    brought the application back each time, 35 to 39 seconds after boot.
+
 ### Added
 - Added page-parameter pagination (`pagination.page_param`, `page_first`,
   `page_step`) for listings whose pages are addressable by a query parameter.

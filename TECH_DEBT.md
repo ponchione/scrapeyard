@@ -6,6 +6,33 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-13 and 14** (`11872b4` to `01a7efb`): a pass with leave to change
+  the production host, which was idle for it.
+  - Three releases went to the host from the release workflow: `11872b4`,
+    `4f73449` and `01a7efb`, each checked there for readiness, a stored
+    result read back byte for byte, a replayed submission, the confinement,
+    the host policy, fetches in all three modes and the tunnel. The rollback
+    from `11872b4` to `523d805` and forward again passed (TD-22 closed).
+  - The host was upgraded in place to Docker 29.9.0 and rebooted (TD-84
+    closed); unattended upgrades rebooted it again the next day for a new
+    kernel, and the boot service brought the application back by itself.
+  - The derived seccomp profile and the AppArmor profile ran there (TD-83
+    closed), and its confinement check refuses what TD-87 closed: packet,
+    raw, netfilter, link and traffic-control operations from a namespace of
+    the process's own.
+  - TD-20's policy watch and readiness health check, and TD-21's backup and
+    restore test, run there. Each of the three changes to the host's
+    scripts had an independent review: TD-87's found no way round the
+    denial and four inexact statements; TD-20's found a restoration that
+    would have made the release unstartable, and more; TD-21's found six
+    problems worth fixing first. All were closed before the merges and
+    checked again by the same reviewers.
+  - TD-18's redirect and DNS checks and TD-19's size, log and Eyebox-client
+    checks ran on the host. They found TD-90: a browser fetch of a name that
+    changes its answer reached the application's own API on the container's
+    loopback. Trying the health check found TD-89: the embedded worker does
+    not come back after Redis goes away. TD-91 came from the owner's other
+    work on the host.
 - **2026-10-12** (`b4be34c` onwards): a pass on what could be fixed without
   touching the production host, which was carrying retailer runs.
   - TD-82 is closed. The smoke lane and the rehearsal install the Docker,
@@ -394,31 +421,29 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Nothing is ready that leaves the production host alone. The two entries
-under "Ready to implement" each wait for a window on it:
-- TD-84: pull request #25 raises the pinned runtime to Docker 29. Merge it
-  when the host is upgraded and rebooted, not before.
-- TD-83: the new seccomp profile reaches the host with the next release,
-  which is also the release TD-22 needs for its rollback.
+Nothing is ready that needs no decision. Every open entry below waits for the
+owner, for Eyebox, or for an outside service.
 
-CI gates pull requests since 2026-10-10. A release (TD-22) is built by the
+CI gates pull requests since 2026-10-10. A release is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
-and rehearses it; dispatch it on the commit to release.
+and rehearses it against the release it replaces; dispatch it on the commit
+to release, with the host's current release as `previous_revision`.
 
 **Coordinated:**
 - TD-89: needs the owner's choice between three fixes; it changes what the
   application does when Redis goes away.
+- TD-90: needs the owner's choice of fix, and Eyebox for the names it calls.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
-- TD-17 to TD-22: deployment qualification; not single PRs. The host is up
-  and connected (2026-10-12), so what is left is this:
-  - TD-18 and TD-17 wait for the owner: what to do about the two beta
-    retailers that refuse the host's address, and leave to run each beta job
-    from it. Every retailer request from the host needs the owner's word.
-  - TD-19 needs one run from Eyebox's ingest.
+- TD-17 to TD-21: deployment qualification; not single PRs.
+  - TD-18 and TD-17 wait for the owner: what to do about the retailers that
+    refuse the host's address, and leave to run each beta job from it.
+    Every retailer request from the host needs the owner's word.
+  - TD-19 needs a rotation tried, and a host rebuilt from the runbook.
   - TD-20 needs a monitoring service and TD-21 an off-host store, both the
     owner's choice.
-  - TD-22 needs a second release on the host to roll back from.
+
+**Ready:** TD-91 (a Compose change, no decision needed).
 
 **Deferred:** TD-48, TD-49, TD-85, TD-86 and TD-88.
 
@@ -446,7 +471,23 @@ and rehearses it; dispatch it on the commit to release.
 
 ## Ready to implement
 
-Nothing is.
+### TD-91 — Compose passes the secret-reference allowlist and none of the secrets it names
+
+**Priority:** P3 · **Area:** deployment · **Risk:** low · **Contract:** none · **Depends on:** —
+
+**Problem:** `docker-compose.yml` hands the application
+`SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` and no `SCRAPEYARD_SECRET_*` value.
+A job that refers to `${SCRAPEYARD_SECRET_PROXY_URL}`, as
+[SECRET_STORAGE.md](docs/SECRET_STORAGE.md) describes, cannot resolve it
+under the shipped Compose file, whatever the host's settings hold, so a
+proxy login can only be the service-wide `SCRAPEYARD_PROXY_URL` or be
+written into the job. Reported from the production host on 2026-10-13 and
+read in the Compose file; not tried.
+**Code:** `docker-compose.yml` (the `scrapeyard` service's environment).
+**Fix:** pass the names a deployment may define, or an env file of them,
+into the container, and rehearse one reference.
+**Done when:** the rehearsal resolves one `SCRAPEYARD_SECRET_*` reference
+in a submitted job through the deploy wrapper.
 
 ## Coordinated
 
@@ -532,24 +573,6 @@ switch.
 **Done when:** the smoke lane fetches a name that rebinds to loopback with
 each browser fetcher and no result holds the API's answer, and the guide's
 "Egress" section says what closes the case the host policy cannot see.
-
-### TD-91 — Compose passes the secret-reference allowlist and none of the secrets it names
-
-**Priority:** P3 · **Area:** deployment · **Risk:** low · **Contract:** none · **Depends on:** —
-
-**Problem:** `docker-compose.yml` hands the application
-`SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` and no `SCRAPEYARD_SECRET_*` value.
-A job that refers to `${SCRAPEYARD_SECRET_PROXY_URL}`, as
-[SECRET_STORAGE.md](docs/SECRET_STORAGE.md) describes, cannot resolve it
-under the shipped Compose file, whatever the host's settings hold, so a
-proxy login can only be the service-wide `SCRAPEYARD_PROXY_URL` or be
-written into the job. Reported from the production host on 2026-10-13 and
-read in the Compose file; not tried.
-**Code:** `docker-compose.yml` (the `scrapeyard` service's environment).
-**Fix:** pass the names a deployment may define, or an env file of them,
-into the container, and rehearse one reference.
-**Done when:** the rehearsal resolves one `SCRAPEYARD_SECRET_*` reference
-in a submitted job through the deploy wrapper.
 
 ### TD-45 — Bundled browsers are months behind upstream
 
@@ -1065,15 +1088,27 @@ check of the egress policy passes. The filesystem, the three SQLite files
 finished 40 seconds before the reset was still readable. What the reset lost
 is TD-85.
 
+**Done on the production host (2026-10-13 and 14):**
+- Docker upgraded in place (TD-84): the package upgrade restarted Docker,
+  and the boot service had the application back behind its policy about 30
+  seconds later. A reboot right after: healthy 35 seconds after boot.
+- On 2026-10-14 at 10:30 UTC unattended upgrades rebooted the host for a new
+  kernel, with the release that carries the readiness check and the
+  wrapper's check of the AppArmor label: the boot service's start finished
+  39 seconds after boot, and every check passed afterwards.
+- The policy watch runs there since 2026-10-14 09:40 UTC. Its first run
+  found the policy in place and printed nothing.
+
 **Still open:**
 - All of the monitoring work below: readiness and metrics collection, and
   alerts. It needs the owner's choice of a monitoring service. Nothing
   collects or alerts today: a stopped application, a full disk or a dead
   tunnel would show as a failed Eyebox run or not at all. A credential for
   the detailed health route exists on the host and nothing uses it.
-- A timer can check the host policy every minute and put a missing one back
+- A timer checks the host policy every minute and puts a missing one back
   (`scrapeyard-release watch`,
-  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch), since 2026-10-13).
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch); on the host since
+  2026-10-14).
   What it leaves for the monitoring work is the alert: it writes a line to
   `/var/lib/scrapeyard/policy-restored.log` and nothing reads that yet. It
   does not judge the order of rules, so a rule put ahead of the policy's is
@@ -1142,12 +1177,38 @@ running release and the one before it. Off the host they exist only as the
 release workflow's artifacts, which expire 30 days after their run. A
 release belongs in the off-host store with the backups.
 
-**State on the production host (2026-10-12):** no backup of any kind runs
-there, and no off-host store has been chosen. The two data volumes hold
-4.5 MB. The encryption key was generated on the host and is nowhere else, so
-a lost host loses the stored configurations with it, and Eyebox needs a new
-credential for the rebuilt one. Rebuilding also depends on the runbook TD-19
-still owes.
+**Done on 2026-10-13 and 14:** `security/backup.sh` and its units
+([DEPLOYMENT.md](docs/DEPLOYMENT.md#persistence-and-backups)): a daily backup
+that waits for an idle application, stops it through the boot service, copies
+the databases, the result and adaptive files and Redis's dump, starts it
+again, and only then encrypts the copy with `age` to public keys, so the host
+cannot read its own backups. A restore test restores an archive into a
+separate project on an internal network and compares what the API returns
+with what it returned before the backup; a restore fills the volumes of a
+rebuilt host. An independent review found thirteen problems in the first
+version, all closed before the merge and checked again by the same reviewer.
+The rehearsal runs a backup and a restore test of each release.
+
+**State on the production host (2026-10-14):** installed from release
+`01a7efb`, with the timer at 04:40 UTC. The first backup, at 13:04 UTC, had
+the application down for 28.3 seconds and wrote a 1.8 MB archive. Its
+restore test passed in 17.8 seconds: 155 jobs and the newest complete and
+failed job identical, all 42 Redis keys loaded, the stored configurations
+decrypted with the host's key, the copy confined on a network with no route
+off the host. The private half of the key pair was made off the host and is
+kept by the operator; it was on the host only for that test.
+
+**Still open:**
+- An off-host store and its upload hook (the owner's choice). Until then the
+  seven archives the host keeps protect against a mistake or a bad release,
+  not against losing the host.
+- A copy of the keyring (`/etc/scrapeyard/deploy.env`) off the host. The
+  archives deliberately do not hold it, and without it a restored database's
+  stored configurations cannot be read and Eyebox needs a new credential.
+- An alert when the last backup is too old: the status file
+  (`/var/lib/scrapeyard/backup-status.json`) is there for it (TD-20).
+- A restore onto a rebuilt host has run on a CI runner only (40 to 54
+  seconds for the command), not from an off-host copy.
 
 **Problem:**
 - The repository has a tested helper for quiesced backup sets, but no complete
