@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -95,6 +96,11 @@ class Host:
         self.ready = {"code": 200, "asked": "/health/ready", "status": "ok", "failing": [], "active": 0, "max": 2, "queued": 0}
         self.restart_count = 0
         self.failed_units = ""
+        # systemctl show answers: the boot unit has started, and nothing else.
+        self.shown: dict[tuple[str, str], str] = {
+            ("scrapeyard.service", "SubState"): "exited",
+            ("cloudflared-scrapeyard.service", "LoadState"): "loaded",
+        }
         # Timers and long-running units are active; the backup and the
         # promotion run now and then.
         self.unit_states: dict[str, str] = {
@@ -130,7 +136,8 @@ class Host:
         if command[:3] == ["systemctl", "list-units", "--failed"]:
             return 0, self.failed_units
         if command[:2] == ["systemctl", "show"]:
-            return 0, ("loaded" if "LoadState" in command[2] else "0") + "\n"
+            prop = command[2].removeprefix("--property=")
+            return 0, self.shown.get((command[4], prop), "0") + "\n"
         raise AssertionError(f"unexpected command {command}")
 
 
@@ -154,6 +161,7 @@ def host(tmp_path, monkeypatch) -> Host:
         "STATE_FILE": root / "var/lib/scrapeyard/health-status.json",
         "BACKUP_STATUS": root / "var/lib/scrapeyard/backup-status.json",
         "POLICY_RECORD": root / "var/lib/scrapeyard/policy-restored.log",
+        "BACKUP_STOP_MARKER": root / "run-backup-stopped-application",
         "DISK_PATHS": (root,),
         "TRUSTED_OWNER": os.getuid(),
         "TRUSTED_ROOT": root,
@@ -366,13 +374,44 @@ def test_without_a_status_file_only_recent_record_lines_are_new(host, capsys):
     assert "FAIL policy-watch: timer active; 1 new record line(s): " + lines[1] in out
 
 
-def test_the_application_is_not_judged_while_a_backup_or_a_promotion_stops_it(host, capsys):
+def _monotonic_us(seconds_ago: float) -> str:
+    return str(int((time.monotonic() - seconds_ago) * 1e6))
+
+
+@pytest.mark.parametrize(
+    ("setup", "judged"),
+    [
+        # A backup that stopped it a minute ago.
+        (lambda host: host.module.BACKUP_STOP_MARKER.touch(), False),
+        # One whose stop has lasted more than ten minutes.
+        (lambda host: (host.module.BACKUP_STOP_MARKER.touch(),
+                       os.utime(host.module.BACKUP_STOP_MARKER, (time.time() - 900,) * 2)), True),
+        # The boot unit's start under way.
+        (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "start",
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), False),
+        # Between retries of a start that keeps failing.
+        (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "auto-restart",
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), True),
+        # A start that has hung for more than ten minutes.
+        (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "start",
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(900)}), True),
+        # A promotion under way.
+        (lambda host: (host.unit_states.update({"scrapeyard-promote.service": "active"}),
+                       host.shown.update({("scrapeyard-promote.service", "StateChangeTimestampMonotonic"): _monotonic_us(30)})), False),
+    ],
+)
+def test_the_application_is_not_judged_for_ten_minutes_at_most_while_it_is_stopped_on_purpose(
+    host, capsys, setup, judged
+):
     host.ready = {"code": 503, "asked": "/health/ready", "status": "unhealthy", "failing": ["redis"]}
-    host.unit_states["scrapeyard-backup.service"] = "active"
+    setup(host)
 
     out, _state = _check(host, capsys)
 
-    assert "ok   application: not judged: scrapeyard-backup.service is stopping or starting it" in out
+    if judged:
+        assert "FAIL application: not ready: HTTP 503" in out
+    else:
+        assert "ok   application: not judged: " in out
 
 
 def test_ping_urls_must_be_https_and_plain(host, receiver, capsys, monkeypatch):
@@ -464,3 +503,14 @@ def test_the_readiness_probe_asks_liveness_of_a_release_without_the_readiness_ch
     done = subprocess.run([sys.executable, "-I", "-S", "-"], input=probe, capture_output=True, text=True, check=True)
 
     assert json.loads(done.stdout)["asked"] == "/health/live"
+
+
+def test_a_delivery_that_failed_is_reported_by_the_next_run(host, receiver, capsys):
+    _ping_file(host, f"healthchecks {receiver.url}/moved-{PING_TOKEN}\nntfy {receiver.url}/topic\n")
+
+    out, _state = _check(host, capsys)
+    assert "ok   hooks: healthchecks, ntfy" in out
+    out, _state = _check(host, capsys)
+
+    assert "FAIL delivery: last run: healthchecks ping to 127.0.0.1: HTTP 302" in out
+    assert PING_TOKEN not in out

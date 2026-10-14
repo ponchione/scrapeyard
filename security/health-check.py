@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import re
@@ -60,8 +59,17 @@ PING_SCHEMES = frozenset({"https"})
 
 OWN_UNIT = "scrapeyard-health.service"
 APP_UNIT = "scrapeyard.service"
-# While one of these runs, the application is stopped or starting on purpose.
-PLANNED_UNITS = ("scrapeyard-backup.service", "scrapeyard-promote.service")
+PROMOTE_UNIT = "scrapeyard-promote.service"
+# Written by a backup just before it stops the application, and removed once
+# the application is started again.
+BACKUP_STOP_MARKER = Path("/run/scrapeyard/backup-stopped-application")
+# What the boot unit is in while its start or stop runs; not between retries.
+STARTING_OR_STOPPING = frozenset({
+    "start-pre", "start", "start-post", "stop", "stop-sigterm", "stop-sigkill",
+    "stop-post", "final-sigterm", "final-sigkill",
+})
+# A planned stop longer than this is judged all the same.
+PLANNED_WINDOW_SECONDS = 600
 WATCH_TIMER = "scrapeyard-policy-watch.timer"
 BACKUP_TIMER = "scrapeyard-backup.timer"
 TUNNEL_UNIT = "cloudflared-scrapeyard.service"
@@ -195,12 +203,38 @@ def containers(project: str) -> dict[str, dict[str, Any]]:
     return found
 
 
+def _show(unit: str, prop: str) -> str:
+    _code, out = run(["systemctl", "show", f"--property={prop}", "--value", unit])
+    return out.strip()
+
+
+def _changed_lately(unit: str) -> bool:
+    try:
+        changed = int(_show(unit, "StateChangeTimestampMonotonic")) / 1e6
+    except ValueError:
+        return False
+    return changed > 0 and time.monotonic() - changed <= PLANNED_WINDOW_SECONDS
+
+
+def planned_stop() -> str | None:
+    """What has the application stopped or starting on purpose, for ten minutes at most."""
+
+    try:
+        if time.time() - BACKUP_STOP_MARKER.stat().st_mtime <= PLANNED_WINDOW_SECONDS:
+            return "a backup has it stopped"
+    except FileNotFoundError:
+        pass
+    if _show(APP_UNIT, "SubState") in STARTING_OR_STOPPING and _changed_lately(APP_UNIT):
+        return f"{APP_UNIT} is starting or stopping it"
+    if unit_state(PROMOTE_UNIT) in {"active", "activating"} and _changed_lately(PROMOTE_UNIT):
+        return "a promotion is under way"
+    return None
+
+
 def check_application(found: dict[str, dict[str, Any]]) -> Result:
-    planned = [unit for unit in PLANNED_UNITS if unit_state(unit) in {"active", "activating", "deactivating"}]
-    if unit_state(APP_UNIT) in {"activating", "deactivating"}:
-        planned.append(APP_UNIT)
+    planned = planned_stop()
     if planned:
-        return Result("application", True, f"not judged: {', '.join(planned)} is stopping or starting it")
+        return Result("application", True, f"not judged: {planned}")
     container = found.get("scrapeyard")
     if container is None:
         return Result("application", False, "no application container")
@@ -294,22 +328,22 @@ def check_policy_watch(state: dict[str, Any], new_state: dict[str, Any], now: fl
         start = previous["size"]
     else:
         start = 0
+    # The newest lines matter most: of more than the limit, the last is read.
+    more = info.st_size - start > RECORD_READ_LIMIT
     with POLICY_RECORD.open("rb") as record:
-        record.seek(start)
+        record.seek(info.st_size - RECORD_READ_LIMIT if more else start)
         data = record.read(RECORD_READ_LIMIT)
-        end = start + len(data)
-        more = bool(record.read(1))
-    if more:
-        # What is beyond the limit is not read; the next run starts after it.
-        end = info.st_size
+    end = (info.st_size - RECORD_READ_LIMIT if more else start) + len(data)
     new_state["policy_record"] = {"inode": info.st_ino, "size": end}
     added = data.decode("utf-8", "replace").splitlines()
+    if more and added:
+        added = added[1:]  # the first may be the end of a line
     if not isinstance(previous, dict):
         # No state to compare with: lines that say they are recent are new.
         added = [line for line in added if _recent(line, now)]
     if added or more:
         shown = "; ".join(line[:200] for line in added[-3:])
-        extra = " (more than 1 MiB was added; the rest is not read)" if more else ""
+        extra = " (more than 1 MiB was added; only its last 1 MiB is read)" if more else ""
         return Result("policy-watch", False, f"timer {timer}; {len(added)} new record line(s){extra}: {shown}")
     return Result("policy-watch", timer == "active", f"timer {timer}; no new record line")
 
@@ -533,18 +567,22 @@ def deliver(
 
     said: list[str] = []
     now = time.time()
-    # Each topic keeps its own state, under a digest: the URL is a credential.
+    # Each topic keeps its own state, by its place in the file: the URL is a
+    # credential, and the status file is readable by anyone on the host.
     sent = state.get("ntfy") if isinstance(state.get("ntfy"), dict) else {}
     ntfy: dict[str, Any] = {}
-    for kind, url in hooks.targets:
+    failed: list[str] = []
+    for place, (kind, url) in enumerate(hooks.targets, 1):
         # The URL is a credential of its own: only its host is said.
         host = urllib.parse.urlsplit(url).hostname
         if kind == "healthchecks":
             target = url if status == "ok" else url.rstrip("/") + "/fail"
             outcome = "not sent (dry run)" if dry_run else send(target, text, {"Content-Type": "text/plain"})
             said.append(f"healthchecks ping ({status}) to {host}: {outcome}")
+            if not dry_run and not outcome.startswith("HTTP 2"):
+                failed.append(f"healthchecks ping to {host}: {outcome}")
             continue
-        key = hashlib.sha256(url.encode()).hexdigest()[:16]
+        key = f"line-{place}"
         last = sent.get(key) if isinstance(sent.get(key), dict) else {}
         ntfy[key] = last
         due = last.get("status") != status or (
@@ -561,6 +599,8 @@ def deliver(
         said.append(f"ntfy message ({status}) to {host}: {outcome}")
         if not dry_run and outcome.startswith("HTTP 2"):
             ntfy[key] = {"status": status, "sent_at": now}
+        elif not dry_run:
+            failed.append(f"ntfy message to {host}: {outcome}")
     new_state["ntfy"] = ntfy
     if hooks.command:
         mode = "changed" if changed else "unchanged"
@@ -579,8 +619,13 @@ def deliver(
                 )
                 # What it printed may hold its own secrets: only its status is said.
                 said.append(f"{HOOK_FILE} {status} {mode}: exit status {done.returncode}")
+                if done.returncode != 0:
+                    failed.append(f"{HOOK_FILE.name}: exit status {done.returncode}")
             except (OSError, subprocess.TimeoutExpired) as error:
                 said.append(f"{HOOK_FILE} {status} {mode}: {type(error).__name__}")
+                failed.append(f"{HOOK_FILE.name}: {type(error).__name__}")
+    # Said by the next run, through whatever does work.
+    new_state["delivery_failed"] = failed
     if not hooks.targets and not hooks.command:
         said.append(f"Nothing sent; with a hook installed, this would have been: {text.splitlines()[0]}")
     return said
@@ -637,6 +682,8 @@ def run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
     if state.get("crashed"):
         # A run that ended before it could report: said once, by this one.
         results.append(Result("previous-run", False, f"ended with {state['crashed']} before it reported"))
+    if state.get("delivery_failed"):
+        results.append(Result("delivery", False, "last run: " + "; ".join(state["delivery_failed"])))
     status = "ok" if all(result.ok for result in results) else "fail"
     changed = state.get("status") != status
     text = report(results, args.label)

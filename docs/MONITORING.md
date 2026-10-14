@@ -119,7 +119,7 @@ run; what it reports through is a hook the operator installs.
 
 | Check | Fails when |
 | --- | --- |
-| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup or a promotion runs, or the boot service is starting or stopping it. |
+| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup has it stopped, or the boot service's start or stop or a promotion is under way, and for ten minutes at most; between the retries of a start that keeps failing it is judged. |
 | `disk` | `/`, `/var/lib/docker` or `/var/backups/scrapeyard` has less than 10% or 2 GiB free, or less than 10% of its inodes. |
 | `backup` | The last backup completed more than 26 hours ago, none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. |
 | `policy-watch` | `scrapeyard-policy-watch.timer` is not active, or the watch wrote to its record since the last check (once, with the lines). The record's first line counts too. Without a status file to compare with, lines from the last 15 minutes count as new. |
@@ -128,6 +128,7 @@ run; what it reports through is a hook the operator installs.
 | `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
 | `hooks` | A hook is installed that root cannot trust, or a ping line is not one `https` URL with no login, space or comment; nothing is sent through it. |
 | `previous-run` | The run before this one ended before it reported (once). |
+| `delivery` | The last run could not hand the report to one of the hooks (by its kind and host, or the command's exit status). |
 
 Each run prints one line for each check to the journal
 (`journalctl -u scrapeyard-health`) and writes them to
