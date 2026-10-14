@@ -765,8 +765,10 @@ Each step ends with the same checks as a deployment:
 10. The candidate's [scheduled backup](DEPLOYMENT.md#persistence-and-backups),
     installed as the deployment guide describes, with a throwaway `age` key
     pair of which the host is given the public half:
-    - A run with an upload hook that another account owns must be refused
-      with the application untouched.
+    - A run with an upload hook that another account owns, one with a
+      recipients line `age` does not accept, and one with a settings line
+      the unit's start could not read must each be refused with the
+      application untouched.
     - A run through `scrapeyard-backup.service` must stop the application,
       copy, and bring it back through the boot service: a new invocation of
       that unit, the checks that follow every deployment, and the
@@ -777,7 +779,9 @@ Each step ends with the same checks as a deployment:
     - `scrapeyard-backup restore-test` must restore the archive into its
       isolated project and report the job list and the known run's job and
       result identical to the witness, the stored configuration encrypted and
-      read back decrypted, and no route off the host. It must leave no
+      read back decrypted, the kernel's label `scrapeyard-chromium (enforce)`
+      on the copy, no address of the host's on its bridge, and no route off
+      the host. It must leave no
       container, volume, network or file behind, and the deployment as it
       was: the same container, the same invocation of the boot service, and
       still exactly one egress policy jump.

@@ -1007,27 +1007,40 @@ the promoted release (`scripts/qualification_backup.py`, described in
 `scrapeyard-backup.timer` starts `scrapeyard-backup.service` once a day at
 04:40 UTC, which runs `scrapeyard-backup run`:
 
-1. **Refuses what it can before anything is stopped**: no promoted release, a
-   recipients file or upload hook that is missing a requirement below, less
-   than 1 GiB free under `/var/backups/scrapeyard`, a promotion under way, or
-   a boot service that is not active.
+1. **Refuses what it can before anything is stopped**: no promoted release; a
+   recipients file or upload hook that is missing a requirement below, or a
+   recipients file that `age` itself does not accept; a settings file with a
+   line the unit's start could not read (below); a promotion under way; a
+   boot service that is not active; or too little room under
+   `/var/backups/scrapeyard`. The data is measured first, read-only, while
+   the application runs, and a run needs twice that and 1 GiB beside: the
+   copy of the files and the set made from it are on the disk together.
 2. **Waits until the application is idle**, for at most an hour, asking every
    30 seconds: readiness is `ok`, nothing is running and nothing is queued.
    The question is put from inside the application's container
    (`docker exec`), with the `health-detail` credential read from the
    container's own environment, so no credential is read on the host or
-   appears in a process list. If the application is never idle, the run fails
-   with nothing stopped.
+   appears in a process list. The journal says why it waits, once for each
+   new reason. If the application is never idle, the run fails with nothing
+   stopped and names the last answer. An application whose readiness answers
+   503 is not backed up, idle or not: the run ends after the hour with
+   "unhealthy" as that answer.
 3. **Takes a witness** through the same route, in the same exchange that found
    the application idle: the list of jobs the configured `read` credentials
    can list, and for the most recent `complete` job and the most recent
    `failed` job the SHA-256 of what `GET /jobs/{id}` and `GET /results/{id}`
-   return. It holds no credential.
+   return. A job with no result is recorded as such (404); any other answer
+   to a read, a rate limit for one, is a refusal, and the question is asked
+   again at the next poll. The reads are made with the consumer's own
+   credential and count towards its rate limit, so the job list is asked for
+   in the largest pages the API allows. The witness holds no credential.
 4. **Stops the application** with `systemctl stop scrapeyard.service`, while
    holding the lock that every start and promotion takes
    (`/run/scrapeyard/release.lock`), and confirms that no application
-   container is running. The lock is taken together with the last idle
-   answer, so no start or promotion can begin between the two.
+   container is running; a Docker that does not answer that question fails
+   the run there. The lock is taken together with the last idle answer, so
+   no start or promotion can begin between the two. It does not keep a
+   submission out: see the archive's `accepted_after_witness` below.
 5. **Copies.** Redis is told to `SAVE` and its `dump.rdb` is copied out. The
    promoted release's helper then runs in a container of the application's
    image, as the data's owner, with no network and the data volume mounted
@@ -1050,21 +1063,32 @@ the promoted release (`scripts/qualification_backup.py`, described in
    `/var/lib/scrapeyard/backup-status.json`.
 
 The application is down from step 4 to step 6: the stop, the copy and the
-start. With a few hundred kilobytes of data that was 17 to 19 seconds in four
-runs on a GitHub runner (2026-10-13), nearly all of it the application's own
-stop and start. It has not been measured on a production host, whose cores
-are slower. A request that arrives in that time is refused, so keep the
-consumer's schedule clear of the minutes after 04:40 UTC. Work that was
-queued when the application stopped is in both the databases and Redis's
-dump, from the same moment; a backup waits for an idle application, so
-normally there is none.
+start. With a few hundred kilobytes of data that was 17 to 21 seconds in
+seven runs on GitHub runners (2026-10-13), nearly all of it the application's
+own stop and start; with 2 GiB of data it was 30.5 seconds. It has not been
+measured on a production host, whose cores are slower. A request that arrives
+in that time is refused, so keep the consumer's schedule clear of the
+minutes after 04:40 UTC. Work that was queued when the application stopped
+is in both the databases and Redis's dump, from the same moment; a backup
+waits for an idle application, so normally there is none.
+
+A backup is an unattended restart. It stops the application and starts it
+through its unit, so it applies whatever `/etc/scrapeyard/deploy.env` holds
+at that moment, as `systemctl restart scrapeyard.service` would: an edit not
+yet applied takes effect at 04:40. Before it stops anything, a run reads the
+file as the unit's start reads it, and refuses a line that start could not
+read, naming the line by its number. A setting that reads well and that the
+deploy wrapper or the application then refuses (a malformed keyring, a proxy
+name that does not resolve) is still found only at the start: the
+application stays down and the unit retries it, as after any failed start.
+Do not leave a half-made edit in the file.
 
 How a run can end:
 
 - **Completed.** The status file is rewritten. Only this outcome rewrites it,
   so its `completed_at` is the age of the last good backup.
-- **Refused, or never idle.** Nothing was stopped. The unit is failed and the
-  journal says why (`journalctl -u scrapeyard-backup`).
+- **Refused, or never idle (or unhealthy).** Nothing was stopped. The unit is
+  failed and the journal says why (`journalctl -u scrapeyard-backup`).
 - **Failed after the application was stopped** (the copy failed, the run was
   stopped or timed out). The run starts the application again through
   `scrapeyard.service` before it ends, and removes the unencrypted copy.
@@ -1082,8 +1106,14 @@ The run's limits are settings of the unit, in a drop-in
 `Environment=SCRAPEYARD_BACKUP_KEEP=14`): `SCRAPEYARD_BACKUP_KEEP` (archives
 kept on the host, 7), `SCRAPEYARD_BACKUP_IDLE_TIMEOUT_SECONDS` (3600),
 `SCRAPEYARD_BACKUP_IDLE_POLL_SECONDS` (30), `SCRAPEYARD_BACKUP_MIN_FREE_MB`
-(1024), `SCRAPEYARD_BACKUP_SNAPSHOT_TIMEOUT_SECONDS` (900) and
-`SCRAPEYARD_BACKUP_UPLOAD_TIMEOUT_SECONDS` (1800). None is a secret. Change
+(1024, the room wanted beside what the copy itself takes),
+`SCRAPEYARD_BACKUP_SNAPSHOT_TIMEOUT_SECONDS` (900) and
+`SCRAPEYARD_BACKUP_UPLOAD_TIMEOUT_SECONDS` (1800). The restore test and
+restore read `SCRAPEYARD_BACKUP_MIN_FREE_MB` too, and
+`SCRAPEYARD_BACKUP_READY_TIMEOUT_SECONDS` (300): how long the restored copy
+may take to be ready. Give those on the command line, as in
+`sudo env SCRAPEYARD_BACKUP_READY_TIMEOUT_SECONDS=600 scrapeyard-backup
+restore-test ...`. None is a secret. Change
 the time of day with a drop-in for the timer (an empty `OnCalendar=` line,
 then the new one), and keep it well away from the hour at which the host
 reboots for updates ([Host baseline](#host-baseline)).
@@ -1098,8 +1128,12 @@ SHA-256 in a `.sha256` file beside it, holds:
 - `witness.json`;
 - `metadata.json`: the format (`scrapeyard-host-backup-v1`), the UTC time of
   the copy, the name of the release that made it and its application image,
-  the Compose project, the number of keys in Redis's dump and the SHA-256 of
-  the set's manifest.
+  the Compose project, the number of keys in Redis's dump, the SHA-256 of
+  the set's manifest, and `accepted_after_witness`: the jobs that are in the
+  copied database and not in the witness, because they were submitted in
+  the second between the last idle answer and the stop (only jobs in the
+  projects the witness covers are counted). The run's journal says when
+  there are any.
 
 It deliberately does not hold:
 
@@ -1112,7 +1146,10 @@ It deliberately does not hold:
   Renew that copy whenever the file changes (a rotated credential, a new
   key). A restore needs the key IDs the envelopes were written with. Without
   them the stored configurations cannot be read by anyone, and the consumer
-  needs a new credential for the rebuilt host.
+  needs a new credential for the rebuilt host. So a key retired from the
+  running keyring stays in the kept copy, or a copy of its own, for as long
+  as any archive made while it was in use is kept, on the host or in the
+  store.
 - **The release.** Keep the retained release archive as
   [above](#retained-release-artifacts-and-rollback); a restore needs the
   release that made the backup.
@@ -1160,9 +1197,13 @@ sudo chmod 644 /etc/scrapeyard/backup-recipients
 ```
 
 The file must be a regular file of root's that nobody else can write, in
-directories of which the same is true, and a run refuses it otherwise. A run
-also refuses a file that holds a private key (`AGE-SECRET-KEY-...`): replace
-that key pair, the private half has been on the host.
+directories of which the same is true, and `age` must accept every line; a
+run refuses it otherwise, before anything is stopped. A run also refuses a
+file that holds a private key (`AGE-SECRET-KEY-...`), whatever else is in
+it: take the key off the host. For as long as it was there, root on the host
+could read every archive made for that key. That is the exposure a restore
+test has for its few minutes (below), only longer; whether to replace the
+pair afterwards is the same judgement.
 
 Take the first backup at once and read what it did, then switch the timer on:
 
@@ -1208,9 +1249,10 @@ The hook is `/etc/scrapeyard/backup-upload`. The contract:
 - It is a regular executable file of root's that nobody else can write, in
   directories of which the same is true. A run refuses any other hook before
   it stops anything, because root runs it.
-- It is run once per backup, as root, after the application is back, with
-  one argument: the archive's path. The checksum file is that path with
-  `.sha256` added.
+- It is run once per backup, as root, after the application has been
+  started again, with one argument: the archive's path. The checksum file is
+  that path with `.sha256` added. It is run also when the application did
+  not come back ready: that archive may be the last good copy there is.
 - It ends with status 0 only when the store has the archive. Any other
   status, or 30 minutes without ending, fails the run: the archive stays on
   the host, and the status file keeps describing the last backup that did
@@ -1221,8 +1263,11 @@ The hook is `/etc/scrapeyard/backup-upload`. The contract:
 - The store's credential is the hook's own business. Keep it in a file only
   root can read, and give it the right to add objects and nothing else: a
   compromised host must not be able to delete or overwrite the backups it
-  made earlier. Retention in the store is a rule of the store, not of the
-  hook.
+  made earlier. That is the control. A conditional write such as the
+  example's `--if-none-match` is the hook's own courtesy: it keeps an honest
+  hook from replacing an object by mistake, and whoever controls the host
+  can leave it out. Retention in the store is a rule of the store, not of
+  the hook.
 
 No store has been chosen for the first production host, so this example for
 an S3-compatible store has not been run against one. Try a hook by hand with
@@ -1246,7 +1291,10 @@ done
 
 A store that does not support conditional writes needs another guard against
 replacement: object versioning or an object lock, with a credential that
-cannot delete versions.
+cannot delete versions. The example stops at the first failure and cannot
+be run again for an archive that reached the store: the store refuses the
+archive's name the second time. If the archive arrived and its `.sha256` did
+not, send the checksum file by hand.
 
 ### Testing a restore
 
@@ -1265,23 +1313,42 @@ sudo scrapeyard-backup restore-test \
 sudo rm /run/scrapeyard-backup.agekey
 ```
 
-While the key is on the host, the host can read its own backups; remove it
-when the test ends, whatever the outcome.
+While the key is on the host, root on the host, and whoever has taken the
+host over, can read every archive made for that key: those on the host,
+those in the store, old and new. Remove it when the test ends, whatever the
+outcome. A second recipient kept for restore tests does not narrow that,
+since it reads the same archives; what it does is keep the recovery key off
+every host, so that after a doubt only the test pair is replaced. Archives
+made before a replacement stay readable by the old key until they are
+deleted.
 
 It refuses an identity file that is not root's alone. What it does:
 
-1. Decrypts and unpacks the archive under `/var/backups/scrapeyard`, refuses
-   one that holds anything but files and directories, and selects the
-   retained release named in its `metadata.json`, which must be under
+1. Measures what the archive unpacks to, by decrypting it once without
+   writing anything, and requires that and 1 GiB free under
+   `/var/backups/scrapeyard`; the disk a test fills is the disk the
+   deployment writes to. Then decrypts and unpacks it there, refuses one
+   that holds anything but files and directories, and selects the retained
+   release named in its `metadata.json`, which must be under
    `/srv/scrapeyard-releases` with its images loaded. A set is checked
    against the SQL of the release that wrote it.
 2. Has that release's helper validate the set: every file's size and
    SHA-256, SQLite's integrity check, the migration ledger.
 3. Creates the network `<project>-restore-test_backend` with
    `docker network create --internal` on `172.30.1.0/24`, which is not the
-   deployment's subnet, and confirms that Docker reports it internal, twice:
-   after creating it and again before the application is started.
-4. Restores the set into a fresh data volume of the Compose project
+   deployment's subnet, and with
+   `com.docker.network.bridge.gateway_mode_ipv4=isolated`, which leaves its
+   bridge without an address of the host's. It confirms both twice, after
+   creating it and again before the application is started: that Docker
+   reports it internal, and that the kernel shows no IPv4 address on its
+   bridge. That needs Docker 28.0 or later. On a runner (2026-10-13) 28.0.4,
+   28.5.2 and 29.9.0 left the bridge without an address and a container on
+   it could not reach a listener on the host; 27.5.1 refused the option;
+   26.1.4 took it, gave the bridge an address all the same, and the
+   container reached the host's listener through it, which is why the
+   kernel is asked.
+4. Requires the unpacked size and 1 GiB free where Docker keeps its volumes,
+   then restores the set into a fresh data volume of the Compose project
    `<project>-restore-test`, and Redis's dump into a fresh Redis volume.
    Redis started with `--appendonly yes`, as the Compose file starts it,
    ignores a bare `dump.rdb` and starts empty (7.4.5). So the dump is loaded
@@ -1295,17 +1362,23 @@ It refuses an identity file that is not root's alone. What it does:
    read-only root. One file is laid over it (with Compose's `!override`,
    so Compose 2.24.4 or later), and changes only the network,
    the restart policy (`no`, so nothing of the test survives a reboot), the
-   retention periods (so the copy removes no history before it is compared)
-   and the egress probe. The application checks the host egress policy at
+   retention periods (so the copy removes no history before it is compared),
+   the proxy (none: a proxy named by a host name could not be resolved from
+   the network, and the application would not start) and the egress probe.
+   The application checks the host egress policy at
    startup only while its probe is configured, and the test leaves the probe
    unconfigured rather than install a second firewall policy on a production
    host. What keeps the test's application off the internet is the internal
    network, which the test confirms from inside the container as well: a
    connection to a documentation address must fail with "network is
-   unreachable".
-6. Compares. The restored application, asked exactly as the original was,
-   must report ready and idle and return the same job list and the same
-   digests for the witnessed `complete` and `failed` jobs and their results.
+   unreachable". It also requires the kernel's label of the container's
+   first process to be `scrapeyard-chromium (enforce)`, as the deploy
+   wrapper does; `docker inspect` only repeats what was asked for.
+6. Compares. The restored application, asked exactly as the original was
+   once it is ready, must return the same job list and the same digests for
+   the witnessed `complete` and `failed` jobs and their results. The jobs
+   named in `accepted_after_witness` are left out of the reading and named
+   in the report; any other difference fails the test.
    A job's configuration is stored as an encryption envelope and returned
    decrypted by `GET /jobs/{id}`, so equal digests mean the restored
    application decrypted it with the keyring; the test also reads the stored
@@ -1333,9 +1406,12 @@ What the test does not show:
   becomes of a lookup, no connection can follow it.
 - The copy runs beside the deployment with the deployment's own CPU and
   memory limits. It is idle, but run the test when the host is too.
-- The copy's application can reach the host's own addresses on its bridge,
-  as any container on an internal network can; the deployment's application
-  cannot, because the egress policy covers its bridge.
+- Jobs submitted in the second between the witness and the stop are in the
+  archive and are not compared: the copy runs any of them that were queued,
+  and they fail there, unable to reach anything.
+- Pending webhook deliveries are attempted by the copy too, and fail at the
+  network. On a runner a pending delivery's attempt from the copy ended
+  `ConnectError`, and no packet towards its address left the test's network.
 
 ### Restoring onto a rebuilt host
 
@@ -1353,10 +1429,22 @@ or replaces anything.
 3. Put `/etc/scrapeyard/deploy.env` back from the copy kept apart from the
    archives (root, mode 600), with the same `COMPOSE_PROJECT_NAME` and the
    keyring the backup was written under.
-4. Install `scrapeyard-release` and `scrapeyard.service` as in
-   [Boot service and promotion](#boot-service-and-promotion), without the
-   `current` link and without enabling the unit yet, and `age` and
-   `scrapeyard-backup` as [above](#installing-it).
+4. Install the scripts and units from that release, without the `current`
+   link and without enabling any unit yet (there is no `current` link to
+   read them from, so name the release):
+
+   ```bash
+   RELEASE=/srv/scrapeyard-releases/scrapeyard-release-<commit>
+   sudo apt-get install age
+   sudo install -m 755 "$RELEASE/source/security/manage-release.sh" /usr/local/sbin/scrapeyard-release
+   sudo install -m 755 "$RELEASE/source/security/backup.sh" /usr/local/sbin/scrapeyard-backup
+   sudo install -m 644 "$RELEASE/source/security/systemd/scrapeyard.service" \
+     "$RELEASE/source/security/systemd/scrapeyard-backup.service" \
+     "$RELEASE/source/security/systemd/scrapeyard-backup.timer" /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+
+   Install the recipients file as [above](#installing-it).
 5. Fetch the archive and its `.sha256` from the store, check it
    (`sha256sum -c`, and against the checksum recorded elsewhere), and put
    the private key on the host as for a restore test.
