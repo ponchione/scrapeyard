@@ -83,7 +83,7 @@ fi
 allowed_names=$(python3 -I -c '
 import json, os, sys
 try:
-    policy = json.loads(os.environ.get("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST") or "{}")
+    policy = json.loads(os.environ.get("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST", "").strip() or "{}")
 except ValueError:
     sys.exit("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST is not JSON")
 if not isinstance(policy, dict) or not all(isinstance(names, list) for names in policy.values()):
@@ -104,9 +104,14 @@ if ((${#secret_names[@]} > 0)); then
     printf 'services:\n  scrapeyard:\n    environment:\n'
     printf '      - %s\n' "${secret_names[@]}"
   } > "$secret_file"
-  # Without COMPOSE_FILE, Compose would read the file here and its override;
-  # naming one replaces that discovery, so both are named.
+  # Without COMPOSE_FILE, Compose finds its files here by itself, and naming
+  # one replaces that discovery. The repository's own two are named; any
+  # other name Compose would have read is left to the operator to name.
   if [[ -z "${COMPOSE_FILE:-}" ]]; then
+    for other in compose.yaml compose.yml docker-compose.yaml compose.override.yaml \
+      compose.override.yml docker-compose.override.yaml; do
+      [[ ! -e "$other" ]] || fail "set COMPOSE_FILE to the files to deploy: $other is here, and passing the secrets names the files"
+    done
     COMPOSE_FILE=docker-compose.yml
     [[ ! -f docker-compose.override.yml ]] || COMPOSE_FILE+=":docker-compose.override.yml"
   fi

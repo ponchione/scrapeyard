@@ -972,11 +972,13 @@ sudo security/install-chromium-apparmor-profile.sh remove
   change to a secret takes effect at the next start of the boot service.
   A job that names a secret the application does not hold is refused with
   `422` and the name.
-- That works through `scrapeyard-release` and the wrapper, which read the
-  settings file into their environment. A manual `docker compose up`, or
-  `COMPOSE_ENV_FILES`, passes the allowlist and none of the secrets. So does
-  a rollback to a release from before this (2026-10-14): jobs that name a
-  secret are then refused until a newer release is promoted again.
+- That works through `scrapeyard-release`, which reads the settings file into
+  the wrapper's environment. Run by hand, the wrapper passes the secrets and
+  the allowlist in its own environment only, so name both in `sudo
+  --preserve-env=...`. A manual `docker compose up`, or `COMPOSE_ENV_FILES`,
+  passes the allowlist and none of the secrets. So does a rollback to a
+  release from before this (2026-10-14): jobs that name a secret are then
+  refused until a newer release is promoted again.
 - Allowing a name for a project gives its value to every credential that may
   submit to that project. A reference is resolved in any string of the job,
   so a submitter can put it in a target or webhook URL and send it anywhere;

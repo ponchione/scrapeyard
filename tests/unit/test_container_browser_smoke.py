@@ -550,6 +550,32 @@ def test_secure_compose_deployment_without_allowed_secrets_leaves_compose_files_
     assert not names.exists()
 
 
+def test_secure_compose_deployment_refuses_compose_files_it_would_drop(tmp_path: Path) -> None:
+    (tmp_path / "compose.override.yaml").write_text("services: {}\n")
+
+    done, names = _run_secret_names_step(
+        tmp_path,
+        check=False,
+        SCRAPEYARD_SECRET_PROXY_URL="http://user:value-one@203.0.113.9:8080",
+        SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST=_ALLOWLIST,
+    )
+
+    assert done.returncode == 2
+    assert "compose.override.yaml is here" in done.stderr
+
+
+def test_secure_compose_deployment_reads_a_blank_allowlist_as_empty(tmp_path: Path) -> None:
+    done, names = _run_secret_names_step(
+        tmp_path,
+        SCRAPEYARD_SECRET_PROXY_URL="http://user:value-one@203.0.113.9:8080",
+        SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST="   ",
+        COMPOSE_FILE="a.yml",
+    )
+
+    assert done.stdout == "a.yml"
+    assert not names.exists()
+
+
 def test_secure_compose_deployment_refuses_an_allowlist_it_cannot_read(tmp_path: Path) -> None:
     done, names = _run_secret_names_step(
         tmp_path,
