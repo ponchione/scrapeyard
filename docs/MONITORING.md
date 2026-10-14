@@ -128,7 +128,7 @@ run; what it reports through is a hook the operator installs.
 | `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
 | `hooks` | A hook is installed that root cannot trust, or a ping line is not one `https` URL with no login, space or comment; nothing is sent through it. |
 | `previous-run` | The run before this one ended before it reported (once). |
-| `delivery` | The last run could not hand the report to one of the hooks (by its kind and host, or the command's exit status). |
+| `delivery` | A warning, not a failure: the last run could not hand the report to one of the hooks (by its kind and host, or the command's exit status). It is said through the others, and the state stays as it was. |
 
 Each run prints one line for each check to the journal
 (`journalctl -u scrapeyard-health`) and writes them to

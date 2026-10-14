@@ -140,6 +140,8 @@ class Result:
     name: str
     ok: bool
     detail: str
+    # A warning is said and does not make the host's state failing.
+    warning: bool = False
 
 
 class Unusable(Exception):
@@ -435,11 +437,14 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
 
 
 def report(results: list[Result], label: str) -> str:
-    failing = [result for result in results if not result.ok]
+    failing = [result for result in results if not result.ok and not result.warning]
     head = f"{label}: " + (
         f"FAILING ({len(failing)} of {len(results)} checks)" if failing else f"OK ({len(results)} checks)"
     )
-    lines = [head] + [f"{'ok  ' if result.ok else 'FAIL'} {result.name}: {result.detail}" for result in results]
+    def mark(result: Result) -> str:
+        return "ok  " if result.ok else "WARN" if result.warning else "FAIL"
+
+    lines = [head] + [f"{mark(result)} {result.name}: {result.detail}" for result in results]
     return "\n".join(lines)[:REPORT_LIMIT]
 
 
@@ -683,8 +688,12 @@ def run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
         # A run that ended before it could report: said once, by this one.
         results.append(Result("previous-run", False, f"ended with {state['crashed']} before it reported"))
     if state.get("delivery_failed"):
-        results.append(Result("delivery", False, "last run: " + "; ".join(state["delivery_failed"])))
-    status = "ok" if all(result.ok for result in results) else "fail"
+        # Said through whatever works, and not a failure of the host: one
+        # missed ping would otherwise alert, and recover, on every channel.
+        results.append(
+            Result("delivery", False, "last run: " + "; ".join(state["delivery_failed"]), warning=True)
+        )
+    status = "ok" if all(result.ok or result.warning for result in results) else "fail"
     changed = state.get("status") != status
     text = report(results, args.label)
     print(text, flush=True)

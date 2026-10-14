@@ -512,5 +512,9 @@ def test_a_delivery_that_failed_is_reported_by_the_next_run(host, receiver, caps
     assert "ok   hooks: healthchecks, ntfy" in out
     out, _state = _check(host, capsys)
 
-    assert "FAIL delivery: last run: healthchecks ping to 127.0.0.1: HTTP 302" in out
+    assert "WARN delivery: last run: healthchecks ping to 127.0.0.1: HTTP 302" in out
+    # Said, and not a failure of the host: the state stays as it was.
+    assert "OK (9 checks)" in out
+    # ntfy heard the first state only: a warning is no change of state.
+    assert [path for path, _headers, _body in receiver.received].count("/topic") == 1
     assert PING_TOKEN not in out
