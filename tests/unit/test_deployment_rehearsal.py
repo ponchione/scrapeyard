@@ -381,6 +381,9 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         "the application came back through the boot service, not by itself",
         "python3 tests/rehearsal/verify_deployment.py run",
         "a job submitted after Redis came back did not run",
+        # The host check runs from its unit and says what it found (TD-20).
+        'systemctl start "$HEALTH_UNIT.service" || fail "the host check did not complete"',
+        "the host check did not report: $line",
         # The host's Host list is set, and a foreign Host gets nothing (TD-90).
         "printf \"SCRAPEYARD_ALLOWED_HOSTS='172.30.0.250,127.0.0.1'\\n\"",
         "the application answered a request for a host it does not name",

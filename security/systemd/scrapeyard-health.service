@@ -1,0 +1,21 @@
+# Check the host and report through a hook. Install it as
+# /etc/systemd/system/scrapeyard-health.service together with
+# scrapeyard-health.timer; see docs/MONITORING.md ("The host check").
+#
+# It runs /usr/local/sbin/scrapeyard-health, an installed copy of
+# security/health-check.py, so it keeps working after a rollback to a release
+# that has no such script. Its thresholds are options; change one in a
+# drop-in that sets ExecStart again, for example
+#   ExecStart=
+#   ExecStart=/usr/local/sbin/scrapeyard-health --backup-max-age-hours 50
+
+[Unit]
+Description=Scrapeyard host check
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scrapeyard-health
+# A run asks Docker, systemd and the application, each under a limit of its
+# own, and each hook gets ten to thirty seconds.
+TimeoutStartSec=5min

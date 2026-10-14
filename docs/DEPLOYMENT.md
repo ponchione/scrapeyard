@@ -675,6 +675,9 @@ sudo systemctl enable --now scrapeyard.service
 sudo systemctl enable --now scrapeyard-policy-watch.timer
 ```
 
+Install the [host check](MONITORING.md#the-host-check) beside them, and the
+[backup](#persistence-and-backups) once its key pair exists.
+
 Repeat the `install` lines and `systemctl daemon-reload` from a later release
 to take a newer script or unit. The [policy watch](#the-policy-watch) needs
 the script of the release that introduced it: with an older installed script

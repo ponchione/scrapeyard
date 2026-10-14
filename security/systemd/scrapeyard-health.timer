@@ -1,0 +1,14 @@
+# Runs scrapeyard-health.service every five minutes. Install it as
+# /etc/systemd/system/scrapeyard-health.timer and enable it:
+#   systemctl enable --now scrapeyard-health.timer
+
+[Unit]
+Description=Scrapeyard host check, every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

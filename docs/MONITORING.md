@@ -110,6 +110,66 @@ Tune the bounded probes with:
 - `SCRAPEYARD_METRICS_REFRESH_INTERVAL_SECONDS` (default `5`)
 - `SCRAPEYARD_HEALTH_DISK_FREE_MIN_MB` (default `100`)
 
+## The host check
+
+`security/health-check.py`, installed as `/usr/local/sbin/scrapeyard-health`
+and run every five minutes by `scrapeyard-health.timer`, looks at the host
+from outside the application and says what it found. It needs no service to
+run; what it reports through is a hook the operator installs.
+
+| Check | Fails when |
+| --- | --- |
+| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes; the line names what failed (`redis`, `worker`, ...) and what Docker says. |
+| `disk` | `/`, `/var/lib/docker` or `/var/backups/scrapeyard` has less than 10% or 2 GiB free, or less than 10% of its inodes. |
+| `backup` | The last backup completed more than 26 hours ago, none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. |
+| `policy-watch` | `scrapeyard-policy-watch.timer` is not active, or the watch wrote to its record since the last check (once, with the lines). |
+| `units` | Any unit on the host has failed, the check's own aside. |
+| `restarts` | Since the last check, an application, Redis or probe container was restarted (TD-89's ending included), or `scrapeyard.service` or the tunnel's unit was. Once, with the counts. |
+| `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
+| `hooks` | A hook is installed that root cannot trust; nothing is sent through it. |
+
+Each run prints one line for each check to the journal
+(`journalctl -u scrapeyard-health`) and writes them to
+`/var/lib/scrapeyard/health-status.json`. Then it hands the report to what is
+installed, and says what it did:
+
+- `/etc/scrapeyard/health-ping`, root's alone (mode 600), one service a line:
+  - `healthchecks https://hc-ping.com/<uuid>`: every run, the URL when every
+    check passes and `<url>/fail` when one does not, with the report as the
+    body. A run that never happens (the host down, the timer stopped, the
+    script broken) is what healthchecks.io itself notices: no ping arrives
+    within the check's grace.
+  - `ntfy https://ntfy.sh/<topic>`: a message when the state changes, and
+    every six hours while it is failing. A topic on ntfy.sh is readable by
+    anyone who knows its name: pick a long random one.
+- `/etc/scrapeyard/health-hook`, an executable of root's that no one else
+  can change: run every time as `health-hook ok|fail changed|unchanged`, with
+  the report on standard input and a 30-second limit. Only its exit status is
+  logged.
+
+With neither installed, it says what it would have sent. `scrapeyard-health
+--dry-run` runs the checks and says what each hook would be sent, sending
+nothing. The URLs are credentials of their own and are never printed; the
+report holds names, states, ages and sizes, no setting and no credential.
+
+The tunnel's connector serves its own readiness on loopback
+(`http://127.0.0.1:20241/ready` by default), but the connector unit in
+`security/systemd/` drops every packet from loopback (`IPAddressDeny`), so the
+host cannot read it. The check then judges the connector by its unit alone;
+an alert from the tunnel's side, such as Cloudflare's tunnel health
+notification, covers a connector that runs and has no connection.
+
+Install it from a release:
+
+```bash
+sudo install -m 755 "$RELEASE/source/security/health-check.py" /usr/local/sbin/scrapeyard-health
+sudo install -m 644 "$RELEASE/source/security/systemd/scrapeyard-health.service" \
+  "$RELEASE/source/security/systemd/scrapeyard-health.timer" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now scrapeyard-health.timer
+sudo scrapeyard-health --dry-run
+```
+
 ## Suggested alerts
 
 - Page when `scrapeyard_background_task_up == 0` for two minutes or readiness

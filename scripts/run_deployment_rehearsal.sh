@@ -112,6 +112,8 @@ BACKUP="/usr/local/sbin/scrapeyard-backup"
 BACKUP_UNIT="scrapeyard-backup"
 BACKUP_DIR="/var/backups/scrapeyard"
 BACKUP_STATUS_DIR="/var/lib/scrapeyard"
+HEALTH="/usr/local/sbin/scrapeyard-health"
+HEALTH_UNIT="scrapeyard-health"
 if ((BOOT_SERVICE == 1)); then
   for command in systemctl systemd-run apparmor_parser; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required for --boot-service"
@@ -131,6 +133,11 @@ if ((BOOT_SERVICE == 1)); then
     done
     for path in "$BACKUP" "/etc/systemd/system/$BACKUP_UNIT.service" \
       "/etc/systemd/system/$BACKUP_UNIT.timer" "$BACKUP_DIR" "$BACKUP_STATUS_DIR"; do
+      [[ ! -e "$path" && ! -L "$path" ]] || fail "$path already exists; use an isolated host"
+    done
+  fi
+  if [[ -f "$CANDIDATE/source/security/health-check.py" ]]; then
+    for path in "$HEALTH" "/etc/systemd/system/$HEALTH_UNIT.service" "/etc/systemd/system/$HEALTH_UNIT.timer"; do
       [[ ! -e "$path" && ! -L "$path" ]] || fail "$path already exists; use an isolated host"
     done
   fi
@@ -273,6 +280,10 @@ cleanup_resources() {
     rm -rf -- "$BACKUP" "/etc/systemd/system/$BACKUP_UNIT.service" \
       "/etc/systemd/system/$BACKUP_UNIT.timer" "$BACKUP_DIR" "$BACKUP_STATUS_DIR"
     systemctl reset-failed "$BACKUP_UNIT.service" >/dev/null 2>&1
+    systemctl disable --now "$HEALTH_UNIT.timer" >/dev/null 2>&1
+    systemctl stop "$HEALTH_UNIT.service" >/dev/null 2>&1
+    rm -f -- "$HEALTH" "/etc/systemd/system/$HEALTH_UNIT.service" "/etc/systemd/system/$HEALTH_UNIT.timer"
+    systemctl reset-failed "$HEALTH_UNIT.service" >/dev/null 2>&1
     systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1
     systemctl stop "$WATCH_UNIT" >/dev/null 2>&1
     systemctl disable --now "$UNIT" >/dev/null 2>&1
@@ -1320,6 +1331,29 @@ PY
     echo "The candidate has no backup script; its backup is not rehearsed."
   fi
   # ---- end of the backup step -----------------------------------------------
+
+  # ---- Host check (TD-20) ----------------------------------------------------
+  # Installed as the guide does and run once by its unit, after the backup, so
+  # that what it reads is there. It must say the application is ready and the
+  # backup fresh, and that with no hook installed it sent nothing.
+  if [[ -f "$BOOT_CANDIDATE/source/security/health-check.py" ]]; then
+    echo "Installing the candidate's host check and running it once..."
+    install -m 755 "$BOOT_CANDIDATE/source/security/health-check.py" "$HEALTH"
+    install -m 644 "$BOOT_CANDIDATE/source/security/systemd/$HEALTH_UNIT.service" \
+      "$BOOT_CANDIDATE/source/security/systemd/$HEALTH_UNIT.timer" /etc/systemd/system/
+    systemctl daemon-reload
+    HEALTH_STARTED_EPOCH="$(date +%s)"
+    systemctl start "$HEALTH_UNIT.service" || fail "the host check did not complete"
+    journalctl --no-pager --output cat --unit "$HEALTH_UNIT.service" --since "@$HEALTH_STARTED_EPOCH" \
+      > "$DIAGNOSTICS_DIR/host-check.log" 2>&1
+    for line in 'ok   application: ok' 'ok   disk: ' 'ok   backup: last completed' \
+      'ok   restarts: first run' 'ok   hooks: none installed' 'Nothing sent; with a hook installed'; do
+      grep -q -F -- "$line" "$DIAGNOSTICS_DIR/host-check.log" || fail "the host check did not report: $line"
+    done
+    [[ -s "$BACKUP_STATUS_DIR/health-status.json" ]] || fail "the host check wrote no status file"
+  else
+    echo "The candidate has no host check; it is not rehearsed."
+  fi
 fi
 
 # Promotion and rollback must work from the retained archives alone.
