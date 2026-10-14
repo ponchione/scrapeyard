@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import math
 import secrets
@@ -24,7 +25,11 @@ from scrapeyard.api.auth import (
 )
 from scrapeyard.api.response_utils import error_content
 from scrapeyard.common.request_hosts import request_host
-from scrapeyard.runtime.metrics import observe_api_request, observe_rate_limit_state
+from scrapeyard.runtime.metrics import (
+    HOST_REFUSALS,
+    observe_api_request,
+    observe_rate_limit_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,13 +204,48 @@ class RateLimitMiddleware:
                 observe_rate_limit_state("api", "expired")
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _from_itself(scope: Scope) -> bool:
+    """Whether the connection came from inside this container.
+
+    One that arrived on loopback did, whatever the client address says: the
+    server trusts X-Forwarded-For from loopback. One from another address is
+    from the container when it came from the address it arrived on.
+    """
+
+    server, client = scope.get("server"), scope.get("client")
+    if not server:
+        return False
+    try:
+        local = ipaddress.ip_address(server[0])
+    except ValueError:
+        return False
+    if isinstance(local, ipaddress.IPv6Address) and local.ipv4_mapped is not None:
+        local = local.ipv4_mapped
+    if local.is_loopback:
+        return True
+    try:
+        peer = ipaddress.ip_address(client[0]) if client else None
+    except ValueError:
+        return False
+    if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped is not None:
+        peer = peer.ipv4_mapped
+    return peer == local
+
+
 class HostHeaderMiddleware:
     """Refuse a request whose Host is not a name this deployment answers to.
 
     A page can name a host whose address changes to this container's own
     loopback after the URL guard has checked it, and a browser then sends it
     here. The browser still says that name in Host, so the request is refused
-    before anything reads it (TD-90). An empty list leaves every Host accepted.
+    before anything reads it (TD-90). A proxy named that way would carry the
+    Host of its target instead, which may be a name this deployment gives
+    out; so a request from inside the container must name loopback, as the
+    container's own health check and the backup do. An empty list leaves
+    every Host accepted.
     """
 
     _LOG_INTERVAL_SECONDS = 10.0
@@ -222,9 +262,14 @@ class HostHeaderMiddleware:
             return
         values = _header_values(scope.get("headers", []), b"host")
         host = request_host(values[0]) if len(values) == 1 else None
-        if host is not None and host in self.allowed_hosts:
+        if (
+            host is not None
+            and host in self.allowed_hosts
+            and (host in _LOOPBACK_HOSTS or not _from_itself(scope))
+        ):
             await self.app(scope, receive, send)
             return
+        HOST_REFUSALS.inc()
         self._log_refusal(values)
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})

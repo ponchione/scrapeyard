@@ -429,7 +429,12 @@ def _host_checked_app(allowed: str) -> FastAPI:
     return app
 
 
-async def _health_with_host(app: FastAPI, *hosts: str) -> tuple[int, str]:
+async def _health_with_host(
+    app: FastAPI,
+    *hosts: str,
+    server: tuple[str, int] = ("172.30.0.250", 8420),
+    client: tuple[str, int] = ("172.30.0.1", 40000),
+) -> tuple[int, str]:
     # Built by hand: an HTTP client always sends exactly one Host.
     scope = {
         "type": "http",
@@ -442,8 +447,8 @@ async def _health_with_host(app: FastAPI, *hosts: str) -> tuple[int, str]:
         "query_string": b"",
         "root_path": "",
         "headers": [(b"host", host.encode()) for host in hosts],
-        "client": ("127.0.0.1", 40000),
-        "server": ("127.0.0.1", 8420),
+        "client": client,
+        "server": server,
     }
     sent: list[dict] = []
 
@@ -506,3 +511,36 @@ async def test_host_check_is_off_without_a_list() -> None:
 
     assert await _health_with_host(app, "rebind-1234.attacker.example:8420") == (200, '{"status":"ok"}')
     assert (await _health_with_host(app))[0] == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server", "client"),
+    [
+        # Over loopback, whatever client X-Forwarded-For made of it.
+        (("127.0.0.1", 8420), ("127.0.0.1", 51000)),
+        (("127.0.0.1", 8420), ("203.0.113.5", 0)),
+        # From the container's own bridge address to itself.
+        (("172.30.0.250", 8420), ("172.30.0.250", 51000)),
+        (("::ffff:172.30.0.250", 8420), ("172.30.0.250", 51000)),
+    ],
+)
+async def test_host_check_refuses_an_allowed_public_name_from_inside_the_container(server, client) -> None:
+    # A proxy name that rebinds to the container sends its target's Host.
+    app = _host_checked_app("scrapeyard.example,127.0.0.1,localhost")
+
+    status, body = await _health_with_host(app, "scrapeyard.example", server=server, client=client)
+
+    assert status == 400 and "ok" not in body
+    # The container's own health check and the backup name loopback.
+    for loopback in ("127.0.0.1:8420", "localhost"):
+        assert (await _health_with_host(app, loopback, server=server, client=client))[0] == 200
+
+
+@pytest.mark.asyncio
+async def test_host_check_admits_an_allowed_name_from_another_address() -> None:
+    app = _host_checked_app("scrapeyard.example,127.0.0.1")
+
+    # Through the tunnel's connector on the host, and from a neighbour container.
+    for client in (("172.30.0.1", 40000), ("172.30.0.7", 40000)):
+        assert (await _health_with_host(app, "scrapeyard.example", client=client))[0] == 200

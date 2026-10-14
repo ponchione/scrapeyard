@@ -420,6 +420,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     setup_logging(settings.log_dir, settings.log_level)
     validate_single_process_configuration(arguments=sys.argv[1:])
+    if getattr(settings, "untrusted_submissions", False) and not settings.parsed_allowed_hosts():
+        logger.warning(
+            "SCRAPEYARD_ALLOWED_HOSTS is empty: a page whose name rebinds to this "
+            "container's own addresses can have a browser read the API "
+            "(docs/DEPLOYMENT.md#egress)"
+        )
     identity = instance_identity(
         db_dir=settings.db_dir,
         queue_name=settings.queue_name,

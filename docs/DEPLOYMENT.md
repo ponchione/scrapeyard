@@ -270,6 +270,11 @@ on the receiving side: `SCRAPEYARD_ALLOWED_HOSTS` names the hosts a request
 may give in its `Host` header, and any other gets `400` before the request
 reaches anything. A browser sent there by a rebinding name gives that name,
 so it reads nothing; the smoke lane proves this for each browser fetcher.
+A rebinding *proxy* name would carry its target's `Host` instead, which can
+be a name on the list, so a request that comes from inside the container
+(over loopback, or from the container's own address) must name loopback:
+`127.0.0.1`, `::1` or `localhost`. Only a caller that may choose a proxy
+could try that: one with `transport-admin`, or any caller in trusted mode.
 List what callers really send, without ports:
 
 - `127.0.0.1`, required whenever the list is set: the container's health
@@ -278,10 +283,17 @@ List what callers really send, without ports:
   host calls it there;
 - the public name a tunnel or reverse proxy forwards (`cloudflared` passes the
   client's `Host` on unless its `httpHostHeader` is set);
-- the Compose service name `scrapeyard`, if another container calls it.
+- the Compose service name `scrapeyard`, if another container calls it, and
+  `host.docker.internal`, if containers reach it through the host gateway.
 
-Empty, the default, accepts any `Host`, as before. A name is compared without
-its port, case or trailing dot, so a rebinding name is refused on any port.
+Empty, the default, accepts any `Host`, as before; in untrusted mode the
+application then says so at its start. A name is compared without its port,
+case or trailing dot, so a rebinding name is refused on any port. After
+setting it, send one request along each caller's path, the tunnel's
+included: a missing name leaves the container healthy, since its health
+check asks on loopback, and refusing every request from that caller. Each
+refusal counts in `scrapeyard_host_refusals_total`, and the log has a line
+for the first in any ten seconds.
 
 Enforce outbound network policy for the Scrapeyard container or pod:
 

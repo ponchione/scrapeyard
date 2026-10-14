@@ -31,6 +31,11 @@ MEMORY_HEADROOM = Gauge(
     "Available memory below the service and visible cgroup ceilings; infinity when unmonitored.",
     registry=REGISTRY,
 )
+HOST_REFUSALS = Counter(
+    "scrapeyard_host_refusals_total",
+    "Requests refused for the host they named (SCRAPEYARD_ALLOWED_HOSTS).",
+    registry=REGISTRY,
+)
 MEMORY_DEFERRALS = Counter(
     "scrapeyard_memory_deferrals_total",
     "Worker/browser starts deferred by memory checks.",

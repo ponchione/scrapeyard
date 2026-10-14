@@ -31,6 +31,8 @@ score for each of three priorities); webhook summaries use aggregate SQLite
 queries. Scrapes never scan job IDs, URLs, projects, or all queue members.
 
 - API request count and latency use method, route template, and status class.
+  Requests refused for the host they named (`SCRAPEYARD_ALLOWED_HOSTS`) never
+  reach a route; `scrapeyard_host_refusals_total` counts them.
 - Queue depth and oldest waiting age use only `high`, `normal`, and `low`.
 - Active jobs, targets, browser targets, bounded run threads, and result-response
   threads are compared with process capacity. Lingering threads separately show work still
