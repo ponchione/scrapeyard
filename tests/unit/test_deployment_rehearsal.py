@@ -243,6 +243,8 @@ def test_runner_rehearses_the_production_path_and_cleans_up_after_itself():
             "expect_refusal_without_policy unprotected-start-no-proxy",
             "await_unit boot-no-proxy ",
             'if "$BACKUP" run > ',
+            'if "$BACKUP" run > "$DIAGNOSTICS_DIR/backup-bad-recipient.log"',
+            'if "$BACKUP" run > "$DIAGNOSTICS_DIR/backup-bad-setting.log"',
             'systemctl start "$BACKUP_UNIT.service"',
             "await_unit backup ",
             '"$BACKUP" restore-test "$BACKUP_ARCHIVE"',
@@ -337,6 +339,14 @@ def test_boot_service_phase_backs_up_through_the_unit_and_restores_in_isolation(
         # A hook root does not own is refused, with the application untouched.
         'chown 65534:65534 "$ENV_DIR/backup-upload"',
         "a refused backup disturbed the running application",
+        # A recipient age does not accept, and a settings line the unit's start
+        # could not read, are both refused before anything is stopped, and the
+        # settings file is put back before the backup that must succeed.
+        'echo "age1notarecipient" >> "$ENV_DIR/backup-recipients"',
+        'install -m 644 "$WORK_DIR/backup-recipients" "$ENV_DIR/backup-recipients"',
+        'write_deploy_env "SCRAPEYARD_LOG_LEVEL=INFO"',
+        "grep -q -F 'could not be started again'",
+        "    write_deploy_env\n",
         # The backup runs as the timer would start it, and the application it
         # stopped is back under a new invocation of the boot service, with
         # the images, confinement and egress policy of any other start.
@@ -354,6 +364,9 @@ def test_boot_service_phase_backs_up_through_the_unit_and_restores_in_isolation(
         # leaves nothing, and leaves the deployment as it was.
         '"$BACKUP" restore-test "$BACKUP_ARCHIVE" --identity "$WORK_DIR/backup-identity"',
         "'encryption envelopes under key rehearsal'",
+        # The kernel's label of the copy, and a bridge with no address of the host's.
+        "'confined as scrapeyard-chromium (enforce)'",
+        '"no address of the host\'s on its bridge"',
         "newest failed job: [0-9a-f-]{8,}",
         '[[ -z "$(restore_test_resources)" ]]',
         "the restore test disturbed the running application",

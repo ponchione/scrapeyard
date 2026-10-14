@@ -1170,6 +1170,27 @@ PY
       app_is_running || fail "a refused backup disturbed the running application"
     chown 0:0 "$ENV_DIR/backup-upload"
 
+    echo "Offering a recipient age does not accept, then a setting the next start could not read; each must be refused with nothing stopped..."
+    cp -- "$ENV_DIR/backup-recipients" "$WORK_DIR/backup-recipients"
+    echo "age1notarecipient" >> "$ENV_DIR/backup-recipients"
+    if "$BACKUP" run > "$DIAGNOSTICS_DIR/backup-bad-recipient.log" 2>&1; then
+      fail "a backup went ahead with a recipients file age does not accept"
+    fi
+    grep -q -F 'age does not accept' "$DIAGNOSTICS_DIR/backup-bad-recipient.log" || \
+      fail "the backup was refused for another reason than its recipients file"
+    install -m 644 "$WORK_DIR/backup-recipients" "$ENV_DIR/backup-recipients"
+    # The line the unit's start would refuse; a backup would stop the
+    # application and leave it down until the line was repaired.
+    write_deploy_env "SCRAPEYARD_LOG_LEVEL=INFO"
+    if "$BACKUP" run > "$DIAGNOSTICS_DIR/backup-bad-setting.log" 2>&1; then
+      fail "a backup went ahead with a settings file the next start could not read"
+    fi
+    grep -q -F 'could not be started again' "$DIAGNOSTICS_DIR/backup-bad-setting.log" || \
+      fail "the backup was refused for another reason than the settings file"
+    write_deploy_env
+    [[ "$(invocation)" == "$BEFORE" && "$(service_containers scrapeyard)" == "$RUNNING_BEFORE" ]] && \
+      app_is_running || fail "a refused backup disturbed the running application"
+
     echo "Backing up through the unit; the application must come back through the boot service..."
     BEFORE="$(invocation)"
     BACKUP_STARTED_EPOCH="$(date +%s)"
@@ -1209,7 +1230,8 @@ PY
     "$BACKUP" restore-test "$BACKUP_ARCHIVE" --identity "$WORK_DIR/backup-identity" \
       > "$DIAGNOSTICS_DIR/restore-test.log" 2>&1 || fail "the restore test failed; see restore-test.log"
     for proof in 'Restore test passed' 'identical to the witness' 'no route off the host' \
-      'encryption envelopes under key rehearsal'; do
+      'encryption envelopes under key rehearsal' 'confined as scrapeyard-chromium (enforce)' \
+      "no address of the host's on its bridge"; do
       grep -q -F -- "$proof" "$DIAGNOSTICS_DIR/restore-test.log" || fail "the restore test did not report: $proof"
     done
     # The known run failed before any fetch, so it is the witness's failed job.
