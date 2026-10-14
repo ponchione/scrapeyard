@@ -1194,7 +1194,13 @@ SHA-256 in a `.sha256` file beside it, holds:
   copied database and not in the witness, because they were submitted in
   the second between the last idle answer and the stop (only jobs in the
   projects the witness covers are counted). The run's journal says when
-  there are any.
+  there are any. It names 1,000 at most, and `accepted_after_witness_count`
+  says how many there were; an archive that could not name them all is
+  refused by the restore test, which could not tell them from a difference,
+  and can still be restored. Archives written before 2026-10-14 have neither
+  field: the restore test refuses them saying so, and a restore takes them.
+  The format names what an archive holds: a change that an older script
+  could not read gets a new one.
 
 It deliberately does not hold:
 

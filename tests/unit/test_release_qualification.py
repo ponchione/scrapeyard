@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,6 +191,61 @@ def test_backup_manifest_round_trip_and_inconsistency_detection(tmp_path: Path) 
     manifest_path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(BackupError, match="inventory mismatch"):
         validate_backup(backup)
+
+
+def _wal_mode(data: Path) -> list[str]:
+    # The connections that filled the databases are closed first, or WAL mode
+    # is set while they still hold them.
+    gc.collect()
+    for database in sorted((data / "db").glob("*.db")):
+        db = sqlite3.connect(database)
+        try:
+            assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        finally:
+            db.close()
+    return sorted(path.name for path in (data / "db").iterdir())
+
+
+def _create_with_the_command(data: Path, backup: Path) -> None:
+    # As the backup runs it: a process of its own, which then exits.
+    subprocess.run(
+        [sys.executable, "scripts/qualification_backup.py", "create",
+         "--data-root", str(data), "--output", str(backup), "--quiesced"],
+        check=True, capture_output=True, env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+
+
+def test_backup_leaves_no_sqlite_sidecars_beside_the_databases_it_read(tmp_path: Path) -> None:
+    # The application runs its databases in WAL mode, and the backup reads
+    # them with the application stopped.
+    data = tmp_path / "data"
+    _minimal_data(data)
+    before = _wal_mode(data)
+    assert not [name for name in before if name.endswith(("-wal", "-shm"))]
+
+    _create_with_the_command(data, tmp_path / "backup")
+
+    assert sorted(path.name for path in (data / "db").iterdir()) == before
+    assert validate_backup(tmp_path / "backup")["row_counts"]["jobs.db:jobs"] == 1
+
+
+def test_backup_reads_pages_still_in_the_write_ahead_log(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _minimal_data(data)
+    _wal_mode(data)
+    writer = sqlite3.connect(data / "db" / "errors.db")
+    try:
+        # Written and not yet checkpointed: the row is in the log only.
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("DELETE FROM errors")
+        writer.commit()
+        assert (data / "db" / "errors.db-wal").stat().st_size > 0
+
+        _create_with_the_command(data, tmp_path / "backup")
+    finally:
+        writer.close()
+
+    assert validate_backup(tmp_path / "backup")["row_counts"]["errors.db:errors"] == 0
 
 
 def test_backup_requires_quiescing_and_restore_requires_fresh_destination(tmp_path: Path) -> None:

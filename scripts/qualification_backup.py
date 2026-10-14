@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -283,9 +284,17 @@ def regular_files(root: Path) -> list[Path]:
 
 def sqlite_snapshot(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # A read-only connection to a database in WAL mode makes -wal and -shm
+    # files beside it and cannot remove them, even when closed. A quiesced
+    # database has nothing in its log, so it is read as immutable, which
+    # makes neither; one whose log holds pages is read through the log.
+    wal = source.with_name(f"{source.name}-wal")
+    logged = wal.exists() and wal.stat().st_size > 0
     with (
-        sqlite3.connect(f"file:{source}?mode=ro", uri=True) as src,
-        sqlite3.connect(destination) as dst,
+        closing(
+            sqlite3.connect(f"file:{source}?mode=ro{'' if logged else '&immutable=1'}", uri=True)
+        ) as src,
+        closing(sqlite3.connect(destination)) as dst,
     ):
         src.backup(dst)
 

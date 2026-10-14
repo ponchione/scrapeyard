@@ -907,6 +907,28 @@ def test_jobs_accepted_after_the_witness_are_named_and_left_out_of_the_compariso
     _nothing_left_of_the_restore_test(host)
 
 
+def test_an_archive_names_at_most_a_thousand_late_jobs_and_its_restore_test_says_so(host):
+    late = [f"j{number:04d}" for number in range(1001)]
+
+    result = host.run("run", ACCEPTED_SINCE=" ".join(f"{job}=td21" for job in late))
+
+    assert result.returncode == 0, result.stderr
+    assert "1001 job(s) were accepted after the witness was taken" in result.stderr
+    assert "the first 1000 of them: its restore test cannot compare the copy" in result.stderr
+    (archive,) = host.archives()
+    metadata = json.loads(host.members(archive)["metadata.json"])
+    assert metadata["accepted_after_witness"] == late[:1000]
+    assert metadata["accepted_after_witness_count"] == 1001
+    host.calls.unlink()
+
+    tested = host.run("restore-test", str(archive), "--identity", str(host.identity))
+
+    assert tested.returncode == 2
+    assert "1001 jobs were accepted after the witness was taken, more than the 1000 an archive names" in tested.stderr
+    assert not host.called("docker run")
+    _nothing_left_of_the_restore_test(host)
+
+
 def test_an_archive_is_never_written_over(host):
     # The name carries the second of the copy; the clock is held still here.
     host.tool(
@@ -1133,6 +1155,19 @@ def test_restore_test_unpacks_nothing_it_has_no_room_for(host):
     assert host.left_in_backups() == {archive.name, archive.name + ".sha256"}
 
 
+def test_restore_test_refuses_a_room_setting_that_is_not_a_number(host):
+    archive = _backed_up(host)
+
+    result = host.run(
+        "restore-test", str(archive), "--identity", str(host.identity),
+        SCRAPEYARD_BACKUP_MIN_FREE_MB="1e3",
+    )
+
+    assert result.returncode == 2
+    assert "SCRAPEYARD_BACKUP_MIN_FREE_MB is not a whole number" in result.stderr
+    assert not host.called("docker network create") and not host.called("docker run")
+
+
 @pytest.mark.parametrize(
     ("fault", "message"),
     [
@@ -1307,6 +1342,39 @@ def test_an_archive_is_not_trusted_for_having_been_decrypted(host, build, messag
     assert message in result.stderr
     assert not host.called("docker run") and not host.called("docker compose --progress")
     assert not [name for name in host.left_in_backups() if name.startswith(".")]
+
+
+def _from_before_the_review(tar: tarfile.TarFile) -> None:
+    # Archives written before 2026-10-14 had no accepted_after_witness.
+    manifest = b'{"format": "scrapeyard-backup-v1"}\n'
+    metadata = {
+        "format": "scrapeyard-host-backup-v1",
+        "created_at": "2020-01-01T00:00:00Z",
+        "release": "scrapeyard-release-new",
+        "redis_keys": 5,
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+    }
+    _member(tar, "metadata.json", json.dumps(metadata).encode())
+    _member(tar, "witness.json", json.dumps(WITNESS).encode())
+    _member(tar, "redis/dump.rdb", b"REDIS-DUMP")
+    _member(tar, "set/manifest.json", manifest)
+
+
+def test_an_archive_from_before_the_review_is_refused_by_the_restore_test_saying_why(host):
+    archive = _archive(host, _from_before_the_review)
+
+    tested = host.run("restore-test", str(archive), "--identity", str(host.identity), NO_DEPLOYMENT="yes")
+
+    assert tested.returncode == 2
+    assert "written by a backup script from before 2026-10-14" in tested.stderr
+    assert "not one this script writes" not in tested.stderr
+    assert not host.called("docker run")
+
+    # A restore compares nothing, so the missing list does not stop it.
+    (host.state / "unit-active").unlink()
+    restored = host.run("restore", str(archive), "--identity", str(host.identity), NO_DEPLOYMENT="yes")
+    assert "from before 2026-10-14" not in restored.stderr
+    assert "not one this script writes" not in restored.stderr
 
 
 def test_restore_fills_the_volumes_of_a_host_that_has_none(host):

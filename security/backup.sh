@@ -700,10 +700,18 @@ late = sorted(
     for job_id, job_project in stored
     if job_id not in witnessed and (covered is None or job_project in covered)
 )
+# A restore passes the names on as arguments, so an archive names at most
+# this many; the count says whether it named them all.
+LIMIT = 1000
 if late:
     print(
         f"scrapeyard backup: {len(late)} job(s) were accepted after the witness was taken; "
-        "they are in the archive and named in its metadata.json",
+        "they are in the archive and named in its metadata.json"
+        + (
+            f" (the first {LIMIT} of them: its restore test cannot compare the copy)"
+            if len(late) > LIMIT
+            else ""
+        ),
         file=sys.stderr,
     )
 description = {
@@ -714,7 +722,8 @@ description = {
     "compose_project": project,
     "redis_keys": int(keys),
     "manifest_sha256": manifest,
-    "accepted_after_witness": late,
+    "accepted_after_witness": late[:LIMIT],
+    "accepted_after_witness_count": len(late),
 }
 print(json.dumps(description, indent=2, sort_keys=True))
 PY
@@ -859,7 +868,7 @@ finish_restore() {
 # out of it, and selects the retained release that made it: a set validates
 # against the SQL of the release that wrote it, and no other.
 unpack_archive() {
-  local archive=$1 identity=$2 unexpected part name created keys manifest bytes
+  local archive=$1 identity=$2 unexpected part name created keys manifest unnamed bytes
   [[ -f "$archive" ]] || fail "no such archive: $archive"
   [[ -n "$(find "$identity" -maxdepth 0 -type f -user "$TRUSTED_OWNER" ! -perm /077 -print 2>/dev/null)" ]] || \
     fail "the identity must be a regular file of root's that nobody else can read (mode 600)"
@@ -882,7 +891,7 @@ unpack_archive() {
     [[ -f "$STAGE/$part" ]] || fail "the archive has no $part"
   done
   {
-    read -r name created keys manifest
+    read -r name created keys manifest unnamed
     read -r -a LATE_JOBS
   } < <(python3 - "$STAGE/metadata.json" <<'PY'
 import json
@@ -898,7 +907,10 @@ try:
         described["manifest_sha256"],
     )
     patterns = (r"[A-Za-z0-9][A-Za-z0-9._-]*", r"[0-9TZ:-]+", r"0|[1-9][0-9]{0,11}", r"[a-f0-9]{64}")
-    late = described["accepted_after_witness"]
+    # An archive from before 2026-10-14 names no jobs accepted after its
+    # witness: an empty list stands for it, and "old" says it is one.
+    late = described.get("accepted_after_witness", [])
+    count = described.get("accepted_after_witness_count", len(late))
     if (
         described["format"] != "scrapeyard-host-backup-v1"
         or not all(
@@ -909,15 +921,24 @@ try:
         or len(late) > 1000
         # They are passed on as arguments and printed, and they come from the archive.
         or not all(isinstance(job, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", job) for job in late)
+        or type(count) is not int
+        or not len(late) <= count <= 10**12
     ):
         raise ValueError
 except Exception:
     sys.exit(1)
-print(*fields)
+unnamed = "old" if "accepted_after_witness" not in described else str(count - len(late))
+print(*fields, unnamed)
 print(*late)
 PY
   ) || true
   [[ -n "${manifest:-}" ]] || fail "the archive's metadata.json is not one this script writes"
+  if [[ "$ACTION" == restore-test && "$unnamed" == old ]]; then
+    fail "the archive was written by a backup script from before 2026-10-14, which did not name the jobs accepted after its witness, so a restore test cannot tell them from a difference; restore it, or test it with the restore-test of the release that wrote it"
+  fi
+  if [[ "$ACTION" == restore-test && "$unnamed" != 0 ]]; then
+    fail "$((unnamed + ${#LATE_JOBS[@]})) jobs were accepted after the witness was taken, more than the ${#LATE_JOBS[@]} an archive names, so a restore test cannot tell them from a difference; restore it instead"
+  fi
   [[ "$(sha256sum < "$STAGE/set/manifest.json" | cut -d' ' -f1)" == "$manifest" ]] || \
     fail "the backup set's manifest is not the one the archive was made with"
   RELEASE="$(dirname -- "$CURRENT")/$name"
