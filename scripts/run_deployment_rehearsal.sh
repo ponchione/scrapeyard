@@ -1011,8 +1011,12 @@ PY
   grep -q 'Embedded worker ended outside a shutdown' "$DIAGNOSTICS_DIR/worker-loss.log" || \
     fail "the application ended without saying that its worker had lost Redis"
   # Through its own shutdown, not a forced end: the single-instance guard is
-  # released only at the end of a shutdown that finished.
-  grep -q 'Released single-instance guard' "$DIAGNOSTICS_DIR/worker-loss.log" || \
+  # released only at the end of a shutdown that finished. A failed start
+  # releases it too, so it must come before the next start's first line.
+  awk '/Embedded worker ended outside a shutdown/ { lost = 1; next }
+       lost && /Started server process/ { exit 1 }
+       lost && /Released single-instance guard/ { released = 1; exit 0 }
+       END { exit !released }' "$DIAGNOSTICS_DIR/worker-loss.log" || \
     fail "the application that lost Redis did not finish its own shutdown"
   docker start "$REDIS_CONTAINER" >/dev/null
   BACK_AT=$SECONDS

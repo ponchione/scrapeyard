@@ -340,9 +340,9 @@ class Harness:
                     "recovery_seconds": round(recovery_seconds, 3),
                 }
             )
-            # A killed arq delivery intentionally retains its in-progress lock
-            # until the queue timeout. Isolate crash points so four stale base
-            # queue members cannot head-of-line block the fifth scenario.
+            # Each crash point starts from an empty project, so that what one
+            # leaves behind cannot shape the next. (A start now also releases
+            # the deliveries a killed process left in progress.)
             self.compose("down", "-v", "--remove-orphans", timeout=120)
             self.compose("up", "-d", "--no-build", timeout=120)
             self.wait_health(timeout=60)

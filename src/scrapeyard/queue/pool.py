@@ -394,8 +394,12 @@ class WorkerPool:
             logger.exception("Failed to connect to Redis queue %s", self._queue_name)
             raise
 
+        try:
+            await self._release_abandoned_deliveries(redis)
+        except Exception:
+            await redis.aclose(close_connection_pool=True)
+            raise
         self._redis = redis
-        await self._release_abandoned_deliveries(redis)
         self._worker = _PriorityWorker(
             functions=[func(cast(Any, self._run_job), name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
             redis_pool=self._redis,
