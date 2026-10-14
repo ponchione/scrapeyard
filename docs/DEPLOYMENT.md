@@ -964,12 +964,24 @@ sudo security/install-chromium-apparmor-profile.sh remove
 - Define each secret a job may name as its own line in the settings file,
   for example `SCRAPEYARD_SECRET_PROXY_URL='http://user:password@proxy.example:8080'`
   (at least eight characters). The Compose file cannot list names it does not
-  know, so the deploy wrapper writes the names it finds, and only the names,
-  to `/run/scrapeyard/secret-names.compose.yml` and adds that file to the
-  deployment; Compose takes each value from the wrapper's environment. A
+  know, so the deploy wrapper finds the `SCRAPEYARD_SECRET_*` names in its
+  environment that the allowlist names for some project, writes them, and
+  only the names, to `/run/scrapeyard/secret-names.compose.yml`, and adds that
+  file to the deployment; Compose takes each value from the wrapper's
+  environment. A secret no project may name does not reach the container. A
   change to a secret takes effect at the next start of the boot service.
   A job that names a secret the application does not hold is refused with
   `422` and the name.
+- That works through `scrapeyard-release` and the wrapper, which read the
+  settings file into their environment. A manual `docker compose up`, or
+  `COMPOSE_ENV_FILES`, passes the allowlist and none of the secrets. So does
+  a rollback to a release from before this (2026-10-14): jobs that name a
+  secret are then refused until a newer release is promoted again.
+- Allowing a name for a project gives its value to every credential that may
+  submit to that project. A reference is resolved in any string of the job,
+  so a submitter can put it in a target or webhook URL and send it anywhere;
+  in untrusted mode only `proxy` and CDP fields need `transport-admin`. Allow a
+  secret only for a project whose every submitter may see it.
 
 Persisted config and webhook retry state require the versioned encryption
 keyring described in [SECRET_STORAGE.md](SECRET_STORAGE.md). Store key material

@@ -82,10 +82,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"job_id": parts[1], "run_id": parts[3], "status": status})
         if parts[0] == "results":
             run_id = self.server.runs.get(IDEMPOTENCY_KEY)
+            leaked = {"secret_leaks": SECRET_VALUE, "password_leaks": "Proxy password 0123456789abcdef"}
             return self._send(
                 200,
                 {
-                    **({"leaked": SECRET_VALUE} if fault == "secret_leaks" else {}),
+                    **({"leaked": leaked[fault]} if fault in leaked else {}),
                     "job_id": parts[1],
                     "run_id": run_id,
                     "status": self.server.result_status,
@@ -186,6 +187,7 @@ def test_verifier_runs_a_job_that_names_a_deployment_secret(deployment, monkeypa
         # The control proves nothing if an undefined name is accepted too.
         ("missing_secret_accepted", "a job naming an undefined secret"),
         ("secret_leaks", "appeared in the result"),
+        ("password_leaks", "appeared in the result"),
     ],
     indirect=["deployment"],
 )

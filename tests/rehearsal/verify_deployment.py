@@ -7,6 +7,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -195,9 +196,13 @@ def secret_reference(
         status, body, _headers = request(f"{api_url}{path}", api_key=client_key)
         expect(status == 200, f"{name} read: HTTP {status}: {body}")
         reads[name] = body
+    # The whole value, and its password alone, which a proxy login can leak
+    # by itself.
+    shown = [secret_value, *filter(None, [urllib.parse.urlsplit(secret_value).password])]
     for name, body in reads.items():
+        text = json.dumps(body)
         expect(
-            secret_value not in json.dumps(body),
+            not any(part in text for part in shown),
             f"the deployment secret's value appeared in the {name}",
         )
     return {

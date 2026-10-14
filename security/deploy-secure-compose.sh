@@ -75,13 +75,25 @@ else
 fi
 
 # Deployment secrets that a submitted job may name as ${SCRAPEYARD_SECRET_...}
-# (docs/SECRET_STORAGE.md) reach the application by name only. A Compose file
-# that lists the names, written for this deployment where only root can read
-# it, has Compose take each value from this process's environment, so no
-# value is written anywhere on the way. With none defined, nothing changes.
+# (docs/SECRET_STORAGE.md) reach the application by name only, and only those
+# that SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST lets some project name. A Compose
+# file that lists the names, written for this deployment where only root can
+# read it, has Compose take each value from this process's environment, so no
+# value is written anywhere on the way. With none, nothing changes.
+allowed_names=$(python3 -I -c '
+import json, os, sys
+try:
+    policy = json.loads(os.environ.get("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST") or "{}")
+except ValueError:
+    sys.exit("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST is not JSON")
+if not isinstance(policy, dict) or not all(isinstance(names, list) for names in policy.values()):
+    sys.exit("SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST is not a map of projects to lists of names")
+print("\n".join(sorted({name for names in policy.values() for name in names if isinstance(name, str)})))
+') || fail "the secret-reference allowlist could not be read"
 secret_names=()
 while IFS= read -r name; do
-  if [[ "$name" =~ ^SCRAPEYARD_SECRET_[A-Z0-9_]+$ && "$name" != SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST ]]; then
+  if [[ "$name" =~ ^SCRAPEYARD_SECRET_[A-Z0-9_]+$ && "$name" != SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST ]] && \
+     grep -qxF -- "$name" <<<"$allowed_names"; then
     secret_names+=("$name")
   fi
 done < <(compgen -e)
@@ -92,7 +104,13 @@ if ((${#secret_names[@]} > 0)); then
     printf 'services:\n  scrapeyard:\n    environment:\n'
     printf '      - %s\n' "${secret_names[@]}"
   } > "$secret_file"
-  export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:$secret_file"
+  # Without COMPOSE_FILE, Compose would read the file here and its override;
+  # naming one replaces that discovery, so both are named.
+  if [[ -z "${COMPOSE_FILE:-}" ]]; then
+    COMPOSE_FILE=docker-compose.yml
+    [[ ! -f docker-compose.override.yml ]] || COMPOSE_FILE+=":docker-compose.override.yml"
+  fi
+  export COMPOSE_FILE="$COMPOSE_FILE:$secret_file"
 fi
 
 # Removes a container that Docker could not stop. A removal can fail the same

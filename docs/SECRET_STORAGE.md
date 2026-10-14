@@ -57,10 +57,14 @@ export SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='{"catalog":["SCRAPEYARD_SECRET_PRO
 ```
 
 Each referenced name must also be set in the application's environment. Under
-the deploy wrapper, a `SCRAPEYARD_SECRET_*` line in the settings file is
-enough: the wrapper hands every such name to the container
-([DEPLOYMENT.md](DEPLOYMENT.md#secrets)). A plain `docker compose up` passes
-the allowlist and none of the secrets.
+`scrapeyard-release` and the deploy wrapper, a `SCRAPEYARD_SECRET_*` line in
+the settings file is enough for a name the allowlist names: the wrapper hands
+it to the container ([DEPLOYMENT.md](DEPLOYMENT.md#secrets)). A plain
+`docker compose up` passes the allowlist and none of the secrets.
+
+Allowing a name for a project discloses its value to every credential that
+may submit to that project: a reference resolves in any string of the job,
+a target or webhook URL included.
 
 The default empty policy denies every secret reference. The config `project`
 and `name` must remain literal, so neither authorization policy nor plaintext

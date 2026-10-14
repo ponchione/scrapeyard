@@ -251,7 +251,8 @@ capture_diagnostics() {
 # credential may be in them.
 scan_diagnostics() {
   local key_file
-  for key_file in "$WORK_DIR/client-key" "$WORK_DIR/monitor-key" "$WORK_DIR/secret-proxy"; do
+  for key_file in "$WORK_DIR/client-key" "$WORK_DIR/monitor-key" "$WORK_DIR/secret-proxy" \
+    "$WORK_DIR/secret-proxy-password"; do
     [[ -f "$key_file" ]] || continue
     if grep -R -F -q -- "$(<"$key_file")" "$DIAGNOSTICS_DIR"; then
       rm -rf -- "$DIAGNOSTICS_DIR"
@@ -388,9 +389,12 @@ export SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_ENCRYPTION_KEYS
 export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID="rehearsal"
 # A deployment secret a job may name (TD-91): a proxy login that only the
 # settings file holds. The second name is allowed and never defined.
-printf 'http://rehearsal:%s@%s:3128\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" "$PROXY_ADDRESS" \
-  > "$WORK_DIR/secret-proxy"
-chmod 600 "$WORK_DIR/secret-proxy"
+(
+  umask 077
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$WORK_DIR/secret-proxy-password"
+  printf 'http://rehearsal:%s@%s:3128\n' "$(<"$WORK_DIR/secret-proxy-password")" "$PROXY_ADDRESS" \
+    > "$WORK_DIR/secret-proxy"
+)
 SECRET_ALLOWLIST='{"release-rehearsal":["SCRAPEYARD_SECRET_REHEARSAL_PROXY","SCRAPEYARD_SECRET_REHEARSAL_MISSING"]}'
 export SCRAPEYARD_PROXY_URL="http://$PROXY_ADDRESS:3128"
 export SCRAPEYARD_EGRESS_POLICY_ID="$POLICY_ID"
@@ -815,13 +819,14 @@ PY
   # transport the untrusted mode reserves, so this runs without one.
   verify_secret_reference() {
     local label=$1
-    python3 - "$WORK_DIR/app-inspect.json" <<'PY' || fail "[$label] the deployment secret did not reach the application by its name alone"
+    python3 - "$WORK_DIR/app-inspect.json" "$WORK_DIR/secret-proxy" <<'PY' || fail "[$label] the deployment secret did not reach the application as the settings hold it"
 import json
 import sys
 
-names = {item.split("=", 1)[0] for item in json.load(open(sys.argv[1], encoding="utf-8"))[0]["Config"]["Env"]}
+env = dict(item.split("=", 1) for item in json.load(open(sys.argv[1], encoding="utf-8"))[0]["Config"]["Env"])
+value = open(sys.argv[2], encoding="utf-8").read().strip()
 sys.exit(
-    0 if "SCRAPEYARD_SECRET_REHEARSAL_PROXY" in names and "SCRAPEYARD_SECRET_REHEARSAL_MISSING" not in names else 1
+    0 if env.get("SCRAPEYARD_SECRET_REHEARSAL_PROXY") == value and "SCRAPEYARD_SECRET_REHEARSAL_MISSING" not in env else 1
 )
 PY
     python3 tests/rehearsal/verify_deployment.py secret-reference \
