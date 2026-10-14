@@ -20,7 +20,8 @@ connector. It prints one line for each, writes them to
 With neither installed it says what it would have sent. Nothing it prints or
 sends holds a credential: it reads the settings file for the Compose project
 alone, and the application is asked for its readiness from inside its own
-container, with the credential the container's health check uses.
+container, with the credential the container's health check uses. The report
+calls the host by --label, never by its host name.
 
 `--dry-run` runs the checks and prints what each hook would be sent, sending
 nothing and leaving the status file as it was.
@@ -30,10 +31,10 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
-import socket
 import stat
 import subprocess
 import sys
@@ -59,6 +60,8 @@ PING_SCHEMES = frozenset({"https"})
 
 OWN_UNIT = "scrapeyard-health.service"
 APP_UNIT = "scrapeyard.service"
+# While one of these runs, the application is stopped or starting on purpose.
+PLANNED_UNITS = ("scrapeyard-backup.service", "scrapeyard-promote.service")
 WATCH_TIMER = "scrapeyard-policy-watch.timer"
 BACKUP_TIMER = "scrapeyard-backup.timer"
 TUNNEL_UNIT = "cloudflared-scrapeyard.service"
@@ -69,14 +72,23 @@ SEND_SECONDS = 10
 REPORT_LIMIT = 10_000
 NTFY_REMINDER_SECONDS = 6 * 3600
 STATE_FORMAT = "scrapeyard-health-status-v1"
+# A first run, or one after the status file was lost, cannot know what of the
+# policy record is new: it takes lines written in the last 15 minutes as new.
+RECENT_RECORD_SECONDS = 15 * 60
+RECORD_READ_LIMIT = 1024 * 1024
 
 # Run inside the application's container with its own Python. It asks the
 # application's readiness on loopback with the credential the container's
 # health check takes, and prints the verdict and the names of what failed.
 READINESS_PROBE = r"""
 import json, os, urllib.error, urllib.request
-from scrapeyard.runtime.healthcheck import readiness_key
-key = readiness_key(os.environ)
+try:
+    from scrapeyard.runtime.healthcheck import readiness_key
+except ImportError:
+    # A release from before 2026-10-13 has no such check: liveness only.
+    key = None
+else:
+    key = readiness_key(os.environ)
 path = "/health/ready" if key else "/health/live"
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 request = urllib.request.Request(
@@ -170,14 +182,25 @@ def containers(project: str) -> dict[str, dict[str, Any]]:
     code, out = run(["docker", "inspect", *ids])
     if code != 0:
         raise RuntimeError("Docker did not describe the deployment's containers")
+    def rank(container: dict[str, Any]) -> tuple[bool, str]:
+        state = container.get("State", {})
+        return bool(state.get("Running")), str(state.get("StartedAt") or "")
+
     for container in json.loads(out):
         service = (container.get("Config", {}).get("Labels") or {}).get("com.docker.compose.service")
-        if service in SERVICES:
+        # While Compose replaces one, a service briefly has two: the one
+        # running, and of those the latest started, is the one to judge.
+        if service in SERVICES and (service not in found or rank(container) > rank(found[service])):
             found[service] = container
     return found
 
 
 def check_application(found: dict[str, dict[str, Any]]) -> Result:
+    planned = [unit for unit in PLANNED_UNITS if unit_state(unit) in {"active", "activating", "deactivating"}]
+    if unit_state(APP_UNIT) in {"activating", "deactivating"}:
+        planned.append(APP_UNIT)
+    if planned:
+        return Result("application", True, f"not judged: {', '.join(planned)} is stopping or starting it")
     container = found.get("scrapeyard")
     if container is None:
         return Result("application", False, "no application container")
@@ -200,7 +223,11 @@ def check_application(found: dict[str, dict[str, Any]]) -> Result:
             f"not ready: HTTP {answer['code']}, failing: {failing}; Docker says {health}",
         )
     busy = f"{answer.get('active')} of {answer.get('max')} workers busy, {answer.get('queued')} queued"
-    verdict = answer.get("status") if answer.get("asked") == "/health/ready" else "live (no health-detail credential)"
+    verdict = (
+        answer.get("status")
+        if answer.get("asked") == "/health/ready"
+        else "live (readiness not asked: no health-detail credential, or an older release)"
+    )
     return Result("application", True, f"{verdict}, {busy}")
 
 
@@ -253,25 +280,46 @@ def check_backup(max_age_hours: float, now: float) -> Result:
     return Result("backup", age <= max_age_hours and timer == "active", detail)
 
 
-def check_policy_watch(state: dict[str, Any], new_state: dict[str, Any]) -> Result:
+def check_policy_watch(state: dict[str, Any], new_state: dict[str, Any], now: float) -> Result:
     timer = unit_state(WATCH_TIMER)
-    previous = state.get("policy_record") or {}
+    previous = state.get("policy_record")
     try:
         info = POLICY_RECORD.stat()
     except FileNotFoundError:
-        new_state["policy_record"] = {}
+        # The watch makes the record when it first puts something back, so
+        # its absence is remembered: everything in it later is new.
+        new_state["policy_record"] = {"absent": True}
         return Result("policy-watch", timer == "active", f"timer {timer}; nothing recorded")
-    start = previous.get("size", 0) if previous.get("inode") == info.st_ino else 0
-    if start > info.st_size:
+    if isinstance(previous, dict) and previous.get("inode") == info.st_ino and previous.get("size", 0) <= info.st_size:
+        start = previous["size"]
+    else:
         start = 0
     with POLICY_RECORD.open("rb") as record:
         record.seek(start)
-        added = record.read(64 * 1024).decode("utf-8", "replace").splitlines()
-    new_state["policy_record"] = {"inode": info.st_ino, "size": info.st_size}
-    if previous and added:
+        data = record.read(RECORD_READ_LIMIT)
+        end = start + len(data)
+        more = bool(record.read(1))
+    if more:
+        # What is beyond the limit is not read; the next run starts after it.
+        end = info.st_size
+    new_state["policy_record"] = {"inode": info.st_ino, "size": end}
+    added = data.decode("utf-8", "replace").splitlines()
+    if not isinstance(previous, dict):
+        # No state to compare with: lines that say they are recent are new.
+        added = [line for line in added if _recent(line, now)]
+    if added or more:
         shown = "; ".join(line[:200] for line in added[-3:])
-        return Result("policy-watch", False, f"timer {timer}; {len(added)} new record line(s): {shown}")
+        extra = " (more than 1 MiB was added; the rest is not read)" if more else ""
+        return Result("policy-watch", False, f"timer {timer}; {len(added)} new record line(s){extra}: {shown}")
     return Result("policy-watch", timer == "active", f"timer {timer}; no new record line")
+
+
+def _recent(line: str, now: float) -> bool:
+    try:
+        written = datetime.datetime.strptime(line[:20], "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return now - written.replace(tzinfo=datetime.timezone.utc).timestamp() <= RECENT_RECORD_SECONDS
 
 
 def check_units() -> Result:
@@ -339,7 +387,7 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
         ("application", lambda: check_application(found)),
         ("disk", lambda: check_disk(args.disk_min_free_percent, args.disk_min_free_gib)),
         ("backup", lambda: check_backup(args.backup_max_age_hours, now)),
-        ("policy-watch", lambda: check_policy_watch(state, new_state)),
+        ("policy-watch", lambda: check_policy_watch(state, new_state, now)),
         ("units", check_units),
         ("restarts", lambda: check_restarts(found, state, new_state)),
         ("tunnel", lambda: check_tunnel(args.tunnel_ready_url)),
@@ -352,9 +400,9 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
     return results
 
 
-def report(results: list[Result]) -> str:
+def report(results: list[Result], label: str) -> str:
     failing = [result for result in results if not result.ok]
-    head = f"Scrapeyard host {socket.gethostname()}: " + (
+    head = f"{label}: " + (
         f"FAILING ({len(failing)} of {len(results)} checks)" if failing else f"OK ({len(results)} checks)"
     )
     lines = [head] + [f"{'ok  ' if result.ok else 'FAIL'} {result.name}: {result.detail}" for result in results]
@@ -393,24 +441,45 @@ def ping_targets() -> list[tuple[str, str]]:
             continue
         kind, _space, url = line.partition(" ")
         url = url.strip()
-        if kind not in {"healthchecks", "ntfy"} or urllib.parse.urlsplit(url).scheme not in PING_SCHEMES:
+        try:
+            parts = urllib.parse.urlsplit(url)
+            usable = (
+                kind in {"healthchecks", "ntfy"}
+                and parts.scheme in PING_SCHEMES
+                and bool(parts.hostname)
+                and parts.username is None
+                and (parts.port is None or parts.port > 0)
+            )
+        except ValueError:
+            usable = False
+        if not usable or any(character.isspace() or ord(character) < 32 for character in url):
             # The line may hold a token: only its number is said.
-            raise Unusable(f"{PING_FILE} line {number} is not `healthchecks https://...` or `ntfy https://...`")
+            raise Unusable(
+                f"{PING_FILE} line {number} is not `healthchecks https://...` or `ntfy https://...`"
+                " (one URL with no login, spaces or comment)"
+            )
         targets.append((kind, url))
     return targets
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer to report, never a place to send the report."""
+
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
 def send(url: str, body: str, headers: dict[str, str]) -> str:
-    request = urllib.request.Request(
-        url, data=body.encode(), headers={"User-Agent": "scrapeyard-health", **headers}, method="POST"
-    )
-    opener = urllib.request.build_opener()
     try:
+        request = urllib.request.Request(
+            url, data=body.encode(), headers={"User-Agent": "scrapeyard-health", **headers}, method="POST"
+        )
+        opener = urllib.request.build_opener(_NoRedirects)
         with opener.open(request, timeout=SEND_SECONDS) as response:
             return f"HTTP {response.status}"
     except urllib.error.HTTPError as error:
         return f"HTTP {error.code}"
-    except OSError as error:
+    except Exception as error:  # noqa: BLE001 - its text can hold the URL, which is a credential
         return type(error).__name__
 
 
@@ -434,6 +503,8 @@ def installed_hooks() -> Hooks:
             names += sorted({kind for kind, _url in targets})
         except (Unusable, OSError, UnicodeDecodeError) as error:
             problems.append(f"{error}; nothing is sent through it")
+        except ValueError:
+            problems.append(f"{PING_FILE} could not be read; nothing is sent through it")
     if HOOK_FILE.exists() or HOOK_FILE.is_symlink():
         try:
             trusted(HOOK_FILE, private=False)
@@ -462,7 +533,9 @@ def deliver(
 
     said: list[str] = []
     now = time.time()
-    ntfy = dict(state.get("ntfy") or {})
+    # Each topic keeps its own state, under a digest: the URL is a credential.
+    sent = state.get("ntfy") if isinstance(state.get("ntfy"), dict) else {}
+    ntfy: dict[str, Any] = {}
     for kind, url in hooks.targets:
         # The URL is a credential of its own: only its host is said.
         host = urllib.parse.urlsplit(url).hostname
@@ -471,8 +544,11 @@ def deliver(
             outcome = "not sent (dry run)" if dry_run else send(target, text, {"Content-Type": "text/plain"})
             said.append(f"healthchecks ping ({status}) to {host}: {outcome}")
             continue
-        due = ntfy.get("status") != status or (
-            status == "fail" and now - float(ntfy.get("sent_at") or 0) >= NTFY_REMINDER_SECONDS
+        key = hashlib.sha256(url.encode()).hexdigest()[:16]
+        last = sent.get(key) if isinstance(sent.get(key), dict) else {}
+        ntfy[key] = last
+        due = last.get("status") != status or (
+            status == "fail" and now - float(last.get("sent_at") or 0) >= NTFY_REMINDER_SECONDS
         )
         if not due:
             continue
@@ -484,7 +560,7 @@ def deliver(
         outcome = "not sent (dry run)" if dry_run else send(url, text, headers)
         said.append(f"ntfy message ({status}) to {host}: {outcome}")
         if not dry_run and outcome.startswith("HTTP 2"):
-            ntfy = {"status": status, "sent_at": now}
+            ntfy[key] = {"status": status, "sent_at": now}
     new_state["ntfy"] = ntfy
     if hooks.command:
         mode = "changed" if changed else "unchanged"
@@ -535,14 +611,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--disk-min-free-gib", type=float, default=2.0)
     parser.add_argument("--backup-max-age-hours", type=float, default=26.0)
     parser.add_argument("--tunnel-ready-url", help="the connector's own readiness, such as http://127.0.0.1:20241/ready")
+    parser.add_argument(
+        "--label",
+        default="Scrapeyard host",
+        help="what the report calls this host; the host name is not sent, since it can name the address",
+    )
     args = parser.parse_args(argv)
     state = load_state()
+    try:
+        return run_once(args, state)
+    except Exception as error:  # noqa: BLE001 - its text could hold a URL or a setting
+        print(f"The check itself failed ({type(error).__name__}); the next run reports it", flush=True)
+        if not args.dry_run:
+            try:
+                save_state({**state, "format": STATE_FORMAT, "crashed": type(error).__name__})
+            except OSError:
+                pass
+        return 1
+
+
+def run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
     new_state: dict[str, Any] = {"format": STATE_FORMAT}
     hooks = installed_hooks()
     results = [*check_all(args, state, new_state), hooks.result]
+    if state.get("crashed"):
+        # A run that ended before it could report: said once, by this one.
+        results.append(Result("previous-run", False, f"ended with {state['crashed']} before it reported"))
     status = "ok" if all(result.ok for result in results) else "fail"
     changed = state.get("status") != status
-    text = report(results)
+    text = report(results, args.label)
     print(text, flush=True)
     for line in deliver(hooks, status, changed, text, state, new_state, args.dry_run):
         print(line, flush=True)

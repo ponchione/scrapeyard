@@ -50,7 +50,10 @@ class _ReceiverHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
         self.server.received.append((self.path, dict(self.headers), body))
-        self.send_response(200)
+        moved = self.path.startswith("/moved")
+        self.send_response(302 if moved else 200)
+        if moved:
+            self.send_header("Location", "/elsewhere")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -92,7 +95,12 @@ class Host:
         self.ready = {"code": 200, "asked": "/health/ready", "status": "ok", "failing": [], "active": 0, "max": 2, "queued": 0}
         self.restart_count = 0
         self.failed_units = ""
-        self.unit_states: dict[str, str] = {}
+        # Timers and long-running units are active; the backup and the
+        # promotion run now and then.
+        self.unit_states: dict[str, str] = {
+            "scrapeyard-backup.service": "inactive",
+            "scrapeyard-promote.service": "inactive",
+        }
 
     def backup(self, *, hours_ago: float) -> None:
         completed = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours_ago)
@@ -184,7 +192,7 @@ def test_a_healthy_host_pings_success_and_tells_ntfy_once(host, receiver, capsys
     paths = [path for path, _headers, _body in receiver.received]
     # healthchecks every run; ntfy only when the state changes.
     assert paths == [f"/{PING_TOKEN}", f"/topic-{PING_TOKEN}", f"/{PING_TOKEN}"]
-    assert receiver.received[0][2].startswith("Scrapeyard host ")
+    assert receiver.received[0][2].startswith("Scrapeyard host: OK")
     assert state["status"] == "ok"
     # The ping URLs are credentials of their own; only their host is printed.
     assert PING_TOKEN not in out
@@ -290,7 +298,7 @@ def test_the_command_hook_gets_the_state_and_the_report(host, tmp_path, capsys):
     _check(host, capsys)
 
     lines = calls.read_text().splitlines()
-    assert lines[0] == "ok changed" and lines[1].startswith("Scrapeyard host ")
+    assert lines[0] == "ok changed" and lines[1].startswith("Scrapeyard host: OK")
     assert "ok unchanged" in lines
     assert f"{hook} ok changed: exit status 0" in out
     assert "hook-output-secret" not in out
@@ -333,3 +341,126 @@ def test_the_readiness_probe_asks_with_the_health_credential_and_names_what_fail
     [(path, headers, _body)] = receiver.received
     sent = {name.lower(): value for name, value in headers.items()}
     assert path == "/health/ready" and sent["x-api-key"] == "monitor-key-000000000"
+
+
+def test_the_first_policy_record_ever_written_is_reported(host, capsys):
+    out, _state = _check(host, capsys)
+    assert "ok   policy-watch: timer active; nothing recorded" in out
+
+    host.module.POLICY_RECORD.write_text("2020-01-01T00:00:00Z NOT PUT BACK: INPUT has no jump\n")
+    out, _state = _check(host, capsys)
+
+    assert "FAIL policy-watch: timer active; 1 new record line(s): 2020-01-01T00:00:00Z NOT PUT BACK" in out
+
+
+def test_without_a_status_file_only_recent_record_lines_are_new(host, capsys):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    lines = [
+        (now - datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ") + " INPUT has no jump",
+        (now - datetime.timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%SZ") + " DOCKER-USER has no jump",
+    ]
+    host.module.POLICY_RECORD.write_text("\n".join(lines) + "\n")
+
+    out, _state = _check(host, capsys)
+
+    assert "FAIL policy-watch: timer active; 1 new record line(s): " + lines[1] in out
+
+
+def test_the_application_is_not_judged_while_a_backup_or_a_promotion_stops_it(host, capsys):
+    host.ready = {"code": 503, "asked": "/health/ready", "status": "unhealthy", "failing": ["redis"]}
+    host.unit_states["scrapeyard-backup.service"] = "active"
+
+    out, _state = _check(host, capsys)
+
+    assert "ok   application: not judged: scrapeyard-backup.service is stopping or starting it" in out
+
+
+def test_ping_urls_must_be_https_and_plain(host, receiver, capsys, monkeypatch):
+    monkeypatch.setattr(host.module, "PING_SCHEMES", frozenset({"https"}))
+    for line in (
+        f"healthchecks http://hc-ping.example/{PING_TOKEN}",
+        f"healthchecks https://hc-ping.example/{PING_TOKEN} # production",
+        f"ntfy https://user:{PING_TOKEN}@ntfy.example/topic",
+        f"ntfy https://[ntfy.example/{PING_TOKEN}",
+    ):
+        _ping_file(host, line + "\n")
+
+        out, _state = _check(host, capsys)
+
+        assert "FAIL hooks:" in out and "nothing is sent through it" in out
+        assert PING_TOKEN not in out
+
+
+def test_a_failed_or_redirected_send_is_said_by_kind_and_never_followed(host, receiver, capsys):
+    _ping_file(
+        host,
+        # TLS to a server that speaks plain HTTP: refused at once.
+        f"healthchecks {receiver.url.replace('http:', 'https:')}/{PING_TOKEN}\n"
+        f"ntfy {receiver.url}/moved-{PING_TOKEN}\n",
+    )
+
+    out, state = _check(host, capsys)
+
+    assert "healthchecks ping (ok) to 127.0.0.1: URLError" in out
+    assert "ntfy message (ok) to 127.0.0.1: HTTP 302" in out
+    assert [path for path, _headers, _body in receiver.received if path.startswith("/moved")] == [
+        f"/moved-{PING_TOKEN}"
+    ]
+    assert PING_TOKEN not in out + json.dumps(state)
+    # Not delivered, so it is tried again next time.
+    _check(host, capsys)
+    assert len([path for path, _headers, _body in receiver.received if path.startswith("/moved")]) == 2
+
+
+def test_each_ntfy_topic_is_told(host, receiver, capsys):
+    _ping_file(host, f"ntfy {receiver.url}/topic-a\nntfy {receiver.url}/topic-b\n")
+
+    _check(host, capsys)
+    _check(host, capsys)
+
+    assert [path for path, _headers, _body in receiver.received] == ["/topic-a", "/topic-b"]
+
+
+@pytest.mark.parametrize("problem", ["writable directory", "link"])
+def test_a_ping_file_others_could_replace_is_not_used(host, receiver, capsys, problem):
+    if problem == "link":
+        target = host.root / "etc/scrapeyard/elsewhere"
+        target.write_text(f"healthchecks {receiver.url}/{PING_TOKEN}\n")
+        target.chmod(0o600)
+        host.module.PING_FILE.symlink_to(target)
+    else:
+        _ping_file(host, f"healthchecks {receiver.url}/{PING_TOKEN}\n")
+        (host.root / "etc").chmod(0o775)
+
+    out, _state = _check(host, capsys)
+
+    assert "FAIL hooks:" in out
+    assert receiver.received == []
+
+
+def test_a_run_that_crashes_says_only_what_kind_and_the_next_run_reports_it(host, capsys, monkeypatch):
+    original = host.module.check_all
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError(f"https://hc-ping.example/{PING_TOKEN}")
+
+    monkeypatch.setattr(host.module, "check_all", crash)
+    assert host.module.main([]) == 1
+    out = capsys.readouterr().out
+    assert "The check itself failed (RuntimeError)" in out and PING_TOKEN not in out
+
+    monkeypatch.setattr(host.module, "check_all", original)
+    out, state = _check(host, capsys)
+    assert "FAIL previous-run: ended with RuntimeError before it reported" in out
+    out, state = _check(host, capsys)
+    assert "previous-run" not in out and state["status"] == "ok"
+
+
+def test_the_readiness_probe_asks_liveness_of_a_release_without_the_readiness_check(receiver):
+    module = _load()
+    probe = module.READINESS_PROBE.replace("http://127.0.0.1:8420", receiver.url)
+
+    # -S: no site packages, so no scrapeyard to import, as in an older release.
+    done = subprocess.run([sys.executable, "-I", "-S", "-"], input=probe, capture_output=True, text=True, check=True)
+
+    assert json.loads(done.stdout)["asked"] == "/health/live"

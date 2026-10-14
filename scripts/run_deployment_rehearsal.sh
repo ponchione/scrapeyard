@@ -1351,6 +1351,10 @@ PY
       grep -q -F -- "$line" "$DIAGNOSTICS_DIR/host-check.log" || fail "the host check did not report: $line"
     done
     [[ -s "$BACKUP_STATUS_DIR/health-status.json" ]] || fail "the host check wrote no status file"
+    systemctl enable --now "$HEALTH_UNIT.timer" > "$DIAGNOSTICS_DIR/host-check-timer-enable.log" 2>&1
+    systemctl list-timers --no-pager "$HEALTH_UNIT.timer" > "$DIAGNOSTICS_DIR/host-check-timer.txt" 2>&1
+    grep -q -F "$HEALTH_UNIT.service" "$DIAGNOSTICS_DIR/host-check-timer.txt" || \
+      fail "the host check's timer is not waiting to start its unit"
   else
     echo "The candidate has no host check; it is not rehearsed."
   fi

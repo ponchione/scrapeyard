@@ -119,14 +119,15 @@ run; what it reports through is a hook the operator installs.
 
 | Check | Fails when |
 | --- | --- |
-| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes; the line names what failed (`redis`, `worker`, ...) and what Docker says. |
+| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup or a promotion runs, or the boot service is starting or stopping it. |
 | `disk` | `/`, `/var/lib/docker` or `/var/backups/scrapeyard` has less than 10% or 2 GiB free, or less than 10% of its inodes. |
 | `backup` | The last backup completed more than 26 hours ago, none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. |
-| `policy-watch` | `scrapeyard-policy-watch.timer` is not active, or the watch wrote to its record since the last check (once, with the lines). |
+| `policy-watch` | `scrapeyard-policy-watch.timer` is not active, or the watch wrote to its record since the last check (once, with the lines). The record's first line counts too. Without a status file to compare with, lines from the last 15 minutes count as new. |
 | `units` | Any unit on the host has failed, the check's own aside. |
 | `restarts` | Since the last check, an application, Redis or probe container was restarted (TD-89's ending included), or `scrapeyard.service` or the tunnel's unit was. Once, with the counts. |
 | `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
-| `hooks` | A hook is installed that root cannot trust; nothing is sent through it. |
+| `hooks` | A hook is installed that root cannot trust, or a ping line is not one `https` URL with no login, space or comment; nothing is sent through it. |
+| `previous-run` | The run before this one ended before it reported (once). |
 
 Each run prints one line for each check to the journal
 (`journalctl -u scrapeyard-health`) and writes them to
@@ -149,8 +150,14 @@ installed, and says what it did:
 
 With neither installed, it says what it would have sent. `scrapeyard-health
 --dry-run` runs the checks and says what each hook would be sent, sending
-nothing. The URLs are credentials of their own and are never printed; the
-report holds names, states, ages and sizes, no setting and no credential.
+nothing. The URLs are credentials of their own and are never printed, nor
+followed to where a redirect points; the report holds names, states, ages
+and sizes, no setting and no credential. It calls the host `Scrapeyard host`,
+or what `--label` says, and never by its host name, which can name its
+address. A run that fails says only what kind of error ended it, and the next
+run reports that once; a run that never happens is noticed only by
+healthchecks.io, whose missed pings are the one alarm that needs nothing on
+the host to work.
 
 The tunnel's connector serves its own readiness on loopback
 (`http://127.0.0.1:20241/ready` by default), but the connector unit in
