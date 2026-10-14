@@ -40,6 +40,19 @@ target:
     title: "h1"
 """
 
+# Deployment secrets the rehearsal's settings define and allow for its project:
+# a job may name the first, and the second is allowed but never defined.
+SECRET_NAME = "SCRAPEYARD_SECRET_REHEARSAL_PROXY"
+MISSING_SECRET_NAME = "SCRAPEYARD_SECRET_REHEARSAL_MISSING"
+
+
+def secret_reference_config(name: str) -> str:
+    """The known job, sent through a proxy named by a deployment secret."""
+
+    return KNOWN_CONFIG.replace(
+        "name: known-run\n", f"name: secret-reference\nproxy:\n  url: ${{{name}}}\n"
+    )
+
 
 class RehearsalFailure(RuntimeError):
     pass
@@ -76,12 +89,15 @@ def expect(condition: bool, message: str) -> None:
 
 
 def submit(
-    api_url: str, client_key: str, idempotency_key: str = IDEMPOTENCY_KEY
+    api_url: str,
+    client_key: str,
+    idempotency_key: str = IDEMPOTENCY_KEY,
+    config: str = KNOWN_CONFIG,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     status, submission, headers = request(
         f"{api_url}/scrape",
         api_key=client_key,
-        data=KNOWN_CONFIG.encode(),
+        data=config.encode(),
         headers={"Content-Type": "application/x-yaml", "Idempotency-Key": idempotency_key},
     )
     expect(status == 202, f"submission: expected HTTP 202, got {status}: {submission}")
@@ -140,6 +156,56 @@ def run_new(api_url: str, client_key: str, timeout: float) -> dict[str, Any]:
     return {"job_id": run.get("job_id"), "run_id": run.get("run_id"), "status": run.get("status")}
 
 
+def secret_reference(
+    api_url: str, client_key: str, secret_value: str, timeout: float
+) -> dict[str, Any]:
+    """A job that names a deployment secret runs with its value, and never shows it.
+
+    The value is resolved from the application's environment when the job is
+    validated, so a reference the container cannot resolve is refused at once.
+    The control names a secret that is allowed and was never defined.
+    """
+    refused_status, refused, _headers = request(
+        f"{api_url}/scrape",
+        api_key=client_key,
+        data=secret_reference_config(MISSING_SECRET_NAME).encode(),
+        headers={
+            "Content-Type": "application/x-yaml",
+            "Idempotency-Key": f"release-rehearsal-{uuid.uuid4().hex}",
+        },
+    )
+    expect(
+        refused_status == 422
+        and f"Missing deployment secret reference {MISSING_SECRET_NAME}" in str(refused),
+        f"a job naming an undefined secret: expected HTTP 422 naming it, got {refused_status}: {refused}",
+    )
+    submission, _headers = submit(
+        api_url,
+        client_key,
+        f"release-rehearsal-{uuid.uuid4().hex}",
+        secret_reference_config(SECRET_NAME),
+    )
+    job_id, run_id = submission["job_id"], submission["run_id"]
+    run = await_run(api_url, client_key, job_id, run_id, timeout)
+    reads = {"run": run}
+    for name, path in (
+        ("result", f"/results/{job_id}?run_id={run_id}&latest=false"),
+        ("job", f"/jobs/{job_id}"),
+    ):
+        status, body, _headers = request(f"{api_url}{path}", api_key=client_key)
+        expect(status == 200, f"{name} read: HTTP {status}: {body}")
+        reads[name] = body
+    for name, body in reads.items():
+        expect(
+            secret_value not in json.dumps(body),
+            f"the deployment secret's value appeared in the {name}",
+        )
+    return {
+        "undefined_secret_refused": refused_status,
+        "run": {"run_id": run_id, "status": run.get("status")},
+    }
+
+
 def check(
     api_url: str,
     client_key: str,
@@ -189,12 +255,15 @@ def check(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("record", "check", "run"))
+    parser.add_argument("action", choices=("record", "check", "run", "secret-reference"))
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--client-key-file", type=Path, required=True)
     parser.add_argument("--monitor-key-file", type=Path, required=True)
     parser.add_argument("--known", type=Path, help="recorded known run (written by record)")
     parser.add_argument("--job-timeout", type=float, default=120)
+    parser.add_argument(
+        "--secret-file", type=Path, help=f"the value of {SECRET_NAME} (secret-reference)"
+    )
     args = parser.parse_args()
     client_key = args.client_key_file.read_text(encoding="utf-8").strip()
     monitor_key = args.monitor_key_file.read_text(encoding="utf-8").strip()
@@ -205,6 +274,11 @@ def main() -> None:
             report = record(args.api_url, client_key, args.known, args.job_timeout)
         elif args.action == "run":
             report = run_new(args.api_url, client_key, args.job_timeout)
+        elif args.action == "secret-reference":
+            if args.secret_file is None:
+                parser.error("secret-reference requires --secret-file")
+            secret_value = args.secret_file.read_text(encoding="utf-8").strip()
+            report = secret_reference(args.api_url, client_key, secret_value, args.job_timeout)
         else:
             report = check(args.api_url, client_key, monitor_key, args.known)
     except (RehearsalFailure, OSError) as exc:

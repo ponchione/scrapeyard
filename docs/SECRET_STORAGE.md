@@ -56,6 +56,12 @@ exact names it may use. The reserved `*` project adds explicitly shared names:
 export SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='{"catalog":["SCRAPEYARD_SECRET_PROXY_URL","SCRAPEYARD_SECRET_WEBHOOK_AUTH"],"*":["SCRAPEYARD_SECRET_SHARED_CA"]}'
 ```
 
+Each referenced name must also be set in the application's environment. Under
+the deploy wrapper, a `SCRAPEYARD_SECRET_*` line in the settings file is
+enough: the wrapper hands every such name to the container
+([DEPLOYMENT.md](DEPLOYMENT.md#secrets)). A plain `docker compose up` passes
+the allowlist and none of the secrets.
+
 The default empty policy denies every secret reference. The config `project`
 and `name` must remain literal, so neither authorization policy nor plaintext
 storage paths can be derived from a secret reference.

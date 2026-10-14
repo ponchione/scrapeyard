@@ -251,7 +251,7 @@ capture_diagnostics() {
 # credential may be in them.
 scan_diagnostics() {
   local key_file
-  for key_file in "$WORK_DIR/client-key" "$WORK_DIR/monitor-key"; do
+  for key_file in "$WORK_DIR/client-key" "$WORK_DIR/monitor-key" "$WORK_DIR/secret-proxy"; do
     [[ -f "$key_file" ]] || continue
     if grep -R -F -q -- "$(<"$key_file")" "$DIAGNOSTICS_DIR"; then
       rm -rf -- "$DIAGNOSTICS_DIR"
@@ -386,6 +386,12 @@ printf -v SCRAPEYARD_ENCRYPTION_KEYS '{"rehearsal":"%s"}' \
   "$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
 export SCRAPEYARD_API_CREDENTIALS SCRAPEYARD_ENCRYPTION_KEYS
 export SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID="rehearsal"
+# A deployment secret a job may name (TD-91): a proxy login that only the
+# settings file holds. The second name is allowed and never defined.
+printf 'http://rehearsal:%s@%s:3128\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" "$PROXY_ADDRESS" \
+  > "$WORK_DIR/secret-proxy"
+chmod 600 "$WORK_DIR/secret-proxy"
+SECRET_ALLOWLIST='{"release-rehearsal":["SCRAPEYARD_SECRET_REHEARSAL_PROXY","SCRAPEYARD_SECRET_REHEARSAL_MISSING"]}'
 export SCRAPEYARD_PROXY_URL="http://$PROXY_ADDRESS:3128"
 export SCRAPEYARD_EGRESS_POLICY_ID="$POLICY_ID"
 export COMPOSE_PROJECT_NAME="$PROJECT"
@@ -766,6 +772,8 @@ if ((BOOT_SERVICE == 1)); then
         printf "SCRAPEYARD_API_CREDENTIALS='%s'\n" "$SCRAPEYARD_API_CREDENTIALS"
         printf "SCRAPEYARD_ENCRYPTION_KEYS='%s'\n" "$SCRAPEYARD_ENCRYPTION_KEYS"
         printf "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID='%s'\n" "$SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID"
+        printf "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='%s'\n" "$SECRET_ALLOWLIST"
+        printf "SCRAPEYARD_SECRET_REHEARSAL_PROXY='%s'\n" "$(<"$WORK_DIR/secret-proxy")"
         printf '%s\n' "$@"
       } > "$ENV_DIR/deploy.env.new"
     )
@@ -799,6 +807,29 @@ PY
     docker logs --since "$since" "$APP_CONTAINER" > "$WORK_DIR/attestation.log" 2>&1
     grep -q 'Connected-IP egress policy attested' "$WORK_DIR/attestation.log" || \
       fail "[$label] the application started without checking the host egress policy"
+  }
+
+  # A job names a deployment secret that only the settings file defines. The
+  # deploy wrapper must hand it to the application by name, so the job is
+  # accepted and runs, and its value shows nowhere (TD-91). A proxy is a
+  # transport the untrusted mode reserves, so this runs without one.
+  verify_secret_reference() {
+    local label=$1
+    python3 - "$WORK_DIR/app-inspect.json" <<'PY' || fail "[$label] the deployment secret did not reach the application by its name alone"
+import json
+import sys
+
+names = {item.split("=", 1)[0] for item in json.load(open(sys.argv[1], encoding="utf-8"))[0]["Config"]["Env"]}
+sys.exit(
+    0 if "SCRAPEYARD_SECRET_REHEARSAL_PROXY" in names and "SCRAPEYARD_SECRET_REHEARSAL_MISSING" not in names else 1
+)
+PY
+    python3 tests/rehearsal/verify_deployment.py secret-reference \
+      --api-url "$API_URL" \
+      --client-key-file "$WORK_DIR/client-key" \
+      --monitor-key-file "$WORK_DIR/monitor-key" \
+      --secret-file "$WORK_DIR/secret-proxy" > "$DIAGNOSTICS_DIR/$label-secret-reference.json" || \
+      fail "[$label] a job naming a deployment secret was not run with it"
   }
 
   echo "Installing the boot service as the deployment guide does..."
@@ -1150,6 +1181,7 @@ PY
   verify_runtime promote-no-proxy "$BOOT_CANDIDATE" candidate
   verify_direct_egress promote-no-proxy
   verify_api promote-no-proxy --known "$WORK_DIR/known-run.json"
+  verify_secret_reference promote-no-proxy
 
   echo "Starting the application without the egress policy and without a proxy; it must still refuse to serve..."
   systemctl stop "$UNIT"

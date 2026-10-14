@@ -961,6 +961,15 @@ sudo security/install-chromium-apparmor-profile.sh remove
   before accepting YAML that uses `${SCRAPEYARD_SECRET_*}`. References are
   denied by default; use the reserved `*` project only for deliberately shared
   names. The setting contains names, never secret values.
+- Define each secret a job may name as its own line in the settings file,
+  for example `SCRAPEYARD_SECRET_PROXY_URL='http://user:password@proxy.example:8080'`
+  (at least eight characters). The Compose file cannot list names it does not
+  know, so the deploy wrapper writes the names it finds, and only the names,
+  to `/run/scrapeyard/secret-names.compose.yml` and adds that file to the
+  deployment; Compose takes each value from the wrapper's environment. A
+  change to a secret takes effect at the next start of the boot service.
+  A job that names a secret the application does not hold is refused with
+  `422` and the name.
 
 Persisted config and webhook retry state require the versioned encryption
 keyring described in [SECRET_STORAGE.md](SECRET_STORAGE.md). Store key material

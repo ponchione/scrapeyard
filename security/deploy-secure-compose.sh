@@ -74,6 +74,27 @@ else
   docker compose build scrapeyard
 fi
 
+# Deployment secrets that a submitted job may name as ${SCRAPEYARD_SECRET_...}
+# (docs/SECRET_STORAGE.md) reach the application by name only. A Compose file
+# that lists the names, written for this deployment where only root can read
+# it, has Compose take each value from this process's environment, so no
+# value is written anywhere on the way. With none defined, nothing changes.
+secret_names=()
+while IFS= read -r name; do
+  if [[ "$name" =~ ^SCRAPEYARD_SECRET_[A-Z0-9_]+$ && "$name" != SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST ]]; then
+    secret_names+=("$name")
+  fi
+done < <(compgen -e)
+if ((${#secret_names[@]} > 0)); then
+  secret_file="$LOCK_DIR/secret-names.compose.yml"
+  install -m 600 /dev/null "$secret_file"
+  {
+    printf 'services:\n  scrapeyard:\n    environment:\n'
+    printf '      - %s\n' "${secret_names[@]}"
+  } > "$secret_file"
+  export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:$secret_file"
+fi
+
 # Removes a container that Docker could not stop. A removal can fail the same
 # way as the stop while a start is under way, so it is tried again; with the
 # restart policy off, no further start follows it. A container that still

@@ -461,6 +461,58 @@ def test_secure_compose_deployment_installs_policy_before_starting_app() -> None
     assert "install-chromium-apparmor-profile.sh install" in text
 
 
+def _run_secret_names_step(tmp_path: Path, **settings: str) -> tuple[str, Path]:
+    """Run the wrapper's secret-name step on its own, as root's shell would."""
+    text = Path("security/deploy-secure-compose.sh").read_text(encoding="utf-8")
+    start = text.index("secret_names=()")
+    step = text[start : text.index("\nfi\n", text.index("if ((${#secret_names[@]}", start)) + 4]
+    lock_dir = tmp_path / "lock"
+    lock_dir.mkdir(mode=0o700)
+    done = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step + 'printf %s "${COMPOSE_FILE:-}"'],
+        env={"PATH": "/usr/bin:/bin", "LOCK_DIR": str(lock_dir), **settings},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout, lock_dir / "secret-names.compose.yml"
+
+
+@pytest.mark.parametrize(
+    "compose_file", [None, "/srv/releases/r1/source/docker-compose.yml:/srv/releases/r1/images.json"]
+)
+def test_secure_compose_deployment_hands_secret_names_to_compose_without_values(
+    tmp_path: Path, compose_file: str | None
+) -> None:
+    settings = {
+        "SCRAPEYARD_SECRET_PROXY_URL": "http://user:value-one@203.0.113.9:8080",
+        "SCRAPEYARD_SECRET_WEBHOOK_AUTH": "Bearer value-two",
+        # Names, already passed by the Compose file, and no reference target.
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST": '{"p":["SCRAPEYARD_SECRET_PROXY_URL"]}',
+        "SCRAPEYARD_SECRETS_FILE": "value-three",
+        "SCRAPEYARD_API_CREDENTIALS": "value-four",
+        **({"COMPOSE_FILE": compose_file} if compose_file else {}),
+    }
+
+    compose_files, names = _run_secret_names_step(tmp_path, **settings)
+
+    assert compose_files == f"{compose_file or 'docker-compose.yml'}:{names}"
+    written = names.read_text(encoding="utf-8")
+    assert "value" not in written
+    environment = yaml.safe_load(written)["services"]["scrapeyard"]["environment"]
+    assert sorted(environment) == ["SCRAPEYARD_SECRET_PROXY_URL", "SCRAPEYARD_SECRET_WEBHOOK_AUTH"]
+    assert names.stat().st_mode & 0o777 == 0o600
+
+
+def test_secure_compose_deployment_without_secrets_leaves_compose_files_alone(tmp_path: Path) -> None:
+    compose_files, names = _run_secret_names_step(
+        tmp_path, SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST="{}", COMPOSE_FILE="a.yml:b.json"
+    )
+
+    assert compose_files == "a.yml:b.json"
+    assert not names.exists()
+
+
 def test_smoke_installs_connected_ip_policy_before_starting_app() -> None:
     text = Path("scripts/run_container_browser_smoke.sh").read_text(encoding="utf-8")
     dependency_start = text.index("egress-probe redis fixture")

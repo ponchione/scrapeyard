@@ -17,6 +17,7 @@ from tests.rehearsal.verify_deployment import KNOWN_CONFIG, PROJECT, RehearsalFa
 RUNNER = Path("scripts/run_deployment_rehearsal.sh")
 CLIENT_KEY = "client-secret"
 MONITOR_KEY = "monitor-secret"
+SECRET_VALUE = "http://rehearsal:0123456789abcdef@203.66.81.250:3128"
 
 
 class _FakeDeployment(ThreadingHTTPServer):
@@ -71,14 +72,20 @@ class _Handler(BaseHTTPRequestHandler):
         if caller != "client":
             return self._send(401, {"error": "unauthenticated"})
         parts = path.strip("/").split("/")
+        if parts[0] == "jobs" and len(parts) == 2:
+            config = verify_deployment.secret_reference_config(verify_deployment.SECRET_NAME)
+            if fault == "secret_leaks":
+                config = config.replace("${" + verify_deployment.SECRET_NAME + "}", SECRET_VALUE)
+            return self._send(200, {"job_id": parts[1], "config_yaml": config})
         if parts[0] == "jobs" and len(parts) == 4:
             status = "queued" if fault == "never_runs" else "failed"
             return self._send(200, {"job_id": parts[1], "run_id": parts[3], "status": status})
         if parts[0] == "results":
-            run_id = self.server.runs[IDEMPOTENCY_KEY]
+            run_id = self.server.runs.get(IDEMPOTENCY_KEY)
             return self._send(
                 200,
                 {
+                    **({"leaked": SECRET_VALUE} if fault == "secret_leaks" else {}),
                     "job_id": parts[1],
                     "run_id": run_id,
                     "status": self.server.result_status,
@@ -96,7 +103,16 @@ class _Handler(BaseHTTPRequestHandler):
         if self._caller() != "client":
             return self._send(403 if self._caller() else 401, {"error": "forbidden"})
         assert self.headers["Content-Type"] == "application/x-yaml"
-        assert body == KNOWN_CONFIG.encode()
+        missing = verify_deployment.secret_reference_config(verify_deployment.MISSING_SECRET_NAME)
+        defined = verify_deployment.secret_reference_config(verify_deployment.SECRET_NAME)
+        assert body in {KNOWN_CONFIG.encode(), missing.encode(), defined.encode()}
+        unresolved = {missing.encode(): verify_deployment.MISSING_SECRET_NAME}
+        if self.server.fault == "secret_unresolved":
+            unresolved[defined.encode()] = verify_deployment.SECRET_NAME
+        if body in unresolved and self.server.fault != "missing_secret_accepted":
+            return self._send(
+                422, {"error": f"Invalid config: Missing deployment secret reference {unresolved[body]}"}
+            )
         key = self.headers["Idempotency-Key"]
         replayed = key in self.server.runs and self.server.fault != "replay_starts_a_run"
         if not replayed:
@@ -150,6 +166,33 @@ def test_verifier_runs_new_work_under_a_key_never_used_before(deployment, tmp_pa
     assert run["status"] == "failed"
     assert run["run_id"] != known["run_id"]
     assert len(deployment.runs) == 2
+
+
+def test_verifier_runs_a_job_that_names_a_deployment_secret(deployment, monkeypatch):
+    monkeypatch.setattr(verify_deployment.time, "sleep", lambda _seconds: None)
+
+    report = verify_deployment.secret_reference(deployment.url, CLIENT_KEY, SECRET_VALUE, timeout=5)
+
+    assert report["undefined_secret_refused"] == 422
+    assert report["run"]["status"] == "failed"
+    assert len(deployment.runs) == 1
+
+
+@pytest.mark.parametrize(
+    ("deployment", "message"),
+    [
+        # Compose did not hand the secret to the application.
+        ("secret_unresolved", "Missing deployment secret reference SCRAPEYARD_SECRET_REHEARSAL_PROXY"),
+        # The control proves nothing if an undefined name is accepted too.
+        ("missing_secret_accepted", "a job naming an undefined secret"),
+        ("secret_leaks", "appeared in the result"),
+    ],
+    indirect=["deployment"],
+)
+def test_verifier_refuses_a_secret_that_is_not_resolved_or_shows(deployment, message, monkeypatch):
+    monkeypatch.setattr(verify_deployment.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RehearsalFailure, match=message):
+        verify_deployment.secret_reference(deployment.url, CLIENT_KEY, SECRET_VALUE, timeout=5)
 
 
 @pytest.mark.parametrize("deployment", ["never_runs"], indirect=True)
