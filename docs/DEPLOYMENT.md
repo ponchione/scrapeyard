@@ -275,6 +275,11 @@ be a name on the list, so a request that comes from inside the container
 (over loopback, or from the container's own address) must name loopback:
 `127.0.0.1`, `::1` or `localhost`. Only a caller that may choose a proxy
 could try that: one with `transport-admin`, or any caller in trusted mode.
+A port the application is published on, at an address its container can
+reach (`host.docker.internal`, or the local file's `0.0.0.0`), lets such a
+proxy come back through the host instead, from an address that is not the
+container's; while a public name is on the list, publish 8420 nowhere the
+container can reach, as the production Compose file does.
 List what callers really send, without ports:
 
 - `127.0.0.1`, required whenever the list is set: the container's health

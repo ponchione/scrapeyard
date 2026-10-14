@@ -14,6 +14,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ## Unreleased
 
 ### Deployment qualification
+- Release `fbc340c` runs on the production host since 2026-10-14 (TD-89,
+  TD-90, TD-91, TD-20's host check and TD-21's fixes). Its settings name the
+  hosts a request may give, which were first read off the host's own
+  traffic. After each change the host's checks passed (tunnel included),
+  a stored result read back byte for byte and a fixed-key submission
+  replayed; a backup and its restore test passed.
 - Qualified on the production host on 2026-10-13 and 14 (TD-22, TD-83 and
   TD-84, now closed):
   - A release built, scanned and rehearsed by the release workflow was
@@ -31,6 +37,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
     brought the application back each time, 35 to 39 seconds after boot.
 
 ### Added
+- `SCRAPEYARD_ALLOWED_HOSTS` (TD-90): when set, a request whose `Host` is not
+  one of the names listed gets `400` before anything else reads it, and a
+  request from inside the container must name loopback. A browser that a
+  page's rebinding name sends to the container's own loopback therefore
+  reads nothing from the API. Empty, the default, accepts any `Host`; when
+  set it must include `127.0.0.1`. Refusals count in
+  `scrapeyard_host_refusals_total`.
+- A host check on a timer (TD-20): `security/health-check.py`, installed as
+  `scrapeyard-health` with `scrapeyard-health.timer`, checks readiness, disk
+  and inodes, the backup's age, the policy watch, failed units, restarts and
+  the tunnel's connector every five minutes, and reports through
+  healthchecks.io or ntfy URLs in a root-only file, or a root-owned command.
 - Added page-parameter pagination (`pagination.page_param`, `page_first`,
   `page_step`) for listings whose pages are addressable by a query parameter.
 - Added click pagination (`pagination.mode: click`) for client-rendered
@@ -91,6 +109,19 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- An application whose embedded worker ends outside a shutdown, as it does
+  when Redis goes away under it, now ends itself (TD-89): the server's own
+  shutdown gives running jobs the grace, a thread ends the process with
+  status 70 if that has not finished ten seconds later, and the container's
+  restart policy starts it again through a full start. Before, it kept
+  answering submissions with `202` and never ran them until an operator
+  restarted it. The next start releases the queue deliveries the ended
+  process could not mark finished. A deployment whose container has no
+  restart policy is left stopped instead of idle.
+- The deploy wrapper hands the container every `SCRAPEYARD_SECRET_*` name
+  that `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` lets a project use, by name
+  only (TD-91), so a job's `${SCRAPEYARD_SECRET_...}` reference resolves
+  under the shipped Compose file.
 - The container's health check is the application's readiness. Compose and
   the image run `python -m scrapeyard.runtime.healthcheck`, which asks
   `/health/ready` from inside the container with a `health-detail`
@@ -343,6 +374,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A backup that found more than 1,000 jobs accepted after its witness wrote
+  an archive every restore refused: it now names the first 1,000 and counts
+  them all, and only the restore test refuses such an archive, saying why.
+  An archive from before the late-job list is refused by the restore test
+  with that reason instead of as one the script does not write (TD-21).
+- `scripts/qualification_backup.py create` no longer leaves `-wal` and
+  `-shm` files beside the databases it reads: a quiesced database is read
+  as immutable, one with pages in its log through the log (TD-21).
 - The application's container starts under runc 1.3.3. That version opens
   `/proc/thread-self/fd` with `openat2` after loading the seccomp filter, and
   the profile, which predates that system call, refused it: no container or

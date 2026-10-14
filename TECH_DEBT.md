@@ -6,6 +6,40 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-14, second pass** (`14de943` to `fbc340c`): five pull requests,
+  each security-sensitive one reviewed by a fresh adversarial agent whose
+  fixes the same agent checked again, and one release promoted on the
+  production host.
+  - TD-89 closed: an application whose worker loses Redis ends itself and
+    Docker starts it again; the next start releases the deliveries it left
+    in progress, which the review found would otherwise keep every slot
+    taken for up to the job timeout. In the rehearsal it ended 1 s after
+    Redis stopped and was ready 6 s after Redis came back, with no
+    boot-service restart, and ran a new job.
+  - TD-91 closed: the deploy wrapper hands the container the
+    `SCRAPEYARD_SECRET_*` names the allowlist uses, names only; the
+    rehearsal resolves one in a proxied job and refuses an undefined one.
+  - TD-90 closed: `SCRAPEYARD_ALLOWED_HOSTS`. In the smoke lane each browser
+    fetcher (`dynamic`, `dynamic` with stealth, `stealthy`) reached the API
+    through a rebinding name and got `400` (run 38592232644). The review
+    found a rebinding *proxy* could carry an allowed `Host`; a request from
+    inside the container must now name loopback.
+  - TD-20: a host check on a timer, reporting through a hook. Its review
+    found eight defects in the first version and one in a fix (a skip that
+    could hide an outage for hours), all closed.
+  - TD-21's review leftovers closed, and two more found and fixed: a backup
+    with more than 1,000 late jobs wrote an archive every restore refused,
+    and an immutable read would have copied a crashed rollback journal's
+    pages.
+  - TD-92 found by TD-89's review: a Redis that hangs instead of closing
+    leaves the worker hung and the application ready.
+  - On the production host: the settings file gained
+    `SCRAPEYARD_ALLOWED_HOSTS` (the tunnel's public name, the bridge
+    address, loopback: what the application was seen to receive on each
+    path, checked first with a capture of `Host` headers), release `fbc340c`
+    was promoted, the new backup script and the host check were installed,
+    and a backup and its restore test passed. A copy of the settings file,
+    sealed with `age` to the backup recipient, is with the operator.
 - **2026-10-13 and 14** (`11872b4` to `01a7efb`): a pass with leave to change
   the production host, which was idle for it.
   - Three releases went to the host from the release workflow: `11872b4`,
@@ -267,7 +301,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-92**) and use this template:
+7. **New findings** take the next free ID (**TD-93**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -299,6 +333,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the third 2026-10-09 pass (`bc3041e`) | ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,604 passed, 17 skipped, 90.44% coverage; the 17 live Redis tests pass against a throwaway Redis; Eyebox's client tests (297 passed) and 54 configs pass; the two Chromium modes of the fetch-session smoke check pass locally (Camoufox is not installed here). The lock and the image did not change, so the dependency audits and the container scan were not rerun |
 | After the first Actions pass (2026-10-10, `166ceac`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,614 passed, 17 skipped, 90.44% coverage. On GitHub at the same commit: CI (Quality 3.10: 2,611 passed, 20 skipped; Quality 3.12: 2,614 passed, 17 skipped, with Chromium installed for the three real-browser tests; distribution build; live Redis), Dependency audit on both legs, Container security, browser smoke (4 min; image 3.36 GB), and release qualification quick (10 min) and full (23 min) all pass, with no deprecation or runner warnings. Eyebox's client tests (299 passed) and 54 configs pass |
 | After the deployment pass (2026-10-10, `2c0f4be`; 2,695 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
+| After the second 2026-10-14 pass (`fbc340c`) | On GitHub at the same commit: Quality on 3.12 (3,083 passed, 18 skipped, 90.44% coverage) and 3.10 (3,079 passed, 22 skipped), live Redis (18 passed), browser smoke, quick qualification, the container scan and the release rehearsal pass; the release workflow built and rehearsed release `fbc340c` (run 38597257620). Locally ruff, mypy (110 files) and `pytest -W error` pass on 3.12 and 3.10 |
 | After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
 
 Not run: live Redis tests, container builds, browser smoke, release
@@ -421,18 +456,14 @@ envelope field uses up that budget.
 
 ## Roadmap
 
-Nothing is ready that needs no decision. Every open entry below waits for the
-owner, for Eyebox, or for an outside service.
-
 CI gates pull requests since 2026-10-10. A release is built by the
 `Release artifact and deployment rehearsal` workflow, which scans, qualifies
 and rehearses it against the release it replaces; dispatch it on the commit
 to release, with the host's current release as `previous_revision`.
 
+**Ready:** TD-92 (a watchdog on the worker's polls; no decision needed).
+
 **Coordinated:**
-- TD-89: needs the owner's choice between three fixes; it changes what the
-  application does when Redis goes away.
-- TD-90: needs the owner's choice of fix, and Eyebox for the names it calls.
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
 - TD-17 to TD-21: deployment qualification; not single PRs.
@@ -440,10 +471,10 @@ to release, with the host's current release as `previous_revision`.
     refuse the host's address, and leave to run each beta job from it.
     Every retailer request from the host needs the owner's word.
   - TD-19 needs a rotation tried, and a host rebuilt from the runbook.
-  - TD-20 needs a monitoring service and TD-21 an off-host store, both the
-    owner's choice.
-
-**Ready:** TD-91 (a Compose change, no decision needed).
+  - TD-20 needs the owner to sign up for the alerting services the host
+    check reports to, and to decide two questions (the tunnel's own
+    readiness, and a policy finding that cannot be put back).
+  - TD-21 needs an off-host store, the owner's choice.
 
 **Deferred:** TD-48, TD-49, TD-85, TD-86 and TD-88.
 
@@ -465,114 +496,36 @@ to release, with the host's current release as `previous_revision`.
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
-| TD-89 | P1 | coordinated | The embedded worker does not come back after it loses Redis |
-| TD-90 | P2 | coordinated | A browser fetch of a name that changes its answer reaches the container's own loopback |
-| TD-91 | P3 | ready | Compose passes the secret-reference allowlist and none of the secrets it names |
+| TD-92 | P2 | ready | A Redis that stops answering, without closing, leaves the worker hung and ready |
 
 ## Ready to implement
 
-### TD-91 — Compose passes the secret-reference allowlist and none of the secrets it names
+### TD-92 — A Redis that stops answering, without closing, leaves the worker hung and ready
 
-**Priority:** P3 · **Area:** deployment · **Risk:** low · **Contract:** none · **Depends on:** —
+**Priority:** P2 · **Area:** queue, supervision · **Risk:** low · **Contract:** a submission is answered 202 and its run stays `queued` · **Depends on:** —
 
-**Problem:** `docker-compose.yml` hands the application
-`SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` and no `SCRAPEYARD_SECRET_*` value.
-A job that refers to `${SCRAPEYARD_SECRET_PROXY_URL}`, as
-[SECRET_STORAGE.md](docs/SECRET_STORAGE.md) describes, cannot resolve it
-under the shipped Compose file, whatever the host's settings hold, so a
-proxy login can only be the service-wide `SCRAPEYARD_PROXY_URL` or be
-written into the job. Reported from the production host on 2026-10-13 and
-read in the Compose file; not tried.
-**Code:** `docker-compose.yml` (the `scrapeyard` service's environment).
-**Fix:** pass the names a deployment may define, or an env file of them,
-into the container, and rehearse one reference.
-**Done when:** the rehearsal resolves one `SCRAPEYARD_SECRET_*` reference
-in a submitted job through the deploy wrapper.
+**Problem:** found by TD-89's independent review on 2026-10-14, read in
+arq and not tried. arq gives its Redis connections a connect timeout and no
+read timeout (`arq/connections.py`, `create_pool`). A Redis that is paused,
+or a network path that drops packets instead of resetting, leaves the
+worker's poll waiting for ever. The runner task stays alive, so readiness
+and the container's health stay ok, nothing ends the process (TD-89 acts
+on a runner that ends), and accepted runs are never started.
+**Code:** `src/scrapeyard/queue/pool.py` (`WorkerPool.start`,
+`_PriorityWorker._poll_iteration`), `src/scrapeyard/runtime/metrics.py`
+(`mark_last_success("worker")`).
+**Fix:** treat a worker whose last completed poll is older than a bound
+(a few poll intervals plus the Redis timeout) as ended: readiness fails
+and the process ends as for TD-89. Or give the pool's connections a read
+timeout, if arq passes one through.
+**Done when:** a live Redis test that pauses Redis (`DEBUG SLEEP`, or a
+relay that stops forwarding without closing) sees the process asked to
+end within the bound, and a job submitted after Redis answers again runs.
 
 ## Coordinated
 
 These need a decision, a security review, an Eyebox change, or real-traffic
 data before any code.
-
-### TD-89 — The embedded worker does not come back after it loses Redis
-
-**Priority:** P1 · **Area:** queue, supervision · **Risk:** medium · **Contract:** a submission is answered 202 and its run stays `queued` · **Depends on:** the owner's choice of fix
-
-**Problem:** found on 2026-10-13 while trying TD-20's health check against a
-local instance (this checkout, a throwaway Redis 7.4.5).
-- The arq worker runs as one task (`WorkerPool.start`). A Redis connection
-  error in its poll ends the task, and nothing starts it again.
-- Measured: a job submitted before the outage completed in under four
-  seconds. Redis was stopped for six seconds and started again. `/health`
-  answered 200 and `/health/ready` 503 (`worker runner task failed:
-  ConnectionError`), still so a minute later. A job submitted then was
-  answered 202 and its run was still `queued` 45 seconds on, when the
-  instance was stopped.
-- Until TD-20's change the container stayed `healthy` in that state. Now it
-  turns `unhealthy`, and Docker does not restart an unhealthy container.
-- On a host, Redis and the application stop and start together at a reboot
-  and at a restart of Docker. It takes Redis alone going away under a
-  running application: a crash, the kernel's out-of-memory killer, an
-  operator's `docker restart`. Not seen on the production host.
-
-**Code:** `src/scrapeyard/queue/pool.py` (`WorkerPool.start`,
-`background_ok`), `src/scrapeyard/main.py` (the lifespan).
-**Fix:** one of three, none tried:
-- End the process when the runner task ends outside a shutdown. The
-  container's restart policy starts it again, through the start every
-  deployment takes (policy check, reconciliation of queued and running
-  runs). Runs that were executing are abandoned and reconciled.
-- Start the worker again in place, with a pause between attempts. It has to
-  settle what becomes of runs that were executing when Redis went away, and
-  must not run one twice.
-- Leave the application alone and have the host's minute check restart
-  `scrapeyard.service` once the container has been unhealthy for some
-  minutes. No application change; any other cause of a lasting 503 (a full
-  disk) then restarts it as well.
-
-**Done when:** the rehearsal stops Redis under the running application,
-starts it again, and a job submitted afterwards runs with no operator
-command. Its Redis step restarts the boot service by hand today.
-
-### TD-90 — A browser fetch of a name that changes its answer reaches the container's own loopback
-
-**Priority:** P2 · **Area:** security, browsers · **Risk:** medium · **Contract:** a fix that judges the `Host` header would refuse requests whose `Host` is not one the deployment names · **Depends on:** the owner's choice of fix, and Eyebox for the names it calls
-
-**Problem:** found on the production host on 2026-10-13 by TD-18's check.
-- The guard resolves a name before a fetch and refuses a non-public answer.
-  A browser resolves the name again by itself when it connects. For that
-  race the [guide](docs/DEPLOYMENT.md#egress) relies on the host policy,
-  which refuses private destinations at the network. The host policy never
-  sees a connection that stays inside the container.
-- Tried with a name whose first answer is a public address and whose later
-  answers are `127.0.0.1`, port 8420: in one of four `dynamic` fetches the
-  browser loaded the application's own `GET /health` from loopback, and the
-  run completed with that body in its result. A plain client in the same
-  container that looked the name up twice reached it in two of four tries.
-  `basic` fetches connect to the address they checked and did not reach it
-  in five.
-- What is there to reach: the API on port 8420, of which `/health` and
-  `/health/live` answer without a credential and say `{"status":"ok"}`.
-  Every other route needs an API key, which a page does not have. Nothing
-  else listens on the container's loopback. So today a hostile page learns
-  that the API exists. The same route would reach anything later added to
-  loopback, or any route that trusted a local caller.
-- Not tried: a name that changes to the container's own bridge address,
-  which stays inside the container the same way.
-
-**Code:** `src/scrapeyard/main.py` (the middleware stack),
-`src/scrapeyard/engine/` (the browser guard), `docs/DEPLOYMENT.md` ("Egress").
-**Fix:** to be chosen. The usual defence is on the receiving side: refuse a
-request whose `Host` header is not a name the deployment was told to answer
-to (the bridge address, the service name, the public name), which leaves a
-rebound name with a 400 and nothing to read. It needs a setting, a default
-that does not break Eyebox's local stack, and the tunnel's forwarded name.
-The alternative is to keep the browsers from connecting to the container's
-own addresses, which Chromium's and Firefox's resolvers do not offer as one
-switch.
-**Done when:** the smoke lane fetches a name that rebinds to loopback with
-each browser fetcher and no result holds the API's answer, and the guide's
-"Egress" section says what closes the case the host policy cannot see.
 
 ### TD-45 — Bundled browsers are months behind upstream
 
@@ -844,7 +797,10 @@ host's address ([DEPLOYMENT.md](docs/DEPLOYMENT.md#without-an-operator-proxy)).
   - A name whose first answer is a public address and whose later answers
     are `127.0.0.1`: `basic` did not reach loopback in five tries, since it
     connects to the address it checked. `dynamic` reached the application's
-    own `/health` there in one of four. That is TD-90.
+    own `/health` there in one of four. That was TD-90, closed on
+    2026-10-14: a request whose `Host` the deployment does not name is
+    refused, and the smoke lane shows each browser fetcher refused that
+    way.
 
 **Still open:**
 - The host's settings name a proxy since 2026-10-13, set by the owner's
@@ -1099,29 +1055,47 @@ is TD-85.
 - The policy watch runs there since 2026-10-14 09:40 UTC. Its first run
   found the policy in place and printed nothing.
 
+**Done on the production host (2026-10-14, second pass):**
+- The host check (`security/health-check.py`, installed as
+  `scrapeyard-health`, [MONITORING.md](docs/MONITORING.md#the-host-check))
+  runs every five minutes since 16:59 UTC: readiness asked from inside the
+  container, disk and inodes, the backup's age and timer, the policy
+  watch's timer and record, failed units, restarts of the containers and
+  units, and the tunnel's connector. Its first runs, and one right after a
+  backup, passed all eight checks. It reports through a ping file or a
+  command; none is installed, so it says in the journal what it would have
+  sent.
+- An application whose worker loses Redis now ends itself and is started
+  again by Docker (TD-89), so an application that stays unready for that
+  reason no longer needs an operator.
+
 **Still open:**
-- All of the monitoring work below: readiness and metrics collection, and
-  alerts. It needs the owner's choice of a monitoring service. Nothing
-  collects or alerts today: a stopped application, a full disk or a dead
-  tunnel would show as a failed Eyebox run or not at all. A credential for
-  the detailed health route exists on the host and nothing uses it.
+- Alerts reaching the operator: the host check has nothing to send to
+  until the owner signs up for a service and installs
+  `/etc/scrapeyard/health-ping` (healthchecks.io for missed runs and
+  failures, ntfy for messages). Then a real failure and a no-data
+  condition (healthchecks.io's missed pings) must be seen to reach the
+  operator and recover.
+- The tunnel's own readiness (`/ready` on the connector's metrics port)
+  cannot be read from the host: the connector's unit drops loopback
+  (`IPAddressDeny`). The check judges the connector by its unit; allowing
+  loopback to the connector is the owner's call. Cloudflare's tunnel
+  health notification covers a connector that runs without a connection.
+- Metrics collection: nothing scrapes `/metrics`. The host check reads
+  readiness, which covers failed background work and disk, not queue age
+  or saturation trends.
 - A timer checks the host policy every minute and puts a missing one back
   (`scrapeyard-release watch`,
-  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch); on the host since
-  2026-10-14).
-  What it leaves for the monitoring work is the alert: it writes a line to
-  `/var/lib/scrapeyard/policy-restored.log` and nothing reads that yet. It
-  does not judge the order of rules, so a rule put ahead of the policy's is
-  not seen. When something removes the `INPUT` jump again in the moment
-  between the watch's install and its check, every time, the application is
-  stopped and restarted once and then runs without that jump, with the watch
-  failing: whether it should stay stopped instead is the owner's to decide.
-- Since the same day the container's health is the application's readiness.
-  Docker does not restart an unhealthy container, so an application that
-  stays unready (TD-89 is one way) is visible in `docker ps` and to nothing
-  else until the monitoring work. A start now fails for an application that
-  runs and is not ready, low disk included, and leaves it stopped; whether
-  low disk should fail a start is the owner's to confirm.
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#the-policy-watch)); the host check
+  reports what it records. It does not judge the order of rules, so a rule
+  put ahead of the policy's is not seen. When something removes the `INPUT`
+  jump again in the moment between the watch's install and its check, every
+  time, the application is stopped and restarted once and then runs without
+  that jump, with the watch failing (which the host check now reports):
+  whether it should stay stopped instead is the owner's to decide.
+- A start fails for an application that runs and is not ready, low disk
+  included, and leaves it stopped; whether low disk should fail a start is
+  the owner's to confirm.
 
 **Problem:**
 - Before 2026-10-10, `security/deploy-secure-compose.sh` installed policy
@@ -1198,15 +1172,20 @@ decrypted with the host's key, the copy confined on a network with no route
 off the host. The private half of the key pair was made off the host and is
 kept by the operator; it was on the host only for that test.
 
+**Done on the production host (2026-10-14, second pass):** the backup
+script of release `fbc340c` was installed, which names at most 1,000 jobs
+accepted after its witness and counts them all, and refuses a crashed
+rollback journal instead of copying its pages. A backup at 16:59 UTC had
+the application down for 33.4 seconds and wrote a 1.9 MB archive; its
+restore test passed in 18 seconds (179 jobs identical, configurations
+decrypted). A copy of `/etc/scrapeyard/deploy.env`, sealed with `age` to
+the backup recipient, was made for the operator, who keeps it with the
+private key; it decrypts with that key to the host's file byte for byte.
+
 **Still open:**
 - An off-host store and its upload hook (the owner's choice). Until then the
   seven archives the host keeps protect against a mistake or a bad release,
   not against losing the host.
-- A copy of the keyring (`/etc/scrapeyard/deploy.env`) off the host. The
-  archives deliberately do not hold it, and without it a restored database's
-  stored configurations cannot be read and Eyebox needs a new credential.
-- An alert when the last backup is too old: the status file
-  (`/var/lib/scrapeyard/backup-status.json`) is there for it (TD-20).
 - A restore onto a rebuilt host has run on a CI runner only (40 to 54
   seconds for the command), not from an off-host copy.
 
