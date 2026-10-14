@@ -1065,8 +1065,9 @@ the promoted release (`scripts/qualification_backup.py`, described in
 The application is down from step 4 to step 6: the stop, the copy and the
 start. With a few hundred kilobytes of data that was 17 to 21 seconds in
 seven runs on GitHub runners (2026-10-13), nearly all of it the application's
-own stop and start; with 2 GiB of data it was 30.5 seconds. It has not been
-measured on a production host, whose cores are slower. A request that arrives
+own stop and start; with 2 GiB of data it was 30.5 and 39.8 seconds in two
+runs, and the restore test of that archive took 40.5 seconds. It has not
+been measured on a production host, whose cores are slower. A request that arrives
 in that time is refused, so keep the consumer's schedule clear of the
 minutes after 04:40 UTC. Work that was queued when the application stopped
 is in both the databases and Redis's dump, from the same moment; a backup

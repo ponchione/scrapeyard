@@ -201,6 +201,9 @@ elif command == "run":
         stored = [(job["job_id"], "td21") for job in json.loads((state / "witness.json").read_text())["jobs"]]
         stored += [tuple(job.split("=")) for job in env.get("ACCEPTED_SINCE", "").split()]
         database = sqlite3.connect(made / "payload" / "db" / "jobs.db")
+        # As SQLite's backup API leaves it: in WAL mode, with no sidecar file
+        # until something opens it for writing.
+        database.execute("PRAGMA journal_mode=WAL")
         database.execute("CREATE TABLE jobs (job_id TEXT, project TEXT)")
         database.executemany("INSERT INTO jobs VALUES (?, ?)", stored)
         database.commit()
@@ -853,9 +856,11 @@ def test_what_cannot_be_trusted_or_used_is_refused_before_anything_is_stopped(ho
     assert not (host.state / "uploaded").exists()
     assert "QQQQ" not in result.stderr and "hunter2" not in result.stderr
     if problem == "a settings line the start could not read":
-        # The line is named by its number, as the unit's start would name it.
+        # The line is named by its number, as the unit's start would name it,
+        # and before the wait: nothing is waited for that would be refused.
         assert "deploy.env line 3 is not a SCRAPEYARD_ setting" in result.stderr
         assert "could not be started again" in result.stderr
+        assert not host.called("docker exec")
     if problem == "more data than there is room for twice":
         assert "a backup of 99999999 MB of data" in result.stderr
     if "private key" in problem:
