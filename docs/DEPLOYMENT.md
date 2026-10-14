@@ -261,6 +261,28 @@ remembered verdict does not change that: the browser, proxy or remote endpoint
 resolves the name again by itself after the guard, whether the guard's own
 answer is a moment or 30 seconds old.
 
+One destination of that race is out of the host policy's sight: the
+container's own addresses. A name that answers a public address to the guard
+and `127.0.0.1` to the browser sends the browser to the application's own API
+on the container's loopback, and that connection never leaves the container
+(TD-90; seen on the production host with a `dynamic` fetch). What closes it is
+on the receiving side: `SCRAPEYARD_ALLOWED_HOSTS` names the hosts a request
+may give in its `Host` header, and any other gets `400` before the request
+reaches anything. A browser sent there by a rebinding name gives that name,
+so it reads nothing; the smoke lane proves this for each browser fetcher.
+List what callers really send, without ports:
+
+- `127.0.0.1`, required whenever the list is set: the container's health
+  check and the backup ask the application there;
+- the application's fixed bridge address `172.30.0.250`, if anything on the
+  host calls it there;
+- the public name a tunnel or reverse proxy forwards (`cloudflared` passes the
+  client's `Host` on unless its `httpHostHeader` is set);
+- the Compose service name `scrapeyard`, if another container calls it.
+
+Empty, the default, accepts any `Host`, as before. A name is compared without
+its port, case or trailing dot, so a rebinding name is refused on any port.
+
 Enforce outbound network policy for the Scrapeyard container or pod:
 
 - Allow Redis.

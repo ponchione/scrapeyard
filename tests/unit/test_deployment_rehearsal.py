@@ -381,6 +381,9 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         "the application came back through the boot service, not by itself",
         "python3 tests/rehearsal/verify_deployment.py run",
         "a job submitted after Redis came back did not run",
+        # The host's Host list is set, and a foreign Host gets nothing (TD-90).
+        "printf \"SCRAPEYARD_ALLOWED_HOSTS='172.30.0.250,127.0.0.1'\\n\"",
+        "the application answered a request for a host it does not name",
         # The last steps run the settings a host without an operator proxy
         # uses: the application's own log must show that it checked the policy.
         "printf \"SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'\\n\"",

@@ -16,6 +16,7 @@ import scrapeyard.main as main_module
 from scrapeyard.api.middleware import (
     APIKeyAuthMiddleware,
     APIVersionHeaderMiddleware,
+    HostHeaderMiddleware,
     MetricsMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -1241,7 +1242,9 @@ async def test_readiness_forwards_authenticated_project_scope(monkeypatch):
 def test_app_middleware_stack_versions_all_size_rate_and_auth_responses():
     middleware_classes = [middleware.cls for middleware in main_module.app.user_middleware]
 
-    assert middleware_classes[:5] == [
+    # A request for a host the deployment does not name reaches none of them.
+    assert middleware_classes[:6] == [
+        HostHeaderMiddleware,
         MetricsMiddleware,
         APIVersionHeaderMiddleware,
         RequestSizeLimitMiddleware,

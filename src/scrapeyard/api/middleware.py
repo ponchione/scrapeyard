@@ -23,6 +23,7 @@ from scrapeyard.api.auth import (
     parse_api_credentials,
 )
 from scrapeyard.api.response_utils import error_content
+from scrapeyard.common.request_hosts import request_host
 from scrapeyard.runtime.metrics import observe_api_request, observe_rate_limit_state
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,54 @@ class RateLimitMiddleware:
             if not requests or requests[-1] <= cutoff:
                 self._requests_by_key.pop(key, None)
                 observe_rate_limit_state("api", "expired")
+
+
+class HostHeaderMiddleware:
+    """Refuse a request whose Host is not a name this deployment answers to.
+
+    A page can name a host whose address changes to this container's own
+    loopback after the URL guard has checked it, and a browser then sends it
+    here. The browser still says that name in Host, so the request is refused
+    before anything reads it (TD-90). An empty list leaves every Host accepted.
+    """
+
+    _LOG_INTERVAL_SECONDS = 10.0
+
+    def __init__(self, app: ASGIApp, allowed_hosts: frozenset[str]) -> None:
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+        self._logged_at: float | None = None
+        self._unlogged = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not self.allowed_hosts or scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+        values = _header_values(scope.get("headers", []), b"host")
+        host = request_host(values[0]) if len(values) == 1 else None
+        if host is not None and host in self.allowed_hosts:
+            await self.app(scope, receive, send)
+            return
+        self._log_refusal(values)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await _reject(scope, send, 400, "Invalid Host header")
+
+    def _log_refusal(self, values: list[bytes]) -> None:
+        # A hostile page can send many; one line in ten seconds says enough.
+        now = time.monotonic()
+        if self._logged_at is not None and now - self._logged_at < self._LOG_INTERVAL_SECONDS:
+            self._unlogged += 1
+            return
+        logger.warning(
+            "Refused a request for a host this deployment does not name host=%r "
+            "refused_since_last_line=%d",
+            [value[:100].decode("ascii", "backslashreplace") for value in values[:2]],
+            self._unlogged,
+        )
+        self._logged_at = now
+        self._unlogged = 0
 
 
 class RequestSizeLimitMiddleware:

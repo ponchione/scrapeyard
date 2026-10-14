@@ -661,6 +661,35 @@ def test_secret_reference_allowlist_rejects_invalid_policies(raw):
         ServiceSettings(secret_reference_allowlist=raw)
 
 
+def test_allowed_hosts_are_read_in_the_form_a_host_header_is_compared_in():
+    settings = ServiceSettings(allowed_hosts=" Scrapeyard.Example. ,127.0.0.1,[::1],172.30.0.250,")
+
+    assert settings.parsed_allowed_hosts() == frozenset(
+        {"scrapeyard.example", "127.0.0.1", "::1", "172.30.0.250"}
+    )
+    assert ServiceSettings(allowed_hosts="").parsed_allowed_hosts() == frozenset()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "127.0.0.1,scrapeyard.example:443",
+        "127.0.0.1,https://scrapeyard.example",
+        "127.0.0.1,*.example",
+        "127.0.0.1,scrapeyard.example/health",
+        "127.0.0.1,user@scrapeyard.example",
+    ],
+)
+def test_allowed_hosts_refuse_anything_but_a_bare_name_or_address(raw):
+    with pytest.raises(ValidationError, match="SCRAPEYARD_ALLOWED_HOSTS entries"):
+        ServiceSettings(allowed_hosts=raw)
+
+
+def test_allowed_hosts_must_keep_the_health_check_answered():
+    with pytest.raises(ValidationError, match="must include 127.0.0.1"):
+        ServiceSettings(allowed_hosts="scrapeyard.example,localhost")
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

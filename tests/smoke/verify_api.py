@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 import time
 import urllib.error
@@ -15,6 +16,13 @@ PUBLIC_ORIGIN = "http://fixture.public.test:8080"
 PRIVATE_ORIGIN = "http://fixture.private.test:8080"
 PRIVATE_LITERAL_ORIGIN = "http://10.77.14.2:8080"
 TERMINAL_STATUSES = {"complete", "partial", "failed", "cancelled"}
+# The fixture's resolver answers these names with its public address first and
+# loopback afterwards (fixture_site.REBIND_SUFFIX). The application's own API
+# listens on the container's loopback at 8420.
+REBIND_SUFFIX = ".rebind.test"
+REBIND_FETCHERS = (("dynamic", False), ("dynamic", True), ("stealthy", False))
+REBIND_ATTEMPTS = 3
+API_HEALTH_BODY = '"status":"ok"'
 
 
 class SmokeFailure(RuntimeError):
@@ -421,6 +429,82 @@ def verify_ssrf_defenses(
     return stats
 
 
+def rebinding_config(name: str, host: str, fetcher: str, *, stealth: bool) -> str:
+    return f"""project: item14-smoke
+name: {name}
+{_execution_block()}target:
+  url: http://{host}:8420/health
+  fetcher: {fetcher}
+  browser:
+    timeout_ms: 30000
+    disable_resources: false
+    network_idle: false
+    stealth: {str(stealth).lower()}
+  selectors:
+    body: body
+"""
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _strings(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
+def verify_rebinding_refused(
+    api_url: str,
+    fixture_url: str,
+    api_key: str,
+    diagnostics: Path,
+    deadline_seconds: float,
+) -> dict[str, Any]:
+    """A browser sent to the API's loopback by a rebinding name reads nothing from it.
+
+    The URL guard sees the name's public answer and lets the fetch go; the
+    browser resolves it again and connects to the container's own loopback,
+    which the host egress policy cannot see. The API must refuse the request
+    by its Host (TD-90). Only a 400 for the document shows that the browser
+    did reach the API; a fetch that went to the public answer finds nothing
+    listening there and proves nothing, so it is tried again under a new name.
+    """
+    outcomes: dict[str, Any] = {}
+    for fetcher, stealth in REBIND_FETCHERS:
+        mode = f"{fetcher}-stealth" if stealth else fetcher
+        tries: list[dict[str, Any]] = []
+        for attempt in range(1, REBIND_ATTEMPTS + 1):
+            label = f"rebinding-{mode}-{attempt}"
+            host = f"{mode}-{attempt}-{secrets.token_hex(4)}{REBIND_SUFFIX}"
+            payload = _submit_and_poll(
+                api_url,
+                api_key,
+                rebinding_config(label, host, fetcher, stealth=stealth),
+                diagnostics,
+                label,
+                deadline_seconds,
+            )
+            debug = _target(payload, label).get("debug") or {}
+            status = debug.get("main_document_status") if isinstance(debug, dict) else None
+            if status == 200 or any(API_HEALTH_BODY in text.replace(" ", "") for text in _strings(payload)):
+                raise SmokeFailure(f"{label}: the API answered a name that rebinds to loopback: {debug}")
+            tries.append({"host": host, "main_document_status": status})
+            if status == 400:
+                break
+        else:
+            raise SmokeFailure(
+                f"rebinding-{mode}: the browser never reached the API through a rebinding "
+                f"name in {REBIND_ATTEMPTS} tries, so nothing was shown: {tries}"
+            )
+        outcomes[mode] = tries
+    status, stats = _request(f"{fixture_url}/__stats")
+    _write_diagnostic(diagnostics, "rebinding-dns-queries", stats.get("rebinding_queries"))
+    print(f"verified rebinding refusal: {json.dumps(outcomes, sort_keys=True)}", flush=True)
+    return outcomes
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     api_key = Path(args.api_key_file).read_text(encoding="utf-8").strip()
     if not api_key:
@@ -452,7 +536,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         diagnostics,
         args.job_timeout,
     )
-    summary = {"modes": modes, "protected_endpoint": stats}
+    rebinding = verify_rebinding_refused(
+        args.api_url,
+        args.fixture_url,
+        api_key,
+        diagnostics,
+        args.job_timeout,
+    )
+    summary = {"modes": modes, "protected_endpoint": stats, "rebinding": rebinding}
     _write_diagnostic(diagnostics, "smoke-summary", summary)
     return summary
 

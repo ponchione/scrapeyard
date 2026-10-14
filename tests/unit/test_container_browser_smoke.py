@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import socket
+import struct
 import subprocess
 import threading
 import urllib.error
@@ -14,7 +16,7 @@ import pytest
 import yaml
 
 from tests.smoke import verify_confinement
-from tests.smoke.fixture_site import PRIVATE_ORIGIN, PUBLIC_ORIGIN, create_server
+from tests.smoke.fixture_site import PRIVATE_ORIGIN, PUBLIC_ORIGIN, RebindingResolver, create_server
 from tests.smoke.verify_api import (
     PRIVATE_LITERAL_ORIGIN,
     basic_config,
@@ -241,6 +243,85 @@ def test_fixture_serves_deterministic_static_dynamic_redirect_and_protected_scen
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def _dns_query(name: str, record_type: int, identifier: int = 0x1234) -> bytes:
+    labels = b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
+    return (
+        struct.pack(">HHHHHH", identifier, 0x0100, 1, 0, 0, 0)
+        + labels
+        + b"\x00"
+        + struct.pack(">HH", record_type, 1)
+    )
+
+
+def _dns_answer(response: bytes) -> tuple[int, int, str | None]:
+    identifier, flags, _questions, answers = struct.unpack(">HHHH", response[:8])
+    address = socket.inet_ntoa(response[-4:]) if answers else None
+    return identifier, flags & 0x000F, address
+
+
+def test_fixture_resolver_rebinds_a_name_after_its_first_address_query() -> None:
+    resolver = RebindingResolver("203.66.81.242")
+
+    # Queries for other record types neither answer nor use up the first answer.
+    identifier, rcode, address = _dns_answer(resolver.answer(_dns_query("a1.rebind.test", 28, 7)))
+    assert (identifier, rcode, address) == (7, 0, None)
+    assert _dns_answer(resolver.answer(_dns_query("A1.Rebind.Test", 1)))[1:] == (0, "203.66.81.242")
+    assert _dns_answer(resolver.answer(_dns_query("a1.rebind.test", 1)))[1:] == (0, "127.0.0.1")
+    assert _dns_answer(resolver.answer(_dns_query("a1.rebind.test", 1)))[1:] == (0, "127.0.0.1")
+    # Each name has its own first answer.
+    assert _dns_answer(resolver.answer(_dns_query("a2.rebind.test", 1)))[1:] == (0, "203.66.81.242")
+    # Anything else does not exist, and a response or a truncated query is ignored.
+    assert _dns_answer(resolver.answer(_dns_query("example.com", 1)))[1:] == (3, None)
+    assert resolver.answer(_dns_query("a3.rebind.test", 1)[:20]) is None
+    assert resolver.queries() == {"a1.rebind.test": 3, "a2.rebind.test": 1}
+
+
+def _rebinding_payload(status: int | None, excerpt: str = "") -> dict[str, Any]:
+    debug = {"main_document_status": status, "html_excerpt": excerpt}
+    return {"status": "failed", "targets": [{"status": "failed", "debug": debug}]}
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "error"),
+    [
+        # Refused by Host on the second try after one fetch that went public.
+        ([None, 400], None),
+        # The API's own answer, by status or by body, is a failure at once.
+        ([200], "answered a name that rebinds"),
+        ([_rebinding_payload(None, '<pre>{"status": "ok"}</pre>')], "answered a name that rebinds"),
+        # Never reaching the API proves nothing.
+        ([None, None, None], "never reached the API"),
+    ],
+)
+def test_rebinding_check_needs_a_refusal_from_the_api_for_each_browser_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcomes: list[Any], error: str | None
+) -> None:
+    from tests.smoke import verify_api
+
+    hosts: list[str] = []
+
+    def submit(_api: str, _key: str, config: str, *_args: Any) -> dict[str, Any]:
+        hosts.append(config.split("url: http://", 1)[1].split(":", 1)[0])
+        # Outcomes are per try, and every browser mode starts its tries anew.
+        attempt = int(config.split("name: rebinding-", 1)[1].splitlines()[0].rsplit("-", 1)[1])
+        outcome = outcomes[attempt - 1]
+        return outcome if isinstance(outcome, dict) else _rebinding_payload(outcome)
+
+    monkeypatch.setattr(verify_api, "_submit_and_poll", submit)
+    monkeypatch.setattr(verify_api, "_request", lambda *_args, **_kwargs: (200, {}))
+
+    if error:
+        with pytest.raises(verify_api.SmokeFailure, match=error):
+            verify_api.verify_rebinding_refused("api", "fixture", "key", tmp_path, 5)
+        return
+    outcome = verify_api.verify_rebinding_refused("api", "fixture", "key", tmp_path, 5)
+
+    assert set(outcome) == {"dynamic", "dynamic-stealth", "stealthy"}
+    assert all(tries[-1]["main_document_status"] == 400 for tries in outcome.values())
+    assert len(set(hosts)) == len(hosts) == 6
+    assert all(host.endswith(".rebind.test") for host in hosts)
 
 
 def test_smoke_compose_preserves_production_security_and_uses_isolated_ssrf_networks() -> None:

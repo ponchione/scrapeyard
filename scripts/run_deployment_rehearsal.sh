@@ -776,6 +776,10 @@ if ((BOOT_SERVICE == 1)); then
         printf "SCRAPEYARD_API_CREDENTIALS='%s'\n" "$SCRAPEYARD_API_CREDENTIALS"
         printf "SCRAPEYARD_ENCRYPTION_KEYS='%s'\n" "$SCRAPEYARD_ENCRYPTION_KEYS"
         printf "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID='%s'\n" "$SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID"
+        # The names a request may give, as a host sets them (TD-90): the
+        # application's fixed bridge address, which this lane calls, and
+        # loopback for the health check and the backup.
+        printf "SCRAPEYARD_ALLOWED_HOSTS='172.30.0.250,127.0.0.1'\n"
         printf "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST='%s'\n" "$SECRET_ALLOWLIST"
         printf "SCRAPEYARD_SECRET_REHEARSAL_PROXY='%s'\n" "$(<"$WORK_DIR/secret-proxy")"
         printf '%s\n' "$@"
@@ -1187,6 +1191,10 @@ PY
   verify_direct_egress promote-no-proxy
   verify_api promote-no-proxy --known "$WORK_DIR/known-run.json"
   verify_secret_reference promote-no-proxy
+  # A request that names any other host gets nothing, /health included.
+  [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+        -H 'Host: rebound.attacker.example:8420' "$API_URL/health")" == 400 ]] || \
+    fail "[promote-no-proxy] the application answered a request for a host it does not name"
 
   echo "Starting the application without the egress policy and without a proxy; it must still refuse to serve..."
   systemctl stop "$UNIT"

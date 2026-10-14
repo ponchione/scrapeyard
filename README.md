@@ -694,6 +694,7 @@ profile.
 | `SCRAPEYARD_WEBHOOK_DELIVERED_RETENTION_DAYS` | `7` | Full delivered-row inspection window before secret scrubbing |
 | `SCRAPEYARD_WEBHOOK_FAILED_RETENTION_DAYS` | `30` | Full failed-row inspection window before secret scrubbing |
 | `SCRAPEYARD_MAX_REQUEST_BYTES` | `262144` | Max request body size |
+| `SCRAPEYARD_ALLOWED_HOSTS` | empty | Comma-separated host names and addresses a request's `Host` may give; any other gets `400`. Empty accepts any. When set it must include `127.0.0.1`, which the container's health check and the backup ask |
 | `SCRAPEYARD_QUALIFICATION_MODE` | `false` | Local release qualification only: enables the destructive crash checkpoints |
 | `SCRAPEYARD_QUALIFICATION_CRASH_POINT` | empty | Local release qualification only: the checkpoint at which the process blocks for the runner's SIGKILL; requires qualification mode |
 | `SCRAPEYARD_QUALIFICATION_MARKER_DIR` | `/run/scrapeyard-qualification` | Local release qualification only: directory holding the runner-created sentinel |

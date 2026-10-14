@@ -34,6 +34,7 @@ from scrapeyard.api.dependencies import (
 from scrapeyard.api.middleware import (
     APIKeyAuthMiddleware,
     APIVersionHeaderMiddleware,
+    HostHeaderMiddleware,
     MetricsMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -523,6 +524,11 @@ app.add_middleware(
 )
 app.add_middleware(APIVersionHeaderMiddleware, version="1")
 app.add_middleware(MetricsMiddleware)
+# Outermost: a request for a host the deployment does not name reaches nothing.
+app.add_middleware(
+    HostHeaderMiddleware,
+    allowed_hosts=_settings_for_middleware.parsed_allowed_hosts(),
+)
 
 app.include_router(router)
 

@@ -10,9 +10,11 @@ from functools import lru_cache
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from scrapeyard.common.request_hosts import parse_allowed_hosts
 from scrapeyard.engine.proxy import normalize_service_proxy_url
 
 _SECRET_REFERENCE_NAME_RE = re.compile(r"^SCRAPEYARD_SECRET_[A-Z0-9_]+$")
+_HEALTH_CHECK_HOST = "127.0.0.1"
 
 
 class ServiceSettings(BaseSettings):
@@ -125,6 +127,8 @@ class ServiceSettings(BaseSettings):
     api_keys: str = ""
     api_credentials: str = ""
     secret_reference_allowlist: str = ""
+    # The names a request's Host may give, comma-separated; empty takes any.
+    allowed_hosts: str = ""
     encryption_keys: str = Field(default="", repr=False)
     encryption_active_key_id: str = ""
     max_request_bytes: int = Field(default=262144, ge=0)
@@ -227,7 +231,18 @@ class ServiceSettings(BaseSettings):
                     "untrusted_submissions requires a connected-IP egress policy probe"
                 )
         self.parsed_secret_reference_allowlist()
+        allowed_hosts = self.parsed_allowed_hosts()
+        if allowed_hosts and _HEALTH_CHECK_HOST not in allowed_hosts:
+            raise ValueError(
+                f"SCRAPEYARD_ALLOWED_HOSTS must include {_HEALTH_CHECK_HOST}, where the "
+                "container's health check and the backup ask the application"
+            )
         return self
+
+    def parsed_allowed_hosts(self) -> frozenset[str]:
+        """Return the hosts a request may name; empty when any is accepted."""
+
+        return parse_allowed_hosts(self.allowed_hosts)
 
     def parsed_api_keys(self) -> set[str]:
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}

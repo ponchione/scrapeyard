@@ -10,10 +10,12 @@ from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.middleware import (
     APIKeyAuthMiddleware,
+    HostHeaderMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
     _api_key_is_valid,
 )
+from scrapeyard.common.request_hosts import parse_allowed_hosts
 
 
 class ManualClock:
@@ -414,3 +416,93 @@ async def test_size_limit_rejects_streaming_oversized_body() -> None:
         "status_code": 413,
         "details": [],
     }
+
+
+def _host_checked_app(allowed: str) -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    app.add_middleware(HostHeaderMiddleware, allowed_hosts=parse_allowed_hosts(allowed))
+    return app
+
+
+async def _health_with_host(app: FastAPI, *hosts: str) -> tuple[int, str]:
+    # Built by hand: an HTTP client always sends exactly one Host.
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/health",
+        "raw_path": b"/health",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", host.encode()) for host in hosts],
+        "client": ("127.0.0.1", 40000),
+        "server": ("127.0.0.1", 8420),
+    }
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    status = next(message["status"] for message in sent if message["type"] == "http.response.start")
+    body = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
+    return status, body.decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "host",
+    ["scrapeyard.example", "Scrapeyard.EXAMPLE.:443", "127.0.0.1:8420", "[::1]", "[0:0::1]:8420"],
+)
+async def test_host_check_admits_the_names_the_deployment_gives(host: str) -> None:
+    app = _host_checked_app("scrapeyard.example, 127.0.0.1, [::1]")
+
+    assert await _health_with_host(app, host) == (200, '{"status":"ok"}')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        # A name that rebinds to the container's loopback, as a browser sends it.
+        ("rebind-1234.attacker.example:8420",),
+        # Neither a suffix nor a prefix of an allowed name is that name.
+        ("notscrapeyard.example",),
+        ("scrapeyard.example.attacker.example",),
+        ("127.0.0.10",),
+        ("127.0.0.1:8420:1",),
+        ("127.0.0.1:port",),
+        ("::1",),
+        ("[::2]:8420",),
+        ("scrape yard.example",),
+        # No Host, and two of them, the second one allowed.
+        (),
+        ("attacker.example", "scrapeyard.example"),
+    ],
+)
+async def test_host_check_refuses_any_other_host_before_the_application(hosts: tuple[str, ...]) -> None:
+    app = _host_checked_app("scrapeyard.example,127.0.0.1")
+
+    status, body = await _health_with_host(app, *hosts)
+
+    assert status == 400
+    assert "Invalid Host header" in body
+    assert "ok" not in body
+
+
+@pytest.mark.asyncio
+async def test_host_check_is_off_without_a_list() -> None:
+    app = _host_checked_app("")
+
+    assert await _health_with_host(app, "rebind-1234.attacker.example:8420") == (200, '{"status":"ok"}')
+    assert (await _health_with_host(app))[0] == 200

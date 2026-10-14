@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
+import socketserver
+import struct
 import threading
 import time
 from collections import Counter
@@ -14,6 +17,11 @@ from urllib.parse import parse_qs, urlsplit
 
 PUBLIC_ORIGIN = "http://fixture.public.test:8080"
 PRIVATE_ORIGIN = "http://fixture.private.test:8080"
+# Names under this suffix answer the fixture's public address to their first
+# A query and loopback to every later one: what the URL guard checks, and
+# then what a browser that resolves the name again connects to (TD-90).
+REBIND_SUFFIX = ".rebind.test"
+REBIND_FIRST_ANSWER = "203.66.81.242"
 
 
 class FixtureState:
@@ -62,10 +70,81 @@ class FixtureState:
             "requests": requests,
             "webhook_attempts": webhook_attempts,
             "webhook_delivered": webhook_delivered,
+            "rebinding_queries": RESOLVER.queries(),
         }
 
 
 STATE = FixtureState()
+
+
+class RebindingResolver:
+    """A DNS responder for the rebinding names, and NXDOMAIN for any other."""
+
+    def __init__(self, first_answer: str = REBIND_FIRST_ANSWER) -> None:
+        self._first_answer = socket.inet_aton(first_answer)
+        self._lock = threading.Lock()
+        self._queries: Counter[str] = Counter()
+
+    def queries(self) -> dict[str, int]:
+        with self._lock:
+            return dict(sorted(self._queries.items()))
+
+    def answer(self, query: bytes) -> bytes | None:
+        """The response to one DNS query, or None for a message to ignore."""
+
+        if len(query) < 12:
+            return None
+        identifier, flags, questions = struct.unpack(">HHH", query[:6])
+        if flags & 0x8000 or questions != 1:
+            return None
+        offset, labels = 12, []
+        while True:
+            if offset >= len(query):
+                return None
+            length = query[offset]
+            offset += 1
+            if length == 0:
+                break
+            if length > 63 or offset + length > len(query):
+                return None
+            labels.append(query[offset : offset + length].decode("ascii", "replace").lower())
+            offset += length
+        if offset + 4 > len(query):
+            return None
+        record_type, record_class = struct.unpack(">HH", query[offset : offset + 4])
+        question = query[12 : offset + 4]
+        name = ".".join(labels)
+        # Response, authoritative, recursion available, recursion desired as asked.
+        reply_flags = 0x8000 | 0x0400 | 0x0080 | (flags & 0x0100)
+        if not name.endswith(REBIND_SUFFIX) or record_class != 1:
+            return struct.pack(">HHHHHH", identifier, reply_flags | 3, 1, 0, 0, 0) + question
+        answer = b""
+        if record_type == 1:
+            with self._lock:
+                self._queries[name] += 1
+                first = self._queries[name] == 1
+            address = self._first_answer if first else socket.inet_aton("127.0.0.1")
+            # A pointer to the question's name, type A, class IN, TTL 0.
+            answer = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + address
+        count = 1 if answer else 0
+        return struct.pack(">HHHHHH", identifier, reply_flags, 1, count, 0, 0) + question + answer
+
+
+RESOLVER = RebindingResolver()
+
+
+class _DNSHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        query, sock = self.request
+        response = RESOLVER.answer(query)
+        if response is not None:
+            sock.sendto(response, self.client_address)
+
+
+def serve_dns(host: str, port: int) -> socketserver.ThreadingUDPServer:
+    server = socketserver.ThreadingUDPServer((host, port), _DNSHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 STATIC_HTML = b"""<!doctype html>
@@ -307,7 +386,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--dns-port", type=int, default=0, help="serve the rebinding names on UDP")
     args = parser.parse_args()
+    if args.dns_port:
+        serve_dns(args.host, args.dns_port)
+        print(f"fixture resolver listening on {args.host}:{args.dns_port}/udp", flush=True)
     server = create_server(args.host, args.port)
     print(f"fixture listening on {args.host}:{args.port}", flush=True)
     try:
