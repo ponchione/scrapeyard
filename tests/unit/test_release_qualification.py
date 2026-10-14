@@ -229,6 +229,30 @@ def test_backup_leaves_no_sqlite_sidecars_beside_the_databases_it_read(tmp_path:
     assert validate_backup(tmp_path / "backup")["row_counts"]["jobs.db:jobs"] == 1
 
 
+def test_backup_reads_an_empty_log_left_beside_a_database_without_making_more(tmp_path: Path) -> None:
+    # An earlier reader may have left an empty -wal: still nothing in the log.
+    data = tmp_path / "data"
+    _minimal_data(data)
+    _wal_mode(data)
+    (data / "db" / "jobs.db-wal").touch()
+    before = sorted(path.name for path in (data / "db").iterdir())
+
+    _create_with_the_command(data, tmp_path / "backup")
+
+    assert sorted(path.name for path in (data / "db").iterdir()) == before
+
+
+def test_backup_refuses_a_database_a_crash_left_half_written(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _minimal_data(data)
+    gc.collect()
+    # A rollback journal beside it: the pages in the file are not all committed.
+    (data / "db" / "errors.db-journal").write_bytes(b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7" + bytes(504))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _create_with_the_command(data, tmp_path / "backup")
+
+
 def test_backup_reads_pages_still_in_the_write_ahead_log(tmp_path: Path) -> None:
     data = tmp_path / "data"
     _minimal_data(data)

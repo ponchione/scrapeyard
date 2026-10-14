@@ -287,9 +287,11 @@ def sqlite_snapshot(source: Path, destination: Path) -> None:
     # A read-only connection to a database in WAL mode makes -wal and -shm
     # files beside it and cannot remove them, even when closed. A quiesced
     # database has nothing in its log, so it is read as immutable, which
-    # makes neither; one whose log holds pages is read through the log.
+    # makes neither; one whose log holds pages is read through the log, and
+    # one with a rollback journal left by a crash is opened as it always was
+    # (an immutable read would take the half-written pages as they are).
     wal = source.with_name(f"{source.name}-wal")
-    logged = wal.exists() and wal.stat().st_size > 0
+    logged = (wal.exists() and wal.stat().st_size > 0) or source.with_name(f"{source.name}-journal").exists()
     with (
         closing(
             sqlite3.connect(f"file:{source}?mode=ro{'' if logged else '&immutable=1'}", uri=True)

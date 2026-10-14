@@ -1325,6 +1325,13 @@ def _with_a_link(tar: tarfile.TarFile) -> None:
         (lambda tar: _honest(tar, accepted_after_witness=["j9; reboot"]), "not one this script writes"),
         (lambda tar: _honest(tar, accepted_after_witness="j9"), "not one this script writes"),
         (lambda tar: _honest(tar, redis_keys="08"), "not one this script writes"),
+        # The count is a whole number no smaller than the names it counts.
+        (lambda tar: _honest(tar, accepted_after_witness_count=1.5), "not one this script writes"),
+        (lambda tar: _honest(tar, accepted_after_witness_count=True), "not one this script writes"),
+        (lambda tar: _honest(tar, accepted_after_witness_count=-1), "not one this script writes"),
+        (lambda tar: _honest(tar, accepted_after_witness=["j9"], accepted_after_witness_count=0),
+         "not one this script writes"),
+        (lambda tar: _honest(tar, accepted_after_witness_count=10**12 + 1), "not one this script writes"),
         (lambda tar: _member(tar, "witness.json", b"{}"), "the archive has no metadata.json"),
     ],
 )
@@ -1366,15 +1373,29 @@ def test_an_archive_from_before_the_review_is_refused_by_the_restore_test_saying
     tested = host.run("restore-test", str(archive), "--identity", str(host.identity), NO_DEPLOYMENT="yes")
 
     assert tested.returncode == 2
-    assert "written by a backup script from before 2026-10-14" in tested.stderr
+    assert "names no jobs accepted after its witness, as backup scripts did before 2026-10-14" in tested.stderr
     assert "not one this script writes" not in tested.stderr
     assert not host.called("docker run")
 
     # A restore compares nothing, so the missing list does not stop it.
     (host.state / "unit-active").unlink()
     restored = host.run("restore", str(archive), "--identity", str(host.identity), NO_DEPLOYMENT="yes")
-    assert "from before 2026-10-14" not in restored.stderr
+    assert "names no jobs accepted after its witness" not in restored.stderr
     assert "not one this script writes" not in restored.stderr
+    assert "Restored into the volumes of" in restored.stdout, restored.stderr
+
+
+def test_a_restore_takes_an_archive_that_could_not_name_every_late_job(host):
+    late = [f"j{number:04d}" for number in range(1000)]
+    archive = _archive(
+        host, lambda tar: _honest(tar, accepted_after_witness=late, accepted_after_witness_count=1500)
+    )
+    (host.state / "unit-active").unlink()
+
+    restored = host.run("restore", str(archive), "--identity", str(host.identity), NO_DEPLOYMENT="yes")
+
+    assert "more than the 1000 an archive names" not in restored.stderr
+    assert "Restored into the volumes of" in restored.stdout, restored.stderr
 
 
 def test_restore_fills_the_volumes_of_a_host_that_has_none(host):

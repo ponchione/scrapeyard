@@ -934,7 +934,7 @@ PY
   ) || true
   [[ -n "${manifest:-}" ]] || fail "the archive's metadata.json is not one this script writes"
   if [[ "$ACTION" == restore-test && "$unnamed" == old ]]; then
-    fail "the archive was written by a backup script from before 2026-10-14, which did not name the jobs accepted after its witness, so a restore test cannot tell them from a difference; restore it, or test it with the restore-test of the release that wrote it"
+    fail "the archive names no jobs accepted after its witness, as backup scripts did before 2026-10-14 (commit fe6c01c), so a restore test cannot tell them from a difference; restore it instead, or test it with the backup script that wrote it"
   fi
   if [[ "$ACTION" == restore-test && "$unnamed" != 0 ]]; then
     fail "$((unnamed + ${#LATE_JOBS[@]})) jobs were accepted after the witness was taken, more than the ${#LATE_JOBS[@]} an archive names, so a restore test cannot tell them from a difference; restore it instead"
