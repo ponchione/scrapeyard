@@ -539,11 +539,13 @@ and `aof-use-rdb-preamble yes`, backed by the project-scoped `redis-data`
 volume. The scenario saturates four running jobs, leaves six high/normal/low
 priority jobs queued, waits for local AOF acknowledgement, SIGKILLs Redis,
 keeps it unavailable beyond the six-second run-heartbeat lease, and requires
-the protected `/health/ready` endpoint to report unhealthy.
+the application to end by itself, saying that its worker lost Redis.
 
-After Redis returns, restart the single Scrapeyard process. This is required:
-a prolonged disconnect terminates arq's worker control loop even though the
-surviving API process can reconnect for a later health probe. Startup then
+A lost connection ends arq's worker control loop, and a process without it
+would accept work and never start it. So the process ends itself: its running
+jobs get the shutdown grace, and production's restart policy starts it again
+(TD-89). The qualification overlay has no restart policy, so after Redis
+returns the harness starts the application, as that policy would. Startup then
 fails stale SQLite owners, clears their now-unlocked base deliveries, and
 drains the durable priority backlog. The lane requires all jobs terminal, one
 run row per job, no simultaneous duplicate owner, all priority depths zero,
@@ -741,10 +743,10 @@ Each step ends with the same checks as a deployment:
    [policy watch](DEPLOYMENT.md#the-policy-watch)'s timer has run once, and
    only a later run of the timer may put them back, with the application
    not started again and the loss recorded.
-   And Redis is stopped under the application, whose container must turn
-   `unhealthy`: its health is its readiness. The application does not
-   recover from that by itself (TD-89), so the step ends by restarting the
-   boot service.
+   And Redis is stopped under the application, which must end itself,
+   saying that its worker lost Redis, and be started again by Docker's
+   restart policy alone. Once Redis is back it must turn healthy with the
+   boot service untouched, keep the known run, and run a job submitted then.
 4. A Docker restart, and a killed Docker daemon, which must be back within a
    minute.
 5. Docker stopped, then the egress policy, the bridge netfilter module and

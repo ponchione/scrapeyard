@@ -992,24 +992,43 @@ PY
     fail "putting the policy back restarted the application"
   verify_api policy-restored --known "$WORK_DIR/known-run.json"
 
-  echo "Stopping Redis under the running application; its health must follow its readiness..."
+  echo "Stopping Redis under the running application; it must end, and Docker alone start it again..."
   REDIS_CONTAINER="$(service_containers redis)"
-  docker stop "$REDIS_CONTAINER" >/dev/null
-  UNREADY_AT=$SECONDS
-  until [[ "$(docker inspect --format '{{.State.Health.Status}}' "$APP_CONTAINER")" == "unhealthy" ]]; do
-    ((SECONDS < UNREADY_AT + 240)) || fail "the application stayed healthy with Redis stopped"
-    sleep 5
-  done
-  echo "unhealthy_after_seconds=$((SECONDS - UNREADY_AT))" > "$DIAGNOSTICS_DIR/readiness-follows-redis.txt"
-  docker start "$REDIS_CONTAINER" >/dev/null
-  # The embedded worker does not come back by itself once it has lost Redis
-  # (TD-89), so the application stays unready, and now shows it. A restart of
-  # the boot service is what recovers it.
   BEFORE="$(invocation)"
-  systemctl restart "$UNIT"
-  await_unit redis-back "$BEFORE"
+  RESTARTS_BEFORE="$(docker inspect --format '{{.RestartCount}}' "$APP_CONTAINER")"
+  LOST_SINCE=$(date +%s)
+  docker stop "$REDIS_CONTAINER" >/dev/null
+  LOST_AT=$SECONDS
+  # An application whose worker has lost Redis ends itself (TD-89), and the
+  # container's restart policy starts it again; without Redis it cannot
+  # finish a start, so Docker keeps starting it.
+  until (( "$(docker inspect --format '{{.RestartCount}}' "$APP_CONTAINER")" > RESTARTS_BEFORE )); do
+    ((SECONDS < LOST_AT + 120)) || fail "the application did not end after its worker lost Redis"
+    sleep 1
+  done
+  echo "ended_after_seconds=$((SECONDS - LOST_AT))" > "$DIAGNOSTICS_DIR/worker-loss.txt"
+  docker logs --since "$LOST_SINCE" "$APP_CONTAINER" > "$DIAGNOSTICS_DIR/worker-loss.log" 2>&1 || true
+  grep -q 'Embedded worker ended outside a shutdown' "$DIAGNOSTICS_DIR/worker-loss.log" || \
+    fail "the application ended without saying that its worker had lost Redis"
+  docker start "$REDIS_CONTAINER" >/dev/null
+  BACK_AT=$SECONDS
+  until [[ "$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' "$APP_CONTAINER")" == \
+           "running/healthy" ]]; do
+    ((SECONDS < BACK_AT + 240)) || fail "the application did not come back by itself after Redis returned"
+    sleep 2
+  done
+  echo "healthy_after_redis_seconds=$((SECONDS - BACK_AT))" >> "$DIAGNOSTICS_DIR/worker-loss.txt"
+  echo "restarts=$(( $(docker inspect --format '{{.RestartCount}}' "$APP_CONTAINER") - RESTARTS_BEFORE ))" \
+    >> "$DIAGNOSTICS_DIR/worker-loss.txt"
+  [[ "$(invocation)" == "$BEFORE" && "$(systemctl is-active "$UNIT" || true)" == "active" ]] || \
+    fail "the application came back through the boot service, not by itself"
   verify_runtime redis-back "$BOOT_CANDIDATE" candidate
   verify_api redis-back --known "$WORK_DIR/known-run.json"
+  python3 tests/rehearsal/verify_deployment.py run \
+    --api-url "$API_URL" \
+    --client-key-file "$WORK_DIR/client-key" \
+    --monitor-key-file "$WORK_DIR/monitor-key" > "$DIAGNOSTICS_DIR/redis-back-new-run.json" || \
+    fail "a job submitted after Redis came back did not run"
 
   echo "Restarting Docker; the boot service must bring the release back..."
   record_image_events

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import uuid
@@ -85,13 +86,94 @@ def _unreachable_redis(dsn: str) -> str | None:
         return str(exc) or type(exc).__name__
 
 
+class RedisRelay:
+    """A TCP relay to the live Redis that can drop and refuse every connection.
+
+    It stands in for Redis going away under a running application: a crash, an
+    out-of-memory kill or ``docker stop``.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        self._target = (host, port)
+        self._server: asyncio.Server | None = None
+        self._writers: set[asyncio.StreamWriter] = set()
+        self.port = 0
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._relay, "127.0.0.1", self.port)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    async def resume(self) -> None:
+        """Listen again on the same port, as a Redis that has come back."""
+        await self.start()
+
+    async def cut(self) -> None:
+        """Stop listening and reset every connection, both sides."""
+        assert self._server is not None
+        self._server.close()
+        for writer in list(self._writers):
+            writer.transport.abort()
+        self._writers.clear()
+        await self._server.wait_closed()
+        self._server = None
+
+    async def _relay(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            upstream_reader, upstream_writer = await asyncio.open_connection(*self._target)
+        except OSError:
+            writer.transport.abort()
+            return
+        self._writers.update((writer, upstream_writer))
+
+        async def pipe(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
+            try:
+                while data := await source.read(65536):
+                    sink.write(data)
+                    await sink.drain()
+            except OSError:
+                pass
+            finally:
+                sink.transport.abort()
+
+        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+        self._writers.difference_update((writer, upstream_writer))
+
+
 @pytest.fixture()
-async def live_app() -> AsyncIterator:
+async def redis_relay(_live_redis_env, monkeypatch) -> AsyncIterator[RedisRelay]:
+    """Point the application at Redis through a relay the test can cut.
+
+    Ask for it before ``live_app`` or ``client`` so that they connect through it.
+    """
+    dsn = os.environ["SCRAPEYARD_REDIS_DSN"]
+    unreachable = _unreachable_redis(dsn)
+    if unreachable is not None:
+        pytest.skip(f"Live Redis unavailable at {dsn}: {unreachable}")
+    target = RedisSettings.from_dsn(dsn)
+    relay = RedisRelay(target.host, target.port)
+    await relay.start()
+    monkeypatch.setenv(
+        "SCRAPEYARD_REDIS_DSN",
+        f"redis://127.0.0.1:{relay.port}/{target.database}",
+    )
+    _clear_singletons()
+    try:
+        yield relay
+    finally:
+        if relay._server is not None:
+            await relay.cut()
+
+
+@pytest.fixture()
+async def live_app(request) -> AsyncIterator:
     """Return a fully initialized app using the real WorkerPool and Redis."""
     settings = get_settings()
     redis = None
     pool = None
     scheduler = None
+    runner_exits: list[BaseException | None] = []
 
     unreachable = _unreachable_redis(settings.redis_dsn)
     if unreachable is not None:
@@ -106,6 +188,10 @@ async def live_app() -> AsyncIterator:
         await init_db(settings.db_dir)
 
         pool = get_worker_pool()
+        # Every test here ends in a stop; a worker that ended without one
+        # would have asked the process to end.
+        pool.on_runner_exit = runner_exits.append
+        app.state.live_runner_exits = runner_exits
         scheduler = get_scheduler()
         await pool.start()
         await scheduler.start()
@@ -116,6 +202,8 @@ async def live_app() -> AsyncIterator:
             scheduler.shutdown()
         if pool is not None:
             await pool.stop()
+            if "redis_relay" not in request.fixturenames:
+                assert runner_exits == []
         await close_webhook_dispatcher(
             timeout=settings.workers_shutdown_grace_seconds,
         )

@@ -150,6 +150,21 @@ class Harness:
             f"health_convergence_failure expected_healthy={healthy} last={last}"
         )
 
+    def wait_application_exited(self, *, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        state = ""
+        while time.monotonic() < deadline:
+            state = self.compose(
+                "ps", "-a", "--format", "{{.State}}", "scrapeyard", timeout=10
+            ).strip()
+            if state == "exited":
+                logs = self.compose("logs", "--no-color", "--tail", "400", "scrapeyard", timeout=30)
+                if "Embedded worker ended outside a shutdown" not in logs:
+                    raise QualificationFailure("application_exit_without_worker_loss")
+                return
+            time.sleep(0.5)
+        raise QualificationFailure(f"application_did_not_end state={state!r}")
+
     def submit(self, config: str, *, timeout: float = 15) -> str:
         status, payload = self.request(
             "/scrape",
@@ -366,15 +381,17 @@ class Harness:
             "exec", "-T", "redis", "redis-cli", "WAITAOF", "1", "1", "5000", check=False
         ).strip()
         self.compose("kill", "-s", "SIGKILL", "redis", timeout=15)
-        time.sleep(8)
-        unavailable = self.wait_health(healthy=False, timeout=15)
+        killed_at = time.monotonic()
+        # A worker that has lost Redis ends its process (TD-89), after the
+        # shutdown grace its running jobs get. Production's restart policy
+        # then starts it again; this overlay has none, so the harness starts
+        # it once Redis is back, as that policy would.
+        self.wait_application_exited(timeout=60)
+        application_exit_seconds = time.monotonic() - killed_at
+        # Redis stays away beyond the six-second run-heartbeat lease.
+        time.sleep(max(0.0, 8 - application_exit_seconds))
         restart_started = time.monotonic()
         self.compose("start", "redis")
-        # A prolonged disconnect terminates arq's control loop even though the
-        # API process can reconnect for health probes. The qualified recovery
-        # procedure restarts the single Scrapeyard process after Redis is back.
-        time.sleep(1)
-        self.compose("stop", "-t", "15", "scrapeyard", timeout=30)
         self.compose("start", "scrapeyard", timeout=30)
         self.wait_health(timeout=self.thresholds.recovery_seconds)
         redis_recovery = time.monotonic() - restart_started
@@ -398,9 +415,8 @@ class Harness:
             "waitaof": persistence,
             "queued_jobs": len(jobs),
             "mixed_priorities": sorted({priority for _, priority in jobs}),
-            "unavailable_health": unavailable["status"],
+            "application_exit_seconds": round(application_exit_seconds, 3),
             "recovery_seconds": round(redis_recovery, 3),
-            "application_restart_required": True,
             "drain_seconds": round(drain_seconds, 3),
             "terminal_statuses": _counts(item["status"] for item in completed),
             "max_run_count": max(item["run_count"] for item in completed),

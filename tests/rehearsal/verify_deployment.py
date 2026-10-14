@@ -8,8 +8,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 PROJECT = "release-rehearsal"
 TERMINAL_STATUSES = {"complete", "partial", "failed", "cancelled"}
@@ -74,12 +75,14 @@ def expect(condition: bool, message: str) -> None:
         raise RehearsalFailure(message)
 
 
-def submit(api_url: str, client_key: str) -> tuple[dict[str, Any], dict[str, str]]:
+def submit(
+    api_url: str, client_key: str, idempotency_key: str = IDEMPOTENCY_KEY
+) -> tuple[dict[str, Any], dict[str, str]]:
     status, submission, headers = request(
         f"{api_url}/scrape",
         api_key=client_key,
         data=KNOWN_CONFIG.encode(),
-        headers={"Content-Type": "application/x-yaml", "Idempotency-Key": IDEMPOTENCY_KEY},
+        headers={"Content-Type": "application/x-yaml", "Idempotency-Key": idempotency_key},
     )
     expect(status == 202, f"submission: expected HTTP 202, got {status}: {submission}")
     expect(
@@ -97,9 +100,9 @@ def known_result(api_url: str, client_key: str, job_id: str, run_id: str) -> dic
     return {field: result.get(field) for field in KNOWN_FIELDS}
 
 
-def record(api_url: str, client_key: str, known_path: Path, timeout: float) -> dict[str, Any]:
-    submission, _headers = submit(api_url, client_key)
-    job_id, run_id = submission["job_id"], submission["run_id"]
+def await_run(
+    api_url: str, client_key: str, job_id: str, run_id: str, timeout: float
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     run: Any = None
     while time.monotonic() < deadline:
@@ -108,15 +111,33 @@ def record(api_url: str, client_key: str, known_path: Path, timeout: float) -> d
         )
         expect(status == 200 and isinstance(run, dict), f"run read: HTTP {status}: {run}")
         if run.get("status") in TERMINAL_STATUSES:
-            break
+            return cast(dict[str, Any], run)
         time.sleep(0.5)
-    else:
-        raise RehearsalFailure(f"known run did not finish within {timeout:.0f}s: {run}")
+    raise RehearsalFailure(f"run {run_id} did not finish within {timeout:.0f}s: {run}")
+
+
+def record(api_url: str, client_key: str, known_path: Path, timeout: float) -> dict[str, Any]:
+    submission, _headers = submit(api_url, client_key)
+    job_id, run_id = submission["job_id"], submission["run_id"]
+    await_run(api_url, client_key, job_id, run_id, timeout)
     known = known_result(api_url, client_key, job_id, run_id)
     expect(known["status"] == "failed", f"known run should fail before any fetch: {known}")
     expect(known["project"] == PROJECT, f"known run has the wrong project: {known}")
     known_path.write_text(json.dumps(known, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return known
+
+
+def run_new(api_url: str, client_key: str, timeout: float) -> dict[str, Any]:
+    """Submit under a key never used before, and wait for the worker to finish it."""
+    submission, headers = submit(
+        api_url, client_key, f"release-rehearsal-{uuid.uuid4().hex}"
+    )
+    expect(
+        headers.get("idempotency-replayed") != "true",
+        f"a new submission was answered as a replay: {submission}",
+    )
+    run = await_run(api_url, client_key, submission["job_id"], submission["run_id"], timeout)
+    return {"job_id": run.get("job_id"), "run_id": run.get("run_id"), "status": run.get("status")}
 
 
 def check(
@@ -168,7 +189,7 @@ def check(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("record", "check"))
+    parser.add_argument("action", choices=("record", "check", "run"))
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--client-key-file", type=Path, required=True)
     parser.add_argument("--monitor-key-file", type=Path, required=True)
@@ -182,6 +203,8 @@ def main() -> None:
             if args.known is None:
                 parser.error("record requires --known")
             report = record(args.api_url, client_key, args.known, args.job_timeout)
+        elif args.action == "run":
+            report = run_new(args.api_url, client_key, args.job_timeout)
         else:
             report = check(args.api_url, client_key, monitor_key, args.known)
     except (RehearsalFailure, OSError) as exc:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from arq.connections import RedisSettings
 from arq.constants import abort_jobs_ss, job_key_prefix
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from scrapeyard.api.dependencies import (
     get_job_store,
@@ -715,6 +716,75 @@ async def test_async_scrape_lifecycle_uses_real_redis_queue(client, monkeypatch)
     payload = results_response.json()
     assert payload["job_id"] == job_id
     assert "Hello from Redis" in json.dumps(payload["results"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_worker_that_loses_redis_asks_once_to_end_and_a_restart_runs_new_work(
+    redis_relay, client, monkeypatch,
+):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _scrape_target(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "ran through the outage"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _scrape_target)
+    first_pool = get_worker_pool()
+    runner_exits = client._transport.app.state.live_runner_exits
+
+    async def _submit() -> str:
+        response = await client.post(
+            "/scrape",
+            content=_async_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert response.status_code == 202
+        return response.json()["job_id"]
+
+    running_job = await _submit()
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    await redis_relay.cut()
+    for _ in range(100):
+        if runner_exits:
+            break
+        await asyncio.sleep(0.05)
+    assert len(runner_exits) == 1
+    assert isinstance(runner_exits[0], ConnectionError | RedisConnectionError)
+    assert first_pool.background_ok is False
+    # The run under way when Redis went away still finishes, and records it.
+    release.set()
+    assert await _await_terminal_status(client, running_job) == "complete"
+
+    # The process's own shutdown, with Redis still away, must not fail: a
+    # failed one keeps the instance guard and leaves the end to the deadline.
+    await first_pool.stop(timeout=5)
+    assert first_pool.shutdown_pending is False
+    assert len(runner_exits) == 1
+
+    # Redis comes back and the process is started again.
+    await redis_relay.resume()
+    get_worker_pool.cache_clear()
+    second_pool = get_worker_pool()
+    second_pool.on_runner_exit = runner_exits.append
+    await second_pool.start()
+    try:
+        started.clear()
+        new_job = await _submit()
+        assert await _await_terminal_status(client, new_job) == "complete"
+        results = await client.get(f"/results/{new_job}")
+        assert "ran through the outage" in json.dumps(results.json()["results"])
+    finally:
+        await second_pool.stop()
+    assert len(runner_exits) == 1
 
 
 @pytest.mark.asyncio

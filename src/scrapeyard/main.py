@@ -98,6 +98,7 @@ from scrapeyard.runtime.metrics import (
     render_metrics,
     set_cleanup_backlog,
 )
+from scrapeyard.runtime.process_exit import end_process
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 from scrapeyard.storage.secret_envelope import (
@@ -111,6 +112,9 @@ logger = logging.getLogger(__name__)
 
 # How often shutdown rechecks whether lingering thread work has finished.
 _THREAD_QUIESCE_POLL_SECONDS = 0.05
+# How much longer than the shutdown grace a process that lost its worker is
+# given to end by itself; with the default grace, Compose's stop period.
+_END_PROCESS_MARGIN_SECONDS = 10.0
 _metrics_refresh_lock = asyncio.Lock()
 _metrics_refreshed_at = 0.0
 _readiness_probe_executor = ThreadPoolExecutor(
@@ -155,6 +159,21 @@ def _ensure_runtime_directories() -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
 
 
+def _end_process_after_worker_loss(error: BaseException | None) -> None:
+    # A process whose worker has ended answers submissions and never runs
+    # them. Ending it lets the container's restart policy start it again
+    # through the start every deployment takes: the policy attestation, and
+    # reconciliation of the runs it left queued or running.
+    end_process(
+        "the embedded worker ended"
+        + ("" if error is None else f" ({type(error).__name__})"),
+        deadline_seconds=(
+            get_settings().workers_shutdown_grace_seconds
+            + _END_PROCESS_MARGIN_SECONDS
+        ),
+    )
+
+
 def _assign_runtime_services(app: FastAPI, services: RuntimeServices) -> None:
     app.state.worker_pool = services.worker_pool
     app.state.scheduler = services.scheduler
@@ -173,6 +192,7 @@ async def _startup_runtime_services(app: FastAPI) -> None:
         )
     )
     await services.webhook_dispatcher.startup()
+    services.worker_pool.on_runner_exit = _end_process_after_worker_loss
     await services.worker_pool.start()
     init_rate_limiter(redis=services.worker_pool.redis)
     init_domain_guard(redis=services.worker_pool.redis)

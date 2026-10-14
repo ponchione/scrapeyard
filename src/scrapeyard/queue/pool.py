@@ -14,6 +14,7 @@ from arq.constants import abort_jobs_ss, in_progress_key_prefix, job_key_prefix,
 from arq.jobs import Job, ResultNotFound, serialize_job
 from arq.utils import timestamp_ms
 from arq.worker import Worker, func
+from redis.exceptions import RedisError
 
 from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
 from scrapeyard.common.settings import get_settings
@@ -187,8 +188,17 @@ class _PriorityWorker(Worker):
             self.handle_sig(signal.SIGUSR1)
         if not self._pool:
             return
-        await asyncio.gather(*self.tasks.values())
-        await self.pool.delete(self.health_check_key)
+        # A job whose result could not be written, because Redis went away,
+        # ends with that error. It was the job's to report, not the close's.
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        try:
+            await self.pool.delete(self.health_check_key)
+        except (RedisError, OSError) as exc:
+            # The key expires by itself; the connections must still be closed.
+            logger.warning(
+                "Could not remove the worker's health key while closing: %s",
+                type(exc).__name__,
+            )
         if self.on_shutdown:
             await self.on_shutdown(self.ctx)
         await self.pool.aclose(close_connection_pool=True)
@@ -339,6 +349,9 @@ class WorkerPool:
         self._active_tasks = 0
         self._started = False
         self._stopping = False
+        # Called once, with what ended it, when the embedded worker ends
+        # outside stop(): the process then starts no queued run again.
+        self.on_runner_exit: Callable[[BaseException | None], None] | None = None
 
     def _check_memory(self) -> bool:
         """Return True if more work may start below the memory ceilings."""
@@ -392,7 +405,23 @@ class WorkerPool:
             self._worker.async_run(),
             name="scrapeyard-arq-worker",
         )
+        self._runner_task.add_done_callback(self._runner_finished)
         self._started = True
+
+    def _runner_finished(self, task: asyncio.Task[None]) -> None:
+        # stop() ends the runner itself, and a cancellation from anywhere
+        # else is the event loop closing; neither leaves work stranded.
+        if self._stopping or self._runner_task is not task or task.cancelled():
+            return
+        error = task.exception()
+        logger.critical(
+            "Embedded worker ended outside a shutdown; no queued run can start "
+            "in this process: %s",
+            self.background_detail,
+            exc_info=error,
+        )
+        if self.on_runner_exit is not None:
+            self.on_runner_exit(error)
 
     async def stop(self, *, timeout: float | None = None) -> None:
         """Stop picking new jobs and close the embedded worker."""
@@ -402,6 +431,11 @@ class WorkerPool:
         if self._worker is None:
             raise RuntimeError("WorkerPool.stop() called but worker was never started")
 
+        # A runner that had already ended was reported by _runner_finished;
+        # what ended it is not a failure of this stop.
+        runner_ended_before_stop = (
+            self._runner_task is not None and self._runner_task.done()
+        )
         self._stopping = True
         self._worker.allow_pick_jobs = False
         grace_seconds = (
@@ -435,7 +469,7 @@ class WorkerPool:
 
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
-        if self._runner_task is not None:
+        if self._runner_task is not None and not runner_ended_before_stop:
             try:
                 await deadline.run(self._runner_task)
             except AwaitableCancelled:

@@ -855,7 +855,14 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
             workers_running_reconciliation_interval_seconds=60,
             workers_running_reconciliation_batch_size=100,
             storage_cleanup_interval_seconds=21600,
+            workers_shutdown_grace_seconds=30,
         ),
+    )
+    ended: list[tuple[str, float]] = []
+    monkeypatch.setattr(
+        main_module,
+        "end_process",
+        lambda reason, *, deadline_seconds: ended.append((reason, deadline_seconds)),
     )
     monkeypatch.setattr(main_module, "init_rate_limiter", MagicMock())
     monkeypatch.setattr(
@@ -904,6 +911,11 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
         webhook_notifier=services.webhook_dispatcher,
         monitor=ANY,
     )
+    # A worker that ends outside a shutdown ends the process, which is given
+    # the shutdown grace and Compose's remaining ten seconds.
+    assert ended == []
+    pool.on_runner_exit(ConnectionError("Redis went away"))
+    assert ended == [("the embedded worker ended (ConnectionError)", 40)]
 
 
 @pytest.mark.asyncio

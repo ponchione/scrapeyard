@@ -72,7 +72,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(401, {"error": "unauthenticated"})
         parts = path.strip("/").split("/")
         if parts[0] == "jobs" and len(parts) == 4:
-            return self._send(200, {"job_id": parts[1], "run_id": parts[3], "status": "failed"})
+            status = "queued" if fault == "never_runs" else "failed"
+            return self._send(200, {"job_id": parts[1], "run_id": parts[3], "status": status})
         if parts[0] == "results":
             run_id = self.server.runs[IDEMPOTENCY_KEY]
             return self._send(
@@ -138,6 +139,27 @@ def test_verifier_records_a_known_run_and_finds_it_unchanged(deployment, tmp_pat
     deployment.result_status = "complete"
     with pytest.raises(RehearsalFailure, match="known run changed"):
         verify_deployment.check(deployment.url, CLIENT_KEY, MONITOR_KEY, known_path)
+
+
+def test_verifier_runs_new_work_under_a_key_never_used_before(deployment, tmp_path, monkeypatch):
+    monkeypatch.setattr(verify_deployment.time, "sleep", lambda _seconds: None)
+    known = verify_deployment.record(deployment.url, CLIENT_KEY, tmp_path / "known.json", timeout=5)
+
+    run = verify_deployment.run_new(deployment.url, CLIENT_KEY, timeout=5)
+
+    assert run["status"] == "failed"
+    assert run["run_id"] != known["run_id"]
+    assert len(deployment.runs) == 2
+
+
+@pytest.mark.parametrize("deployment", ["never_runs"], indirect=True)
+def test_verifier_refuses_new_work_that_never_runs(deployment, monkeypatch):
+    clock = iter(range(0, 1000, 1))
+    monkeypatch.setattr(verify_deployment.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(verify_deployment.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(RehearsalFailure, match="did not finish within 5s"):
+        verify_deployment.run_new(deployment.url, CLIENT_KEY, timeout=5)
 
 
 @pytest.mark.parametrize(
@@ -307,9 +329,12 @@ def test_boot_service_phase_follows_the_deployment_guide_and_restores_the_host()
         "putting the policy back restarted the application",
         'systemctl disable --now "$WATCH_TIMER" >/dev/null 2>&1\n    systemctl stop "$WATCH_UNIT"',
         'rm -rf -- "$WATCH_UNIT_FILE" "$WATCH_TIMER_FILE" "$(dirname -- "$RESTORED_LOG")"',
-        # The container's health is the application's readiness, not its liveness.
-        "the application stayed healthy with Redis stopped",
-        "await_unit redis-back ",
+        # An application whose worker loses Redis ends, and comes back by
+        # Docker's restart alone, ready to run new work (TD-89).
+        "the application did not end after its worker lost Redis",
+        "the application came back through the boot service, not by itself",
+        "python3 tests/rehearsal/verify_deployment.py run",
+        "a job submitted after Redis came back did not run",
         # The last steps run the settings a host without an operator proxy
         # uses: the application's own log must show that it checked the policy.
         "printf \"SCRAPEYARD_UNTRUSTED_SUBMISSIONS='false'\\n\"",
