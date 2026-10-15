@@ -1781,9 +1781,9 @@ def test_backup_timer_runs_daily_at_a_fixed_utc_time_clear_of_the_reboot_window(
         r"\*-\*-\* (\d\d):(\d\d):00 UTC", timer["Timer"]["OnCalendar"]
     ).groups()  # type: ignore[union-attr]
     start = int(hour) * 60 + int(minute)
-    # The host reboots for security updates at 10:30 UTC. A run waits up to an
+    # The host reboots for security updates at 08:00 UTC. A run waits up to an
     # hour to begin and must be long over by then.
-    assert start + 180 <= 10 * 60 + 30 or start >= 11 * 60 + 30
+    assert start + 180 <= 8 * 60 or start >= 9 * 60
     assert timer["Timer"]["Persistent"] == "true"
     assert timer["Timer"]["RandomizedDelaySec"] == "0"
     assert timer["Install"]["WantedBy"] == "timers.target"

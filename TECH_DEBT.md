@@ -6,6 +6,17 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-15** (no release): readying the production host for Eyebox's
+  beta soak.
+  - Cloudflare's tunnel health notification now covers the production
+    tunnel: every status change is emailed to the operator (TD-20). It has
+    not been fired end to end, which needs the connector stopped.
+  - The host's unattended reboot moved from 10:30 to 08:00 UTC: 10:30 fell
+    inside the window in which Eyebox's beta schedules start runs, and a
+    reboot ends runs in flight. 08:00 follows the 04:40 backup and the 06:00
+    to 07:00 upgrade run.
+  - The owner chose to start the soak without waiting for TD-92, the
+    host check's hook or an off-host store (TD-21).
 - **2026-10-14, second pass** (`14de943` to `fbc340c`): five pull requests,
   each security-sensitive one reviewed by a fresh adversarial agent whose
   fixes the same agent checked again, and one release promoted on the
@@ -462,6 +473,7 @@ and rehearses it against the release it replaces; dispatch it on the commit
 to release, with the host's current release as `previous_revision`.
 
 **Ready:** TD-92 (a watchdog on the worker's polls; no decision needed).
+The owner chose on 2026-10-15 to start Eyebox's beta soak without it.
 
 **Coordinated:**
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
@@ -1068,6 +1080,14 @@ is TD-85.
 - An application whose worker loses Redis now ends itself and is started
   again by Docker (TD-89), so an application that stays unready for that
   reason no longer needs an operator.
+
+**Done on the production host (2026-10-15):**
+- A Cloudflare tunnel health notification for the production tunnel, on
+  every status, emails the operator. It covers a connector that runs and
+  has no connection, which the host check cannot see. Not yet fired end to
+  end.
+- Unattended upgrades now reboot at 08:00 UTC instead of 10:30, clear of
+  Eyebox's beta schedules and after the backup's latest finish.
 
 **Still open:**
 - Alerts reaching the operator: the host check has nothing to send to
