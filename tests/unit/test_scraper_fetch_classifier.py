@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from scrapeyard.config.schema import FetcherType
+from scrapeyard.config.transforms import TransformOutputLimitError, TransformTimeoutError
 from scrapeyard.engine.browser_debug import BrowserTransportTimeout
 from scrapeyard.engine.fetch_classifier import (
     classify_fetch_exception,
@@ -280,3 +281,18 @@ def test_classify_rendered_outcome_keeps_access_markers_when_expected_content_is
     assert classify_rendered_outcome(debug, [], has_item_selector=has_item_selector) == (
         ErrorType.challenge_page
     )
+
+
+@pytest.mark.parametrize("fetcher", [FetcherType.basic, FetcherType.dynamic])
+@pytest.mark.parametrize(
+    "exc",
+    [
+        TransformTimeoutError("Regex replacement transform timed out"),
+        TransformOutputLimitError("Selector value exceeds 1048576 UTF-8 bytes (predicted 2000000)"),
+    ],
+)
+def test_a_selector_value_past_a_transform_limit_is_no_fetch_failure(exc, fetcher):
+    error_type, http_status, _debug = classify_fetch_exception(exc, fetcher)
+
+    assert error_type == ErrorType.selector_engine_error
+    assert http_status is None

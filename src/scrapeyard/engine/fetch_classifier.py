@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from scrapeyard.config.schema import FetcherType
+from scrapeyard.config.transforms import TransformOutputLimitError, TransformTimeoutError
 from scrapeyard.engine.adaptive_diagnostics import has_extracted_value
 from scrapeyard.engine.resilience import RetryableError
 from scrapeyard.engine.scrape_models import FetchError, ScrapeStop
@@ -213,6 +214,10 @@ def classify_fetch_exception(
                     return signal, exc.status, exc.debug
             return ErrorType.blocked_response, exc.status, exc.debug
         return ErrorType.http_error, exc.status, exc.debug
+    if isinstance(exc, TransformTimeoutError | TransformOutputLimitError):
+        # The page was fetched; a selector's value or its transform went past
+        # a limit the deployment sets.
+        return ErrorType.selector_engine_error, None, debug
     # Distinct classes before Python 3.11; BrowserTransportTimeout is a TimeoutError.
     if isinstance(exc, TimeoutError | asyncio.TimeoutError | httpx.TimeoutException):
         return (

@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A `regex` transform whose replacement names a group its pattern lacks
+  (`regex("(\d+)", "\2")`) or holds a bad escape is refused when the
+  config is validated. It was accepted and failed only on a page whose
+  text matched, as an `http_error` with no status. A transform's timeout
+  or a selector value past `SCRAPEYARD_TRANSFORM_MAX_VALUE_BYTES` is now
+  `selector_engine_error` too, not `http_error`: the page was fetched.
+  Every Eyebox config still validates.
 - A `422` for a config that resolved a deployment secret no longer
   returns the secret in another spelling. Only the exact secret and its
   URL-quoted forms were redacted from Pydantic's text, which quotes the

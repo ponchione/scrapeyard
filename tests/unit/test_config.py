@@ -1009,6 +1009,26 @@ class TestParseTransform:
         fn = parse_transform(r"regex:\d+:NUM")
         assert fn("item 42 and 7") == "item NUM and NUM"
 
+    @pytest.mark.parametrize(
+        ("replacement", "result"),
+        [
+            (r"<\1>", "item <42>"),
+            (r"<\g<n>>", "item <42>"),
+            (r"\g<0>-\1", "item 42-42"),
+            # The pattern has one group; these failed only on a page that matched.
+            (r"\2", None),
+            (r"\g<cents>", None),
+            (r"\y", None),
+        ],
+    )
+    def test_regex_replacement_names_only_groups_the_pattern_has(self, replacement, result):
+        expression = f'regex("(?P<n>\\d+)", "{replacement}")'
+        if result is None:
+            with pytest.raises(ValueError, match="Invalid regex replacement"):
+                parse_transform(expression)
+        else:
+            assert parse_transform(expression)("item 42") == result
+
     def test_pipeline_parser_preserves_regex_alternation_and_literal_pipe(self):
         transforms = parse_transform_pipeline('regex("a|b", "X")|append("|done")')
 

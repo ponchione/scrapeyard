@@ -26,6 +26,8 @@ _DEFAULT_MAX_VALUE_BYTES = 1048576
 # size limit. The module's own parser, which copies nothing, gives the counts
 # before the compiler runs; it is internal to the pinned regex release.
 _regex_core: Any = importlib.import_module("regex._regex_core")
+# Parses a replacement template the way a match's expand() does.
+_regex_main: Any = importlib.import_module("regex._main")
 _MAX_REGEX_EXPANSION = 10_000
 # A target's extraction keeps every pattern its selectors use compiled, so
 # one config's patterns are held to a budget together as well.
@@ -232,6 +234,22 @@ def _bounded_regex_replace(
         _raise_output_limit(output_bytes, limit)
     output.write(tail)
     return output.getvalue()
+
+
+def _check_replacement(compiled: regex.Pattern[str], replacement: str) -> None:
+    """Refuse a replacement that names a group the pattern lacks, or a bad escape.
+
+    Otherwise it passes validation and fails only on a page whose text matches.
+    """
+    try:
+        parts = _regex_main._compile_replacement_helper(compiled, replacement)
+    except (regex.error, IndexError) as exc:
+        raise ValueError(f"Invalid regex replacement {replacement!r}: {exc}") from exc
+    for part in parts:
+        if isinstance(part, int) and part > compiled.groups:
+            raise ValueError(
+                f"Invalid regex replacement {replacement!r}: the pattern has no group {part}"
+            )
 
 
 def _parse_regex(pattern: str) -> Any:
@@ -456,6 +474,7 @@ def parse_transform(raw: str) -> Callable[[str], str]:
     elif name == "regex":
         pattern, replacement = args[0], args[1]
         compiled = _compile_regex(pattern)
+        _check_replacement(compiled, replacement)
 
         def _replace_regex(value: str) -> str:
             return _bounded_regex_replace(compiled, replacement, value)
