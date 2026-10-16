@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any
 from urllib.parse import quote, quote_plus
 
@@ -22,6 +22,7 @@ _SECRET_REFERENCE_RE = re.compile(r"\$\{(SCRAPEYARD_SECRET_[A-Z0-9_]+)\}")
 # encoder accepts, so a string holding one breaks every response it reaches.
 _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 MIN_DEPLOYMENT_SECRET_LENGTH = 8
+_WITHHELD_MESSAGE = "invalid; the message is withheld because the value holds a deployment secret"
 
 
 def _surrogate_location(value: Any, location: tuple[str, ...] = ()) -> str | None:
@@ -126,6 +127,37 @@ def load_config(yaml_str: str) -> ScrapeConfig:
     return load_config_mapping(load_yaml_mapping(yaml_str))
 
 
+def _secret_paths(value: Any, path: tuple[Any, ...] = ()) -> Iterator[tuple[Any, ...]]:
+    """Yield the path of each string in *value* that holds a secret reference."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _secret_paths(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _secret_paths(item, (*path, index))
+    elif isinstance(value, str) and _SECRET_REFERENCE_RE.search(value):
+        yield path
+
+
+def _input_path(data: Any, loc: tuple[int | str, ...]) -> tuple[Any, ...]:
+    """Follow an error's location into the input as far as the input has it.
+
+    A location also names union members, which the input has no key for. The
+    walk stops at the first such part, so the path it gives holds at least
+    the value the error was raised for.
+    """
+    path: list[Any] = []
+    node = data
+    for part in loc:
+        in_mapping = isinstance(node, dict) and part in node
+        in_list = isinstance(node, list) and isinstance(part, int) and 0 <= part < len(node)
+        if not (in_mapping or in_list):
+            break
+        node = node[part]
+        path.append(part)
+    return tuple(path)
+
+
 def _redact_secret_spellings(text: str, secrets: Iterable[str]) -> str:
     """Redact each secret as written, URL-quoted or escaped, in any letter case."""
     spellings: set[str] = set()
@@ -176,15 +208,26 @@ def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
         # Never let a resolved deployment secret escape merely because its
         # destination is invalid. Pydantic's own text quotes the input, cut
         # short or escaped where no exact match finds it, so only its messages
-        # are kept; and a message may give the value lower-cased (a URL scheme).
-        if isinstance(exc, ValidationError):
-            detail = "; ".join(
-                f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}"
-                for error in exc.errors(include_input=False, include_url=False)
-            )
-        else:
-            detail = str(exc)
-        raise ValueError(_redact_secret_spellings(detail, resolved_secrets.values())) from exc
+        # are kept. A message about a value that held a secret is withheld: a
+        # validator's may quote a piece of it (a transform pipeline splits at
+        # `:` and `|`) or give it lower-cased (a URL scheme). The chained
+        # exception, which holds the input, is dropped for any log.
+        if not isinstance(exc, ValidationError):
+            raise ValueError(
+                f"Config is invalid ({type(exc).__name__}); the message is withheld "
+                "because the config holds a deployment secret"
+            ) from None
+        secret_paths = list(_secret_paths(data))
+        messages = []
+        for error in exc.errors(include_input=False, include_url=False):
+            path = _input_path(data, error["loc"])
+            message = error["msg"]
+            if any(secret[: len(path)] == path for secret in secret_paths):
+                message = _WITHHELD_MESSAGE
+            location = ".".join(str(part) for part in error["loc"]) or "config"
+            messages.append(f"{location}: {message}")
+        detail = "; ".join(messages)
+        raise ValueError(_redact_secret_spellings(detail, resolved_secrets.values())) from None
     config._resolved_secret_values = tuple(
         value for value in dict.fromkeys(resolved_secrets.values()) if value
     )

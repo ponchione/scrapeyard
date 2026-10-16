@@ -161,3 +161,39 @@ target:
     message = response.json()["error"]
     assert "target.url" in message
     assert leaked not in message
+
+
+async def test_config_error_withholds_a_validator_message_about_a_secret(client, monkeypatch):
+    # A transform pipeline splits at `:` and `|`, and its error quotes a
+    # piece, which no match for the whole secret finds.
+    monkeypatch.setenv("SCRAPEYARD_SECRET_AUDIT_SENTINEL", "Abcd1234:Efgh5678|Ijkl")
+    monkeypatch.setenv(
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+        '{"integ":["SCRAPEYARD_SECRET_AUDIT_SENTINEL"]}',
+    )
+    get_settings.cache_clear()
+    response = await client.post(
+        "/scrape",
+        content="""
+project: integ
+name: invalid-secret-transform
+target:
+  url: https://example.com/
+  selectors:
+    title:
+      query: h1
+      transform: "prepend:${SCRAPEYARD_SECRET_AUDIT_SENTINEL}"
+    price:
+      query: .price
+      transform: nosuch
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    message = response.json()["error"]
+    assert "target.selectors.title" in message
+    for piece in ("Abcd1234", "Efgh5678", "Ijkl"):
+        assert piece not in message
+    # A message about a value that held no secret is kept.
+    assert "Unknown transform: 'nosuch'" in message

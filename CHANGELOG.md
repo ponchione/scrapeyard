@@ -407,12 +407,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `selector_engine_error` too, not `http_error`: the page was fetched.
   Every Eyebox config still validates.
 - A `422` for a config that resolved a deployment secret no longer
-  returns the secret in another spelling. Only the exact secret and its
-  URL-quoted forms were redacted from Pydantic's text, which quotes the
-  input cut short or escaped, and a message can give it lower-cased (a URL
-  scheme). The error is now built from Pydantic's messages without the
-  input, and each secret is redacted as written, quoted or escaped, in any
-  letter case.
+  returns the secret in another spelling or in pieces. Only the exact
+  secret and its URL-quoted forms were redacted from Pydantic's text, which
+  quotes the input cut short or escaped; a message can give it lower-cased
+  (a URL scheme); and a transform pipeline, split at `:` and `|`, quotes
+  one piece of it. The error is now built from Pydantic's messages without
+  the input. A message about a value that held a secret is withheld, its
+  location kept, and each secret is redacted from the rest as written,
+  quoted or escaped, in any letter case.
 - `GET /errors?since=` with a date whose offset puts it outside the
   representable range (`0001-01-01T00:00:00+01:00`) answers `400` instead
   of `500`.
