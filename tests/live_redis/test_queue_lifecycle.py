@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from arq.connections import RedisSettings
-from arq.constants import abort_jobs_ss, in_progress_key_prefix, job_key_prefix
+from arq.constants import in_progress_key_prefix, job_key_prefix
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from scrapeyard.api.dependencies import (
@@ -633,58 +633,63 @@ async def test_real_redis_priority_backlog_refills_each_freed_worker_slot(
 
 @pytest.mark.asyncio
 @pytest.mark.live_redis
-async def test_queued_cancellation_prevents_real_redis_handler_execution(
+async def test_queued_cancellation_is_acknowledged_while_every_worker_slot_is_busy(
+    one_worker_slot,
     client,
     monkeypatch,
 ):
+    started = asyncio.Event()
+    release = asyncio.Event()
     calls = 0
 
-    async def _must_not_run(*_args, **_kwargs):
+    async def _scrape_target(*_args, **_kwargs):
         nonlocal calls
         calls += 1
+        started.set()
+        await release.wait()
         return TargetResult(
             url="https://example.com",
             status="success",
-            data=[{"title": "unexpected"}],
+            data=[{"title": "the run that held the slot"}],
             pages_scraped=1,
         )
 
-    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _must_not_run)
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _scrape_target)
     pool = get_worker_pool()
-    assert pool._worker is not None
-    assert pool.redis is not None
-    pool._worker.allow_pick_jobs = False
-    try:
+
+    async def _submit() -> str:
         response = await client.post(
             "/scrape",
             content=_async_scrape_yaml(),
             headers={"content-type": "application/x-yaml"},
         )
         assert response.status_code == 202
-        job_id = response.json()["job_id"]
-        job = await get_job_store().get_job(job_id)
-        assert job.current_run_id is not None
+        return response.json()["job_id"]
 
-        cancellation = asyncio.create_task(
-            client.post(f"/jobs/{job_id}/cancel")
-        )
-        for _ in range(100):
-            if await pool.redis.zscore(abort_jobs_ss, job.current_run_id) is not None:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("Timed out waiting for the arq abort marker")
-        pool._worker.allow_pick_jobs = True
-        cancelled = await asyncio.wait_for(cancellation, timeout=3)
+    running_job = await _submit()
+    await asyncio.wait_for(started.wait(), timeout=10)
+    queued_job = await _submit()
+    queued = await get_job_store().get_job(queued_job)
+    assert queued.current_run_id is not None
+    assert await pool.inspect_delivery(queued.current_run_id) is QueueDeliveryState.queued
 
-        assert cancelled.status_code == 204
-        assert calls == 0
-        stored = await get_job_store().get_job(job_id)
-        assert stored.status is JobStatus.cancelled
-        assert stored.current_run_id == job.current_run_id
-        assert await pool.inspect_delivery(job.current_run_id) is QueueDeliveryState.complete
-    finally:
-        pool._worker.allow_pick_jobs = True
+    # An abort the worker must acknowledge waited for a free slot, and the
+    # API answered 504 after the cancellation grace for as long as the run
+    # holding the slot lasted. (Cancelled from outside, arq's abort reports
+    # success, so the wait here outlasts the grace.)
+    cancelled = await asyncio.wait_for(
+        client.post(f"/jobs/{queued_job}/cancel"),
+        timeout=get_settings().workers_cancellation_grace_seconds + 10,
+    )
+    assert cancelled.status_code == 204
+    assert (await get_job_store().get_job(queued_job)).status is JobStatus.cancelled
+    assert await pool.inspect_delivery(queued.current_run_id) is QueueDeliveryState.missing
+
+    release.set()
+    assert await _await_terminal_status(client, running_job) == "complete"
+    # The slot is free again and the cancelled delivery is not run.
+    await asyncio.sleep(1)
+    assert calls == 1
 
 
 @pytest.mark.asyncio

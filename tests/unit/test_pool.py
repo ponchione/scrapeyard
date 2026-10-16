@@ -1045,59 +1045,75 @@ async def test_cancel_run_accepts_already_quiescent_delivery(state, outcome):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("initial", "outcome", "source_priority"),
-    [
-        (
-            QueueDeliveryState.queued,
-            QueueCancellationOutcome.queued_cancelled,
-            "high",
-        ),
-        (
-            QueueDeliveryState.queued,
-            QueueCancellationOutcome.queued_cancelled,
-            "normal",
-        ),
-        (
-            QueueDeliveryState.deferred,
-            QueueCancellationOutcome.deferred_cancelled,
-            "low",
-        ),
-        (
-            QueueDeliveryState.in_progress,
-            QueueCancellationOutcome.in_progress_cancelled,
-            None,
-        ),
-    ],
-)
-async def test_cancel_run_aborts_active_delivery_and_verifies_quiescence(
-    initial,
-    outcome,
-    source_priority,
-):
+async def test_cancel_run_aborts_running_delivery_and_verifies_quiescence():
     pool = _make_pool(cancellation_grace_seconds=3.5)
     pool._redis = MagicMock()
-    queue_name = (
-        pool._queue_name
-        if initial is QueueDeliveryState.in_progress
-        else pool._priority_queues[source_priority]
-    )
     pool._delivery_snapshot = AsyncMock(
         side_effect=[
-            _DeliverySnapshot(initial, queue_name),
+            _DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name),
             _DeliverySnapshot(QueueDeliveryState.complete),
         ]
     )
-    pool._move_to_execution_queue = AsyncMock(return_value=True)
     arq_job = MagicMock(abort=AsyncMock(return_value=True))
 
     with patch("scrapeyard.queue.pool.Job", return_value=arq_job):
         result = await pool.cancel_run("run-1")
 
-    assert result.outcome is outcome
-    assert result.initial_state is initial
+    assert result.outcome is QueueCancellationOutcome.in_progress_cancelled
+    assert result.initial_state is QueueDeliveryState.in_progress
     assert result.final_state is QueueDeliveryState.complete
     arq_job.abort.assert_awaited_once_with(timeout=3.5, poll_delay=0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial", "outcome", "source_priority"),
+    [
+        (QueueDeliveryState.queued, QueueCancellationOutcome.queued_cancelled, "high"),
+        (QueueDeliveryState.queued, QueueCancellationOutcome.queued_cancelled, None),
+        (QueueDeliveryState.deferred, QueueCancellationOutcome.deferred_cancelled, "low"),
+    ],
+)
+async def test_cancel_run_removes_an_unstarted_delivery_without_waiting_for_the_worker(
+    initial, outcome, source_priority,
+):
+    pool = _make_pool()
+    queue_name = pool._queue_name if source_priority is None else pool._priority_queues[source_priority]
+    pool._redis = MagicMock()
+    pool._redis.eval = AsyncMock(return_value=1)
+    pool._delivery_snapshot = AsyncMock(return_value=_DeliverySnapshot(initial, queue_name))
+
+    with patch("scrapeyard.queue.pool.Job") as job_cls:
+        result = await pool.cancel_run("run-1")
+
+    assert result.outcome is outcome
+    assert result.final_state is QueueDeliveryState.missing
+    job_cls.assert_not_called()
+    _script, key_count, *keys_and_args = pool._redis.eval.await_args.args
+    assert keys_and_args[:2] == ["arq:in-progress:run-1", "arq:job:run-1"]
+    assert set(keys_and_args[2:key_count]) == set(pool._known_queues)
+    assert keys_and_args[key_count:] == ["run-1"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_aborts_a_delivery_that_started_before_it_could_be_removed():
+    pool = _make_pool(cancellation_grace_seconds=2.0)
+    pool._redis = MagicMock()
+    pool._redis.eval = AsyncMock(return_value=0)
+    pool._delivery_snapshot = AsyncMock(
+        side_effect=[
+            _DeliverySnapshot(QueueDeliveryState.queued, pool._priority_queues["normal"]),
+            _DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name),
+            _DeliverySnapshot(QueueDeliveryState.complete),
+        ]
+    )
+    arq_job = MagicMock(abort=AsyncMock(return_value=True))
+
+    with patch("scrapeyard.queue.pool.Job", return_value=arq_job):
+        result = await pool.cancel_run("run-1")
+
+    assert result.outcome is QueueCancellationOutcome.in_progress_cancelled
+    arq_job.abort.assert_awaited_once()
 
 
 @pytest.mark.asyncio

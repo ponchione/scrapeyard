@@ -48,15 +48,16 @@ loaded older state still loses its `queue_run` compare-and-set.
 - `500`: the jobs.db cancellation transition itself could not be persisted.
 
 The transition disables future schedule triggers before local APScheduler
-removal and before Redis cancellation. A queued/deferred delivery is located
-in the fixed priority queue set and atomically moved to the base execution
-queue before `Job.abort()` places the run ID in arq's abort set. The embedded
-worker has `allow_abort_jobs=True`, so arq removes the delivery before invoking
-the scrape handler. This cancellation admission bypasses priority fairness only
-to prove quiescence; it does not execute the handler. For in-progress work, arq
-cancels the owned asyncio handler task and waits for its cancellation result.
-The bound is
-`SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default 10 seconds).
+removal and before Redis cancellation. A queued/deferred delivery that has not
+started is removed, with its arq payload, from the fixed priority queue set by
+one Redis script that refuses if the worker has already marked it in progress.
+Nothing waits on the worker, so the cancel answers at once even when every
+worker slot is busy with long runs. A delivery that started before the script
+ran is cancelled as in-progress work: `Job.abort()` places the run ID in arq's
+abort set, and the embedded worker (`allow_abort_jobs=True`) cancels the owned
+asyncio handler task and reports its cancellation result. Only that wait is
+bounded, by `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default 10
+seconds).
 
 The worker also checks exact jobs.db run ownership at bounded lifecycle
 boundaries: before target starts; around target delays and domain rate-limit

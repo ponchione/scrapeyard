@@ -107,14 +107,20 @@ end
 return {}
 """
 
-_MOVE_DELIVERY_LUA = """
-local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
-if not score then
+# Takes a delivery that has not started out of every queue, with its payload;
+# returns 0 when it has started, or is in no queue.
+_REMOVE_UNSTARTED_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
     return 0
 end
-redis.call('ZREM', KEYS[1], ARGV[1])
-redis.call('ZADD', KEYS[2], score, ARGV[1])
-return 1
+local removed = 0
+for index = 3, #KEYS do
+    removed = removed + redis.call('ZREM', KEYS[index], ARGV[1])
+end
+if removed > 0 then
+    redis.call('DEL', KEYS[2])
+end
+return removed
 """
 
 
@@ -783,22 +789,21 @@ class WorkerPool:
             snapshot[priority] = (depth, age_seconds)
         return snapshot
 
-    async def _move_to_execution_queue(self, run_id: str, source_queue: str) -> bool:
+    async def _remove_unstarted_delivery(self, run_id: str) -> bool:
         if self._redis is None:
-            raise RuntimeError("Redis disconnected while moving queued delivery")
-        if source_queue == self._queue_name:
-            return True
-        moved = await cast(
+            raise RuntimeError("Redis disconnected while removing a queued delivery")
+        removed = await cast(
             Awaitable[Any],
             self._redis.eval(
-                _MOVE_DELIVERY_LUA,
-                2,
-                source_queue,
-                self._queue_name,
+                _REMOVE_UNSTARTED_LUA,
+                2 + len(self._known_queues),
+                f"{in_progress_key_prefix}{run_id}",
+                f"{job_key_prefix}{run_id}",
+                *self._known_queues,
                 run_id,
             ),
         )
-        return bool(moved)
+        return bool(removed)
 
     async def cancel_run(self, run_id: str) -> RunCancellationResult:
         """Abort and verify one arq delivery using only its run-scoped identity."""
@@ -853,33 +858,20 @@ class WorkerPool:
                 initial,
             )
         if initial in {QueueDeliveryState.queued, QueueDeliveryState.deferred}:
+            # A delivery that has not started is taken out of its queue at
+            # once. An arq abort would wait for the worker to pick it up,
+            # which a worker with every slot busy does not do for as long as
+            # a run lasts (TD-95).
             try:
-                moved = await self._move_to_execution_queue(run_id, delivery_queue)
-                if not moved:
-                    refreshed = await self._delivery_snapshot(run_id)
-                    delivery_queue = refreshed.queue_name
-                    if refreshed.state in {
-                        QueueDeliveryState.complete,
-                        QueueDeliveryState.missing,
-                    }:
-                        outcome = (
-                            QueueCancellationOutcome.complete
-                            if refreshed.state is QueueDeliveryState.complete
-                            else QueueCancellationOutcome.missing
-                        )
-                        return RunCancellationResult(
-                            run_id,
-                            outcome,
-                            initial,
-                            refreshed.state,
-                        )
-                    if delivery_queue != self._queue_name:
-                        raise RuntimeError("delivery moved to an unexpected queue")
+                removed = await self._remove_unstarted_delivery(run_id)
+                refreshed = (
+                    None if removed else await self._delivery_snapshot(run_id)
+                )
             except Exception as exc:
                 logger.error(
-                    "Run cancellation queue admission unavailable run_id=%s "
+                    "Run cancellation queue removal unavailable run_id=%s "
                     "redis_state=%s queue_outcome=%s "
-                    "cancellation_phase=priority_admission error_type=%s",
+                    "cancellation_phase=unstarted_removal error_type=%s",
                     run_id,
                     initial.value,
                     QueueCancellationOutcome.unavailable.value,
@@ -890,6 +882,35 @@ class WorkerPool:
                     QueueCancellationOutcome.unavailable,
                     initial,
                 )
+            if refreshed is None:
+                outcome = (
+                    QueueCancellationOutcome.queued_cancelled
+                    if initial is QueueDeliveryState.queued
+                    else QueueCancellationOutcome.deferred_cancelled
+                )
+                logger.info(
+                    "Run abort completed run_id=%s prior_redis_state=%s "
+                    "redis_state=%s queue_outcome=%s cancellation_phase=quiescent",
+                    run_id,
+                    initial.value,
+                    QueueDeliveryState.missing.value,
+                    outcome.value,
+                )
+                return RunCancellationResult(
+                    run_id, outcome, initial, QueueDeliveryState.missing
+                )
+            if refreshed.state in {
+                QueueDeliveryState.complete,
+                QueueDeliveryState.missing,
+            }:
+                outcome = (
+                    QueueCancellationOutcome.complete
+                    if refreshed.state is QueueDeliveryState.complete
+                    else QueueCancellationOutcome.missing
+                )
+                return RunCancellationResult(run_id, outcome, initial, refreshed.state)
+            # It started in the meantime: abort it as a running delivery.
+            initial = refreshed.state
         job = Job(run_id, redis=self._redis, _queue_name=self._queue_name)
         logger.info(
             "Run abort requested run_id=%s redis_state=%s "

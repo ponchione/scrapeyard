@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Cancelling a run that was still queued answered `504` after the abort
+  grace whenever every worker slot was busy, and the delivery was only
+  removed once a slot came free (TD-95). arq removes an aborted delivery
+  only when its worker picks it up. A delivery that has not started is now
+  taken out of its queue, with its payload, by one Redis script that
+  refuses if the worker has already marked it in progress, and the cancel
+  answers `204` at once. A run that has started is aborted as before.
 - A backup that found more than 1,000 jobs accepted after its witness wrote
   an archive every restore refused: it now names the first 1,000 and counts
   them all, and only the restore test refuses such an archive, saying why.

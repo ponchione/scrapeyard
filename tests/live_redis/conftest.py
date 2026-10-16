@@ -184,6 +184,13 @@ async def redis_relay(_live_redis_env, monkeypatch) -> AsyncIterator[RedisRelay]
 
 
 @pytest.fixture()
+def one_worker_slot(_live_redis_env, monkeypatch) -> None:
+    """Give the worker one slot; ask for it before ``live_app`` or ``client``."""
+    monkeypatch.setenv("SCRAPEYARD_WORKERS_MAX_CONCURRENT", "1")
+    _clear_singletons()
+
+
+@pytest.fixture()
 async def live_app(request) -> AsyncIterator:
     """Return a fully initialized app using the real WorkerPool and Redis."""
     settings = get_settings()

@@ -654,7 +654,7 @@ profile.
 | `SCRAPEYARD_WORKERS_MAX_CONCURRENT` | `4` | Max concurrent jobs |
 | `SCRAPEYARD_WORKERS_MAX_BROWSERS` | `2` | Max concurrent browser targets across all jobs |
 | `SCRAPEYARD_WORKERS_MEMORY_LIMIT_MB` | `4096` (`3072` in production Compose) | Memory ceiling for starting jobs and browser targets; `0` disables memory admission |
-| `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait for cancellation |
+| `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` | `10` | Bounded arq abort and worker-quiescence wait when cancelling a run that has started |
 | `SCRAPEYARD_WORKERS_SHUTDOWN_GRACE_SECONDS` | `30` | Shutdown grace shared by worker and webhook shutdown; running jobs drain until a quarter of it (at most 5 s) remains, then are cancelled and record their failure |
 | `SCRAPEYARD_WORKERS_REDIS_CONNECT_TIMEOUT_SECONDS` | `10` | Timeout for the worker pool's Redis connection at startup |
 | `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` | `300` | Age after which an unclaimed queued delivery may be replaced |
