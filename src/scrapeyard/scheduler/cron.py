@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 from contextlib import suppress
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.schedulers.base import SchedulerNotRunningError
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.util import datetime_utc_add
 
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.time import utc_now
@@ -49,6 +51,27 @@ class SchedulerUnavailableError(RuntimeError):
 
 class ScheduledJobLifecycleError(RuntimeError):
     """Raised when a job cannot participate in scheduled execution."""
+
+
+class _UtcJitterCronTrigger(CronTrigger):  # type: ignore[misc]  # APScheduler 3 is untyped
+    """A cron trigger whose jitter is added in UTC, not in wall time.
+
+    APScheduler adds it to the local fire time, and the sum loses the fold
+    that tells the repeated hour of a clock change from the first: the
+    second 01:30 plus a minute becomes the first 01:31, an hour in the past.
+    Its catch-up loop then asks for the next fire after that, gets the second
+    01:30 again, and never reaches the present, which hangs the event loop.
+    """
+
+    def _apply_jitter(
+        self, next_fire_time: datetime | None, jitter: int | None, now: datetime
+    ) -> datetime | None:
+        if next_fire_time is None or not jitter:
+            return next_fire_time
+        jittered: datetime = datetime_utc_add(
+            next_fire_time, timedelta(seconds=random.uniform(0, jitter))
+        )
+        return jittered
 
 
 class SchedulerService:
@@ -104,7 +127,7 @@ class SchedulerService:
         enabled:
             If False, the job is added in a paused state.
         """
-        trigger = CronTrigger.from_crontab(
+        trigger = _UtcJitterCronTrigger.from_crontab(
             cron_expr,
             timezone=ZoneInfo(timezone_name),
         )

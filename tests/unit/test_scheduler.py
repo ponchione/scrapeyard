@@ -140,6 +140,34 @@ def test_cron_timezone_has_defined_spring_forward_and_fall_back_behavior():
     assert second.astimezone(utc) == datetime(2026, 11, 1, 6, 30, tzinfo=utc)
 
 
+def test_jitter_across_the_fall_back_never_puts_a_fire_in_the_past(monkeypatch):
+    # The jitter used to be added in wall time, which loses the repeated
+    # hour's fold, so the second 01:30 plus jitter fell an hour back and
+    # APScheduler's catch-up loop (Job._get_run_times) never reached now.
+    import random
+
+    monkeypatch.setattr(random, "uniform", lambda low, high: high)
+    svc = _make_service(jitter_max_seconds=120)
+    svc.register_job("fall", "30 1 * * *", timezone_name="America/New_York")
+    trigger = svc._scheduler.get_job("fall").trigger
+    utc = ZoneInfo("UTC")
+    first = trigger.get_next_fire_time(None, datetime(2026, 11, 1, 5, 0, tzinfo=utc))
+    assert first.astimezone(utc) == datetime(2026, 11, 1, 5, 32, tzinfo=utc)
+
+    now = datetime(2026, 11, 1, 6, 40, tzinfo=utc)
+    run_times = []
+    next_run_time = first
+    while next_run_time.astimezone(utc) <= now:
+        run_times.append(next_run_time.astimezone(utc))
+        assert len(run_times) <= 3, run_times
+        next_run_time = trigger.get_next_fire_time(next_run_time, now)
+    assert run_times == [
+        datetime(2026, 11, 1, 5, 32, tzinfo=utc),
+        datetime(2026, 11, 1, 6, 32, tzinfo=utc),
+    ]
+    assert next_run_time.astimezone(utc) == datetime(2026, 11, 2, 6, 32, tzinfo=utc)
+
+
 def test_remove_job_silent_for_nonexistent():
     svc = _make_service()
     svc.remove_job("no-such-job")

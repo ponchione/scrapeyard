@@ -383,6 +383,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A native cron schedule that fires in the repeated hour of a clock change
+  (`schedule.timezone` with daylight saving, the default 120 s jitter) no
+  longer hangs the whole process. APScheduler added the jitter in wall
+  time, which loses the hour's fold, so the second 01:30 plus jitter fell
+  an hour back and its catch-up loop never reached the present, holding
+  the event loop: the API, readiness and the worker stopped. The jitter is
+  now added in UTC. UTC schedules were never affected, and Eyebox uses no
+  native schedule.
 - The browser smoke lane's check that the egress policy blocks a private
   and a metadata address now requires the policy's refusal (curl exit 7).
   It accepted any failure, and the private fixture is on an internal
