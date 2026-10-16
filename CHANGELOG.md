@@ -470,7 +470,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   at a `docker stop`, a backup stop or a promotion let new runs start after
   the signal and pushed the end of the shutdown towards Compose's SIGKILL at
   40 s, leaving the runs it cut off `running` until reconciliation. Now the
-  worker starts no run from the signal on, Uvicorn waits at most 5 s
+  worker polls for no run from the signal on (a start already under way,
+  a matter of milliseconds, still finishes), Uvicorn waits at most 5 s
   (`--timeout-graceful-shutdown 5` in the image and Compose commands), and
   the shutdown grace counts from the signal. With a request held open for
   25 s, the process now ended 9.6 s after SIGTERM instead of 34.5 s, and no

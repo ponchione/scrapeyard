@@ -269,7 +269,7 @@ def _shutdown_grace_left(grace_seconds: float, stop_requested_at: float | None) 
     waited = max(0.0, time.monotonic() - stop_requested_at)
     logger.info(
         "Application shutdown starting %.1fs after the stop signal; "
-        "the worker has started no run since",
+        "the worker has polled for no run since",
         waited,
     )
     return max(0.0, grace_seconds - waited)
