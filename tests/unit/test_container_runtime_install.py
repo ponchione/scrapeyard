@@ -17,7 +17,14 @@ DOCKER_KEY = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 _SHIMS = {
     "id": 'echo "${FAKE_UID:-0}"',
     "curl": 'while [ "$#" -gt 1 ]; do shift; done; echo key > "$1"',
-    "gpg": 'echo "pub:-:4096:1:8D81803C0EBFCD88:"; echo "fpr:::::::::${FAKE_KEY}:"',
+    # Docker's key has a signing subkey; a served file may carry another key.
+    "gpg": """
+echo "pub:-:4096:1:8D81803C0EBFCD88:"; echo "fpr:::::::::${FAKE_KEY}:"
+echo "sub:-:4096:1:7EA0A9C3F273FCD8:"; echo "fpr:::::::::D3306A018370199E527AE7A67EA0A9C3F273FCD8:"
+if [ -n "${FAKE_EXTRA_KEY:-}" ]; then
+  echo "pub:-:4096:1:${FAKE_EXTRA_KEY: -16}:"; echo "fpr:::::::::${FAKE_EXTRA_KEY}:"
+fi
+""",
     "dpkg": "echo amd64",
     "apt-get": 'echo "apt-get $*" >> "$SHIM_LOG"',
     "apt-cache": 'cat "$SHIM_DIR/madison-$2"',
@@ -164,8 +171,18 @@ def test_installer_reuses_a_repository_entry_the_image_already_has(tmp_path: Pat
     assert [path.name for path in (apt / "sources.list.d").iterdir()] == ["image-docker.list"]
 
 
-def test_installer_refuses_a_repository_key_that_is_not_dockers(tmp_path: Path) -> None:
-    result, log, apt = _run(tmp_path, FAKE_KEY="0" * 40)
+@pytest.mark.parametrize(
+    "served",
+    [
+        {"FAKE_KEY": "0" * 40},
+        # Docker's key first and another behind it: apt would trust both.
+        {"FAKE_EXTRA_KEY": "1" * 40},
+    ],
+)
+def test_installer_refuses_a_repository_key_that_is_not_dockers(
+    tmp_path: Path, served: dict[str, str]
+) -> None:
+    result, log, apt = _run(tmp_path, **served)
 
     assert result.returncode == 1
     assert "not Docker's release key" in result.stderr

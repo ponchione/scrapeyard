@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `install_container_runtime.sh` refuses a key file from Docker's
+  repository that holds any key besides Docker's. It compared only the
+  first key's fingerprint and then gave apt the whole file, so a second key
+  appended to the one served would have been trusted to sign the Docker
+  packages the container lanes and release builds install.
 - The release workflow no longer uploads a release whose Redis and egress
   probe were never scanned. `create` runs the scanner of the revision it
   builds, and before TD-99 that scanner read only the application's image

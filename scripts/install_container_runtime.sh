@@ -53,7 +53,11 @@ add_repository() {
   local key codename
   key="$(mktemp)"
   curl -fsSL --retry 3 "$REPOSITORY/gpg" -o "$key"
-  if [[ "$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" {print $10; exit}')" \
+  # The whole file becomes apt's keyring for the repository, so it must hold
+  # Docker's key and no other: one primary key, with the pinned fingerprint.
+  if [[ "$(gpg --show-keys --with-colons "$key" | awk -F: '
+      $1 == "pub" { primary = 1; next }
+      $1 == "fpr" && primary { print $10; primary = 0 }')" \
     != "$REPOSITORY_KEY_FINGERPRINT" ]]; then
     rm -f -- "$key"
     fail "the key served by $REPOSITORY is not Docker's release key"
