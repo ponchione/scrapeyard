@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -57,7 +58,6 @@ _BLOCK_MARKERS = (
 )
 _PROXY_MARKERS = (
     "proxy",
-    "407",
     "tunnel",
     "authentication required",
     "econnrefused",
@@ -82,6 +82,11 @@ _NETWORK_ERROR_MARKERS = (
     "network",
     "socket",
 )
+
+
+# Browser errors quote the URL they were loading, which the markers must not
+# match: a product ID containing 407 is no proxy refusal.
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+")
 
 
 def token_match(text: str, tokens: tuple[str, ...]) -> bool:
@@ -193,7 +198,9 @@ def classify_fetch_exception(
             return ErrorType.blocked_response, exc.status, debug
         return ErrorType.http_error, exc.status, debug
     if isinstance(exc, FetchError):
-        if exc.status == 200 and exc.debug:
+        if exc.debug and (not exc.status or exc.status < 400):
+            # Below 400 the fetch raised for the page's own access signal,
+            # whatever success status it came with.
             signal = classify_page_signals(exc.debug)
             if signal in ACCESS_DENIAL_TYPES:
                 return signal, exc.status, exc.debug
@@ -214,7 +221,7 @@ def classify_fetch_exception(
             debug,
         )
 
-    detail = f"{type(exc).__name__}: {exc}".lower()
+    detail = _URL.sub("", f"{type(exc).__name__}: {exc}".lower())
     if token_match(detail, _PROXY_MARKERS):
         return ErrorType.proxy_rejected, None, debug
     if fetcher_type != FetcherType.basic and token_match(detail, _BROWSER_ERROR_MARKERS):

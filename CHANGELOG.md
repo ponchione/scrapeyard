@@ -383,6 +383,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Two fetch failures were reported under the wrong `error_type` (TD-97).
+  A browser error quotes the URL it was loading, and the proxy markers
+  were matched against it, so a page whose URL held `407`, `proxy` or
+  `tunnel` failing for any reason was `proxy_rejected`; the markers now
+  read the error with its URLs removed, and the bare `407` is gone (a
+  proxy's refusal names the proxy). And a challenge, consent or login page
+  served with a success status other than 200, which the fetch already
+  refused for that signal, was `http_error`; it now keeps its
+  `challenge_page`, `consent_gate`, `login_gate` or `blocked_response`.
 - A stop no longer lets the worker start runs while Uvicorn waits for the
   requests in flight, and that wait no longer holds the shutdown open
   (TD-96). Uvicorn ran the application's shutdown, which is what stopped the

@@ -112,6 +112,77 @@ def test_classify_fetch_exception_checks_retryable_responses_for_challenges(stat
     assert debug is exc.debug
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (200, ErrorType.challenge_page),
+        # The fetch raises for the page's signal below 400, whatever the status.
+        (202, ErrorType.challenge_page),
+        (203, ErrorType.challenge_page),
+        (405, ErrorType.http_error),
+    ],
+)
+def test_classify_fetch_exception_keeps_the_page_signal_of_any_success_status(status, expected):
+    exc = FetchError(status, debug={"main_document_status": status, **_CHALLENGE_DEBUG})
+
+    error_type, http_status, _debug = classify_fetch_exception(exc, FetcherType.dynamic)
+
+    assert error_type == expected
+    assert http_status == status
+
+
+def _goto_error(reason: str, url: str) -> Exception:
+    return Exception(
+        f"Page.goto: net::{reason} at {url}\nCall log:\n"
+        f'  - navigating to "{url}", waiting until "load"'
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc", "fetcher", "expected"),
+    [
+        # Markers in the URL being loaded say nothing about a proxy.
+        (
+            _goto_error("ERR_CONNECTION_RESET", "https://shop.test/product/1024074071"),
+            FetcherType.dynamic,
+            ErrorType.browser_error,
+        ),
+        (
+            _goto_error("ERR_CONNECTION_RESET", "https://proxy-deals.test/tunnel?p=407"),
+            FetcherType.stealthy,
+            ErrorType.browser_error,
+        ),
+        (
+            _goto_error("ERR_PROXY_CONNECTION_FAILED", "https://shop.test/product/1"),
+            FetcherType.dynamic,
+            ErrorType.proxy_rejected,
+        ),
+        (
+            _goto_error("ERR_TUNNEL_CONNECTION_FAILED", "https://shop.test/product/1"),
+            FetcherType.dynamic,
+            ErrorType.proxy_rejected,
+        ),
+        (
+            httpx.ProxyError("407 Proxy Authentication Required"),
+            FetcherType.basic,
+            ErrorType.proxy_rejected,
+        ),
+        (
+            httpx.ConnectError("[Errno 104] Connection reset by peer"),
+            FetcherType.basic,
+            ErrorType.network_error,
+        ),
+    ],
+)
+def test_classify_fetch_exception_reads_proxy_markers_from_the_error_not_the_url(
+    exc, fetcher, expected
+):
+    error_type, http_status, _debug = classify_fetch_exception(exc, fetcher)
+
+    assert error_type == expected
+    assert http_status is None
+
+
 def test_classify_page_signals_detects_akamai_interstitial_markers_in_html_excerpt():
     debug = {
         "page_title": "Bass Pro Shops",
