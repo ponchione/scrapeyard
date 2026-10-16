@@ -46,19 +46,27 @@ def element_text_content(element: object) -> str:
 
 
 def _visible_text_segments(element: object) -> Iterator[str]:
-    tag = getattr(element, "tag", "")
-    local_tag = tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
-    if local_tag in _NON_VISIBLE_TAGS:
-        return
+    # A stack, not recursion: a page nested deeper than Python's recursion
+    # limit would otherwise fail its target. A string on it is a tail.
+    pending: list[object] = [element]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, str):
+            yield node
+            continue
+        tag = getattr(node, "tag", "")
+        local_tag = tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
+        if local_tag in _NON_VISIBLE_TAGS:
+            continue
 
-    text = getattr(element, "text", None)
-    if isinstance(text, str):
-        yield text
-    for child in cast(Iterable[object], element):
-        yield from _visible_text_segments(child)
-        tail = getattr(child, "tail", None)
-        if isinstance(tail, str):
-            yield tail
+        text = getattr(node, "text", None)
+        if isinstance(text, str):
+            yield text
+        for child in reversed(list(cast(Iterable[object], node))):
+            tail = getattr(child, "tail", None)
+            if isinstance(tail, str):
+                pending.append(tail)
+            pending.append(child)
 
 
 def _text_attribute(element: object) -> str:

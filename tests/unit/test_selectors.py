@@ -209,6 +209,19 @@ def test_extract_selectors_excludes_non_visible_script_and_style_text() -> None:
     assert result == {"text": "Before Middle After"}
 
 
+def test_extract_selectors_reads_text_nested_deeper_than_the_recursion_limit() -> None:
+    depth = 1500
+    page = _adaptor(
+        '<div class="product">' + "<span>a" * depth + "</span>b" * depth + "</div>"
+    )
+
+    result = extract_selectors_strict(page, {"text": ".product"})
+
+    # However deep the parser keeps the nesting, every level gives its text.
+    assert set(result["text"]) == {"a", "b"}
+    assert result["text"].index("b") > result["text"].rindex("a")
+
+
 def test_select_items_returns_one_element_per_item() -> None:
     item_one = _Node(
         css_map={

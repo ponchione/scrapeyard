@@ -383,6 +383,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A page nested deeper than Python's recursion limit (about 1,000
+  elements) no longer fails its target with `RecursionError` reported as
+  `http_error`: a selector's text is gathered with a stack instead of
+  recursion, in the same order.
 - `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` is at most 100 and
   `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` at most 30 days. Unbounded,
   attempt 1,025 overflowed the backoff after its POST, leaving the delivery
