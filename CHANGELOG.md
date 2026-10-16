@@ -394,12 +394,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   from Monday and was given the field as written, so `1-5` ran Tuesday to
   Saturday, `0` on Mondays, and `7` was refused. A schedule stored with a
   numeric day of week fires on different days after the upgrade: the days
-  it was written for. Names (`mon-fri`, `sat-sun`) are unchanged. A fire
-  that restricts both day of month and day of week still needs both to
-  match, as the field's description now says. A stored schedule the
-  scheduler cannot register no longer stops the service from starting: it
-  is left unscheduled and reported in readiness as
-  `persisted_config_invalid`. Eyebox's schedules restrict neither field.
+  it was written for. Names (`mon-fri`, `sat-sun`) are unchanged, but
+  APScheduler ignored whatever followed a name: a step after one now
+  applies (`mon-fri/2` is Monday, Wednesday and Friday, not every weekday),
+  and a field with other trailing text (`fri.`) is refused. A fire that
+  restricts both day of month and day of week still needs both to match,
+  as the field's description now says. A stored schedule the scheduler
+  cannot register, by its cron or by a time zone the image's zone data no
+  longer holds, no longer stops the service from starting: it is left
+  unscheduled and reported in readiness as `persisted_config_invalid`.
+  Eyebox's schedules restrict neither field.
 - A cancellation that reaches a worker just after it recorded its own run
   as `failed` (every target failed, or a run limit) no longer deletes the
   run's result. The worker kept the result only for `complete` and

@@ -8,7 +8,7 @@ import logging
 import random
 from contextlib import suppress
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from apscheduler.jobstores.base import JobLookupError
@@ -170,7 +170,8 @@ class SchedulerService:
         unregistered: dict[str, str] = {}
         for job_id, cron_expr, timezone_name, schedule_enabled in rows:
             # One stored schedule this version cannot read must not stop the
-            # service from starting; it is reported instead of scheduled.
+            # service from starting; it is reported instead of scheduled. Its
+            # zone may also be gone: the zone data is the image's.
             try:
                 self.register_job(
                     job_id,
@@ -178,7 +179,7 @@ class SchedulerService:
                     timezone_name=timezone_name,
                     enabled=schedule_enabled,
                 )
-            except ValueError as exc:
+            except (ValueError, ZoneInfoNotFoundError) as exc:
                 unregistered[job_id] = "persisted_config_invalid"
                 logger.error(
                     "Stored schedule could not be registered job_id=%s error_type=%s "

@@ -559,17 +559,24 @@ async def test_start_reports_a_stored_schedule_it_cannot_read_and_starts():
     job_store.list_scheduled_jobs.return_value = [
         ("unreadable", "0 9 * * fri-mon", "UTC", True),
         ("weekend", "0 9 * * sat-sun", "UTC", True),
+        # Zone data comes from the image; a newer one may lack an old link.
+        ("unknown-zone", "0 9 * * *", "Mars/Olympus_Mons", True),
     ]
     job_store.list_scheduled_trigger_failures.return_value = []
     svc = _make_service(job_store=job_store)
     await svc.start()
     try:
         assert svc._scheduler.get_job("unreadable") is None
+        assert svc._scheduler.get_job("unknown-zone") is None
         assert svc._scheduler.get_job("weekend") is not None
         assert not svc.background_ok
-        assert "job_id=unreadable code=persisted_config_invalid" in svc.background_detail
+        assert svc._schedule_failures == {
+            "unreadable": "persisted_config_invalid",
+            "unknown-zone": "persisted_config_invalid",
+        }
     finally:
         svc.shutdown()
+
 
 async def test_trigger_job_enqueues_queued_job():
     """_trigger_job reserves a run before enqueueing it into the worker pool."""
