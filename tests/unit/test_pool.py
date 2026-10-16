@@ -1066,6 +1066,40 @@ async def test_cancel_run_aborts_running_delivery_and_verifies_quiescence():
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_run_cancelled_while_arq_aborts_is_cancelled_not_quiescent():
+    pool = _make_pool(cancellation_grace_seconds=3.5)
+    pool._redis = MagicMock()
+    pool._delivery_snapshot = AsyncMock(
+        return_value=_DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name)
+    )
+    waiting = asyncio.Event()
+    abort_ended = asyncio.Event()
+
+    async def arq_abort(**_kwargs) -> bool:
+        # As arq 0.26 does: its own cancellation reads as an abort that finished.
+        waiting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return True
+        finally:
+            abort_ended.set()
+        return False
+
+    with patch("scrapeyard.queue.pool.Job", return_value=MagicMock(abort=arq_abort)):
+        cancelling = asyncio.create_task(pool.cancel_run("run-1"))
+        await waiting.wait()
+        cancelling.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await cancelling
+
+    await asyncio.wait_for(abort_ended.wait(), timeout=1)
+    # Only the first look; no verification ran on a cancelled request.
+    pool._delivery_snapshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("initial", "outcome", "source_priority"),
     [

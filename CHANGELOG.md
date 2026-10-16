@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A cancel request cut off while it waited for a running run to abort is
+  cancelled, instead of reporting the run quiescent. arq's `Job.abort`
+  answers True when it is itself cancelled, so the caller's cancellation
+  read as a finished abort; the abort is now awaited shielded. TD-96's
+  5 s limit on Uvicorn's wait for requests at a stop makes such a cut-off
+  likelier.
 - A page nested deeper than Python's recursion limit (about 1,000
   elements) no longer fails its target with `RecursionError` reported as
   `http_error`: a selector's text is gathered with a stack instead of

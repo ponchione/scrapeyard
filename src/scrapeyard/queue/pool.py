@@ -924,11 +924,20 @@ class WorkerPool:
             initial.value,
             self._cancellation_grace_seconds,
         )
-        try:
-            aborted = await job.abort(
+        abort = asyncio.ensure_future(
+            job.abort(
                 timeout=self._cancellation_grace_seconds,
                 poll_delay=min(0.1, self._cancellation_grace_seconds),
             )
+        )
+        try:
+            # arq's abort answers True when it is itself cancelled, so a caller
+            # cancelled while it waits would read a finished abort and report
+            # the run quiescent. Shielded, the caller's cancellation stays its own.
+            aborted = await asyncio.shield(abort)
+        except asyncio.CancelledError:
+            abort.cancel()
+            raise
         except asyncio.TimeoutError:
             logger.error(
                 "Run abort timed out run_id=%s redis_state=%s queue_outcome=%s "
