@@ -311,6 +311,7 @@ async def test_trigger_job_recovers_and_requeues_stale_running_run():
         queued_at=NOW,
         stale_before=None,
         expected_config_yaml=CONFIG_YAML,
+        require_schedule_enabled=True,
     )
     pool.enqueue.assert_awaited_once_with(
         "job-1",
@@ -571,6 +572,7 @@ async def test_trigger_job_enqueues_queued_job():
         queued_at=NOW,
         stale_before=None,
         expected_config_yaml=CONFIG_YAML,
+        require_schedule_enabled=True,
     )
     pool.enqueue.assert_awaited_once()
 

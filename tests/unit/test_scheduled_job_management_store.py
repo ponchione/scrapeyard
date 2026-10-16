@@ -170,15 +170,18 @@ async def test_a_pause_committed_during_a_fire_stops_its_run(store):
     paused = await store.set_schedule_enabled(job.job_id, enabled=False, updated_at=NOW)
     assert paused.current is not None and paused.current.schedule_enabled is False
 
-    for trigger, expected in (("scheduled", False), ("manual", True)):
+    # A worker picking up a delivery accepted before the pause still runs it
+    # (DEPLOYMENT.md: a pause does not discard an accepted delivery).
+    for scheduler, expected in ((True, False), (False, True)):
         queued = await store.queue_run(
             job.job_id,
             expected_status=JobStatus.queued.value,
             expected_run_id=None,
-            new_run_id=f"run-{trigger}",
-            new_trigger=trigger,
+            new_run_id=f"run-{scheduler}",
+            new_trigger="scheduled",
             queued_at=NOW,
             expected_config_yaml=job.config_yaml,
+            require_schedule_enabled=scheduler,
         )
-        assert queued is expected, trigger
-    assert (await store.get_job(job.job_id)).current_run_id == "run-manual"
+        assert queued is expected, scheduler
+    assert (await store.get_job(job.job_id)).current_run_id == "run-False"

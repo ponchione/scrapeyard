@@ -1350,6 +1350,7 @@ class SQLiteJobStore:
         queued_at: datetime,
         stale_before: datetime | None = None,
         expected_config_yaml: str | None = None,
+        require_schedule_enabled: bool = False,
     ) -> bool:
         """Queue a replacement only if the scheduler's observed state still holds."""
         if expected_status in {
@@ -1376,8 +1377,9 @@ class SQLiteJobStore:
                 hashlib.sha256(expected_config_yaml.encode("utf-8")).hexdigest()
             )
         # The scheduler read the schedule as enabled before it loaded the
-        # config; a pause that committed since must still stop the fire.
-        schedule_clause = " AND schedule_enabled = 1" if new_trigger == "scheduled" else ""
+        # config; a pause that committed since must still stop the fire. A
+        # worker picking up a delivery accepted before the pause still runs it.
+        schedule_clause = " AND schedule_enabled = 1" if require_schedule_enabled else ""
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             cursor = await db.execute(
                 """UPDATE jobs

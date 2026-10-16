@@ -408,6 +408,7 @@ class SchedulerService:
             queued_at=now,
             stale_before=None,
             expected_config_yaml=job.config_yaml,
+            require_schedule_enabled=trigger == "scheduled",
         )
         if not queued:
             logger.info(

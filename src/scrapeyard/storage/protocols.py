@@ -324,6 +324,7 @@ class JobStore(Protocol):
         queued_at: datetime,
         stale_before: datetime | None = None,
         expected_config_yaml: str | None = None,
+        require_schedule_enabled: bool = False,
     ) -> bool:
         """Conditionally replace the current job delivery with a queued run."""
         ...
