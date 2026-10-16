@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from collections.abc import Iterable
 from typing import Any
+from urllib.parse import quote, quote_plus
+
+from pydantic import ValidationError
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.settings import get_settings
@@ -121,6 +126,22 @@ def load_config(yaml_str: str) -> ScrapeConfig:
     return load_config_mapping(load_yaml_mapping(yaml_str))
 
 
+def _redact_secret_spellings(text: str, secrets: Iterable[str]) -> str:
+    """Redact each secret as written, URL-quoted or escaped, in any letter case."""
+    spellings: set[str] = set()
+    for secret in secrets:
+        spellings.update((
+            secret,
+            quote(secret, safe=""),
+            quote_plus(secret, safe=""),
+            repr(secret)[1:-1],
+            json.dumps(secret)[1:-1],
+        ))
+    for spelling in sorted(spellings, key=lambda value: (-len(value), value)):
+        text = re.sub(re.escape(spelling), "<redacted>", text, flags=re.IGNORECASE)
+    return text
+
+
 def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
     """Validate a parsed YAML mapping into a ScrapeConfig."""
     _reject_surrogates(data)
@@ -152,12 +173,18 @@ def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
     except Exception as exc:
         if not resolved_secrets:
             raise
-        # Pydantic includes invalid input values in its error text. Never let a
-        # resolved deployment secret escape merely because its destination is invalid.
-        from scrapeyard.engine.url_guard import redact_deployment_secrets
-
-        detail = redact_deployment_secrets(str(exc), resolved_secrets.values())
-        raise ValueError(detail) from exc
+        # Never let a resolved deployment secret escape merely because its
+        # destination is invalid. Pydantic's own text quotes the input, cut
+        # short or escaped where no exact match finds it, so only its messages
+        # are kept; and a message may give the value lower-cased (a URL scheme).
+        if isinstance(exc, ValidationError):
+            detail = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_url=False)
+            )
+        else:
+            detail = str(exc)
+        raise ValueError(_redact_secret_spellings(detail, resolved_secrets.values())) from exc
     config._resolved_secret_values = tuple(
         value for value in dict.fromkeys(resolved_secrets.values()) if value
     )

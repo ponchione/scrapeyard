@@ -118,23 +118,39 @@ async def test_secret_sentinel_absent_from_all_diagnostic_boundaries(
     assert SENTINEL not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("secret", "url", "leaked"),
+    [
+        (SENTINEL, "${SECRET}", SENTINEL),
+        # The scheme comes back lower-cased in the message.
+        ("Xk9TqP2mVb7RwL4z", "${SECRET}://example.com/", "xk9tqp2mvb7rwl4z"),
+        # Pydantic quotes a long input cut short, which no exact match finds.
+        ("tok_" + "A1b2C3d4E5f6G7h8I9j0" * 3, "${SECRET}", "A1b2C3d4E5f6G7h8I9j0"),
+        # And escapes a backslash or a quote in it.
+        ("pa\\ss'w0rd-0123", "${SECRET}", "pa\\\\ss'w0rd"),
+    ],
+)
 async def test_resolved_secret_is_redacted_from_config_validation_errors(
     client,
     monkeypatch,
+    secret,
+    url,
+    leaked,
 ):
-    monkeypatch.setenv("SCRAPEYARD_SECRET_AUDIT_SENTINEL", SENTINEL)
+    monkeypatch.setenv("SCRAPEYARD_SECRET_AUDIT_SENTINEL", secret)
     monkeypatch.setenv(
         "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
         '{"integ":["SCRAPEYARD_SECRET_AUDIT_SENTINEL"]}',
     )
     get_settings.cache_clear()
+    destination = url.replace("SECRET", "SCRAPEYARD_SECRET_AUDIT_SENTINEL")
     response = await client.post(
         "/scrape",
-        content="""
+        content=f"""
 project: integ
 name: invalid-secret-destination
 target:
-  url: ${SCRAPEYARD_SECRET_AUDIT_SENTINEL}
+  url: "{destination}"
   selectors:
     title: h1
 """,
@@ -142,4 +158,6 @@ target:
     )
 
     assert response.status_code == 422
-    assert SENTINEL not in response.text
+    message = response.json()["error"]
+    assert "target.url" in message
+    assert leaked not in message
