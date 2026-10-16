@@ -114,5 +114,7 @@ directory = "htmlcov"
 title = "Scrapeyard coverage report"
 
 [build-system]
-requires = ["poetry-core"]
+# The image builds the package with pip, which fetches this backend; pin the
+# one Poetry itself uses, so the image and CI build with the same backend.
+requires = ["poetry-core==2.3.2"]
 build-backend = "poetry.core.masonry.api"

@@ -8,6 +8,7 @@ import pytest
 
 from scripts.check_packaging_toolchain import (
     PIP_VERSION,
+    POETRY_CORE_VERSION,
     POETRY_EXPORT_VERSION,
     POETRY_VERSION,
     ToolchainVersionError,
@@ -60,7 +61,10 @@ def test_repository_surfaces_declare_and_check_the_same_toolchain() -> None:
     ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     audit = Path(".github/workflows/dependency-audit.yml").read_text(encoding="utf-8")
     docs = Path("docs/TESTING.md").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
 
+    # pip fetches the build backend for the image's install of the package.
+    assert f'requires = ["poetry-core=={POETRY_CORE_VERSION}"]' in pyproject
     assert f"ARG PIP_VERSION={PIP_VERSION}" in dockerfile
     assert f"ARG POETRY_VERSION={POETRY_VERSION}" in dockerfile
     assert f"ARG POETRY_EXPORT_VERSION={POETRY_EXPORT_VERSION}" in dockerfile

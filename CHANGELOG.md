@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The image installs the package with pip, which fetched whatever
+  `poetry-core` PyPI served at build time, unpinned, as the build backend
+  (TD-98). `pyproject.toml` now pins `poetry-core==2.3.2`, the backend
+  Poetry 2.3.4 itself uses, so the image and CI build the package with the
+  same backend; a test holds the pin to the toolchain check's.
 - Two fetch failures were reported under the wrong `error_type` (TD-97).
   A browser error quotes the URL it was loading, and the proxy markers
   were matched against it, so a page whose URL held `407`, `proxy` or

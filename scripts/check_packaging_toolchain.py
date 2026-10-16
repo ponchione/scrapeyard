@@ -12,6 +12,8 @@ from typing import Any
 PIP_VERSION = "26.2.1"
 POETRY_VERSION = "2.3.4"
 POETRY_EXPORT_VERSION = "1.10.0"
+# The build backend Poetry 2.3.4 requires; pyproject.toml pins it for the image.
+POETRY_CORE_VERSION = "2.3.2"
 
 
 class ToolchainVersionError(RuntimeError):
