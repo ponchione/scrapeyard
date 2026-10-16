@@ -32,13 +32,16 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     the probe image too (its statement now says why that is safe); and a
     cancel landing inside arq's start of the same run answers `204`, the
     handler never runs, and arq records a "job expired" failure.
-  - Opened TD-102 (browser redirects pass the route guard; needs the
-    owner's choice; `docs/SECRET_STORAGE.md` no longer claims otherwise),
-    and deferred TD-103 to TD-105.
+  - Opened TD-102: a browser follows a redirect past the route guard.
+    Deployment secret references in browser `extra_headers` are now
+    refused, and `docs/SECRET_STORAGE.md` no longer claims redirects are
+    covered; the hop's address check is deferred, with TD-103 to TD-105.
   - The production host still runs Redis 7.4.5 until the next release. The
     Trivy exception for CVE-2026-84782 in the new Redis image expires on
     2026-11-30, after which the scan fails again until it is fixed or
-    renewed.
+    renewed. The Alpine image was kept over Debian's, which scans clean,
+    because the live tests and the backup's dump load ran on it; no rebuild
+    of it had been published by the end of the pass.
 - **2026-10-15** (no release): readying the production host for Eyebox's
   beta soak.
   - Cloudflare's tunnel health notification now covers the production
@@ -379,7 +382,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the deployment pass (2026-10-10, `2c0f4be`; 2,695 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
 | After the second 2026-10-14 pass (`fbc340c`) | On GitHub at the same commit: Quality on 3.12 (3,083 passed, 18 skipped, 90.44% coverage) and 3.10 (3,079 passed, 22 skipped), live Redis (18 passed), browser smoke, quick qualification, the container scan and the release rehearsal pass; the release workflow built and rehearsed release `fbc340c` (run 38597257620). Locally ruff, mypy (110 files) and `pytest -W error` pass on 3.12 and 3.10 |
 | After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
-| After the 2026-10-16 audit (`f792fa7`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,142 passed, 19 skipped, 90.61% coverage; and on 3.10 the same counts, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
+| After the 2026-10-16 audit (`e830567`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,144 passed, 19 skipped, 90.62% coverage; on 3.10, one commit of code earlier (`f792fa7`), 3,142 passed and 19 skipped, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -520,9 +523,8 @@ to release, with the host's current release as `previous_revision`.
     check reports to, and to decide two questions (the tunnel's own
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
-- TD-102: needs the owner's choice of how browser redirects are guarded.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-103, TD-104 and TD-105.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-105.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -542,7 +544,7 @@ to release, with the host's current release as `previous_revision`.
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
-| TD-102 | P2 | coordinated | A browser follows a redirect past the route guard: headers go cross-origin and the hop's address goes unchecked |
+| TD-102 | P3 | deferred | A browser follows a redirect past the route guard: the hop's address goes unchecked and headers go cross-origin |
 | TD-103 | P3 | deferred | Uvicorn buffers a request's headers and URL without limit before authentication |
 | TD-104 | P3 | deferred | A native cron schedule fires twice when the clocks go back |
 | TD-105 | P3 | deferred | An egress switch killed between its insert and its delete leaves two jumps every install refuses |
@@ -661,53 +663,6 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
-
-### TD-102 — A browser follows a redirect past the route guard: headers go cross-origin and the hop's address goes unchecked
-
-**Priority:** P2 · **Area:** security, browser fetchers · **Risk:** medium · **Contract:** none, unless the fix refuses configs (Eyebox's browser `extra_headers` hold only `Accept-Language` and `Upgrade-Insecure-Requests`) · **Depends on:** the owner's choice below
-
-**Problem:** found by the 2026-10-16 audit and reproduced. A browser
-fetcher sets a target's `extra_headers` page-wide
-(`page.set_extra_http_headers`), and the route handler is what strips them
-from requests to another origin and checks each request's address
-(`assert_public_url_in_run`). Chromium follows a server's 3xx itself without
-calling the route handler again, so neither runs on the hop: with a target
-on `127.0.0.1:P` and `X-Secret` in `extra_headers`, a 302 to
-`localhost:P` delivered `X-Secret` to the landing page and to a redirected
-script, and the guard ran only for the two requests before the redirects.
-Overriding headers through `route.continue_` does not help: Playwright
-carries an override on through redirects.
-
-What it exposes today:
-- A credential in browser `extra_headers` (a `${SCRAPEYARD_SECRET_*}`
-  reference resolves there) goes to wherever a redirect points.
-  `docs/SECRET_STORAGE.md` now says not to put one there.
-- A redirect hop reaches an address the guard would refuse. The host's
-  egress policy still filters what leaves the application's bridge, but not
-  the container's own loopback; the post-fetch check of `final_url` refuses
-  the result of a main document that ended there, not the request.
-
-**Code:** `src/scrapeyard/engine/browser_session.py` (`BrowserSession.fetch`,
-the `context.route` and `set_extra_http_headers` calls),
-`src/scrapeyard/engine/browser_debug.py` (`_guarded_async_intercept_route`).
-
-**Fix, for the owner to choose:**
-- Fulfil every request from the route with `route.fetch` and follow
-  redirects there, checking each hop and scoping headers per hop. It sees
-  every hop, but Playwright's fetch is not the browser's network stack, so
-  retailers would see another TLS and HTTP/2 fingerprint.
-- Refuse a deployment secret reference in browser `extra_headers` at
-  validation (the basic fetcher, which follows redirects itself, keeps
-  them), and find a hook that sees each hop before it is sent for the
-  address check. Playwright's `request` event sees redirect hops but cannot
-  stop them; whether Chromium's DevTools `Fetch` domain can, and what
-  Camoufox offers, is untried.
-- Run browser fetchers only through an egress-filtering proxy, as
-  `untrusted_submissions` already requires, which checks every hop.
-
-**Done when:** a fixture redirect to another origin receives none of the
-target's `extra_headers`, and a redirect to loopback is refused before its
-request is sent, in all three browser modes.
 
 ## Operational and deployment qualification
 
@@ -1482,6 +1437,49 @@ namespace gives, or the browsers are replaced (TD-45), which is the moment
 to measure what their sandboxes use. The change is to replace `capability,`
 with the list both browsers need, proved in the smoke lane with all three,
 and to check that each browser still reports its sandbox as active.
+
+### TD-102 — A browser follows a redirect past the route guard: the hop's address goes unchecked and headers go cross-origin
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the 2026-10-16 audit and reproduced. A browser
+fetcher sets a target's `extra_headers` page-wide
+(`page.set_extra_http_headers`), and the route handler is what strips them
+from requests to another origin and checks each request's address
+(`assert_public_url_in_run`). The browser follows a server's 3xx itself, and
+Playwright continues the redirected request before it reports it
+(`crNetworkManager.js`: "Chromium does not preserve header overrides between
+redirects"), so neither runs on the hop and no Playwright event can stop it.
+With a target on `127.0.0.1:P` and `X-Secret` in `extra_headers`, a 302 to
+`localhost:P` delivered `X-Secret` to the landing page and to a redirected
+script. Overriding headers through `route.continue_` does not help:
+Playwright carries an override on through redirects.
+
+Closed on 2026-10-16: `extra_headers` refuse a deployment secret reference,
+and the schema and `docs/SECRET_STORAGE.md` say a literal credential must
+not go there either. Still open: a hop to an address the guard refuses is
+requested. The post-fetch check of `final_url` refuses the result of a main
+document that ended there, not the request.
+
+**Why deferred:** production runs in trusted mode (TD-18's decision): Eyebox
+is the only submitter, and its `extra_headers` hold only `Accept-Language`
+and `Upgrade-Insecure-Requests`. A hop therefore needs a hostile target page,
+and it reaches little: on the container's loopback only the application's
+API, which requires a key; on its bridge Redis, which drops a connection that
+speaks HTTP, and the egress probe's challenge endpoints; and the host's
+egress policy filters what leaves the bridge. Each remaining fix costs more
+than that:
+- Fulfilling every request with `route.fetch`, following redirects there,
+  sees each hop, but retailers would see another TLS and HTTP/2
+  fingerprint.
+- A second DevTools session with the `Fetch` domain may pause hops in the
+  two Chromium modes; it is untried, and Camoufox has no such domain.
+- An egress-filtering proxy, which untrusted mode requires, checks the hops
+  it carries; browsers send loopback past a proxy unless told otherwise.
+
+**Revisit when:** a submitter other than the operator's own service is
+allowed, a browser target needs a credential header, or Playwright or
+Camoufox offers a handler for redirect hops.
 
 ### TD-103 — Uvicorn buffers a request's headers and URL without limit before authentication
 
