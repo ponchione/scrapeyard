@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import os
 import re
 import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,14 +15,32 @@ import pytest
 from scripts import release_artifact
 
 
+def _image_archive(path: Path, images, *, store: str = "classic") -> None:
+    """Write what `docker image save` writes for *images*, under either store."""
+    hexes = [image.removeprefix("sha256:") for image in images]
+    if store == "classic":
+        manifest = [{"Config": f"blobs/sha256/{value}", "Layers": []} for value in hexes]
+        index = {"manifests": [{"digest": "sha256:" + "f" * 64}]}
+    else:
+        manifest = [{"Config": "blobs/sha256/" + "f" * 64, "Layers": []} for _ in hexes]
+        index = {"manifests": [{"digest": f"sha256:{value}"} for value in hexes]}
+    with tarfile.open(path, "w") as archive:
+        for name, payload in (("index.json", index), ("manifest.json", manifest)):
+            data = json.dumps(payload).encode()
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+
+
 def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, monkeypatch):
     bundle = tmp_path / "release"
     bundle.mkdir()
-    (bundle / "images.tar").write_bytes(b"retained image archive")
     images = {
         name: "sha256:" + value * 64
         for name, value in (("scrapeyard", "a"), ("redis", "b"), ("egress-probe", "c"))
     }
+    _image_archive(bundle / "images.tar", images.values())
+    retained = (bundle / "images.tar").read_bytes()
     overlay = {"services": {name: {"image": value} for name, value in images.items()}}
     (bundle / "images.json").write_text(json.dumps(overlay))
     manifest = {
@@ -29,6 +49,26 @@ def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, mon
         "images": images,
         "files": release_artifact.inventory(bundle),
     }
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    assert release_artifact.verify(bundle) == manifest
+    # The containerd image store identifies images by their index entries.
+    _image_archive(bundle / "images.tar", images.values(), store="containerd")
+    manifest["files"] = release_artifact.inventory(bundle)
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    assert release_artifact.verify(bundle) == manifest
+    # An archive that lacks an image is refused, though its checksum matches.
+    _image_archive(bundle / "images.tar", [images["scrapeyard"], images["egress-probe"]])
+    manifest["files"] = release_artifact.inventory(bundle)
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="images.tar does not hold the redis image"):
+        release_artifact.verify(bundle)
+    (bundle / "images.tar").write_bytes(b"not an archive")
+    manifest["files"] = release_artifact.inventory(bundle)
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="images.tar is not an image archive"):
+        release_artifact.verify(bundle)
+    (bundle / "images.tar").write_bytes(retained)
+    manifest["files"] = release_artifact.inventory(bundle)
     (bundle / "manifest.json").write_text(json.dumps(manifest))
     assert release_artifact.verify(bundle) == manifest
     calls = []
@@ -69,12 +109,12 @@ def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, mon
         assert not calls
         if image.is_symlink():
             image.unlink()
-        image.write_bytes(b"retained image archive")
+        image.write_bytes(retained)
         image.chmod(manifest["files"]["images.tar"]["mode"])
         (bundle / "extra").unlink(missing_ok=True)
 
 
-@pytest.mark.parametrize("failure", ["disk", "scan", "qualification", "network", None])
+@pytest.mark.parametrize("failure", ["disk", "scan", "qualification", "network", "archive", None])
 def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, failure):
     commands = []
     # The real check reads the temp filesystem, which may hold less than 15 GiB.
@@ -93,7 +133,9 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
         }.get(failure):
             raise subprocess.CalledProcessError(1, command)
         if command[:3] == ["docker", "image", "save"]:
-            Path(command[4]).write_bytes(b"retained images")
+            # A save list that leaves an image out still writes an archive.
+            saved = command[5:-1] if failure == "archive" else command[5:]
+            _image_archive(Path(command[4]), saved)
             Path(command[4]).chmod(0o666)
 
     def output(*args, **kwargs):
@@ -166,6 +208,9 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
         release_artifact.create(tmp_path / "candidate", "HEAD")
     assert ("15 GiB free disk" in str(refused.value)) == (failure == "disk")
     assert not (tmp_path / "candidate").exists()
+    if failure == "archive":
+        assert "images.tar does not hold the egress-probe image" in str(refused.value)
+        return
     assert not any(command[:3] == ["docker", "image", "save"] for command in commands)
 
 
@@ -188,7 +233,7 @@ def test_release_image_name_is_valid_whatever_the_temporary_directory_is_called(
         if command[0] == "git":
             return original_run(command, cwd=cwd, **kwargs)
         if command[:3] == ["docker", "image", "save"]:
-            Path(command[4]).write_bytes(b"retained images")
+            _image_archive(Path(command[4]), command[5:])
 
     def output(*args, **kwargs):
         if args[0] == "git":

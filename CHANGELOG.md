@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `release_artifact.py verify` (and so `create` and `load`) now refuses a
+  release whose `images.tar` lacks an image its manifest names. The
+  checksums cover whatever was saved, and the rehearsal's daemon already
+  holds every image it built or pulled, so an image left out of the save
+  passed every gate until a host's `load` refused the release.
 - A config error no longer quotes a piece of a resolved deployment secret
   when the config holds a key spelled like a union member's name. Such an
   error's location names the member (`SelectorLong`, say), and a key of

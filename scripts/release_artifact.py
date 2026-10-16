@@ -42,6 +42,37 @@ def inventory(directory: Path) -> dict[str, dict[str, str | int]]:
     return files
 
 
+def archived_image_ids(archive: Path) -> set[str]:
+    """Identifiers of the images `docker image save` wrote into *archive*.
+
+    The classic image store identifies an image by its config's digest,
+    which manifest.json names; the containerd store by its index entry's,
+    which index.json lists. Both are returned.
+    """
+    identifiers: set[str] = set()
+    try:
+        with tarfile.open(archive) as stream:
+            names = set(stream.getnames())
+            if "manifest.json" not in names:
+                raise ValueError("images.tar is not an image archive")
+            manifest_file = stream.extractfile("manifest.json")
+            if manifest_file is None:
+                raise ValueError("images.tar is not an image archive")
+            for entry in json.load(manifest_file):
+                config = re.fullmatch(
+                    r"(?:blobs/sha256/)?([a-f0-9]{64})(?:\.json)?", str(entry.get("Config"))
+                )
+                if config is not None:
+                    identifiers.add(f"sha256:{config.group(1)}")
+            index_file = stream.extractfile("index.json") if "index.json" in names else None
+            if index_file is not None:
+                for entry in json.load(index_file).get("manifests", []):
+                    identifiers.add(str(entry.get("digest")))
+    except (tarfile.TarError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+        raise ValueError(f"images.tar is not an image archive ({type(exc).__name__})") from None
+    return identifiers
+
+
 def verify(directory: Path) -> dict:
     manifest_path = directory / "manifest.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -61,6 +92,13 @@ def verify(directory: Path) -> dict:
     overlay = json.loads((directory / "images.json").read_text())
     if overlay != {"services": {name: {"image": value} for name, value in images.items()}}:
         raise ValueError("release Compose images differ from the manifest")
+    # The checksums cover whatever was saved, and a rehearsal's daemon already
+    # holds every image it built or pulled, so only this shows an image the
+    # archive left out before a host's load refuses it.
+    archived = archived_image_ids(directory / "images.tar")
+    for name, image in images.items():
+        if image not in archived:
+            raise ValueError(f"images.tar does not hold the {name} image {image}")
     return manifest
 
 
