@@ -197,3 +197,39 @@ target:
         assert piece not in message
     # A message about a value that held no secret is kept.
     assert "Unknown transform: 'nosuch'" in message
+
+
+async def test_config_error_withholds_a_secret_message_past_a_decoy_union_key(
+    client, monkeypatch
+):
+    # The error's location names the union member `SelectorLong`. An input
+    # key spelled the same once led the location's walk into that key, away
+    # from the secret, and the transform's message quoted a piece of it.
+    monkeypatch.setenv("SCRAPEYARD_SECRET_AUDIT_SENTINEL", "Abcd1234:Efgh5678|Ijkl")
+    monkeypatch.setenv(
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+        '{"integ":["SCRAPEYARD_SECRET_AUDIT_SENTINEL"]}',
+    )
+    get_settings.cache_clear()
+    response = await client.post(
+        "/scrape",
+        content="""
+project: integ
+name: invalid-secret-transform-decoy
+target:
+  url: https://example.com/
+  selectors:
+    title:
+      query: h1
+      transform: "${SCRAPEYARD_SECRET_AUDIT_SENTINEL}"
+      SelectorLong:
+        transform: x
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    message = response.json()["error"]
+    assert "target.selectors.title.SelectorLong.transform" in message
+    for piece in ("Abcd1234", "Efgh5678", "Ijkl"):
+        assert piece not in message

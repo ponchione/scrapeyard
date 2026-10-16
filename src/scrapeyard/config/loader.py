@@ -180,6 +180,23 @@ def _input_path(data: Any, loc: tuple[int | str, ...]) -> tuple[Any, ...]:
     return tuple(path)
 
 
+def _is_subsequence(path: tuple[Any, ...], loc: tuple[int | str, ...]) -> bool:
+    remaining = iter(loc)
+    return all(any(part == item for item in remaining) for part in path)
+
+
+def _holds_secret(value: Any, secrets: Iterable[str]) -> bool:
+    """Whether any string in *value* contains a resolved secret, in any case."""
+    if isinstance(value, dict):
+        return any(_holds_secret(item, secrets) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_secret(item, secrets) for item in value)
+    if isinstance(value, str):
+        folded = value.casefold()
+        return any(secret.casefold() in folded for secret in secrets)
+    return False
+
+
 def _redact_secret_spellings(text: str, secrets: Iterable[str]) -> str:
     """Redact each secret as written, URL-quoted or escaped, in any letter case."""
     spellings: set[str] = set()
@@ -246,12 +263,22 @@ def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
                 f"Config is invalid ({type(exc).__name__}); the message is withheld "
                 "because the config holds a deployment secret"
             ) from None
+        #
+        # A location's union-member names are not input keys, but an input
+        # can hold a key spelled like one, which the walk then follows away
+        # from the secret. So a message is also withheld when a secret's path
+        # runs through the location, or the value it was raised for holds one.
         secret_paths = list(_secret_paths(data))
+        secrets = [secret for secret in resolved_secrets.values() if secret]
         messages = []
-        for error in exc.errors(include_input=False, include_url=False):
+        for error in exc.errors(include_url=False):
             path = _input_path(data, error["loc"])
             message = error["msg"]
-            if any(secret[: len(path)] == path for secret in secret_paths):
+            if (
+                any(secret[: len(path)] == path for secret in secret_paths)
+                or any(_is_subsequence(secret, error["loc"]) for secret in secret_paths)
+                or _holds_secret(error.get("input"), secrets)
+            ):
                 message = _WITHHELD_MESSAGE
             location = ".".join(str(part) for part in error["loc"]) or "config"
             messages.append(f"{location}: {message}")

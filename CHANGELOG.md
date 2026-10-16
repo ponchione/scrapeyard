@@ -383,6 +383,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A config error no longer quotes a piece of a resolved deployment secret
+  when the config holds a key spelled like a union member's name. Such an
+  error's location names the member (`SelectorLong`, say), and a key of
+  that name led the check for messages about a secret-bearing value away
+  from the secret, so a transform's message quoted the piece of the
+  secret it split off. A message is now also withheld when a secret's path
+  runs through the error's location or the value it was raised for holds a
+  secret.
 - The exact run of a missed scheduled fire whose queued copy outlived it
   is read instead of answering 500. When enqueueing a scheduled run and
   then failing it both raised, the run row had no config but the queued
