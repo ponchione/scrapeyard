@@ -121,7 +121,8 @@ jobs:
           check="$RUNNER_TEMP/release-archive-check"
           sudo mkdir "$check"
           sudo tar --zstd -xpf "$archive" --no-same-owner -C "$check"
-          # A release to ship must hold a passing scan of every image it runs.
+          # A release to ship must hold a scan of every image it runs (create
+          # stops when a scan fails).
           sudo python3 scripts/release_artifact.py verify --scanned "$check/scrapeyard-release-$CANDIDATE"
           foreign="$(sudo find "$check" \( ! -user 0 -o -perm /022 \) -print -quit)"
           if [ -n "$foreign" ]; then

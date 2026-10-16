@@ -386,7 +386,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - DEPLOYMENT.md and JOB_LIFECYCLE.md no longer say a request still running
   at the end of a stop's 5 s request drain gets no answer: Uvicorn answers
   it with a plain-text `500`. For `POST /jobs/{id}/cancel` that `500` can
-  come after the cancellation was persisted; a retry answers `204`.
+  come after the cancellation was persisted; a retry answers as any cancel
+  of a cancelled run does (`204`, or `503`/`504` while Redis or the worker
+  has not settled).
 - A native cron schedule's day of week now means what it means in cron:
   0 and 7 are Sunday, so `1-5` is Monday to Friday. APScheduler 3 counts
   from Monday and was given the field as written, so `1-5` ran Tuesday to
@@ -437,7 +439,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   "scanned". The workflow now checks the packed candidate with the new
   `release_artifact.py verify --scanned`, which requires a vulnerability
   report naming each image; the rollback target it also builds may predate
-  TD-99.
+  TD-99. Releases built before this change have no `--scanned` in their own
+  copy of the script; run it from a current checkout.
 - `release_artifact.py verify` (and so `create` and `load`) now refuses a
   release whose `images.tar` lacks an image its manifest names. The
   checksums cover whatever was saved, and the rehearsal's daemon already
@@ -456,11 +459,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   copy remained, and the read decrypted that copy with the run row's
   associated data, which fails authentication.
 - A restart no longer gives a missed scheduled fire its parent's config.
-  The fire's run is recorded without one on purpose, so its exact read
-  (`GET /jobs/{id}/runs/{run_id}`) is a 404, but the startup backfill meant
-  for runs from before migration 018 filled it in, and the same read
-  answered 200 after the restart. The backfill now skips runs with a
-  failure code, which only this version writes.
+  The fire's run is recorded without one on purpose, and with no queued
+  copy either its exact read (`GET /jobs/{id}/runs/{run_id}`) is a 404, but
+  the startup backfill meant for runs from before migration 018 filled it
+  in, and the same read answered 200 after the restart. The backfill now
+  skips runs with a failure code, which only this version writes.
 - A deployment secret reference in a target's browser `extra_headers` is
   refused when the config is validated (TD-102). The browser follows a
   server's redirect itself, past the route that keeps these headers to the
