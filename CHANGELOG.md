@@ -392,10 +392,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   from Monday and was given the field as written, so `1-5` ran Tuesday to
   Saturday, `0` on Mondays, and `7` was refused. A schedule stored with a
   numeric day of week fires on different days after the upgrade: the days
-  it was written for. Names (`mon-fri`) are unchanged. A fire that
-  restricts both day of month and day of week still needs both to match,
-  as the field's description now says. Eyebox's schedules restrict
-  neither.
+  it was written for. Names (`mon-fri`, `sat-sun`) are unchanged. A fire
+  that restricts both day of month and day of week still needs both to
+  match, as the field's description now says. A stored schedule the
+  scheduler cannot register no longer stops the service from starting: it
+  is left unscheduled and reported in readiness as
+  `persisted_config_invalid`. Eyebox's schedules restrict neither field.
 - A cancellation that reaches a worker just after it recorded its own run
   as `failed` (every target failed, or a run limit) no longer deletes the
   run's result. The worker kept the result only for `complete` and

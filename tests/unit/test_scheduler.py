@@ -176,6 +176,10 @@ def test_jitter_across_the_fall_back_never_puts_a_fire_in_the_past(monkeypatch):
         ("7", ["Sun", "Sun", "Sun", "Sun", "Sun", "Sun"]),
         ("*/2", ["Sun", "Tue", "Thu", "Sat", "Sun", "Tue"]),
         ("mon,fri", ["Mon", "Fri", "Mon", "Fri", "Mon", "Fri"]),
+        # Names ending a range on Sunday read as they did under APScheduler.
+        ("sat-sun", ["Sun", "Sat", "Sun", "Sat", "Sun", "Sat"]),
+        ("fri-sun", ["Sun", "Fri", "Sat", "Sun", "Fri", "Sat"]),
+        ("sun-sun", ["Sun", "Sun", "Sun", "Sun", "Sun", "Sun"]),
     ],
 )
 def test_a_schedule_reads_day_of_week_as_cron_does(day_of_week, days):
@@ -546,6 +550,24 @@ async def test_start_registers_jobs_from_store():
         assert job_b is not None
         assert job_b.next_run_time is None
         assert str(job_b.trigger.timezone) == "America/New_York"
+    finally:
+        svc.shutdown()
+
+
+async def test_start_reports_a_stored_schedule_it_cannot_read_and_starts():
+    job_store = AsyncMock()
+    job_store.list_scheduled_jobs.return_value = [
+        ("unreadable", "0 9 * * fri-mon", "UTC", True),
+        ("weekend", "0 9 * * sat-sun", "UTC", True),
+    ]
+    job_store.list_scheduled_trigger_failures.return_value = []
+    svc = _make_service(job_store=job_store)
+    await svc.start()
+    try:
+        assert svc._scheduler.get_job("unreadable") is None
+        assert svc._scheduler.get_job("weekend") is not None
+        assert not svc.background_ok
+        assert "job_id=unreadable code=persisted_config_invalid" in svc.background_detail
     finally:
         svc.shutdown()
 

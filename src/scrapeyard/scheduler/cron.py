@@ -167,17 +167,30 @@ class SchedulerService:
         """Start the scheduler and re-register all enabled scheduled jobs from the store."""
         rows = await self._job_store.list_scheduled_jobs()
 
+        unregistered: dict[str, str] = {}
         for job_id, cron_expr, timezone_name, schedule_enabled in rows:
-            self.register_job(
-                job_id,
-                cron_expr,
-                timezone_name=timezone_name,
-                enabled=schedule_enabled,
-            )
+            # One stored schedule this version cannot read must not stop the
+            # service from starting; it is reported instead of scheduled.
+            try:
+                self.register_job(
+                    job_id,
+                    cron_expr,
+                    timezone_name=timezone_name,
+                    enabled=schedule_enabled,
+                )
+            except ValueError as exc:
+                unregistered[job_id] = "persisted_config_invalid"
+                logger.error(
+                    "Stored schedule could not be registered job_id=%s error_type=%s "
+                    "recovery_action=update_or_delete_job",
+                    job_id,
+                    type(exc).__name__,
+                )
 
         self._schedule_failures = dict(
             await self._job_store.list_scheduled_trigger_failures()
         )
+        self._schedule_failures.update(unregistered)
 
         self._scheduler.start()
         mark_last_success("scheduler")

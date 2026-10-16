@@ -36,6 +36,10 @@ def standard_day_of_week(field: str) -> str:
         elif "-" in base:
             start, _, end = base.partition("-")
             first, last = _day_number(start), _day_number(end)
+            # A range may end on Sunday as its last day (`sat-sun`), which
+            # APScheduler, counting from Monday, accepted too.
+            if end.lower() == "sun" and first > 0:
+                last = 7
             if first > last:
                 raise ValueError(f"Invalid day-of-week range {base!r}")
         else:
