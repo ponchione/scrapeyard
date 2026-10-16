@@ -10,6 +10,7 @@ from scrapeyard.common.paths import safe_path_part
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.yaml import load_yaml_mapping
 from scrapeyard.config.schema import ScrapeConfig
+from scrapeyard.config.transforms import config_regex_budget
 
 _SECRET_REFERENCE_RE = re.compile(r"\$\{(SCRAPEYARD_SECRET_[A-Z0-9_]+)\}")
 # YAML's \uD800-style escapes load as surrogate code points, which no UTF-8
@@ -146,7 +147,8 @@ def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
                 )
             resolved_secrets[reference] = resolved
     try:
-        config = ScrapeConfig(**_resolve_secret_references(data, resolved_secrets))
+        with config_regex_budget():
+            config = ScrapeConfig(**_resolve_secret_references(data, resolved_secrets))
     except Exception as exc:
         if not resolved_secrets:
             raise

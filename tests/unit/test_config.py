@@ -1091,6 +1091,54 @@ class TestParseTransform:
         with pytest.raises(ValueError, match="exceeds 4 UTF-8 bytes"):
             parse_transform("regex:12345:x")
 
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "(?:a{100}){200}",
+            "a{5001}a{5001}",
+            # The counts come from the regex module's own parser, which a
+            # comment cannot hide a repeat from.
+            "(?x)(?:a {100}){200} # [",
+            "(?#[)(?:a{100}){200}(?#])",
+        ],
+    )
+    def test_regex_refuses_counted_repeats_that_compile_large(self, pattern):
+        with pytest.raises(ValueError, match="repeats too much"):
+            parse_transform(f'extract("{pattern}")')
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"\$?(\d+(?:\.\d{2})?)", "[a-f0-9]{64}", r"(?:\d{1,3}\.){3}\d{1,3}", "(?:a{0,1000}){9}"],
+    )
+    def test_regex_accepts_ordinary_counted_repeats(self, pattern):
+        parse_transform(f'extract("{pattern}")')
+
+    def test_regex_nested_too_deeply_is_invalid_not_an_error(self):
+        with pytest.raises(ValueError, match="nested too deeply"):
+            parse_transform(f'extract("{"(" * 400}a{")" * 400}")')
+
+    @pytest.mark.parametrize(("selectors", "accepted"), [(10, True), (11, False)])
+    def test_one_configs_regex_patterns_share_one_budget(self, selectors, accepted):
+        # Each pattern compiles to about 9,200 nodes, under the limit for one;
+        # eleven of them pass the limit for a config.
+        lines = "\n".join(
+            f"    f{index}:\n      query: h1\n      transform: extract(\"(?:a{{90}}){{100}}\")"
+            for index in range(selectors)
+        )
+        yaml_text = f"""
+project: regex-budget
+name: shared
+target:
+  url: https://example.com
+  selectors:
+{lines}
+"""
+        if accepted:
+            load_config(yaml_text)
+        else:
+            with pytest.raises(ValueError, match="repeat too much together"):
+                load_config(yaml_text)
+
     def test_regex_times_out_catastrophic_backtracking(self, monkeypatch):
         monkeypatch.setattr(
             "scrapeyard.config.transforms.get_settings",

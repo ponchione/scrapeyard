@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import io
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any
 
 import regex
 
@@ -16,6 +20,29 @@ _FUNC_RE = re.compile(r"^(\w+)\((.*)\)$")
 _PIPELINE_PREFIX_RE = re.compile(r"\s*(?:(extract:|regex:)|\w+\s*\()")
 _DEFAULT_MAX_PIPELINE_STEPS = 32
 _DEFAULT_MAX_VALUE_BYTES = 1048576
+# The regex module's compiler copies a counted repeat's body once for each of
+# its minimum count: `(?:a{1000}){1000}` builds a million nodes, about 250 MB
+# and three seconds, from 17 bytes, and `a{99999}` 250 times fits the pattern
+# size limit. The module's own parser, which copies nothing, gives the counts
+# before the compiler runs; it is internal to the pinned regex release.
+_regex_core: Any = importlib.import_module("regex._regex_core")
+_MAX_REGEX_EXPANSION = 10_000
+# A target's extraction keeps every pattern its selectors use compiled, so
+# one config's patterns are held to a budget together as well.
+_MAX_CONFIG_REGEX_EXPANSION = 100_000
+_config_regex_budget: ContextVar[list[int] | None] = ContextVar(
+    "scrapeyard_config_regex_budget", default=None
+)
+
+
+@contextmanager
+def config_regex_budget() -> Iterator[None]:
+    """Hold every regex compiled within, together, to one config's budget."""
+    token = _config_regex_budget.set([_MAX_CONFIG_REGEX_EXPANSION])
+    try:
+        yield
+    finally:
+        _config_regex_budget.reset(token)
 
 
 class TransformTimeoutError(ValueError):
@@ -207,6 +234,47 @@ def _bounded_regex_replace(
     return output.getvalue()
 
 
+def _parse_regex(pattern: str) -> Any:
+    """Parse *pattern* as ``regex.compile`` does, without compiling it."""
+    _regex_core.DEFAULT_VERSION = regex.DEFAULT_VERSION
+    global_flags = 0
+    while True:
+        source = _regex_core.Source(pattern)
+        info = _regex_core.Info(global_flags, source.char_type, {})
+        info.guess_encoding = regex.UNICODE
+        source.ignore_space = bool(info.flags & regex.VERBOSE)
+        try:
+            return _regex_core._parse_pattern(source, info)
+        except _regex_core._UnscopedFlagSet:
+            # A flag set in the pattern applies to all of it: parse again.
+            global_flags = info.global_flags
+
+
+def _regex_expansion(pattern: str, *, limit: int) -> int:
+    """Count the nodes compiling *pattern* builds, stopping once past *limit*.
+
+    Each parsed node counts once for each copy the compiler makes of it: a
+    repeat's body is copied its minimum count of times (once at least).
+    """
+    total = 0
+    pending: list[tuple[Any, int]] = [(_parse_regex(pattern), 1)]
+    while pending:
+        node, copies = pending.pop()
+        total += copies
+        if total > limit:
+            return total
+        if isinstance(node, _regex_core.GreedyRepeat):
+            copies *= max(1, node.min_count)
+        for value in vars(node).values():
+            children = value if isinstance(value, (list, tuple)) else (value,)
+            pending.extend(
+                (child, copies)
+                for child in children
+                if isinstance(child, _regex_core.RegexBase)
+            )
+    return total
+
+
 def _compile_regex(pattern: str) -> regex.Pattern[str]:
     settings = get_settings()
     pattern_bytes = len(pattern.encode("utf-8"))
@@ -216,7 +284,29 @@ def _compile_regex(pattern: str) -> regex.Pattern[str]:
             f"{settings.transform_regex_max_pattern_bytes} UTF-8 bytes"
         )
     try:
-        return regex.compile(pattern)
+        expansion = _regex_expansion(pattern, limit=_MAX_REGEX_EXPANSION)
+    except regex.error:
+        # Compiling stops at the same error, before building anything.
+        expansion = 0
+    except RecursionError:
+        raise ValueError("Invalid regular expression: nested too deeply") from None
+    if expansion > _MAX_REGEX_EXPANSION:
+        raise ValueError(
+            "Regex transform pattern repeats too much: compiled, it would "
+            f"exceed {_MAX_REGEX_EXPANSION} nodes; use smaller counted repeats"
+        )
+    budget = _config_regex_budget.get()
+    if budget is not None:
+        budget[0] -= expansion
+        if budget[0] < 0:
+            raise ValueError(
+                "Regex transform patterns repeat too much together: compiled, "
+                f"one config's would exceed {_MAX_CONFIG_REGEX_EXPANSION} nodes"
+            )
+    try:
+        # Not cached: the module's cache would keep every distinct pattern a
+        # client sends, compiled, for the life of the process.
+        return regex.compile(pattern, cache_pattern=False)
     except regex.error as exc:
         raise ValueError(f"Invalid regular expression: {exc}") from exc
 
