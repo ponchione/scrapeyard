@@ -123,6 +123,7 @@ run; what it reports through is a hook the operator installs.
 
 | Check | Fails when |
 | --- | --- |
+| `deployment` | Docker did not list or describe the deployment's containers, or `docker.service` is stopped, failed or stopping. Then Docker is not asked at all: its socket would start a stopped Docker for the first client, and the boot service, which Docker wants, would start the application with it in the middle of maintenance. |
 | `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup has it stopped, or the boot service's start or stop or a promotion is under way, and for ten minutes at most; between the retries of a start that keeps failing it is judged. |
 | `disk` | `/`, `/var/lib/docker` or `/var/backups/scrapeyard` has less than 10% or 2 GiB free, or less than 10% of its inodes. |
 | `backup` | The last backup completed more than 26 hours ago, none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. |

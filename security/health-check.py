@@ -59,6 +59,11 @@ PING_SCHEMES = frozenset({"https"})
 
 OWN_UNIT = "scrapeyard-health.service"
 APP_UNIT = "scrapeyard.service"
+DOCKER_UNIT = "docker.service"
+# Docker's states in which asking it starts nothing: its socket starts a
+# stopped Docker for the first client, and the boot unit, which Docker wants,
+# starts the application with it.
+DOCKER_ASKABLE = frozenset({"active", "activating", "reloading"})
 PROMOTE_UNIT = "scrapeyard-promote.service"
 # Written by a backup just before it stops the application, and removed once
 # the application is started again.
@@ -415,6 +420,9 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
     now = time.time()
     results: list[Result] = []
     try:
+        docker = unit_state(DOCKER_UNIT)
+        if docker not in DOCKER_ASKABLE:
+            raise RuntimeError(f"{DOCKER_UNIT} is {docker}, so Docker was not asked")
         found = containers(project_name())
     except (OSError, ValueError, RuntimeError) as error:
         found = {}

@@ -115,6 +115,8 @@ class Host:
         }))
 
     def run(self, command: list[str], *, stdin: str | None = None) -> tuple[int, str]:
+        if command[0] == "docker":
+            assert self.unit_states.get("docker.service", "active") == "active"
         if command[:2] == ["docker", "ps"]:
             assert "label=com.docker.compose.project=sy-prod" in command
             return 0, "app1\nredis1\nprobe1\n"
@@ -262,6 +264,21 @@ def test_an_old_or_missing_backup_or_a_stopped_timer_fails(host, capsys, hours_a
     out, _state = _check(host, capsys)
 
     assert expected in out
+
+
+@pytest.mark.parametrize("docker", ["inactive", "failed", "deactivating"])
+def test_a_stopped_docker_is_not_asked_so_it_does_not_start_again(host, capsys, docker):
+    # Its socket would start it for the first client, and the application with it.
+    host.unit_states["docker.service"] = docker
+
+    out, state = _check(host, capsys)
+
+    assert (
+        f"FAIL deployment: its containers could not be found: docker.service is {docker}, "
+        "so Docker was not asked"
+    ) in out
+    assert "FAIL application: no application container" in out
+    assert state["status"] == "fail"
 
 
 def test_low_disk_fails(host, capsys):
