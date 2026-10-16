@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The browser smoke lane's check that the egress policy blocks a private
+  and a metadata address now requires the policy's refusal (curl exit 7).
+  It accepted any failure, and the private fixture is on an internal
+  network Docker isolates whether or not the policy is installed, so the
+  check passed without the policy.
 - `install_container_runtime.sh` refuses a key file from Docker's
   repository that holds any key besides Docker's. It compared only the
   first key's fingerprint and then gave apt the whole file, so a second key

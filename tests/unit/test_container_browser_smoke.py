@@ -418,6 +418,8 @@ def test_smoke_runner_has_bounded_cleanup_diagnostics_and_privilege_contracts() 
         "run_apparmor_profile remove",
         "fixture.private.test:8080/protected?case=network-layer",
         "169.254.169.254/latest/meta-data",
+        # Only a refusal is the policy's; a drop or a lookup failure is not.
+        "((refused == 7))",
         "compose exec -T peer",
         "PORT_BINDING",
         "docker stats --no-stream",

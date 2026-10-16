@@ -324,14 +324,16 @@ PORT_BINDING="$(docker port "$(compose ps -q scrapeyard)" 8420/tcp)"
 compose exec -T peer python -c \
   "import urllib.request; assert urllib.request.urlopen('http://scrapeyard:8420/health/live', timeout=3).status == 200"
 
-if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
-  'http://fixture.private.test:8080/protected?case=network-layer'; then
-  fail "network policy allowed a private target"
-fi
-if compose exec -T scrapeyard curl --fail --silent --show-error --max-time 2 \
-  'http://169.254.169.254/latest/meta-data/'; then
-  fail "network policy allowed a metadata target"
-fi
+# Only the policy's REJECT refuses the connection (curl exit 7). Without it
+# Docker's isolation of the internal network drops it (a timeout), a runner's
+# metadata service answers, and a name that does not resolve fails as well.
+for target in 'http://fixture.private.test:8080/protected?case=network-layer' \
+  'http://169.254.169.254/latest/meta-data/'; do
+  refused=0
+  compose exec -T scrapeyard curl --silent --show-error --output /dev/null --max-time 2 \
+    "$target" || refused=$?
+  ((refused == 7)) || fail "network policy did not refuse $target (curl exit $refused)"
+done
 
 # The host's own addresses are input to the host, not forwarded traffic, so
 # the DOCKER-USER policy alone never sees a connection to them. A listener on
