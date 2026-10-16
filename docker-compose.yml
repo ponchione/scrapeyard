@@ -51,7 +51,7 @@ services:
 
   scrapeyard:
     build: .
-    command: ["uvicorn", "scrapeyard.main:app", "--host", "0.0.0.0", "--port", "8420", "--workers", "1"]
+    command: ["uvicorn", "scrapeyard.main:app", "--host", "0.0.0.0", "--port", "8420", "--timeout-graceful-shutdown", "5", "--workers", "1"]
     deploy:
       replicas: 1
     init: true

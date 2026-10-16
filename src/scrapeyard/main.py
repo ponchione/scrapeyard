@@ -100,6 +100,7 @@ from scrapeyard.runtime.metrics import (
     set_cleanup_backlog,
 )
 from scrapeyard.runtime.process_exit import end_process
+from scrapeyard.runtime.stop_signal import StopSignalHook
 from scrapeyard.storage.cleanup import start_cleanup_loop
 from scrapeyard.storage.database import close_db, init_db
 from scrapeyard.storage.secret_envelope import (
@@ -195,6 +196,9 @@ async def _startup_runtime_services(app: FastAPI) -> None:
     await services.webhook_dispatcher.startup()
     services.worker_pool.on_runner_exit = _end_process_after_worker_loss
     await services.worker_pool.start()
+    stop_hook = StopSignalHook(services.worker_pool.stop_taking_runs)
+    stop_hook.install()
+    app.state.stop_signal_hook = stop_hook
     init_rate_limiter(redis=services.worker_pool.redis)
     init_domain_guard(redis=services.worker_pool.redis)
     running_monitor = BackgroundLoopMonitor(
@@ -252,6 +256,23 @@ async def _startup_runtime_services(app: FastAPI) -> None:
         error_store=get_error_store(),
         monitor=cleanup_monitor,
     )
+
+
+def _shutdown_grace_left(grace_seconds: float, stop_requested_at: float | None) -> float:
+    """Count the shutdown grace from the stop's signal, as Compose's stop period does.
+
+    The server waits for its requests in flight before the application's
+    shutdown starts; that wait comes off the grace.
+    """
+    if stop_requested_at is None:
+        return grace_seconds
+    waited = max(0.0, time.monotonic() - stop_requested_at)
+    logger.info(
+        "Application shutdown starting %.1fs after the stop signal; "
+        "the worker has started no run since",
+        waited,
+    )
+    return max(0.0, grace_seconds - waited)
 
 
 async def _shutdown_runtime_services(
@@ -460,11 +481,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         thaw_startup_heap()
+        stop_hook: StopSignalHook | None = getattr(app.state, "stop_signal_hook", None)
+        if stop_hook is not None:
+            stop_hook.restore()
         release_instance_lock = True
         try:
             await _shutdown_runtime_services(
                 app,
-                shutdown_grace_seconds=settings.workers_shutdown_grace_seconds,
+                shutdown_grace_seconds=_shutdown_grace_left(
+                    settings.workers_shutdown_grace_seconds,
+                    None if stop_hook is None else stop_hook.requested_at,
+                ),
             )
         except BaseException:
             release_instance_lock = not _runtime_shutdown_pending(app)

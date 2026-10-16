@@ -1586,7 +1586,11 @@ Set limits to match host capacity:
   then, shutdown reports failure and keeps the instance guard, with the
   databases already closed, and the process exits when the thread returns or
   Compose's `stop_grace_period` kills it. Unresolved worker or background
-  tasks, which can still write, keep the databases open as before)
+  tasks, which can still write, keep the databases open as before. The
+  grace counts from the stop's signal: the worker starts no run from then
+  on, and Uvicorn's wait for requests in flight, at most 5 s
+  (`--timeout-graceful-shutdown 5`), comes off it. A request still running
+  then is cut off without an answer)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
 - `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` (default `604800`)

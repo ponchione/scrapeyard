@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -77,7 +78,7 @@ async def test_health_cache_surfaces_store_unavailability():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp_path):
+async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp_path, request):
     app = FastAPI()
     settings = SimpleNamespace(
         log_dir="/tmp/logs",
@@ -110,7 +111,9 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
             ]
         )
     )
-    pool = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), redis=object())
+    pool = SimpleNamespace(
+        start=AsyncMock(), stop=AsyncMock(), stop_taking_runs=MagicMock(), redis=object()
+    )
     scheduler = SimpleNamespace(start=AsyncMock(), shutdown=MagicMock())
     webhook_dispatcher = SimpleNamespace(startup=AsyncMock())
 
@@ -181,6 +184,13 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     heap = MagicMock()
     monkeypatch.setattr(main_module, "freeze_startup_heap", heap.freeze)
     monkeypatch.setattr(main_module, "thaw_startup_heap", heap.thaw)
+    server_stops: list[int] = []
+
+    def server_handle_exit(signum, _frame) -> None:
+        server_stops.append(signum)
+
+    original_sigterm = signal.signal(signal.SIGTERM, server_handle_exit)
+    request.addfinalizer(lambda: signal.signal(signal.SIGTERM, original_sigterm))
 
     async with main_module.lifespan(app):
         heap.freeze.assert_called_once_with()
@@ -198,7 +208,15 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         assert (tmp_path / "results").is_dir()
         assert (tmp_path / "adaptive").is_dir()
         assert not (tmp_path / "browser-debug").exists()
+        pool.stop_taking_runs.assert_not_called()
+        # The server waits for its requests before the application's shutdown;
+        # the worker stops taking runs at the signal itself.
+        signal.raise_signal(signal.SIGTERM)
+        pool.stop_taking_runs.assert_called_once_with()
+        assert server_stops == [signal.SIGTERM]
+        await asyncio.sleep(0.3)
 
+    assert signal.getsignal(signal.SIGTERM) == server_handle_exit
     main_module.setup_logging.assert_called_once_with("/tmp/logs", "DEBUG")
     main_module.init_db.assert_awaited_once_with(str(tmp_path / "db"))
     main_module.migrate_persisted_secrets.assert_awaited_once_with()
@@ -228,7 +246,8 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     pool.stop.assert_awaited_once()
     worker_timeout = pool.stop.await_args.kwargs["timeout"]
     webhook_timeout = main_module.close_webhook_dispatcher.await_args.kwargs["timeout"]
-    assert 0 <= webhook_timeout <= worker_timeout <= 7
+    # The grace counts from the signal, so the wait before shutdown came off it.
+    assert 0 <= webhook_timeout <= worker_timeout <= 7 - 0.3
     main_module.close_db.assert_awaited_once()
     heap.thaw.assert_called_once_with()
     assert app.state.instance_lock is None
@@ -834,7 +853,7 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
     async def _start_scheduler() -> None:
         events.append("scheduler_started")
 
-    pool = SimpleNamespace(start=_start_pool, redis=object())
+    pool = SimpleNamespace(start=_start_pool, stop_taking_runs=MagicMock(), redis=object())
     scheduler = SimpleNamespace(start=_start_scheduler)
     services = main_module.RuntimeServices(
         result_store="result-store",
@@ -922,7 +941,7 @@ async def test_startup_connects_redis_then_reconciles_before_scheduler(monkeypat
 @pytest.mark.asyncio
 async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
     app = FastAPI()
-    pool = SimpleNamespace(start=AsyncMock(), redis=object())
+    pool = SimpleNamespace(start=AsyncMock(), stop_taking_runs=MagicMock(), redis=object())
     scheduler = SimpleNamespace(start=AsyncMock())
     services = main_module.RuntimeServices(
         result_store="result-store",

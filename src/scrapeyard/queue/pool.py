@@ -537,6 +537,11 @@ class WorkerPool:
         if self.on_runner_exit is not None:
             self.on_runner_exit(error)
 
+    def stop_taking_runs(self) -> None:
+        """Start no further delivery; a stop's signal handler calls it."""
+        if self._worker is not None:
+            self._worker.allow_pick_jobs = False
+
     async def stop(self, *, timeout: float | None = None) -> None:
         """Stop picking new jobs and close the embedded worker."""
         if not self._started:

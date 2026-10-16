@@ -74,7 +74,7 @@ export SCRAPEYARD_DB_DIR=/tmp/scrapeyard/db
 export SCRAPEYARD_STORAGE_RESULTS_DIR=/tmp/scrapeyard/results
 export SCRAPEYARD_ADAPTIVE_DIR=/tmp/scrapeyard/adaptive
 export SCRAPEYARD_LOG_DIR=/tmp/scrapeyard/logs
-poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420 --workers 1
+poetry run uvicorn scrapeyard.main:app --host 0.0.0.0 --port 8420 --timeout-graceful-shutdown 5 --workers 1
 ```
 
 Check health:
