@@ -174,6 +174,14 @@ class TestScrapeConfigValidation:
         with pytest.raises(ValidationError, match="Unsafe project/name"):
             ScrapeConfig(**data)
 
+    def test_schedule_reads_day_of_week_as_cron_does(self):
+        # Cron's Sunday is 0 or 7; APScheduler's own 0 is Monday and has no 7.
+        ScrapeConfig(**_tier1_config(schedule={"cron": "0 9 * * 7", "enabled": True}))
+        for invalid in ("0 9 * * 8", "0 9 * * fri-mon", "0 9 * * */0"):
+            data = _tier1_config(schedule={"cron": invalid, "enabled": True})
+            with pytest.raises(ValidationError, match="Invalid cron expression"):
+                ScrapeConfig(**data)
+
     def test_schedule_rejects_invalid_cron_expression(self):
         data = _tier1_config(schedule={"cron": "not a cron", "enabled": True})
         with pytest.raises(ValidationError, match="Invalid cron expression"):

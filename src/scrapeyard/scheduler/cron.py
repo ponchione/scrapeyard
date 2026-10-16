@@ -17,6 +17,7 @@ from apscheduler.schedulers.base import SchedulerNotRunningError
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.util import datetime_utc_add
 
+from scrapeyard.common.crontab import crontab_fields
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.loader import load_config
@@ -127,8 +128,8 @@ class SchedulerService:
         enabled:
             If False, the job is added in a paused state.
         """
-        trigger = _UtcJitterCronTrigger.from_crontab(
-            cron_expr,
+        trigger = _UtcJitterCronTrigger(
+            **crontab_fields(cron_expr),
             timezone=ZoneInfo(timezone_name),
         )
         trigger.jitter = self._jitter_max

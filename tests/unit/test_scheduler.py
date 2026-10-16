@@ -168,6 +168,29 @@ def test_jitter_across_the_fall_back_never_puts_a_fire_in_the_past(monkeypatch):
     assert next_run_time.astimezone(utc) == datetime(2026, 11, 2, 6, 32, tzinfo=utc)
 
 
+@pytest.mark.parametrize(
+    ("day_of_week", "days"),
+    [
+        ("1-5", ["Mon", "Tue", "Wed", "Thu", "Fri", "Mon"]),
+        ("0", ["Sun", "Sun", "Sun", "Sun", "Sun", "Sun"]),
+        ("7", ["Sun", "Sun", "Sun", "Sun", "Sun", "Sun"]),
+        ("*/2", ["Sun", "Tue", "Thu", "Sat", "Sun", "Tue"]),
+        ("mon,fri", ["Mon", "Fri", "Mon", "Fri", "Mon", "Fri"]),
+    ],
+)
+def test_a_schedule_reads_day_of_week_as_cron_does(day_of_week, days):
+    # APScheduler 3 counts weekdays from Monday, so `1-5` ran Tuesday to Saturday.
+    svc = _make_service()
+    svc.register_job("weekly", f"0 9 * * {day_of_week}")
+    trigger = svc._scheduler.get_job("weekly").trigger
+    fire = trigger.get_next_fire_time(None, datetime(2026, 10, 17, 12, tzinfo=timezone.utc))
+    fired = []
+    for _ in days:
+        fired.append(fire.strftime("%a"))
+        fire = trigger.get_next_fire_time(fire, fire)
+    assert fired == days
+
+
 def test_remove_job_silent_for_nonexistent():
     svc = _make_service()
     svc.remove_job("no-such-job")

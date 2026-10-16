@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from scrapeyard.common.crontab import crontab_fields
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.transforms import parse_transform_pipeline
 from scrapeyard.engine.proxy import normalize_public_proxy_url
@@ -1221,7 +1222,14 @@ class ExecutionConfig(StrictConfigModel):
 class ScheduleConfig(StrictConfigModel):
     """Cron-style scheduling configuration."""
 
-    cron: str = Field(..., description="Cron expression")
+    cron: str = Field(
+        ...,
+        description=(
+            "Five-field cron expression. Day of week counts from Sunday (0 or 7) "
+            "or takes names; unlike cron, a fire that restricts both day of month "
+            "and day of week needs both to match"
+        ),
+    )
     timezone: str = Field(
         default="UTC",
         description="IANA timezone used to interpret the cron expression",
@@ -1232,7 +1240,7 @@ class ScheduleConfig(StrictConfigModel):
     @classmethod
     def _validate_cron(cls, value: str) -> str:
         try:
-            CronTrigger.from_crontab(value)
+            CronTrigger(**crontab_fields(value))
         except ValueError as exc:
             raise ValueError(f"Invalid cron expression: {exc}") from exc
         return value
