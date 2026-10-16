@@ -111,11 +111,27 @@ def test_assert_public_url_rejects_raw_control_characters() -> None:
 
 @pytest.mark.parametrize(
     "host",
-    ["localhost", "localhost.", "localhost.localdomain", "ip6-localhost", "broadcasthost"],
+    [
+        "localhost",
+        "localhost.",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "broadcasthost",
+        "localhost6",
+        "localhost6.localdomain6",
+        # A browser maps every name under .localhost to loopback itself.
+        "internal.localhost",
+        "a.b.LOCALHOST.",
+    ],
 )
 def test_assert_public_url_rejects_known_local_hostnames_without_dns(host: str) -> None:
     with pytest.raises(UnsafeURLError, match="blocked"):
         assert_public_url(f"http://{host}/resource", resolve_dns=False)
+
+
+@pytest.mark.parametrize("host", ["localhost.example.com", "notlocalhost", "mylocalhost.test"])
+def test_assert_public_url_accepts_names_that_only_contain_localhost(host: str) -> None:
+    assert_public_url(f"http://{host}/resource", resolve_dns=False)
 
 
 @pytest.mark.parametrize(

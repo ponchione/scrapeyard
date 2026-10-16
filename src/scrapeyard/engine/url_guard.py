@@ -52,6 +52,8 @@ _DISALLOWED_HOSTS: frozenset[str] = frozenset(
         "instance-data.ec2.internal",
         "localhost",
         "localhost.localdomain",
+        "localhost6",
+        "localhost6.localdomain6",
     }
 )
 
@@ -104,7 +106,10 @@ def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 def _hostname_is_blocked(host: str) -> bool:
-    return host.lower().rstrip(".") in _DISALLOWED_HOSTS
+    name = host.lower().rstrip(".")
+    # Browsers answer every name under .localhost with loopback themselves
+    # (RFC 6761), without asking DNS, so no lookup here would see it.
+    return name in _DISALLOWED_HOSTS or name.endswith(".localhost")
 
 
 # httpx percent-encodes these in an ASCII host, so the name it requests is not
