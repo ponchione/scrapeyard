@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -154,18 +155,22 @@ async def test_cancellation_after_result_write_discards_artifact_before_finaliza
 
 
 @pytest.mark.parametrize(
-    ("durable_status", "discarded"),
+    ("durable_status", "owner_stamped", "discarded"),
     [
-        (JobStatus.complete, False),
-        (JobStatus.partial, False),
-        (JobStatus.cancelled, True),
-        (JobStatus.failed, True),
-        (None, True),
+        (JobStatus.complete, True, False),
+        (JobStatus.partial, True, False),
+        (JobStatus.cancelled, False, True),
+        # A stale recovery's failure carries its own completed_at.
+        (JobStatus.failed, False, True),
+        # The worker records failed itself (every target failed, a run limit).
+        (JobStatus.failed, True, False),
+        (None, False, True),
     ],
 )
 async def test_cancellation_after_finalization_commit_keeps_the_finalized_artifact(
     mock_stores,
     durable_status,
+    owner_stamped,
     discarded,
 ):
     job_store, result_store, error_store, circuit_breaker = mock_stores
@@ -179,24 +184,34 @@ async def test_cancellation_after_finalization_commit_keeps_the_finalized_artifa
         serialized_bytes=64,
     )
 
-    async def _commit_then_cancel(*_args, **_kwargs):
+    committed = {}
+
+    async def _commit_then_cancel(*args, **_kwargs):
         # The transaction commits on the database thread, then the awaiting
         # worker is cancelled before it sees the outcome.
         nonlocal active
         active = False
+        committed["completed_at"] = args[5]
         raise asyncio.CancelledError
 
-    job_store.finalize_owned_run.side_effect = _commit_then_cancel
-    if durable_status is None:
-        job_store.get_job_run.side_effect = OSError("disk I/O error")
-    else:
-        job_store.get_job_run.return_value = JobRun(
+    async def _durable_run(*_args):
+        if durable_status is None:
+            raise OSError("disk I/O error")
+        return JobRun(
             run_id="run-1",
             job_id="job-1",
             status=durable_status,
             trigger="adhoc",
             config_hash="0" * 64,
+            completed_at=(
+                committed["completed_at"]
+                if owner_stamped
+                else committed["completed_at"] + timedelta(seconds=1)
+            ),
         )
+
+    job_store.finalize_owned_run.side_effect = _commit_then_cancel
+    job_store.get_job_run.side_effect = _durable_run
     success = TargetResult(
         url="https://example.com",
         status="success",

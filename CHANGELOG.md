@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A cancellation that reaches a worker just after it recorded its own run
+  as `failed` (every target failed, or a run limit) no longer deletes the
+  run's result. The worker kept the result only for `complete` and
+  `partial`, the statuses only it writes, so its own failed run read
+  `failed` with a `404` for the results, losing `targets[]`, `errors[]`
+  and `budget_error`. A failed run is now the worker's when it carries the
+  `completed_at` the worker gave it.
 - A schedule paused while one of its fires was loading the config no
   longer queues that fire after the pause has returned `200`. The fire
   checked `schedule_enabled` before loading the config, and the
