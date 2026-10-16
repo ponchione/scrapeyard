@@ -127,6 +127,10 @@ elif args and args[0] == "-X":
 else:
     raise SystemExit(f"unsupported shim command: {tool} {' '.join(args)}")
 save()
+if args[0] in mutations and count == int(os.environ.get("SIGNAL_AT", "0")):
+    # A stop that lands just after this command, as systemd's would.
+    import signal
+    os.kill(os.getppid(), getattr(signal, os.environ["SIGNAL_NAME"]))
 """
 
 
@@ -301,6 +305,41 @@ def test_policy_replacement_restores_prior_deny_path_at_every_mutation_stage(
         assert result.returncode != 0
         assert "prior policy restored" in result.stderr
         _assert_old_policy_active(state_dir)
+
+
+@pytest.mark.parametrize(
+    ("tool", "signal_name", "status"),
+    [("iptables", "SIGTERM", 143), ("ip6tables", "SIGINT", 130), ("iptables", "SIGHUP", 129)],
+)
+def test_a_stop_just_after_the_switch_insert_restores_one_jump_and_fails(
+    tmp_path: Path, tool: str, signal_name: str, status: int
+) -> None:
+    installer, state_dir, env = _fresh_install(tmp_path)
+    assert _run(installer, env).returncode == 0
+    (state_dir / "mutations.log").unlink()
+    (state_dir / "mutation-count").unlink()
+    baseline = tmp_path / "baseline"
+    shutil.copytree(state_dir, baseline)
+    assert _run(installer, env).returncode == 0
+    insert = next(
+        int(row.split("\t", 1)[0])
+        for row in (state_dir / "mutations.log").read_text().splitlines()
+        if f"\t{tool}\t-I DOCKER-USER" in row
+    )
+    shutil.rmtree(state_dir)
+    shutil.copytree(baseline, state_dir)
+
+    result = _run(installer, {**env, "SIGNAL_AT": str(insert), "SIGNAL_NAME": signal_name})
+
+    # An interrupted switch never reports success.
+    assert result.returncode == status
+    assert "prior policy restored" in result.stderr
+    _assert_old_policy_active(state_dir)
+    for family in ("iptables", "ip6tables"):
+        assert json.loads((state_dir / f"{family}.json").read_text())["jumps"] == [
+            "SY-EGRESS-test-A"
+        ]
+    assert _run(installer, env).returncode == 0
 
 
 def test_wrong_address_family_fails_before_firewall_mutation(tmp_path: Path) -> None:

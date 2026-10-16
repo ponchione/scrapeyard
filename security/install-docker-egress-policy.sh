@@ -465,7 +465,10 @@ V4_SWITCHED=0
 V6_SWITCHED=0
 rollback() {
   local status=$?
-  trap - ERR INT TERM
+  # After a signal, $? is the status of whatever ran last, often 0; its trap
+  # passes the signal's own.
+  [[ $# -eq 0 ]] || status=$1
+  trap - ERR HUP INT TERM
   set +e
   if [[ $V6_SWITCHED -eq 1 ]]; then
     if [[ -n "$V6_OLD" ]] && ! has_jump ip6tables "$V6_OLD"; then
@@ -487,7 +490,10 @@ rollback() {
   echo "scrapeyard egress policy: replacement failed; prior policy restored" >&2
   exit "$status"
 }
-trap rollback ERR INT TERM
+trap rollback ERR
+trap 'rollback 129' HUP
+trap 'rollback 130' INT
+trap 'rollback 143' TERM
 
 prepare_chain() {
   local tool=$1 chain=$2
@@ -552,22 +558,24 @@ fi
 
 # Insert and verify each replacement before removing its prior jump. If any
 # later command fails, the trap reinserts the old jump before removing new.
-iptables -I DOCKER-USER 1 -i "$NETWORK_INTERFACE" -j "$V4_NEW"
+# Each flag is set before its insert: a signal between the two would leave the
+# new jump beside the old, and removing a jump never inserted changes nothing.
 V4_SWITCHED=1
+iptables -I DOCKER-USER 1 -i "$NETWORK_INTERFACE" -j "$V4_NEW"
 has_jump iptables "$V4_NEW"
 if [[ -n "$V4_OLD" ]]; then
   iptables -D DOCKER-USER -i "$NETWORK_INTERFACE" -j "$V4_OLD"
 fi
 if [[ -n "$APP_SOURCE_V6" ]]; then
-  ip6tables -I DOCKER-USER 1 -i "$NETWORK_INTERFACE" -j "$V6_NEW"
   V6_SWITCHED=1
+  ip6tables -I DOCKER-USER 1 -i "$NETWORK_INTERFACE" -j "$V6_NEW"
   has_jump ip6tables "$V6_NEW"
   if [[ -n "$V6_OLD" ]]; then
     ip6tables -D DOCKER-USER -i "$NETWORK_INTERFACE" -j "$V6_OLD"
   fi
 fi
 
-trap - ERR INT TERM
+trap - ERR HUP INT TERM
 rm -f "$POLICY_OUTPUT"
 # Inactive old chains are harmless. Cleanup is best-effort so a host-tool
 # cleanup error cannot roll back or invalidate the already verified policy.

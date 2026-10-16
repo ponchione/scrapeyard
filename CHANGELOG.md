@@ -383,6 +383,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A stop that lands during the egress policy's switch no longer leaves two
+  policy jumps behind and reports success (TD-101). The installer marked
+  each family switched only after inserting the new jump, so a SIGTERM or
+  SIGINT between the two rolled back nothing, printed "prior policy
+  restored" and exited 0; SIGHUP was not trapped at all. Every later
+  install then refused the two jumps, leaving the application down. Each
+  flag is now set before its insert, HUP is trapped too, and an
+  interrupted install exits with its signal's status (129, 130 or 143).
 - The host check no longer starts a Docker the operator stopped (TD-100).
   It asked the Docker CLI first thing every five minutes; with Docker
   stopped, its socket starts it for the first client, and the boot service,
