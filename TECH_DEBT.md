@@ -6,7 +6,58 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
-- **2026-10-16** (no release; branch `audit-2026-10-16`, not pushed): an
+- **2026-10-16, second pass** (no release; pull request #40): a targeted
+  audit in place of the cancelled 72-hour soak, done locally, of the secret
+  storage, the code pull request #39 changed, the scheduler and webhooks,
+  results and retention, and the scripts. The production host was not
+  touched.
+  - Twelve findings fixed without entries, each code fix with a test seen
+    failing on the old code. The worst: a native cron schedule firing in
+    the repeated hour of a clock change hung the whole process (API,
+    readiness and worker), because APScheduler added the jitter in wall
+    time and its catch-up loop never reached the present; and a config
+    error quoted a piece of a resolved secret when the config held a key
+    spelled like a union member (`SelectorLong`), which led the check for
+    messages about a secret away from the secret.
+  - The release gates: the workflow could upload a release whose Redis
+    and probe were never scanned (a rebuild of a release from before
+    TD-99), now refused by `verify --scanned`; and `verify` passed an
+    `images.tar` that lacked an image its manifest names. The runtime
+    installer compared only the first key in the file Docker's repository
+    serves and gave apt the whole file. The smoke lane's egress check
+    passed without the policy installed.
+  - The scheduler: a day of week was read from Monday (`1-5` ran Tuesday
+    to Saturday; a schedule stored with numbers now fires on the days it
+    was written for, and Eyebox restricts no day); and a pause committed
+    while a fire loaded its config still queued that fire.
+  - Runs: a cancellation arriving just after a worker failed its own run
+    deleted the run's result; a restart gave a missed scheduled fire its
+    parent's config; and a missed fire's queued copy was decrypted with the
+    run row's associated data (`500`). The docs said a request cut off by a
+    stop's drain gets no answer; Uvicorn sends a plain-text `500`.
+  - A fresh adversarial agent reviewed the security-sensitive commits and
+    found four faults in this pass's own fixes, all closed. The pause check
+    also dropped a scheduled delivery a worker picked up after a pause,
+    which `docs/DEPLOYMENT.md` says never happens. The day-of-week change
+    refused ranges ending on Sunday (`sat-sun`), and one such stored
+    schedule would have stopped the service from starting; startup now
+    leaves a schedule it cannot register unscheduled and reports it as
+    `persisted_config_invalid`. The key check could be passed with a second
+    key in a secret-key block or a block with another armor label; apt now
+    gets an export of the pinned key alone. And the secret check withheld
+    unrelated messages, such as a transform's on a selector named `url`
+    when `target.url` held a secret. Four statements in the docs, the
+    changelog and a workflow comment were corrected. The same agent
+    checked those fixes and found two low faults in them, both closed: a
+    stored time zone the image's zone data no longer holds still stopped
+    startup, and the changelog missed that a named day field with a step
+    now applies it (`mon-fri/2`) and one with other trailing text (`fri.`)
+    is refused, where APScheduler ignored what followed the name.
+  - Opened TD-106 to TD-108, all deferred. Left as documented: a worker
+    that ends after indexing a run's result but before finalizing the run
+    leaves the result readable under a `failed` run
+    (`during_run_finalization` in `docs/TESTING.md`).
+- **2026-10-16** (no release; pull request #39, merged as `de7acc3`): an
   audit during Eyebox's beta soak, done locally. The production host was
   not touched.
   - TD-92 closed, and nine findings of this pass fixed and closed as TD-93
@@ -348,7 +399,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-106**) and use this template:
+7. **New findings** take the next free ID (**TD-109**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -383,6 +434,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the second 2026-10-14 pass (`fbc340c`) | On GitHub at the same commit: Quality on 3.12 (3,083 passed, 18 skipped, 90.44% coverage) and 3.10 (3,079 passed, 22 skipped), live Redis (18 passed), browser smoke, quick qualification, the container scan and the release rehearsal pass; the release workflow built and rehearsed release `fbc340c` (run 38597257620). Locally ruff, mypy (110 files) and `pytest -W error` pass on 3.12 and 3.10 |
 | After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
 | After the 2026-10-16 audit (`e830567`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,144 passed, 19 skipped, 90.62% coverage; on 3.10, one commit of code earlier (`f792fa7`), 3,142 passed and 19 skipped, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
+| After the second 2026-10-16 pass (`1e6e8a8`) | Locally, ruff over `src tests scripts security`, mypy (112 files) and `pytest -W error` pass on 3.12: 3,165 passed, 19 skipped, 90.65% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (339 passed, 22 skipped) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -524,7 +576,7 @@ to release, with the host's current release as `previous_revision`.
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-105.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-108.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -548,6 +600,9 @@ to release, with the host's current release as `previous_revision`.
 | TD-103 | P3 | deferred | Uvicorn buffers a request's headers and URL without limit before authentication |
 | TD-104 | P3 | deferred | A native cron schedule fires twice when the clocks go back |
 | TD-105 | P3 | deferred | An egress switch killed between its insert and its delete leaves two jumps every install refuses |
+| TD-106 | P3 | deferred | With the default backoff a webhook is dead-lettered after about 15 s of receiver errors |
+| TD-107 | P3 | deferred | A Redis stall that trips the poll watchdog during a run ends in a failed shutdown |
+| TD-108 | P3 | deferred | The rehearsal deploys releases whose images its daemon already holds |
 
 ## Ready to implement
 
@@ -1518,7 +1573,11 @@ it once. The spring change is handled: a 02:30 schedule runs once, at 03:30.
 
 **Revisit when:** a consumer schedules natively in a zone with daylight
 saving. The fix is to skip a fire whose local time has `fold=1` when the
-same wall time already fired that day.
+same wall time already fired that day. Its test,
+`test_cron_timezone_has_defined_spring_forward_and_fall_back_behavior`,
+pins the double fire. The second 2026-10-16 pass fixed a worse effect of
+the same hour: the jitter, added in wall time, put the second fire an hour
+in the past and hung the process; it is now added in UTC.
 
 ### TD-105 — An egress switch killed between its insert and its delete leaves two jumps every install refuses
 
@@ -1540,6 +1599,75 @@ dropped, which would leave egress unfiltered.
 **Revisit when:** a host is found in that state. The fix is to keep the
 topmost jump only if its chain matches what `check` expects of the rendered
 policy, and to refuse otherwise as now.
+
+### TD-106 — With the default backoff a webhook is dead-lettered after about 15 s of receiver errors
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the second 2026-10-16 pass. The dispatcher's backoff
+is fixed at 1 s doubling to at most 30 s (`_DEFAULT_BACKOFF_BASE`,
+`_DEFAULT_BACKOFF_MAX` in `src/scrapeyard/webhook/dispatcher.py`), and
+`get_webhook_dispatcher` passes no setting for it. With the default five
+attempts the waits are 1, 2, 4 and 8 s, so a receiver that answers `503`
+for 20 s while it redeploys loses the delivery for good (`attempt_exhausted`
+after 16 s, in a run against a local server). Even the 100-attempt maximum
+spans about 47 minutes. The 24 h
+`SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` only matters when the
+receiver sends `Retry-After`.
+
+**Why deferred:** Eyebox's scheduled runs strip `webhook`; no consumer
+receives webhooks.
+
+**Revisit when:** a consumer relies on webhooks. The fix is settings for
+the base and the cap, with defaults whose retries span the age bound.
+
+### TD-107 — A Redis stall that trips the poll watchdog during a run ends in a failed shutdown
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the second 2026-10-16 pass. When a Redis that hangs
+trips TD-92's watchdog while a run is in progress, `WorkerPool.stop`
+(`src/scrapeyard/queue/pool.py`) drains and then cancels the run. Its
+handler records the run `failed` in SQLite, but arq 0.26.3's `run_job`
+then waits, shielded, for its result write on the Redis that does not
+answer, and `stop` cancels each task once. The cancellation reserve runs
+out, the stop raises `Worker shutdown deadline exceeded in phase(s):
+runner, active_jobs`, the instance guard is kept with a CRITICAL log, and
+the dispatcher and databases are not closed. The process ends (status 143)
+and Docker starts it again. Nothing durable is lost: the run is `failed`,
+and arq's buffered write runs when Redis resumes. The live stall test stops
+an idle worker only.
+
+**Why deferred:** the restart recovers, and the run's state is right; the
+cost is an unclean-looking shutdown on each such stall.
+
+**Revisit when:** a stall with a run in flight is seen, or the shutdown's
+logs feed an alert. The fix is to close the Redis connection pool under a
+short timeout once the reserve expires, so the hung reads fail and the
+tasks finish, and to extend the live stall test to a run in progress.
+
+### TD-108 — The rehearsal deploys releases whose images its daemon already holds
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the second 2026-10-16 pass. The release workflow
+runs `release_artifact.py create` for both releases on the daemon it then
+deploys them on, and nothing removes the images it built or pulled, so
+every `load` in the rehearsal succeeds whatever `images.tar` holds. The
+check that nothing was pulled reads `docker events --since`, which serves
+only the daemon's last 256 events of every type; health-check `exec`
+events fill that in about two minutes, and the first read is minutes after
+the first deploy. This pass made `verify` require each manifest image in
+the archive, so an image left out of the save is now refused at `create`;
+an archive whose images are present but unloadable would still pass.
+
+**Why deferred:** the archive check covers the likely mistake, and a host's
+`load` refuses a broken archive before it stops anything.
+
+**Revisit when:** the release workflow is next changed. The fix is to
+remove both releases' image IDs and build tags before the first deploy,
+and to stream `docker events --filter type=image` to a file from the start
+of the run.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 
