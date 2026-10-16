@@ -448,9 +448,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   error's location names the member (`SelectorLong`, say), and a key of
   that name led the check for messages about a secret-bearing value away
   from the secret, so a transform's message quoted the piece of the
-  secret it split off. A message is now also withheld when a secret's path
-  runs through the error's location or the value it was raised for holds a
-  secret.
+  secret it split off. A message is now also withheld when the value it was
+  raised for holds a resolved secret, in any letter case.
 - The exact run of a missed scheduled fire whose queued copy outlived it
   is read instead of answering 500. When enqueueing a scheduled run and
   then failing it both raised, the run row had no config but the queued

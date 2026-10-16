@@ -233,3 +233,35 @@ target:
     assert "target.selectors.title.SelectorLong.transform" in message
     for piece in ("Abcd1234", "Efgh5678", "Ijkl"):
         assert piece not in message
+
+
+async def test_config_error_keeps_a_message_about_a_field_named_like_a_secret_one(
+    client, monkeypatch
+):
+    # A secret in target.url, and a selector also named `url` whose transform
+    # is invalid: that message is not about the secret and stays.
+    monkeypatch.setenv("SCRAPEYARD_SECRET_AUDIT_SENTINEL", "Abcd1234Efgh5678Ijkl")
+    monkeypatch.setenv(
+        "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+        '{"integ":["SCRAPEYARD_SECRET_AUDIT_SENTINEL"]}',
+    )
+    get_settings.cache_clear()
+    response = await client.post(
+        "/scrape",
+        content="""
+project: integ
+name: invalid-transform-beside-secret
+target:
+  url: "https://example.com/?auth=${SCRAPEYARD_SECRET_AUDIT_SENTINEL}"
+  selectors:
+    url:
+      query: a
+      transform: nosuch
+""",
+        headers={"content-type": "application/x-yaml"},
+    )
+
+    assert response.status_code == 422
+    message = response.json()["error"]
+    assert "Unknown transform: 'nosuch'" in message
+    assert "Abcd1234" not in message
