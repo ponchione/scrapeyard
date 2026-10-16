@@ -6,6 +6,39 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-16** (no release; branch `audit-2026-10-16`, not pushed): an
+  audit during Eyebox's beta soak, done locally. The production host was
+  not touched.
+  - TD-92 closed, and nine findings of this pass fixed and closed as TD-93
+    to TD-101. The worst were TD-94, where a 29-byte regex transform took
+    28 GB to compile, so one submission could end the application by OOM,
+    and TD-99, where every release shipped Redis 7.4.5 with CVE-2025-49844
+    (remote code execution through Lua) because only the application's
+    image was scanned.
+  - Fixed without an entry: a resolved secret in a `422` in another
+    spelling; regex replacements naming missing groups; transform limits
+    reported as `http_error`; webhook retry settings that overflowed; deep
+    pages failing on `RecursionError`; an overflowing `since`; live Redis
+    runs that passed with every test skipped; and a cancel request whose
+    own cancellation read as arq's finished abort.
+  - A fresh adversarial agent reviewed the security-sensitive commits and
+    found two holes in this pass's own fixes, both closed. Under full case
+    folding a character set compiles to about a hundred nodes a copy, so
+    `(?fi)(?:[\x00-\U0010FFFF]{98}){99}` passed TD-94's count and ten such
+    steps took 2.8 GB. And a transform's error quoted a piece of a secret
+    (the pipeline splits at `:` and `|`), which no whole-secret redaction
+    finds. Its low findings: a run start already under way at the stop
+    signal still finishes (the docs now say so); the Trivy exception covers
+    the probe image too (its statement now says why that is safe); and a
+    cancel landing inside arq's start of the same run answers `204`, the
+    handler never runs, and arq records a "job expired" failure.
+  - Opened TD-102 (browser redirects pass the route guard; needs the
+    owner's choice; `docs/SECRET_STORAGE.md` no longer claims otherwise),
+    and deferred TD-103 to TD-105.
+  - The production host still runs Redis 7.4.5 until the next release. The
+    Trivy exception for CVE-2026-84782 in the new Redis image expires on
+    2026-11-30, after which the scan fails again until it is fixed or
+    renewed.
 - **2026-10-15** (no release): readying the production host for Eyebox's
   beta soak.
   - Cloudflare's tunnel health notification now covers the production
@@ -312,7 +345,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-93**) and use this template:
+7. **New findings** take the next free ID (**TD-106**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -346,6 +379,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the deployment pass (2026-10-10, `2c0f4be`; 2,695 passed after pull request #12) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12 and 3.10: 2,676 passed, 17 skipped, 90% coverage. On GitHub, CI, Dependency audit, Container security, browser smoke and quick qualification pass on the commits that touch them, and the release rehearsal passes on the pull request head `cf335c8` (run 38073376177: two releases built, scanned and qualified in 11 and 10 minutes, the rehearsal with the boot service in 406 seconds, 29 minutes in all). Run 38071059498 on `main` at `f100488` uploaded the first release archive (1.3 GB) |
 | After the second 2026-10-14 pass (`fbc340c`) | On GitHub at the same commit: Quality on 3.12 (3,083 passed, 18 skipped, 90.44% coverage) and 3.10 (3,079 passed, 22 skipped), live Redis (18 passed), browser smoke, quick qualification, the container scan and the release rehearsal pass; the release workflow built and rehearsed release `fbc340c` (run 38597257620). Locally ruff, mypy (110 files) and `pytest -W error` pass on 3.12 and 3.10 |
 | After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
+| After the 2026-10-16 audit (`f792fa7`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,142 passed, 19 skipped, 90.61% coverage; and on 3.10 the same counts, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -486,8 +520,9 @@ to release, with the host's current release as `previous_revision`.
     check reports to, and to decide two questions (the tunnel's own
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
+- TD-102: needs the owner's choice of how browser redirects are guarded.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86 and TD-88.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-103, TD-104 and TD-105.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -507,6 +542,10 @@ to release, with the host's current release as `previous_revision`.
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
+| TD-102 | P2 | coordinated | A browser follows a redirect past the route guard: headers go cross-origin and the hop's address goes unchecked |
+| TD-103 | P3 | deferred | Uvicorn buffers a request's headers and URL without limit before authentication |
+| TD-104 | P3 | deferred | A native cron schedule fires twice when the clocks go back |
+| TD-105 | P3 | deferred | An egress switch killed between its insert and its delete leaves two jumps every install refuses |
 
 ## Ready to implement
 
@@ -622,6 +661,53 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
+
+### TD-102 — A browser follows a redirect past the route guard: headers go cross-origin and the hop's address goes unchecked
+
+**Priority:** P2 · **Area:** security, browser fetchers · **Risk:** medium · **Contract:** none, unless the fix refuses configs (Eyebox's browser `extra_headers` hold only `Accept-Language` and `Upgrade-Insecure-Requests`) · **Depends on:** the owner's choice below
+
+**Problem:** found by the 2026-10-16 audit and reproduced. A browser
+fetcher sets a target's `extra_headers` page-wide
+(`page.set_extra_http_headers`), and the route handler is what strips them
+from requests to another origin and checks each request's address
+(`assert_public_url_in_run`). Chromium follows a server's 3xx itself without
+calling the route handler again, so neither runs on the hop: with a target
+on `127.0.0.1:P` and `X-Secret` in `extra_headers`, a 302 to
+`localhost:P` delivered `X-Secret` to the landing page and to a redirected
+script, and the guard ran only for the two requests before the redirects.
+Overriding headers through `route.continue_` does not help: Playwright
+carries an override on through redirects.
+
+What it exposes today:
+- A credential in browser `extra_headers` (a `${SCRAPEYARD_SECRET_*}`
+  reference resolves there) goes to wherever a redirect points.
+  `docs/SECRET_STORAGE.md` now says not to put one there.
+- A redirect hop reaches an address the guard would refuse. The host's
+  egress policy still filters what leaves the application's bridge, but not
+  the container's own loopback; the post-fetch check of `final_url` refuses
+  the result of a main document that ended there, not the request.
+
+**Code:** `src/scrapeyard/engine/browser_session.py` (`BrowserSession.fetch`,
+the `context.route` and `set_extra_http_headers` calls),
+`src/scrapeyard/engine/browser_debug.py` (`_guarded_async_intercept_route`).
+
+**Fix, for the owner to choose:**
+- Fulfil every request from the route with `route.fetch` and follow
+  redirects there, checking each hop and scoping headers per hop. It sees
+  every hop, but Playwright's fetch is not the browser's network stack, so
+  retailers would see another TLS and HTTP/2 fingerprint.
+- Refuse a deployment secret reference in browser `extra_headers` at
+  validation (the basic fetcher, which follows redirects itself, keeps
+  them), and find a hook that sees each hop before it is sent for the
+  address check. Playwright's `request` event sees redirect hops but cannot
+  stop them; whether Chromium's DevTools `Fetch` domain can, and what
+  Camoufox offers, is untried.
+- Run browser fetchers only through an egress-filtering proxy, as
+  `untrusted_submissions` already requires, which checks every hop.
+
+**Done when:** a fixture redirect to another origin receives none of the
+target's `extra_headers`, and a redirect to loopback is refused before its
+request is sent, in all three browser modes.
 
 ## Operational and deployment qualification
 
@@ -1396,6 +1482,66 @@ namespace gives, or the browsers are replaced (TD-45), which is the moment
 to measure what their sandboxes use. The change is to replace `capability,`
 with the list both browsers need, proved in the smoke lane with all three,
 and to check that each browser still reports its sandbox as active.
+
+### TD-103 — Uvicorn buffers a request's headers and URL without limit before authentication
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the 2026-10-16 audit. `uvicorn[standard]` parses with
+httptools, which keeps a header block and a URL of any size;
+`RequestSizeLimitMiddleware` bounds bodies only, and authentication runs
+once the headers are complete. A 96 MiB header took the application's RSS
+from 152 MB to 302 MB with no answer, and was released on disconnect. With
+`--http h11` the same request was refused with `400` within the first MiB.
+
+**Why deferred:** in production nothing reaches port 8420 but the tunnel,
+and Cloudflare bounds headers. The local Compose file publishes the port,
+and anything on the `backend` network reaches it.
+
+**Revisit when:** the application is reachable other than through the
+tunnel. The fix is `--http h11` in the image and Compose commands, after
+measuring what the pure-Python parser costs at Eyebox's request rate, or a
+proxy that bounds headers in front.
+
+### TD-104 — A native cron schedule fires twice when the clocks go back
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the 2026-10-16 audit. `SchedulerService.register_job`
+(`src/scrapeyard/scheduler/cron.py`) hands `ZoneInfo(timezone)` to
+APScheduler 3.11's `CronTrigger`, which fires at both instants of a wall
+time inside the repeated hour: `30 1 * * *` in `America/New_York` fires at
+01:30 EDT and at 01:30 EST on 2026-11-01. `_job_has_active_run` stops the
+second only while the first is still queued or running. Standard cron runs
+it once. The spring change is handled: a 02:30 schedule runs once, at 03:30.
+
+**Why deferred:** Eyebox uses neither native cron nor `schedule.timezone`
+(TD-49).
+
+**Revisit when:** a consumer schedules natively in a zone with daylight
+saving. The fix is to skip a fire whose local time has `fold=1` when the
+same wall time already fired that day.
+
+### TD-105 — An egress switch killed between its insert and its delete leaves two jumps every install refuses
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** what TD-101 leaves. `install-docker-egress-policy.sh` inserts
+the new chain's jump and then deletes the old one. A signal between them is
+now rolled back, but `SIGKILL` (systemd's, after a stop times out) cannot be
+trapped, and leaves both. Both chains are complete, so nothing is exposed,
+but `active_chain` refuses "multiple active Scrapeyard policy jumps" on
+every later install: the boot service cannot start the application until a
+jump is deleted by hand. The host rules recover from the same state.
+
+**Why deferred:** the window is one `iptables` call, and keeping the top
+jump, as the host rules do, is safe only when that chain is complete. A
+chain jumped to by hand, or emptied, would then be kept and the complete one
+dropped, which would leave egress unfiltered.
+
+**Revisit when:** a host is found in that state. The fix is to keep the
+topmost jump only if its chain matches what `check` expects of the rendered
+policy, and to refuse otherwise as now.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 
