@@ -39,7 +39,21 @@ _KEEP_RESULT_SECONDS = 3600
 # until the heartbeat timeout.
 _CANCELLATION_RESERVE_MAX_SECONDS = 5.0
 _CANCELLATION_RESERVE_FRACTION = 0.25
+# A poll of the queue is a few Redis round trips, half a second apart. arq
+# gives its connections no read timeout, so a Redis that stops answering
+# without closing (paused, or behind a path that drops packets) holds a poll
+# for ever while the runner stays alive (TD-92). A runner that has finished
+# no poll in this long is treated as one that has ended.
+_POLL_STALL_SECONDS = 60.0
+# The worker's health key expires by itself; a close does not wait on a Redis
+# that does not answer to remove it.
+_HEALTH_KEY_DELETE_SECONDS = 1.0
 logger = logging.getLogger(__name__)
+
+
+class WorkerPollStalled(Exception):
+    """The embedded worker has finished no poll of the queue within the bound."""
+
 
 _ATOMIC_ENQUEUE_LUA = """
 if redis.call('EXISTS', KEYS[2], KEYS[3]) > 0 then
@@ -181,6 +195,9 @@ class _PriorityWorker(Worker):
         self.priority_queues = priority_queues
         self.priority_policy = WeightedPriorityPolicy()
         self.memory_available = memory_available
+        # When the runner last finished a poll, or was made; the pool's
+        # watchdog reads it.
+        self.last_poll_at = monotonic()
 
     async def close(self) -> None:
         """Close arq 0.26.x without its deprecated redis-py compatibility call."""
@@ -199,8 +216,11 @@ class _PriorityWorker(Worker):
                     type(outcome).__name__,
                 )
         try:
-            await self.pool.delete(self.health_check_key)
-        except (RedisError, OSError) as exc:
+            await asyncio.wait_for(
+                self.pool.delete(self.health_check_key),
+                timeout=_HEALTH_KEY_DELETE_SECONDS,
+            )
+        except (RedisError, OSError, asyncio.TimeoutError) as exc:
             # The key expires by itself; the connections must still be closed.
             logger.warning(
                 "Could not remove the worker's health key while closing: %s",
@@ -250,6 +270,7 @@ class _PriorityWorker(Worker):
             self._polling = False
             self._poll_memory_available = None
             self._poll_deferred = False
+        self.last_poll_at = monotonic()
         mark_last_success("worker")
 
     async def start_jobs(self, job_ids: list[bytes]) -> None:
@@ -329,6 +350,7 @@ class WorkerPool:
         payload_ttl_seconds: int = 604800,
         job_timeout_seconds: float = 300.0,
         browser_memory_reserve_mb: int = 512,
+        poll_stall_seconds: float | None = None,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._max_browsers = max_browsers
@@ -344,6 +366,9 @@ class WorkerPool:
         self._cancellation_grace_seconds = cancellation_grace_seconds
         self._payload_ttl_ms = payload_ttl_seconds * 1000
         self._job_timeout_seconds = job_timeout_seconds
+        self._poll_stall_seconds = (
+            _POLL_STALL_SECONDS if poll_stall_seconds is None else poll_stall_seconds
+        )
 
         self._browser_limiter = BrowserExecutionLimiter(
             max_browsers,
@@ -353,6 +378,9 @@ class WorkerPool:
         self._redis: ArqRedis | None = None
         self._worker: Worker | None = None
         self._runner_task: asyncio.Task[None] | None = None
+        self._poll_watchdog: asyncio.Task[None] | None = None
+        self._poll_stalled_for: float | None = None
+        self._runner_exit_reported = False
         self._active_tasks = 0
         self._started = False
         self._stopping = False
@@ -400,7 +428,7 @@ class WorkerPool:
             await redis.aclose(close_connection_pool=True)
             raise
         self._redis = redis
-        self._worker = _PriorityWorker(
+        worker = _PriorityWorker(
             functions=[func(cast(Any, self._run_job), name=_ARQ_FUNCTION_NAME, keep_result=_KEEP_RESULT_SECONDS)],
             redis_pool=self._redis,
             queue_name=self._queue_name,
@@ -413,11 +441,18 @@ class WorkerPool:
             retry_jobs=False,
             allow_abort_jobs=True,
         )
+        self._worker = worker
         self._runner_task = asyncio.create_task(
-            self._worker.async_run(),
+            worker.async_run(),
             name="scrapeyard-arq-worker",
         )
         self._runner_task.add_done_callback(self._runner_finished)
+        self._poll_stalled_for = None
+        self._runner_exit_reported = False
+        self._poll_watchdog = asyncio.create_task(
+            self._watch_polls(worker),
+            name="scrapeyard-arq-poll-watchdog",
+        )
         self._started = True
 
     async def _release_abandoned_deliveries(self, redis: ArqRedis) -> None:
@@ -450,6 +485,8 @@ class WorkerPool:
         # else is the event loop closing; neither leaves work stranded.
         if self._stopping or self._runner_task is not task or task.cancelled():
             return
+        if self._poll_watchdog is not None:
+            self._poll_watchdog.cancel()
         error = task.exception()
         logger.critical(
             "Embedded worker ended outside a shutdown; no queued run can start "
@@ -457,6 +494,40 @@ class WorkerPool:
             self.background_detail,
             exc_info=error,
         )
+        self._report_runner_exit(error)
+
+    async def _watch_polls(self, worker: _PriorityWorker) -> None:
+        # Two looks a quarter of the bound apart must find the same poll
+        # overdue. After the event loop itself was held up, the first look can
+        # come before the poll that was waiting has had its turn to finish.
+        overdue_poll: float | None = None
+        while True:
+            await asyncio.sleep(self._poll_stall_seconds / 4)
+            if self._stopping or worker is not self._worker:
+                return
+            last_poll = worker.last_poll_at
+            if monotonic() - last_poll <= self._poll_stall_seconds:
+                overdue_poll = None
+            elif overdue_poll != last_poll:
+                overdue_poll = last_poll
+            else:
+                break
+        self._poll_stalled_for = monotonic() - last_poll
+        logger.critical(
+            "Embedded worker has finished no poll of the queue in %.0fs; no "
+            "queued run can start in this process",
+            self._poll_stalled_for,
+        )
+        self._report_runner_exit(
+            WorkerPollStalled(
+                f"no poll of the queue finished in {self._poll_stalled_for:.0f}s"
+            )
+        )
+
+    def _report_runner_exit(self, error: BaseException | None) -> None:
+        if self._runner_exit_reported:
+            return
+        self._runner_exit_reported = True
         if self.on_runner_exit is not None:
             self.on_runner_exit(error)
 
@@ -473,6 +544,11 @@ class WorkerPool:
             self._runner_task is not None and self._runner_task.done()
         )
         self._stopping = True
+        watchdog, self._poll_watchdog = self._poll_watchdog, None
+        if watchdog is not None:
+            # It only sleeps between looks, so it ends at once.
+            watchdog.cancel()
+            await asyncio.wait({watchdog})
         self._worker.allow_pick_jobs = False
         grace_seconds = (
             get_settings().workers_shutdown_grace_seconds
@@ -954,12 +1030,13 @@ class WorkerPool:
 
     @property
     def background_ok(self) -> bool:
-        """Whether the embedded arq runner is present and still executing."""
+        """Whether the embedded arq runner is present and still polling."""
 
         return (
             self._started
             and self._runner_task is not None
             and not self._runner_task.done()
+            and self._poll_stalled_for is None
         )
 
     @property
@@ -977,6 +1054,11 @@ class WorkerPool:
                 "worker runner task stopped"
                 if exception is None
                 else f"worker runner task failed: {type(exception).__name__}"
+            )
+        if self._poll_stalled_for is not None:
+            return (
+                "worker runner task stalled: no poll of the queue finished in "
+                f"{self._poll_stalled_for:.0f}s"
             )
         return None
 

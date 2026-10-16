@@ -84,7 +84,11 @@ Docker does not restart an unhealthy container; the status is for an
 operator or an alert to read. One cause does not wait for that: when the
 embedded worker ends outside a shutdown, as it does when Redis goes away
 under it, the process ends itself with a `CRITICAL` line saying so, and the
-container's restart policy starts it again through a full start. Runs under
+container's restart policy starts it again through a full start. A worker
+that has finished no poll of the queue for 60 seconds, as when Redis stops
+answering without closing its connections (a paused container, or a path
+that drops packets), counts as ended: readiness names it `stalled` and the
+process ends the same way, 75 to 90 seconds after its last poll. Runs under
 way get the shutdown grace to finish and are then cancelled, as at any stop.
 Until Redis is back each start fails, and Docker keeps trying, at most a
 minute apart. A shutdown that has not finished 10 seconds after the shutdown

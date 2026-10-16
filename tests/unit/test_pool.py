@@ -14,6 +14,7 @@ from arq.connections import RedisSettings
 from scrapeyard.queue.cancellation import QueueCancellationOutcome
 from scrapeyard.queue.pool import (
     QueueDeliveryState,
+    WorkerPollStalled,
     WorkerPool,
     _DeliverySnapshot,
     _PriorityJobHandle,
@@ -402,7 +403,10 @@ async def test_start_initializes_redis_and_worker_once(monkeypatch):
         "normal": "test-queue:priority:normal",
         "low": "test-queue:priority:low",
     }
-    create_task_mock.assert_called_once()
+    assert [call.kwargs["name"] for call in create_task_mock.call_args_list] == [
+        "scrapeyard-arq-worker",
+        "scrapeyard-arq-poll-watchdog",
+    ]
     assert wait_for_timeouts == [7.0]
     assert pool.redis is fake_redis
     fake_redis.zrange.assert_awaited_once_with("test-queue", 0, -1)
@@ -524,6 +528,72 @@ async def test_stop_succeeds_when_the_runner_fails_while_it_stops(monkeypatch, c
     assert closed == [True]
     assert pool.shutdown_pending is False
     assert "Embedded worker ended during shutdown: ConnectionError" in caplog.text
+
+
+class _PollingWorker:
+    """A runner that finishes a poll every 10 ms until it is told to hang.
+
+    Each poll takes a few turns of the event loop after its wait, as a poll
+    that reads Redis replies does.
+    """
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.allow_pick_jobs = True
+        self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.main_task: asyncio.Task[None] | None = None
+        self.last_poll_at = time.monotonic()
+        self.hung = False
+
+    async def async_run(self) -> None:
+        self.main_task = asyncio.current_task()
+        while True:
+            await asyncio.sleep(0.01)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            if not self.hung:
+                self.last_poll_at = time.monotonic()
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_held_up_event_loop_is_not_a_stalled_poll_but_a_hung_runner_is(monkeypatch):
+    pool = _make_pool(poll_stall_seconds=0.2)
+    fake_redis = MagicMock()
+    fake_redis.zrange = AsyncMock(return_value=[])
+    exits: list[BaseException | None] = []
+    pool.on_runner_exit = exits.append
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: SimpleNamespace(workers_redis_connect_timeout_seconds=1.0),
+    )
+    with (
+        patch("scrapeyard.queue.pool.create_pool", new=AsyncMock(return_value=fake_redis)),
+        patch("scrapeyard.queue.pool._PriorityWorker", _PollingWorker),
+    ):
+        await pool.start()
+    worker = pool._worker
+    try:
+        await asyncio.sleep(0.1)
+        # Something holds the event loop for more than twice the bound; the
+        # poll that was due finishes a few turns after it lets go.
+        time.sleep(0.5)
+        await asyncio.sleep(0.4)
+        assert exits == []
+        assert pool.background_ok is True
+
+        worker.hung = True
+        await asyncio.sleep(0.5)
+        assert len(exits) == 1
+        assert isinstance(exits[0], WorkerPollStalled)
+        assert pool.background_ok is False
+        assert pool.background_detail is not None
+        assert "stalled" in pool.background_detail
+    finally:
+        await pool.stop(timeout=1)
+    assert len(exits) == 1
+    assert pool.shutdown_pending is False
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@ from scrapeyard.common.settings import get_settings
 from scrapeyard.common.time import utc_now
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.queue.pool import QueueDeliveryState, WorkerPool
+from scrapeyard.queue.pool import QueueDeliveryState, WorkerPollStalled, WorkerPool
 from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
 from scrapeyard.storage.database import get_db
 from scrapeyard.webhook.payload import deterministic_delivery_id
@@ -786,6 +786,74 @@ async def test_worker_that_loses_redis_asks_once_to_end_and_a_restart_runs_new_w
         assert await _await_terminal_status(client, new_job) == "complete"
         results = await client.get(f"/results/{new_job}")
         assert "ran through the outage" in json.dumps(results.json()["results"])
+    finally:
+        await second_pool.stop()
+    assert len(runner_exits) == 1
+
+
+@pytest.fixture()
+def short_poll_stall(monkeypatch):
+    """Count a poll as stalled after two seconds; ask for it before ``client``."""
+    monkeypatch.setattr("scrapeyard.queue.pool._POLL_STALL_SECONDS", 2.0)
+    return 2.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
+async def test_worker_whose_redis_stops_answering_asks_once_to_end_and_a_restart_runs_new_work(
+    redis_relay, short_poll_stall, client, monkeypatch,
+):
+    async def _scrape_target(*_args, **_kwargs):
+        return TargetResult(
+            url="https://example.com",
+            status="success",
+            data=[{"title": "ran after the stall"}],
+            pages_scraped=1,
+        )
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _scrape_target)
+    first_pool = get_worker_pool()
+    runner_exits = client._transport.app.state.live_runner_exits
+    assert first_pool.background_ok is True
+
+    # Redis stops answering and closes nothing: the worker's poll waits on a
+    # reply that does not come, and its runner stays alive.
+    redis_relay.stall()
+    stalled_at = asyncio.get_running_loop().time()
+    for _ in range(200):
+        if runner_exits:
+            break
+        await asyncio.sleep(0.05)
+    waited = asyncio.get_running_loop().time() - stalled_at
+    assert len(runner_exits) == 1
+    assert isinstance(runner_exits[0], WorkerPollStalled)
+    assert short_poll_stall <= waited < short_poll_stall * 3
+    assert first_pool.background_ok is False
+    assert "stalled" in (first_pool.background_detail or "")
+
+    # The process's own shutdown, with Redis still not answering, must end
+    # in time and not leave the stop pending.
+    await first_pool.stop(timeout=5)
+    assert first_pool.shutdown_pending is False
+    assert len(runner_exits) == 1
+
+    # Redis answers again and the process is started again.
+    redis_relay.flow()
+    get_worker_pool.cache_clear()
+    second_pool = get_worker_pool()
+    second_pool.on_runner_exit = runner_exits.append
+    await second_pool.start()
+    try:
+        response = await client.post(
+            "/scrape",
+            content=_async_scrape_yaml(),
+            headers={"content-type": "application/x-yaml"},
+        )
+        assert response.status_code == 202
+        new_job = response.json()["job_id"]
+        assert await _await_terminal_status(client, new_job) == "complete"
+        results = await client.get(f"/results/{new_job}")
+        assert "ran after the stall" in json.dumps(results.json()["results"])
     finally:
         await second_pool.stop()
     assert len(runner_exits) == 1

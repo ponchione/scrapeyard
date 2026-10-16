@@ -109,6 +109,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- A worker that has finished no poll of the queue for 60 seconds counts as
+  ended (TD-92): readiness fails with `worker runner task stalled` and the
+  process ends itself as for TD-89. arq gives its Redis connections no read
+  timeout, so a Redis that stopped answering without closing held the poll
+  for ever while readiness's worker check stayed ok and accepted runs stayed
+  `queued`. A held-up event loop alone is not taken for a stall: two looks a
+  quarter of the bound apart must find the same poll overdue. A shutdown no
+  longer waits on such a Redis to remove the worker's health key, which
+  expires by itself; before, that removal failed the stop.
 - An application whose embedded worker ends outside a shutdown, as it does
   when Redis goes away under it, now ends itself (TD-89): the server's own
   shutdown gives running jobs the grace, a thread ends the process with

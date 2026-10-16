@@ -90,13 +90,17 @@ class RedisRelay:
     """A TCP relay to the live Redis that can drop and refuse every connection.
 
     It stands in for Redis going away under a running application: a crash, an
-    out-of-memory kill or ``docker stop``.
+    out-of-memory kill or ``docker stop``. Stalled, it stands in for a Redis
+    that stops answering without closing: ``docker pause``, or a path that
+    drops packets.
     """
 
     def __init__(self, host: str, port: int) -> None:
         self._target = (host, port)
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
+        self._flowing = asyncio.Event()
+        self._flowing.set()
         self.port = 0
 
     async def start(self) -> None:
@@ -107,9 +111,18 @@ class RedisRelay:
         """Listen again on the same port, as a Redis that has come back."""
         await self.start()
 
+    def stall(self) -> None:
+        """Stop forwarding and keep every connection open, as a paused Redis."""
+        self._flowing.clear()
+
+    def flow(self) -> None:
+        """Forward again, what was held first."""
+        self._flowing.set()
+
     async def cut(self) -> None:
         """Stop listening and reset every connection, both sides."""
         assert self._server is not None
+        self._flowing.set()
         self._server.close()
         for writer in list(self._writers):
             writer.transport.abort()
@@ -130,6 +143,7 @@ class RedisRelay:
         async def pipe(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
             try:
                 while data := await source.read(65536):
+                    await self._flowing.wait()
                     sink.write(data)
                     await sink.drain()
             except OSError:

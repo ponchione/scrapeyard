@@ -472,8 +472,7 @@ CI gates pull requests since 2026-10-10. A release is built by the
 and rehearses it against the release it replaces; dispatch it on the commit
 to release, with the host's current release as `previous_revision`.
 
-**Ready:** TD-92 (a watchdog on the worker's polls; no decision needed).
-The owner chose on 2026-10-15 to start Eyebox's beta soak without it.
+**Ready:** nothing.
 
 **Coordinated:**
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
@@ -508,31 +507,10 @@ The owner chose on 2026-10-15 to start Eyebox's beta soak without it.
 | TD-85 | P2 | deferred | A power loss loses the submissions accepted in its last seconds |
 | TD-86 | P3 | deferred | A release loads only under the image store it was built on |
 | TD-88 | P3 | deferred | The AppArmor profile allows every capability but two inside a user namespace |
-| TD-92 | P2 | ready | A Redis that stops answering, without closing, leaves the worker hung and ready |
 
 ## Ready to implement
 
-### TD-92 — A Redis that stops answering, without closing, leaves the worker hung and ready
-
-**Priority:** P2 · **Area:** queue, supervision · **Risk:** low · **Contract:** a submission is answered 202 and its run stays `queued` · **Depends on:** —
-
-**Problem:** found by TD-89's independent review on 2026-10-14, read in
-arq and not tried. arq gives its Redis connections a connect timeout and no
-read timeout (`arq/connections.py`, `create_pool`). A Redis that is paused,
-or a network path that drops packets instead of resetting, leaves the
-worker's poll waiting for ever. The runner task stays alive, so readiness
-and the container's health stay ok, nothing ends the process (TD-89 acts
-on a runner that ends), and accepted runs are never started.
-**Code:** `src/scrapeyard/queue/pool.py` (`WorkerPool.start`,
-`_PriorityWorker._poll_iteration`), `src/scrapeyard/runtime/metrics.py`
-(`mark_last_success("worker")`).
-**Fix:** treat a worker whose last completed poll is older than a bound
-(a few poll intervals plus the Redis timeout) as ended: readiness fails
-and the process ends as for TD-89. Or give the pool's connections a read
-timeout, if arq passes one through.
-**Done when:** a live Redis test that pauses Redis (`DEBUG SLEEP`, or a
-relay that stops forwarding without closing) sees the process asked to
-end within the bound, and a job submitted after Redis answers again runs.
+Nothing at present.
 
 ## Coordinated
 
