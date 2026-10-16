@@ -383,6 +383,18 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Redis is now 7.4.11 (TD-99). The 7.4.5 image every release shipped has
+  CVE-2025-49844, remote code execution through a Lua script (CVSS 10),
+  and CVE-2025-46817, -46818 and -46819, all fixed in 7.4.6, and its
+  `gosu` was built with Go 1.18.2. Nothing caught it because only the
+  application's image went through the vulnerability gate: `release_artifact.py
+  create` and the container-security workflow now scan the Redis and
+  egress-probe images too, with the same HIGH/CRITICAL gate. The probe is
+  now Python 3.12.15 on Alpine 3.24, which scans clean. One finding in the
+  Redis image, an OpenSSL DTLS issue (CVE-2026-84782) published after it
+  was built, is accepted until 2026-11-30 in
+  `security/trivy-dependency-exceptions.yaml`: Redis makes no DTLS
+  handshake. The live Redis tests and the backup's dump load pass on 7.4.11.
 - The image installs the package with pip, which fetched whatever
   `poetry-core` PyPI served at build time, unpinned, as the build backend
   (TD-98). `pyproject.toml` now pins `poetry-core==2.3.2`, the backend

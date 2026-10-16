@@ -50,8 +50,8 @@ def test_ci_required_gate_contracts() -> None:
 
     live_redis = workflow["jobs"]["live-redis"]
     assert live_redis["services"]["redis"]["image"] == (
-        "redis:7.4.5-alpine@sha256:"
-        "bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08"
+        "redis:7.4.11-alpine@sha256:"
+        "858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
     )
     assert live_redis["env"]["SCRAPEYARD_API_CREDENTIALS"]
     assert live_redis["env"]["SCRAPEYARD_REDIS_DSN"].endswith("/15")
@@ -147,7 +147,11 @@ def test_container_security_workflow_builds_sbom_and_enforces_scans() -> None:
     assert workflow["permissions"] == {"contents": "read"}
     commands = _run_commands(workflow["jobs"]["scan"])
     assert "docker build --pull --tag scrapeyard:security-scan ." in commands
-    assert "run_container_security_scan.sh scrapeyard:security-scan" in commands
+    assert (
+        'run_container_security_scan.sh scrapeyard:security-scan "${dependencies[@]}"'
+        in commands
+    )
+    assert "config --images redis egress-probe" in commands
     artifact = next(
         step
         for step in workflow["jobs"]["scan"]["steps"]

@@ -36,7 +36,17 @@ jobs:
       - name: Build the immutable-input production image
         run: docker build --pull --tag scrapeyard:security-scan .
       - name: Generate CycloneDX SBOM and enforce scans
-        run: ./scripts/run_container_security_scan.sh scrapeyard:security-scan
+        env:
+          # Placeholders that let Compose resolve the file; nothing is started.
+          SCRAPEYARD_API_CREDENTIALS: "{}"
+          SCRAPEYARD_ENCRYPTION_KEYS: "{}"
+          SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID: scan
+        # A release ships Redis and the egress probe beside the application.
+        run: |
+          mapfile -t dependencies < <(docker compose -f docker-compose.yml config --images redis egress-probe)
+          test "${#dependencies[@]}" -eq 2
+          for image in "${dependencies[@]}"; do docker pull --quiet "$image"; done
+          ./scripts/run_container_security_scan.sh scrapeyard:security-scan "${dependencies[@]}"
       - name: Upload bounded security reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

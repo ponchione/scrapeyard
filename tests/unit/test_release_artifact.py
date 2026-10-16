@@ -126,8 +126,9 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
                     "services": {"redis": {"image": "redis"}, "egress-probe": {"image": "probe"}},
                 }
             )
-        return "sha256:" + "a" * 64
+        return dependency_ids.get(args[-1], "sha256:" + "a" * 64)
 
+    dependency_ids = {"redis": "sha256:" + "b" * 64, "probe": "sha256:" + "c" * 64}
     original_run = subprocess.run
     original_output = release_artifact.run
     monkeypatch.setattr(subprocess, "run", execute)
@@ -140,7 +141,14 @@ def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, 
         finally:
             os.umask(previous_umask)
         manifest = release_artifact.verify(tmp_path / "candidate")
-        assert set(manifest["images"]) == {"scrapeyard", "redis", "egress-probe"}
+        assert manifest["images"] == {
+            "scrapeyard": "sha256:" + "a" * 64,
+            "redis": dependency_ids["redis"],
+            "egress-probe": dependency_ids["probe"],
+        }
+        # Every image the release ships passes the scan, not only the application's.
+        scans = [c for c in commands if c[0] == "./scripts/run_container_security_scan.sh"]
+        assert scans == [["./scripts/run_container_security_scan.sh", *manifest["images"].values()]]
         assert {
             "images.tar",
             "source/docker-compose.yml",

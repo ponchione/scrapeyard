@@ -1,0 +1,13 @@
+# Vulnerability findings accepted in the images a release runs beside the
+# application's (Redis and the egress probe), which only an upstream rebuild
+# fixes. scripts/run_container_security_scan.sh applies this file to those
+# images only. Each entry says why it does not apply and expires; after that
+# date the gate fails again until the image digest is refreshed.
+vulnerabilities:
+  - id: CVE-2026-84782
+    statement: >-
+      OpenSSL information disclosure through DTLS handshake retransmission,
+      in libssl3/libcrypto3 3.3.7-r1 of redis:7.4.11-alpine (built
+      2026-09-21, before the fix). Redis speaks TCP only and runs here
+      without TLS, so it never makes a DTLS handshake.
+    expired_at: 2026-11-30

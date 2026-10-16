@@ -497,7 +497,14 @@ Prepare a release on a build/qualification host with Docker, Python 3.10+, and
 at least 15 GiB free disk. Use an isolated host or ensure the qualification
 lane's fixed subnets and ports are unused. This builds the selected **committed**
 revision, runs the existing security scans and complete quick qualification,
-and publishes the directory only after both pass:
+and publishes the directory only after both pass. The vulnerability gate
+covers all three images the release ships: the application, Redis and the
+egress probe. A finding in Redis or the probe that only an upstream rebuild
+fixes, and that does not apply here, can be accepted in
+`security/trivy-dependency-exceptions.yaml` with its reason and an expiry;
+after the expiry the gate fails again until the digest is refreshed. Trivy
+cannot see a source-built `redis-server`, so follow Redis's own advisories
+too:
 
 ```bash
 python3 scripts/release_artifact.py create ~/scrapeyard-releases/candidate --revision HEAD
@@ -936,7 +943,7 @@ bind-mounted data directory while the application is stopped:
 
 ```bash
 docker run --rm --user 0 -v scrapeyard_scrapeyard-data:/data \
-  redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08 \
+  redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
   sh -c 'chown -R 10001:10001 /data && find /data -type d -exec chmod 0750 {} +'
 ```
 

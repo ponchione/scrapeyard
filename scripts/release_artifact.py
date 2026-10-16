@@ -161,30 +161,9 @@ def create(directory: Path, revision: str) -> None:
             check=True,
         )
         image = run("docker", "image", "inspect", "--format", "{{.Id}}", tag, cwd=source)
-        env["SCRAPEYARD_SECURITY_REPORT_DIR"] = str(bundle / "security-reports")
-        subprocess.run(
-            ["./scripts/run_container_security_scan.sh", image], cwd=source, env=env, check=True
-        )
-        env.update(
-            SCRAPEYARD_QUALIFICATION_PROJECT=project,
-            SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR=str(bundle / "qualification-reports"),
-        )
-        subprocess.run(
-            ["./scripts/run_release_qualification.sh", "--profile", "quick", "--no-build"],
-            cwd=source,
-            env=env,
-            check=True,
-        )
-        if run("docker", "image", "inspect", "--format", "{{.Id}}", tag, cwd=source) != image:
-            raise ValueError("application image changed during qualification")
-        # Compose needs placeholders to resolve image references; never retain a
-        # rendered deployment environment or its secrets in the release bundle.
-        env.update(
-            SCRAPEYARD_API_CREDENTIALS="{}",
-            SCRAPEYARD_ENCRYPTION_KEYS="{}",
-            SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID="release",
-        )
-        config = json.loads(
+        # The placeholders above let Compose resolve image references; never retain
+        # a rendered deployment environment or its secrets in the release bundle.
+        production = json.loads(
             run(
                 "docker",
                 "compose",
@@ -199,10 +178,31 @@ def create(directory: Path, revision: str) -> None:
         )
         images = {"scrapeyard": image}
         for name in ("redis", "egress-probe"):
-            reference = config["services"][name]["image"]
+            reference = production["services"][name]["image"]
+            subprocess.run(["docker", "pull", "--quiet", reference], cwd=source, check=True)
             images[name] = run(
                 "docker", "image", "inspect", "--format", "{{.Id}}", reference, cwd=source
             )
+        # Root runs all three images on the host, so each passes the gate.
+        env["SCRAPEYARD_SECURITY_REPORT_DIR"] = str(bundle / "security-reports")
+        subprocess.run(
+            ["./scripts/run_container_security_scan.sh", *images.values()],
+            cwd=source,
+            env=env,
+            check=True,
+        )
+        env.update(
+            SCRAPEYARD_QUALIFICATION_PROJECT=project,
+            SCRAPEYARD_QUALIFICATION_DIAGNOSTICS_DIR=str(bundle / "qualification-reports"),
+        )
+        subprocess.run(
+            ["./scripts/run_release_qualification.sh", "--profile", "quick", "--no-build"],
+            cwd=source,
+            env=env,
+            check=True,
+        )
+        if run("docker", "image", "inspect", "--format", "{{.Id}}", tag, cwd=source) != image:
+            raise ValueError("application image changed during qualification")
         (bundle / "images.json").write_text(
             json.dumps(
                 {"services": {name: {"image": value} for name, value in images.items()}}, indent=2
