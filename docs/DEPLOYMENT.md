@@ -1600,7 +1600,9 @@ Set limits to match host capacity:
   grace counts from the stop's signal: the worker polls for no run from
   then on (a start already under way finishes), and Uvicorn's wait for
   requests in flight, at most 5 s (`--timeout-graceful-shutdown 5`), comes
-  off it. A request still running then is cut off without an answer)
+  off it. A request still running then is cancelled, and Uvicorn answers it
+  with a plain-text `500` if no response has started; the API's own JSON
+  error is not sent, and the request's work may already be durable)
 - `SCRAPEYARD_WORKERS_CANCELLATION_GRACE_SECONDS` (default `10`)
 - `SCRAPEYARD_WORKERS_QUEUED_CLAIM_TIMEOUT_SECONDS` (default `300`)
 - `SCRAPEYARD_WORKERS_QUEUE_PAYLOAD_TTL_SECONDS` (default `604800`)

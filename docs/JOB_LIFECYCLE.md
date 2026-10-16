@@ -45,7 +45,10 @@ loaded older state still loses its `queue_run` compare-and-set.
   unavailable. Retry the same request when Redis recovers.
 - `504`: the job is durably cancelled, but the configured abort grace expired.
   Retry the same request to finish verification.
-- `500`: the jobs.db cancellation transition itself could not be persisted.
+- `500`: the jobs.db cancellation transition itself could not be persisted,
+  or a stop cut the request off (a plain-text `500` from Uvicorn after its
+  5 s drain), by which time the cancellation may already be durable. Either
+  way, retry the same request.
 
 The transition disables future schedule triggers before local APScheduler
 removal and before Redis cancellation. A queued/deferred delivery that has not

@@ -383,6 +383,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- DEPLOYMENT.md and JOB_LIFECYCLE.md no longer say a request still running
+  at the end of a stop's 5 s request drain gets no answer: Uvicorn answers
+  it with a plain-text `500`. For `POST /jobs/{id}/cancel` that `500` can
+  come after the cancellation was persisted; a retry answers `204`.
 - A native cron schedule's day of week now means what it means in cron:
   0 and 7 are Sunday, so `1-5` is Monday to Friday. APScheduler 3 counts
   from Monday and was given the field as written, so `1-5` ran Tuesday to
