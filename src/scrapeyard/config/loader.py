@@ -74,6 +74,28 @@ def _secret_references(value: Any) -> set[str]:
     return set()
 
 
+def _browser_header_secret_reference(data: dict[str, Any]) -> str | None:
+    """Return a secret reference that a target's browser `extra_headers` hold.
+
+    A browser follows a server's redirect itself, past the route that keeps
+    these headers to the target's origin, and sends them on to wherever it
+    points (TD-102).
+    """
+    targets: list[Any] = [data.get("target")]
+    if isinstance(data.get("targets"), list):
+        targets.extend(data["targets"])
+    for target in targets:
+        browser = target.get("browser") if isinstance(target, dict) else None
+        headers = browser.get("extra_headers") if isinstance(browser, dict) else None
+        if not isinstance(headers, dict):
+            continue
+        for value in headers.values():
+            match = _SECRET_REFERENCE_RE.search(value) if isinstance(value, str) else None
+            if match is not None:
+                return match.group(1)
+    return None
+
+
 def _resolve_secret_references(value: Any, resolved_secrets: dict[str, str]) -> Any:
     """Resolve deployment secret references without changing persisted YAML."""
 
@@ -180,6 +202,13 @@ def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:
     references = _secret_references(data)
     resolved_secrets: dict[str, str] = {}
     if references:
+        in_browser_headers = _browser_header_secret_reference(data)
+        if in_browser_headers is not None:
+            raise ValueError(
+                f"Deployment secret reference {in_browser_headers} is not allowed in "
+                "browser.extra_headers: a browser sends them on through a redirect to "
+                "any origin"
+            )
         project = _literal_project(data)
         _require_literal_name(data)
         policy = get_settings().parsed_secret_reference_allowlist()

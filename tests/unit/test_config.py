@@ -254,11 +254,12 @@ target:
                 """
 project: secret-ref
 name: missing
+webhook:
+  url: https://hooks.example.com/events
+  headers:
+    Authorization: ${SCRAPEYARD_SECRET_MISSING}
 target:
   url: https://example.com
-  browser:
-    extra_headers:
-      Authorization: ${SCRAPEYARD_SECRET_MISSING}
   selectors:
     title: h1
 """
@@ -280,11 +281,12 @@ target:
                 """
 project: secret-ref
 name: short-secret
+webhook:
+  url: https://hooks.example.com/events
+  headers:
+    Authorization: ${SCRAPEYARD_SECRET_SHORT}
 target:
   url: https://example.com
-  browser:
-    extra_headers:
-      Authorization: ${SCRAPEYARD_SECRET_SHORT}
   selectors:
     title: h1
 """
@@ -325,18 +327,45 @@ target:
             """
 project: alpha
 name: shared
+webhook:
+  url: https://hooks.example.com/events
+  headers:
+    X-Shared: ${SCRAPEYARD_SECRET_SHARED}
 target:
   url: https://example.com
-  fetcher: dynamic
-  browser:
-    extra_headers:
-      X-Shared: ${SCRAPEYARD_SECRET_SHARED}
   selectors:
     title: h1
 """
         )
-        assert config.target is not None
-        assert config.target.browser.extra_headers["X-Shared"] == "shared-value"
+        assert config.webhook is not None
+        assert config.webhook.headers["X-Shared"] == "shared-value"
+
+    @pytest.mark.parametrize("key", ["target", "targets"])
+    def test_deployment_secret_reference_is_refused_in_browser_extra_headers(
+        self,
+        monkeypatch,
+        key,
+    ):
+        # A browser carries these headers on through a redirect to any origin.
+        monkeypatch.setenv("SCRAPEYARD_SECRET_BROWSER", "browser-token")
+        monkeypatch.setenv(
+            "SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST",
+            '{"alpha":["SCRAPEYARD_SECRET_BROWSER"]}',
+        )
+        get_settings.cache_clear()
+        target = """
+  url: https://example.com
+  fetcher: dynamic
+  browser:
+    extra_headers:
+      Accept-Language: en-US
+      X-Token: "Bearer ${SCRAPEYARD_SECRET_BROWSER}"
+  selectors:
+    title: h1"""
+        if key == "targets":
+            target = "\n  - " + target.replace("\n  ", "\n    ").lstrip()
+        with pytest.raises(ValueError, match="not allowed in browser.extra_headers"):
+            load_config(f"project: alpha\nname: browser\n{key}:{target}\n")
 
     def test_project_cannot_be_derived_from_a_secret_reference(self, monkeypatch):
         monkeypatch.setenv("SCRAPEYARD_SECRET_PROJECT", "alpha")

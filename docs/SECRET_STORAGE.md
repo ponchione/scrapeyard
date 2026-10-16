@@ -32,15 +32,15 @@ contain extracted site data by design and therefore require the same access,
 retention, and backup controls as any scrape output. Logs record identifiers
 and exception types rather than config/header values.
 
-Browser `extra_headers` are target-origin credentials: they are retained only
-when scheme, hostname, and effective port exactly match the configured target.
-Browser interception removes them from cross-origin requests, subdomains, and
-scheme changes before the request is continued. It does **not** see a
-server's redirect: the browser follows a 3xx itself, without calling the
-interception again, and sends the headers on to wherever it points, another
-origin included. The per-request address check is skipped for that hop too.
-Until that is closed (see `TECH_DEBT.md`), do not put a credential in browser
-`extra_headers`; the basic fetcher, `proxy.url` and webhook headers are not
+Browser `extra_headers` are retained only when scheme, hostname, and
+effective port exactly match the configured target. Browser interception
+removes them from cross-origin requests, subdomains, and scheme changes
+before the request is continued. It does **not** see a server's redirect:
+the browser follows a 3xx itself, without calling the interception again,
+and sends the headers on to wherever it points, another origin included. So
+`extra_headers` refuse a deployment secret reference, and must not hold a
+literal credential either (TD-102). The per-request address check is skipped
+for that hop too. The basic fetcher, `proxy.url` and webhook headers are not
 affected.
 
 Prefer deployment references in submitted YAML:

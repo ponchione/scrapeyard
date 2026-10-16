@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A deployment secret reference in a target's browser `extra_headers` is
+  refused when the config is validated (TD-102). The browser follows a
+  server's redirect itself, past the route that keeps these headers to the
+  target's origin, so a redirect to another origin received the secret.
+  The field's description said redirects were covered. Eyebox's configs
+  use no secret references.
 - A cancel request cut off while it waited for a running run to abort is
   cancelled, instead of reporting the run quiescent. arq's `Job.abort`
   answers True when it is itself cancelled, so the caller's cancellation
