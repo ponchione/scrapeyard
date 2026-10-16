@@ -235,3 +235,18 @@ async def test_exact_queued_cancel_keeps_accepted_hash_without_fake_execution(st
     assert after["started_at"] is None
     assert await store.get_job_run("job-1", "run-1") is None
     assert await store.get_job_run_state("job-1", "wrong-run") is None
+
+
+async def test_exact_run_of_a_missed_fire_reads_its_queued_snapshot(store):
+    # The scheduler queued the run, enqueueing it and then failing it both
+    # raised, and the missed fire was recorded: its run row has no config,
+    # so the read takes the queued copy and must decrypt it as that copy.
+    await _save_queued(store)
+    assert await store.record_scheduled_trigger_failure(
+        "job-1", "run-1", failed_at=NOW, failure_code="scheduled_callback_failed"
+    )
+    state = await store.get_job_run_state("job-1", "run-1")
+    assert state is not None
+    assert state["status"] == "failed"
+    assert state["config_hash"] == hashlib.sha256(YAML.encode()).hexdigest()
+    assert state["failure_code"] == "scheduled_callback_failed"

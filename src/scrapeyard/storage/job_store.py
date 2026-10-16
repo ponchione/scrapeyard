@@ -765,11 +765,14 @@ class SQLiteJobStore:
             cursor = await db.execute(
                 """SELECT j.job_id, j.project, j.name,
                           COALESCE(r.run_id, q.run_id) AS run_id,
-                          COALESCE(r.config_hash, q.config_hash) AS config_hash,
+                          CASE WHEN r.config_yaml IS NOT NULL THEN r.config_hash
+                               ELSE COALESCE(q.config_hash, r.config_hash) END AS config_hash,
                           COALESCE(r.status, j.status) AS status,
                           r.started_at, r.completed_at, r.failure_code,
                           COALESCE(r.config_yaml, q.config_yaml) AS config_yaml,
-                          CASE WHEN r.run_id IS NOT NULL THEN 'job_runs' ELSE 'queued_run_snapshots' END AS origin
+                          -- The copy read decides the associated data: a missed
+                          -- scheduled fire's run row has none, its queued one may.
+                          CASE WHEN r.config_yaml IS NOT NULL THEN 'job_runs' ELSE 'queued_run_snapshots' END AS origin
                    FROM jobs j
                    LEFT JOIN job_runs r ON r.job_id = j.job_id AND r.run_id = ?
                    LEFT JOIN queued_run_snapshots q

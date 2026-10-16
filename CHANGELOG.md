@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The exact run of a missed scheduled fire whose queued copy outlived it
+  is read instead of answering 500. When enqueueing a scheduled run and
+  then failing it both raised, the run row had no config but the queued
+  copy remained, and the read decrypted that copy with the run row's
+  associated data, which fails authentication.
 - A restart no longer gives a missed scheduled fire its parent's config.
   The fire's run is recorded without one on purpose, so its exact read
   (`GET /jobs/{id}/runs/{run_id}`) is a 404, but the startup backfill meant
