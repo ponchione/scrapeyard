@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` is at most 100 and
+  `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` at most 30 days. Unbounded,
+  attempt 1,025 overflowed the backoff after its POST, leaving the delivery
+  due at once, so the receiver got POSTs with no backoff; and an age past
+  the date range stopped every webhook while readiness stayed ok. The
+  backoff no longer computes a power past the cap.
 - A `regex` transform whose replacement names a group its pattern lacks
   (`regex("(\d+)", "\2")`) or holds a bad escape is refused when the
   config is validated. It was accepted and failed only on a page whose

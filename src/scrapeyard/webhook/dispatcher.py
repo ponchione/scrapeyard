@@ -304,7 +304,8 @@ class HttpWebhookDispatcher:
     def _backoff_delay(self, attempt_index: int) -> float:
         """Return capped exponential delay for a zero-based attempt index."""
 
-        return float(min(self._backoff_base * (2**attempt_index), self._backoff_max))
+        # Past 2**62 the delay is the cap anyway, and a larger power overflows a float.
+        return float(min(self._backoff_base * (2 ** min(attempt_index, 62)), self._backoff_max))
 
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:

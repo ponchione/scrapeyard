@@ -592,6 +592,19 @@ def test_webhook_retry_settings_reject_non_positive_values(monkeypatch, name, va
         ServiceSettings()
 
 
+@pytest.mark.parametrize(
+    ("name", "largest"),
+    [("WEBHOOK_MAX_DELIVERY_ATTEMPTS", 100), ("WEBHOOK_MAX_DELIVERY_AGE_SECONDS", 30 * 86400)],
+)
+def test_webhook_retry_settings_are_bounded_where_they_would_overflow(monkeypatch, name, largest):
+    monkeypatch.setenv(f"SCRAPEYARD_{name}", str(largest))
+    ServiceSettings()
+    monkeypatch.setenv(f"SCRAPEYARD_{name}", str(largest + 1))
+
+    with pytest.raises(ValidationError):
+        ServiceSettings()
+
+
 def test_webhook_batch_size_must_cover_dispatch_concurrency(monkeypatch):
     monkeypatch.setenv("SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY", "5")
     monkeypatch.setenv("SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE", "4")

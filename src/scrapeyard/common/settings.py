@@ -73,8 +73,9 @@ class ServiceSettings(BaseSettings):
     scheduler_jitter_max_seconds: int = Field(default=120, ge=0)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=1)
 
-    webhook_max_delivery_attempts: int = Field(default=5, ge=1)
-    webhook_max_delivery_age_seconds: int = Field(default=86400, ge=1)
+    # Bounded: past them the backoff and the age cutoff overflow.
+    webhook_max_delivery_attempts: int = Field(default=5, ge=1, le=100)
+    webhook_max_delivery_age_seconds: int = Field(default=86400, ge=1, le=30 * 86400)
     webhook_dispatch_concurrency: int = Field(default=4, ge=1)
     webhook_dispatch_batch_size: int = Field(default=100, ge=1)
     webhook_client_cache_max_size: int = Field(default=64, ge=1)

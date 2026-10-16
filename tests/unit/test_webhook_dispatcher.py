@@ -723,6 +723,8 @@ class TestBackoffDelay:
         dispatcher = HttpWebhookDispatcher(backoff_base=1.0, backoff_max=5.0)
         assert dispatcher._backoff_delay(0) == 1.0
         assert dispatcher._backoff_delay(10) == 5.0  # capped
+        # A power of two this large no longer converts to a float.
+        assert dispatcher._backoff_delay(1024) == 5.0
 
     def test_is_retryable_status(self) -> None:
         assert HttpWebhookDispatcher._is_retryable_status(500) is True

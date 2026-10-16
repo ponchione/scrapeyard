@@ -685,8 +685,8 @@ profile.
 | `SCRAPEYARD_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Open interval before exactly one half-open probe is admitted |
 | `SCRAPEYARD_CIRCUIT_BREAKER_MAX_DOMAINS` | `10000` | Maximum retained per-domain circuit states |
 | `SCRAPEYARD_CIRCUIT_BREAKER_INACTIVE_TTL_SECONDS` | `3600` | Idle lifetime for sub-threshold circuit history |
-| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first |
-| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt |
+| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_ATTEMPTS` | `5` | Total durable delivery attempts, including the first (at most 100) |
+| `SCRAPEYARD_WEBHOOK_MAX_DELIVERY_AGE_SECONDS` | `86400` | Maximum age from durable intent creation to another attempt (at most 30 days) |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_CONCURRENCY` | `4` | Maximum simultaneous webhook HTTP attempts |
 | `SCRAPEYARD_WEBHOOK_DISPATCH_BATCH_SIZE` | `100` | Maximum due rows loaded into one bounded dispatch batch |
 | `SCRAPEYARD_WEBHOOK_CLIENT_CACHE_MAX_SIZE` | `64` | Maximum hostname-isolated webhook HTTP client pools |
