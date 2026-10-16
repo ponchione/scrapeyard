@@ -44,9 +44,14 @@ def test_parse_error_filters_accepts_api_rfc3339_utc_timestamp() -> None:
     assert parsed.since.isoformat() == "2026-07-14T12:00:00+00:00"
 
 
-def test_parse_error_filters_returns_error_for_invalid_since() -> None:
+@pytest.mark.parametrize(
+    "since",
+    # The last two are dates whose offset puts the instant outside datetime's range.
+    ["nope", "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"],
+)
+def test_parse_error_filters_returns_error_for_invalid_since(since: str) -> None:
     with pytest.raises(HTTPException) as exc_info:
-        parse_error_filters(project=None, job_id=None, since="nope", error_type=None)
+        parse_error_filters(project=None, job_id=None, since=since, error_type=None)
 
     assert exc_info.value.status_code == 400
 

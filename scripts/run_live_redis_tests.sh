@@ -62,4 +62,5 @@ done
 docker compose "${COMPOSE_ARGS[@]}" exec -T redis redis-cli ping >/dev/null
 
 SCRAPEYARD_REDIS_DSN="redis://127.0.0.1:${SCRAPEYARD_TEST_REDIS_PORT}/15" \
+SCRAPEYARD_LIVE_REDIS_REQUIRED=1 \
 poetry run pytest -W error --no-cov -m live_redis tests/live_redis -q

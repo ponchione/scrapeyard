@@ -8,6 +8,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator
 from functools import cache
+from typing import NoReturn
 
 import pytest
 from arq.connections import RedisSettings, create_pool
@@ -84,6 +85,15 @@ def _unreachable_redis(dsn: str) -> str | None:
             return None
     except OSError as exc:
         return str(exc) or type(exc).__name__
+
+
+def _redis_unavailable(message: str) -> NoReturn:
+    # CI and scripts/run_live_redis_tests.sh start Redis themselves. There, an
+    # unreachable Redis is a failure, not a run that passes with every test
+    # skipped.
+    if os.environ.get("SCRAPEYARD_LIVE_REDIS_REQUIRED") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 class RedisRelay:
@@ -166,7 +176,7 @@ async def redis_relay(_live_redis_env, monkeypatch) -> AsyncIterator[RedisRelay]
     dsn = os.environ["SCRAPEYARD_REDIS_DSN"]
     unreachable = _unreachable_redis(dsn)
     if unreachable is not None:
-        pytest.skip(f"Live Redis unavailable at {dsn}: {unreachable}")
+        _redis_unavailable(f"Live Redis unavailable at {dsn}: {unreachable}")
     target = RedisSettings.from_dsn(dsn)
     relay = RedisRelay(target.host, target.port)
     await relay.start()
@@ -201,11 +211,11 @@ async def live_app(request) -> AsyncIterator:
 
     unreachable = _unreachable_redis(settings.redis_dsn)
     if unreachable is not None:
-        pytest.skip(f"Live Redis unavailable at {settings.redis_dsn}: {unreachable}")
+        _redis_unavailable(f"Live Redis unavailable at {settings.redis_dsn}: {unreachable}")
     try:
         redis = await create_pool(RedisSettings.from_dsn(settings.redis_dsn))
     except (OSError, RedisConnectionError) as exc:
-        pytest.skip(f"Live Redis unavailable at {settings.redis_dsn}: {exc}")
+        _redis_unavailable(f"Live Redis unavailable at {settings.redis_dsn}: {exc}")
 
     try:
         await redis.flushdb()

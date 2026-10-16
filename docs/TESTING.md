@@ -370,10 +370,12 @@ For queue behavior against a real Redis instance, run:
 ./scripts/run_live_redis_tests.sh
 ```
 
-The live Redis runner starts an isolated Redis container on host port `56379`,
-runs the `live_redis` pytest marker, and tears the container down. Normal
-`poetry run pytest` executions skip those tests when the isolated Redis
-instance is not available.
+The live Redis runner starts an isolated Redis container on host port `56379`
+(loopback only), runs the `live_redis` pytest marker, and tears the container
+down. Normal `poetry run pytest` executions skip those tests when the isolated
+Redis instance is not available. The runner and CI set
+`SCRAPEYARD_LIVE_REDIS_REQUIRED=1`, which makes an unreachable Redis fail
+every test instead.
 
 Useful targeted lanes:
 

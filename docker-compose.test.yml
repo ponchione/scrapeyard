@@ -1,4 +1,5 @@
 services:
   redis:
     ports:
-      - "${SCRAPEYARD_TEST_REDIS_PORT:-56379}:6379"
+      # Loopback only: this Redis has no password, and the script reaches it there.
+      - "127.0.0.1:${SCRAPEYARD_TEST_REDIS_PORT:-56379}:6379"

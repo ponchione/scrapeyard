@@ -144,6 +144,8 @@ jobs:
     env:
       SCRAPEYARD_API_CREDENTIALS: '{"live-redis-ci":{"secret":"live-redis-ci-key-0000","scopes":["submit","read","schedule-admin","delete","health-detail"]}}'
       SCRAPEYARD_REDIS_DSN: redis://127.0.0.1:6379/15
+      # Fail, not skip, every test when the service's Redis can't be reached.
+      SCRAPEYARD_LIVE_REDIS_REQUIRED: "1"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

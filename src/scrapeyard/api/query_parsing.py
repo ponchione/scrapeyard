@@ -18,7 +18,8 @@ def parse_error_filters(
 ) -> ErrorFilters:
     try:
         since_dt = _parse_since(since)
-    except ValueError:
+    # An offset that moves the instant past year 1 or 9999 overflows in UTC.
+    except (ValueError, OverflowError):
         raise_json_error(400, f"Invalid 'since' format: {since!r}")
     try:
         error_type_enum = ErrorType(error_type) if error_type else None

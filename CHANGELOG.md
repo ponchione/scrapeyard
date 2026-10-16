@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `GET /errors?since=` with a date whose offset puts it outside the
+  representable range (`0001-01-01T00:00:00+01:00`) answers `400` instead
+  of `500`.
+- The live Redis CI job and `scripts/run_live_redis_tests.sh` fail when
+  their Redis cannot be reached, instead of passing with every test
+  skipped (`SCRAPEYARD_LIVE_REDIS_REQUIRED=1`); the runner's Redis, which
+  has no password, is published on loopback only.
 - A stop that lands during the egress policy's switch no longer leaves two
   policy jumps behind and reports success (TD-101). The installer marked
   each family switched only after inserting the new jump, so a SIGTERM or
