@@ -29,6 +29,12 @@ _regex_core: Any = importlib.import_module("regex._regex_core")
 # Parses a replacement template the way a match's expand() does.
 _regex_main: Any = importlib.import_module("regex._main")
 _MAX_REGEX_EXPANSION = 10_000
+# With both the f and i flags (f is on by default in V1), the compiler turns a
+# character range or set into a branch of itself and one string for each
+# character it matches whose case folding is several characters: about a
+# hundred more nodes, 40 KB, for `[\x00-\U0010FFFF]`.
+_FULL_IGNORECASE = regex.FULLCASE | regex.IGNORECASE
+_EXPAND_ON_FOLDING = tuple(ord(ch) for ch in _regex_core._regex.get_expand_on_folding())
 # A target's extraction keeps every pattern its selectors use compiled, so
 # one config's patterns are held to a budget together as well.
 _MAX_CONFIG_REGEX_EXPANSION = 100_000
@@ -268,25 +274,39 @@ def _parse_regex(pattern: str) -> Any:
             global_flags = info.global_flags
 
 
+def _node_weight(node: Any, *, in_set: bool) -> int:
+    """Return how many nodes one copy of *node* compiles to, as far as it adds."""
+    if (
+        in_set
+        or not isinstance(node, (_regex_core.Range, _regex_core.SetBase))
+        or not node.positive
+        or node.case_flags & _FULL_IGNORECASE != _FULL_IGNORECASE
+    ):
+        return 1
+    return 1 + sum(1 for ch in _EXPAND_ON_FOLDING if node.matches(ch))
+
+
 def _regex_expansion(pattern: str, *, limit: int) -> int:
     """Count the nodes compiling *pattern* builds, stopping once past *limit*.
 
-    Each parsed node counts once for each copy the compiler makes of it: a
-    repeat's body is copied its minimum count of times (once at least).
+    Each parsed node counts its weight once for each copy the compiler makes
+    of it: a repeat's body is copied its minimum count of times (once at
+    least). A set's members are compiled into the set, not expanded apart.
     """
     total = 0
-    pending: list[tuple[Any, int]] = [(_parse_regex(pattern), 1)]
+    pending: list[tuple[Any, int, bool]] = [(_parse_regex(pattern), 1, False)]
     while pending:
-        node, copies = pending.pop()
-        total += copies
+        node, copies, in_set = pending.pop()
+        total += copies * _node_weight(node, in_set=in_set)
         if total > limit:
             return total
         if isinstance(node, _regex_core.GreedyRepeat):
             copies *= max(1, node.min_count)
+        in_set = in_set or isinstance(node, _regex_core.SetBase)
         for value in vars(node).values():
             children = value if isinstance(value, (list, tuple)) else (value,)
             pending.extend(
-                (child, copies)
+                (child, copies, in_set)
                 for child in children
                 if isinstance(child, _regex_core.RegexBase)
             )

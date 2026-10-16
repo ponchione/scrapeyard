@@ -1120,6 +1120,10 @@ class TestParseTransform:
             # comment cannot hide a repeat from.
             "(?x)(?:a {100}){200} # [",
             "(?#[)(?:a{100}){200}(?#])",
+            # Under full case folding each copy of a wide set is about a
+            # hundred nodes; V1 turns full case folding on by itself.
+            r"(?fi)(?:[\x00-\U0010FFFF]{98}){99}",
+            r"(?V1i)(?:[\x00-\U0010FFFF]{98}){99}",
         ],
     )
     def test_regex_refuses_counted_repeats_that_compile_large(self, pattern):

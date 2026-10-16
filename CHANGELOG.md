@@ -480,6 +480,23 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   taken out of its queue, with its payload, by one Redis script that
   refuses if the worker has already marked it in progress, and the cancel
   answers `204` at once. A run that has started is aborted as before.
+- A `regex` transform can no longer exhaust the application's memory when
+  its config is validated (TD-94). The regex module's compiler copies a
+  counted repeat's body once for each of its minimum count: a 29-byte
+  pattern, `((((a{100}){100}){100}){100})`, took 70 s and about 28 GB to
+  compile inside the submission, and the module's cache kept every pattern
+  compiled. The module's own parser now gives the counts before the
+  compiler runs: a pattern may build 10,000 nodes and one config's
+  patterns 100,000 together, a character range or set counting the
+  strings full case folding (`(?fi)`, or `(?i)` under `V1`) adds to it.
+  Patterns are no longer cached, and one nested too deeply for the parser
+  is an invalid config instead of an unhandled `RecursionError`. Every
+  Eyebox config still validates.
+- A target under `.localhost` (`http://internal.localhost:8080/`) is
+  refused like `localhost` itself (TD-93). Browsers answer every such name
+  with loopback without asking DNS, so a browser fetch reached a page
+  served on the container's loopback. `localhost6` and
+  `localhost6.localdomain6` are refused too.
 - A backup that found more than 1,000 jobs accepted after its witness wrote
   an archive every restore refused: it now names the first 1,000 and counts
   them all, and only the restore test refuses such an archive, saying why.
