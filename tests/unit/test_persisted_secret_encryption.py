@@ -591,3 +591,31 @@ async def test_migration_with_nothing_to_rewrite_leaves_secure_delete_off(tmp_pa
 
     async with get_db("jobs.db") as db:
         assert await _secure_delete(db) == 0
+
+
+async def test_restart_leaves_a_missed_scheduled_fire_without_a_snapshot(tmp_path):
+    # A missed fire never accepted a config, so it keeps no snapshot and its
+    # exact read is a 404. The legacy backfill must not give it the parent's.
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    store = SQLiteJobStore()
+    job = _job()
+    job.schedule_cron = "*/5 * * * *"
+    await store.save_job(job)
+    assert await store.record_scheduled_trigger_failure(
+        "secret-job", "missed-run", failed_at=NOW, failure_code="persisted_config_invalid"
+    )
+    assert await store.get_job_run_state("secret-job", "missed-run") is None
+    await close_db()
+
+    await init_db(str(db_dir))
+    await migrate_persisted_secrets()
+
+    async with get_db("jobs.db") as db:
+        row = await (
+            await db.execute(
+                "SELECT config_yaml FROM job_runs WHERE run_id = 'missed-run'"
+            )
+        ).fetchone()
+    assert row[0] is None
+    assert await SQLiteJobStore().get_job_run_state("secret-job", "missed-run") is None

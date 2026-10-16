@@ -116,7 +116,8 @@ After schema migrations and before workers/scheduler start, one atomic
 1. authenticates every existing envelope;
 2. encrypts every legacy job config, accepted queued snapshot, and unsanitized outbox request;
 3. backfills a legacy run snapshot only when its hash proves the current parent
-   is the exact configuration that run accepted;
+   is the exact configuration that run accepted (a run with a failure code is
+   not legacy: a missed scheduled fire keeps no snapshot on purpose);
 4. writes a SHA-256 config fingerprint used only for compare-and-set behavior;
 5. rotates parent, queued-snapshot, run-snapshot, and outbox envelopes to the configured active key.
 

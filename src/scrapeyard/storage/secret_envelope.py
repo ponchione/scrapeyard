@@ -247,13 +247,17 @@ async def migrate_persisted_secrets() -> None:
                         )
 
                 # Legacy runs without a snapshot take their parent's config when
-                # its hash proves it is the config the run executed.
+                # its hash proves it is the config the run executed. A run
+                # with a failure code was written after 018 added both
+                # columns, by a path that stores the snapshot it has; a
+                # missed scheduled fire has none on purpose and stays so.
                 async for row in _paged_rows(
                     db,
                     """SELECT job_runs.run_id, job_runs.job_id, jobs.config_yaml,
                               job_runs.config_hash
                        FROM job_runs JOIN jobs ON jobs.job_id = job_runs.job_id
                        WHERE job_runs.run_id > ? AND job_runs.config_yaml IS NULL
+                         AND job_runs.failure_code IS NULL
                        ORDER BY job_runs.run_id LIMIT ?""",
                 ):
                     run_id = str(row[0])

@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A restart no longer gives a missed scheduled fire its parent's config.
+  The fire's run is recorded without one on purpose, so its exact read
+  (`GET /jobs/{id}/runs/{run_id}`) is a 404, but the startup backfill meant
+  for runs from before migration 018 filled it in, and the same read
+  answered 200 after the restart. The backfill now skips runs with a
+  failure code, which only this version writes.
 - A deployment secret reference in a target's browser `extra_headers` is
   refused when the config is validated (TD-102). The browser follows a
   server's redirect itself, past the route that keeps these headers to the
