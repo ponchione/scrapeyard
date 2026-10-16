@@ -160,3 +160,25 @@ async def test_config_update_cannot_race_future_run_reservation(store):
         expected_config_yaml=original.config_yaml,
     )
     assert queued is False
+
+
+async def test_a_pause_committed_during_a_fire_stops_its_run(store):
+    # The scheduler saw the schedule enabled, then loaded the config while
+    # the pause committed; the reservation must not queue the fire anyway.
+    job = _job(config_yaml="project: schedule\nname: daily\n")
+    await store.save_job(job)
+    paused = await store.set_schedule_enabled(job.job_id, enabled=False, updated_at=NOW)
+    assert paused.current is not None and paused.current.schedule_enabled is False
+
+    for trigger, expected in (("scheduled", False), ("manual", True)):
+        queued = await store.queue_run(
+            job.job_id,
+            expected_status=JobStatus.queued.value,
+            expected_run_id=None,
+            new_run_id=f"run-{trigger}",
+            new_trigger=trigger,
+            queued_at=NOW,
+            expected_config_yaml=job.config_yaml,
+        )
+        assert queued is expected, trigger
+    assert (await store.get_job(job.job_id)).current_run_id == "run-manual"

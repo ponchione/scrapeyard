@@ -1375,6 +1375,9 @@ class SQLiteJobStore:
             params.append(
                 hashlib.sha256(expected_config_yaml.encode("utf-8")).hexdigest()
             )
+        # The scheduler read the schedule as enabled before it loaded the
+        # config; a pause that committed since must still stop the fire.
+        schedule_clause = " AND schedule_enabled = 1" if new_trigger == "scheduled" else ""
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             cursor = await db.execute(
                 """UPDATE jobs
@@ -1384,7 +1387,8 @@ class SQLiteJobStore:
                      AND status = ?
                      AND current_run_id IS ?"""
                 + stale_clause
-                + config_clause,
+                + config_clause
+                + schedule_clause,
                 params,
             )
             if cursor.rowcount != 1:

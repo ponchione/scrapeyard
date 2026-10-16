@@ -383,6 +383,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A schedule paused while one of its fires was loading the config no
+  longer queues that fire after the pause has returned `200`. The fire
+  checked `schedule_enabled` before loading the config, and the
+  reservation that queues it did not check it again.
 - A native cron schedule that fires in the repeated hour of a clock change
   (`schedule.timezone` with daylight saving, the default 120 s jitter) no
   longer hangs the whole process. APScheduler added the jitter in wall
