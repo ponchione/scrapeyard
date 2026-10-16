@@ -422,11 +422,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   It accepted any failure, and the private fixture is on an internal
   network Docker isolates whether or not the policy is installed, so the
   check passed without the policy.
-- `install_container_runtime.sh` refuses a key file from Docker's
-  repository that holds any key besides Docker's. It compared only the
-  first key's fingerprint and then gave apt the whole file, so a second key
-  appended to the one served would have been trusted to sign the Docker
-  packages the container lanes and release builds install.
+- `install_container_runtime.sh` gives apt only Docker's key, exported from
+  a throwaway keyring into `/etc/apt/keyrings/docker.gpg`, and never the key
+  file Docker's repository serves. It compared only the first key's
+  fingerprint in that file and then gave apt the whole file, so another key
+  beside Docker's (in a second block, or in a block gpg does not list as a
+  public key, which apt still reads) would have been trusted to sign the
+  Docker packages the container lanes and release builds install.
 - The release workflow no longer uploads a release whose Redis and egress
   probe were never scanned. `create` runs the scanner of the revision it
   builds, and before TD-99 that scanner read only the application's image

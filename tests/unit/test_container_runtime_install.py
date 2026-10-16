@@ -16,15 +16,39 @@ DOCKER_KEY = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 # Each stands in for a command the installer runs as root on a runner.
 _SHIMS = {
     "id": 'echo "${FAKE_UID:-0}"',
-    "curl": 'while [ "$#" -gt 1 ]; do shift; done; echo key > "$1"',
-    # Docker's key has a signing subkey; a served file may carry another key.
-    "gpg": """
-echo "pub:-:4096:1:8D81803C0EBFCD88:"; echo "fpr:::::::::${FAKE_KEY}:"
-echo "sub:-:4096:1:7EA0A9C3F273FCD8:"; echo "fpr:::::::::D3306A018370199E527AE7A67EA0A9C3F273FCD8:"
-if [ -n "${FAKE_EXTRA_KEY:-}" ]; then
-  echo "pub:-:4096:1:${FAKE_EXTRA_KEY: -16}:"; echo "fpr:::::::::${FAKE_EXTRA_KEY}:"
-fi
+    # The served key file, as gpg's colon listing of it: Docker's key with
+    # its signing subkey, and whatever else the server put beside it.
+    "curl": """
+while [ "$#" -gt 1 ]; do shift; done
+{
+  echo "pub:-:4096:1:8D81803C0EBFCD88:"; echo "fpr:::::::::${FAKE_KEY}:"
+  echo "sub:-:4096:1:7EA0A9C3F273FCD8:"; echo "fpr:::::::::D3306A018370199E527AE7A67EA0A9C3F273FCD8:"
+  if [ -n "${FAKE_EXTRA_KEY:-}" ]; then
+    echo "${FAKE_EXTRA_KIND:-pub}:-:4096:1:${FAKE_EXTRA_KEY: -16}:"; echo "fpr:::::::::${FAKE_EXTRA_KEY}:"
+  fi
+} > "$1"
 """,
+    # A keyring per --homedir: --import keeps the file, --export prints the
+    # named key's records, --show-keys lists a file.
+    "gpg": """
+home=""; previous=""
+for argument in "$@"; do
+  [ "$previous" = "--homedir" ] && home="$argument"
+  previous="$argument"
+done
+last="${@: -1}"
+case " $* " in
+  *" --import "*) cp "$last" "$home/imported" ;;
+  *" --export "*)
+    awk -F: -v want="$last" '
+      $1 == "pub" || $1 == "sec" { keep = 0; held = $0; next }
+      held != "" && $1 == "fpr" { keep = ($10 == want); if (keep) print held; held = "" }
+      keep { print }' "$home/imported" ;;
+  *" --show-keys "*) cat "$last" ;;
+  *) echo "unexpected gpg $*" >&2; exit 64 ;;
+esac
+""",
+    "gpgconf": ":",
     "dpkg": "echo amd64",
     "apt-get": 'echo "apt-get $*" >> "$SHIM_LOG"',
     "apt-cache": 'cat "$SHIM_DIR/madison-$2"',
@@ -117,7 +141,7 @@ def test_installer_installs_the_pinned_packages_and_checks_what_runs(tmp_path: P
     assert log.index("apt-get update") < log.index("apt-get install")
     assert log.index("apt-get install") < log.index("systemctl restart containerd docker")
     source = (apt / "sources.list.d/docker.list").read_text(encoding="utf-8")
-    assert f"signed-by={apt}/keyrings/docker.asc" in source
+    assert f"signed-by={apt}/keyrings/docker.gpg" in source
     assert "https://download.docker.com/linux/ubuntu" in source
     assert "runc 1.5.2" in result.stdout
     assert "image store overlay2" in result.stdout
@@ -171,24 +195,29 @@ def test_installer_reuses_a_repository_entry_the_image_already_has(tmp_path: Pat
     assert [path.name for path in (apt / "sources.list.d").iterdir()] == ["image-docker.list"]
 
 
-@pytest.mark.parametrize(
-    "served",
-    [
-        {"FAKE_KEY": "0" * 40},
-        # Docker's key first and another behind it: apt would trust both.
-        {"FAKE_EXTRA_KEY": "1" * 40},
-    ],
-)
-def test_installer_refuses_a_repository_key_that_is_not_dockers(
-    tmp_path: Path, served: dict[str, str]
-) -> None:
-    result, log, apt = _run(tmp_path, **served)
+def test_installer_refuses_a_repository_key_that_is_not_dockers(tmp_path: Path) -> None:
+    result, log, apt = _run(tmp_path, FAKE_KEY="0" * 40)
 
     assert result.returncode == 1
     assert "not Docker's release key" in result.stderr
     assert not (apt / "sources.list.d/docker.list").exists()
     assert not (apt / "keyrings").exists()
     assert "apt-get" not in log
+
+
+@pytest.mark.parametrize("kind", ["pub", "sec"])
+def test_installer_gives_apt_only_dockers_key_from_what_is_served(
+    tmp_path: Path, kind: str
+) -> None:
+    # A key behind Docker's in the served file, public or secret, must not
+    # reach the keyring apt trusts for the repository.
+    other = "1" * 40
+    result, _, apt = _run(tmp_path, FAKE_EXTRA_KEY=other, FAKE_EXTRA_KIND=kind)
+
+    assert result.returncode == 0, result.stderr
+    keyring = (apt / "keyrings/docker.gpg").read_text(encoding="utf-8")
+    assert DOCKER_KEY in keyring
+    assert other not in keyring
 
 
 def test_installer_stops_when_the_repository_lacks_a_pinned_version(tmp_path: Path) -> None:

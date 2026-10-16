@@ -50,23 +50,31 @@ add_repository() {
   if grep -rqsF "${REPOSITORY#https://}" "$APT_DIR/sources.list" "$APT_DIR/sources.list.d"; then
     return
   fi
-  local key codename
+  local key home keyring codename primaries
   key="$(mktemp)"
+  home="$(mktemp -d)"
+  keyring="$(mktemp)"
   curl -fsSL --retry 3 "$REPOSITORY/gpg" -o "$key"
-  # The whole file becomes apt's keyring for the repository, so it must hold
-  # Docker's key and no other: one primary key, with the pinned fingerprint.
-  if [[ "$(gpg --show-keys --with-colons "$key" | awk -F: '
-      $1 == "pub" { primary = 1; next }
-      $1 == "fpr" && primary { print $10; primary = 0 }')" \
-    != "$REPOSITORY_KEY_FINGERPRINT" ]]; then
-    rm -f -- "$key"
+  # Apt gets only the pinned key, exported from a throwaway keyring, never
+  # the served file: apt reads every armored block in a file whatever its
+  # label, including blocks gpg does not list as public keys. An export of
+  # a key the file lacks is empty, which the check below refuses.
+  gpg --batch --quiet --homedir "$home" --import "$key" >/dev/null 2>&1 || true
+  gpg --batch --quiet --homedir "$home" --export "$REPOSITORY_KEY_FINGERPRINT" > "$keyring"
+  primaries="$(gpg --homedir "$home" --show-keys --with-colons "$keyring" 2>/dev/null | awk -F: '
+      $1 == "pub" || $1 == "sec" { primary = 1; next }
+      $1 == "fpr" && primary { print $10; primary = 0 }')" || true
+  gpgconf --homedir "$home" --kill gpg-agent >/dev/null 2>&1 || true
+  rm -rf -- "$key" "$home"
+  if [[ "$primaries" != "$REPOSITORY_KEY_FINGERPRINT" ]]; then
+    rm -f -- "$keyring"
     fail "the key served by $REPOSITORY is not Docker's release key"
   fi
-  install -D -m 0644 "$key" "$APT_DIR/keyrings/docker.asc"
-  rm -f -- "$key"
+  install -D -m 0644 "$keyring" "$APT_DIR/keyrings/docker.gpg"
+  rm -f -- "$keyring"
   codename="$(. /etc/os-release && printf '%s' "$VERSION_CODENAME")"
   printf 'deb [arch=%s signed-by=%s] %s %s stable\n' \
-    "$(dpkg --print-architecture)" "$APT_DIR/keyrings/docker.asc" "$REPOSITORY" "$codename" \
+    "$(dpkg --print-architecture)" "$APT_DIR/keyrings/docker.gpg" "$REPOSITORY" "$codename" \
     > "$APT_DIR/sources.list.d/docker.list"
 }
 
