@@ -383,6 +383,15 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The release workflow no longer uploads a release whose Redis and egress
+  probe were never scanned. `create` runs the scanner of the revision it
+  builds, and before TD-99 that scanner read only the application's image
+  and passed over the others, so rebuilding an older release (its artifact
+  expires after 30 days) shipped them unscanned under a summary that said
+  "scanned". The workflow now checks the packed candidate with the new
+  `release_artifact.py verify --scanned`, which requires a vulnerability
+  report naming each image; the rollback target it also builds may predate
+  TD-99.
 - `release_artifact.py verify` (and so `create` and `load`) now refuses a
   release whose `images.tar` lacks an image its manifest names. The
   checksums cover whatever was saved, and the rehearsal's daemon already

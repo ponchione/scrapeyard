@@ -504,11 +504,14 @@ fixes, and that does not apply here, can be accepted in
 `security/trivy-dependency-exceptions.yaml` with its reason and an expiry;
 after the expiry the gate fails again until the digest is refreshed. Trivy
 cannot see a source-built `redis-server`, so follow Redis's own advisories
-too:
+too. `create` runs the scanner of the revision it builds, and before TD-99
+that scanner passed over Redis and the probe; `verify --scanned` refuses a
+release without a report naming each of its images, so use it on any
+release you mean to ship (a rollback target may predate it):
 
 ```bash
 python3 scripts/release_artifact.py create ~/scrapeyard-releases/candidate --revision HEAD
-python3 scripts/release_artifact.py verify ~/scrapeyard-releases/candidate
+python3 scripts/release_artifact.py verify --scanned ~/scrapeyard-releases/candidate
 ```
 
 A GitHub runner is such a host. The `Release artifact and deployment
@@ -523,7 +526,7 @@ gh run download <run-id> -n scrapeyard-release-<commit>
 sha256sum -c scrapeyard-release-<commit>.tar.zst.sha256
 sudo tar --zstd -xpf scrapeyard-release-<commit>.tar.zst --no-same-owner -C /srv/scrapeyard-releases
 python3 /srv/scrapeyard-releases/scrapeyard-release-<commit>/source/scripts/release_artifact.py \
-  verify /srv/scrapeyard-releases/scrapeyard-release-<commit>
+  verify --scanned /srv/scrapeyard-releases/scrapeyard-release-<commit>
 ```
 
 Compare the checksum with the one in the run's summary. `--no-same-owner`

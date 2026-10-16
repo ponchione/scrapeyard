@@ -114,6 +114,35 @@ def test_release_verifies_content_and_rejects_drift_before_loading(tmp_path, mon
         (bundle / "extra").unlink(missing_ok=True)
 
 
+def test_a_release_to_ship_needs_a_scan_report_naming_each_image(tmp_path):
+    images = {
+        name: "sha256:" + value * 64
+        for name, value in (("scrapeyard", "a"), ("redis", "b"), ("egress-probe", "c"))
+    }
+    manifest = {"images": images}
+    reports = tmp_path / "security-reports"
+    reports.mkdir()
+    (reports / "vulnerabilities.json").write_text(
+        json.dumps({"ArtifactName": images["scrapeyard"], "Results": []})
+    )
+    # The scanner before TD-99 read only its first argument: it wrote the
+    # application's report and none for the images beside it.
+    with pytest.raises(ValueError, match="no vulnerability report for its redis image"):
+        release_artifact.verify_scanned(tmp_path, manifest)
+    (reports / "vulnerabilities-dependency-1.json").write_text(
+        json.dumps({"ArtifactName": "redis:7.4.11-alpine", "Metadata": {"ImageID": images["redis"]}})
+    )
+    (reports / "vulnerabilities-dependency-2.json").write_text(
+        json.dumps({"ArtifactName": images["redis"]})
+    )
+    with pytest.raises(ValueError, match="not a scan of the egress-probe image"):
+        release_artifact.verify_scanned(tmp_path, manifest)
+    (reports / "vulnerabilities-dependency-2.json").write_text(
+        json.dumps({"ArtifactName": images["egress-probe"]})
+    )
+    release_artifact.verify_scanned(tmp_path, manifest)
+
+
 @pytest.mark.parametrize("failure", ["disk", "scan", "qualification", "network", "archive", None])
 def test_release_is_published_only_after_all_checks_pass(tmp_path, monkeypatch, failure):
     commands = []

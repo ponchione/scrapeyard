@@ -102,6 +102,37 @@ def verify(directory: Path) -> dict:
     return manifest
 
 
+# The vulnerability report the scan of each image writes, in the order
+# create passes the images to it.
+SCAN_REPORTS = {
+    "scrapeyard": "vulnerabilities.json",
+    "redis": "vulnerabilities-dependency-1.json",
+    "egress-probe": "vulnerabilities-dependency-2.json",
+}
+
+
+def verify_scanned(directory: Path, manifest: dict) -> None:
+    """Require a vulnerability report naming each image the release ships.
+
+    create runs the scanner of the revision it builds. Before TD-99 that
+    scanner read only the application's image and passed over the others,
+    so a release rebuilt from such a revision ships Redis and the egress
+    probe unscanned. A rollback target may be one; a release to ship may not.
+    """
+    for name, report in SCAN_REPORTS.items():
+        try:
+            payload = json.loads((directory / "security-reports" / report).read_text())
+        except (OSError, ValueError):
+            raise ValueError(f"release holds no vulnerability report for its {name} image") from None
+        metadata = payload.get("Metadata") if isinstance(payload, dict) else None
+        scanned = {
+            payload.get("ArtifactName") if isinstance(payload, dict) else None,
+            metadata.get("ImageID") if isinstance(metadata, dict) else None,
+        }
+        if manifest["images"][name] not in scanned:
+            raise ValueError(f"security-reports/{report} is not a scan of the {name} image")
+
+
 def create(directory: Path, revision: str) -> None:
     revision = run("git", "rev-parse", "--verify", f"{revision}^{{commit}}", cwd=ROOT)
     directory.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +332,14 @@ def main() -> None:
     parser.add_argument(
         "--revision", default="HEAD", help="committed source to build (create only)"
     )
+    parser.add_argument(
+        "--scanned",
+        action="store_true",
+        help="also require a vulnerability report for each image (verify only)",
+    )
     args = parser.parse_args()
+    if args.scanned and args.action != "verify":
+        parser.error("--scanned applies to verify only")
     directory = args.directory.resolve()
     try:
         if args.action == "create":
@@ -310,6 +348,8 @@ def main() -> None:
             load_images(directory)
         else:
             manifest = verify(directory)
+            if args.scanned:
+                verify_scanned(directory, manifest)
             print(f"Verified release {manifest['revision']}")
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"release artifact: {exc}\n")

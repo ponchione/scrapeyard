@@ -528,7 +528,9 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     # the runner's account as the owner.
     assert "--owner=0 --group=0 --numeric-owner" in pack["run"]
     assert "--no-same-owner" in pack["run"]
-    assert "release_artifact.py verify" in pack["run"]
+    # The release it uploads must hold a scan of every image, not only the
+    # application's, whatever revision it was built from.
+    assert "release_artifact.py verify --scanned" in pack["run"]
     assert "! -user 0 -o -perm /022" in pack["run"]
 
 
