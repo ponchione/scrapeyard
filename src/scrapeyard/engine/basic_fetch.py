@@ -114,6 +114,10 @@ def _decode_body(body: bytes, encoding: str) -> tuple[str, str]:
     Returns the text and the encoding to parse it with.
     """
     try:
+        if codecs.lookup(encoding).name == "punycode":
+            # Its decoder is pure Python and quadratic: a 1.3 MB page that
+            # declared it held the event loop for 34 s. No browser reads one.
+            raise LookupError(encoding)
         text = body.decode(encoding, errors="replace")
     except (LookupError, UnicodeError):
         # Not a text encoding (zlib), or one that rejects replacement (idna).

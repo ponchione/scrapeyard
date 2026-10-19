@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A `basic` page that declares `charset=punycode` is read as UTF-8, as
+  other charsets no browser uses already were. Python's punycode decoder
+  is pure Python and quadratic, and decoding runs on the event loop: a
+  1.3 MB page held the API, readiness, the scheduler and every run for
+  34 s, past every timeout, and a page at the byte ceiling would have held
+  them for days.
 - A compressed `basic` response is inflated a bounded piece at a time
   (64 KiB, or about 2 MiB for zstd), and each piece is charged to the run's
   fetched-byte budget before the next is decoded. httpx decoded each network

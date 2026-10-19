@@ -303,10 +303,11 @@ async def test_chunked_body_stops_at_live_byte_ceiling() -> None:
         ("zlib", b"scope", "scope"),
         ("iso-8859-1", b"caf\xe9", "caf\xe9"),
         ("utf-7", b"caf+AOk-", "caf\xe9"),
+        ("punycode", b"scope", "scope"),
     ],
     ids=[
         "utf-7-surrogate", "unicode-escape", "raw-unicode-escape", "idna", "undefined",
-        "zlib", "latin-1", "utf-7-text",
+        "zlib", "latin-1", "utf-7-text", "punycode",
     ],
 )
 async def test_declared_charset_that_cannot_be_parsed_falls_back_to_utf8(
