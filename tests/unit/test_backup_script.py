@@ -117,9 +117,17 @@ elif command == "exec":
     container, program = rest[0], rest[1]
     if program == "redis-cli":
         question = rest[2].upper()
+        # The restored Redis holds what it loaded: one key had expired.
+        keys = env.get("RESTORED_KEYS", "4") if container == "d44" else "5"
+        database = env.get("REDIS_DB", "0")
         if question == "DBSIZE":
-            # The restored Redis holds what it loaded: one key had expired.
-            print(env.get("RESTORED_KEYS", "4") if container == "d44" else "5")
+            # The database a connection starts in, the first.
+            print(keys if database == "0" else "0")
+        elif question == "INFO" and rest[3:] == ["keyspace"]:
+            # Redis lists only the databases that hold keys.
+            print("# Keyspace\r")
+            if keys != "0":
+                print(f"db{database}:keys={keys},expires=1,avg_ttl=0,subexpiry=0\r")
         elif question == "SAVE":
             print("ERR Background save already in progress" if env.get("SAVE_FAILS") == "yes" else "OK")
         else:
@@ -1032,8 +1040,8 @@ def test_pruning_keeps_the_newest_archives_and_touches_nothing_else(host, keep):
     assert (host.backups / "notes.txt").read_text() == "someone else's"
 
 
-def _backed_up(host: _Host) -> Path:
-    result = host.run("run")
+def _backed_up(host: _Host, **env: str) -> Path:
+    result = host.run("run", **env)
     assert result.returncode == 0, result.stderr
     host.calls.unlink()
     return host.archives()[0]
@@ -1102,6 +1110,16 @@ def test_restore_test_restores_into_an_isolated_project_and_removes_it(host):
     _nothing_left_of_the_restore_test(host)
     assert host.left_in_backups() == {archive.name, archive.name + ".sha256"}
     assert "hunter2" not in result.stdout + result.stderr
+
+
+def test_redis_keys_are_counted_in_whichever_database_holds_them(host):
+    # The DSN can name another database than the first, which DBSIZE counts.
+    archive = _backed_up(host, REDIS_DB="1")
+
+    assert json.loads(host.members(archive)["metadata.json"])["redis_keys"] == 5
+    result = host.run("restore-test", str(archive), "--identity", str(host.identity), REDIS_DB="1")
+    assert result.returncode == 0, result.stderr
+    assert "Restore test passed" in result.stdout
 
 
 @pytest.mark.parametrize(

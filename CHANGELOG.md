@@ -383,6 +383,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `security/backup.sh` counts Redis's keys in every database. It counted
+  the first alone, so with `SCRAPEYARD_REDIS_DSN` naming another one
+  every backup recorded 0 keys and every restore of it failed when Redis
+  loaded more.
 - `block_third_party` no longer blocks the requests of a target whose
   host is a Unicode name to its own site (`www.bücher.de` loading from
   `cdn.xn--bcher-kva.de`), and `run_budget.traffic` no longer counts them
