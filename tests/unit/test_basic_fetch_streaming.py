@@ -407,6 +407,12 @@ async def test_decoded_body_crosses_ceiling_despite_small_content_length() -> No
     assert exc_info.value.observed_amount == len(body)
 
 
+def _raw_deflate(body: bytes) -> bytes:
+    # zlib.compress takes wbits only from Python 3.11.
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    return compressor.compress(body) + compressor.flush()
+
+
 _CODINGS = pytest.mark.parametrize(
     ("coding", "encode"),
     [
@@ -415,7 +421,7 @@ _CODINGS = pytest.mark.parametrize(
         ("br", lambda body: brotli.compress(body, quality=5)),
         ("zstd", lambda body: zstandard.ZstdCompressor().compress(body)),
         ("gzip, gzip", lambda body: gzip.compress(gzip.compress(body))),
-        ("deflate", lambda body: zlib.compress(body, wbits=-zlib.MAX_WBITS)),
+        ("deflate", _raw_deflate),
         ("zstd", lambda body: b"".join(
             zstandard.ZstdCompressor().compress(half)
             for half in (body[: len(body) // 2], body[len(body) // 2 :])
