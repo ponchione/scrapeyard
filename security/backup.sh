@@ -457,6 +457,11 @@ def sample(job_id, secret):
 
 
 def witness(credentials, restored=False, left_out=()):
+    if not any("read" in c["scopes"] for c in credentials.values()):
+        # With no job list the witness holds nothing, and every restore test
+        # would compare nothing with nothing and pass.
+        print("no credential in SCRAPEYARD_API_CREDENTIALS holds the read scope", file=sys.stderr)
+        sys.exit(NEVER)
     # The original is asked while it is idle, so that what it reports is what
     # the copy holds. A restored copy is asked as soon as it is ready: a job
     # accepted after the witness is queued in it, and it runs that job.

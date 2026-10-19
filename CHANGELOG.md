@@ -383,6 +383,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `security/backup.sh` refuses to take a witness, with nothing stopped,
+  when no configured credential holds the `read` scope. The witness then
+  listed no job, and every restore test of such a backup reported the job
+  list "identical to the witness" and passed without comparing anything.
 - A `SCRAPEYARD_STORAGE_RESULTS_DIR` reached through a symlink (a bind to
   another disk, or `/tmp` on macOS) holds results. The path check resolved
   the root but not the paths stored under it, so every result save failed

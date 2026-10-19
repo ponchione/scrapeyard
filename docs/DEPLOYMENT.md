@@ -1112,6 +1112,8 @@ the promoted release (`scripts/qualification_backup.py`, described in
    again at the next poll. The reads are made with the consumer's own
    credential and count towards its rate limit, so the job list is asked for
    in the largest pages the API allows. The witness holds no credential.
+   With no `read` credential configured there is nothing to list, and the
+   run fails with nothing stopped, as it does without a `health-detail` one.
 4. **Stops the application** with `systemctl stop scrapeyard.service`, while
    holding the lock that every start and promotion takes
    (`/run/scrapeyard/release.lock`), and confirms that no application

@@ -1672,11 +1672,19 @@ def test_a_refused_job_list_and_a_missing_credential_are_told_apart(tmp_path):
             tmp_path, api, "witness",
             SCRAPEYARD_API_CREDENTIALS=json.dumps({"client": {"secret": CLIENT, "scopes": ["read"]}}),
         )
+        # It gave an empty witness, which every restore test then matched.
+        unlisted = _ask(
+            tmp_path, api, "witness",
+            SCRAPEYARD_API_CREDENTIALS=json.dumps(
+                {"monitor": {"secret": MONITOR, "scopes": ["health-detail"]}}
+            ),
+        )
 
     # "Anything else", which the wait asks again; and what waiting cannot cure.
     assert refused.returncode == 4 and refused.stderr.strip() == "the job list answered HTTP 429"
     assert unreadable.returncode == 2 and "holds the health-detail scope" in unreadable.stderr
-    assert refused.stdout == unreadable.stdout == ""
+    assert unlisted.returncode == 2 and "holds the read scope" in unlisted.stderr
+    assert refused.stdout == unreadable.stdout == unlisted.stdout == ""
 
 
 def test_a_restored_copy_is_asked_when_ready_and_without_the_jobs_accepted_late(tmp_path):
