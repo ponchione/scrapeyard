@@ -210,11 +210,18 @@ class LocalResultStore:
             if entry.users == 0 and self._save_locks.get(run_dir) is entry:
                 self._save_locks.pop(run_dir, None)
 
+    def _root(self) -> Path:
+        # Paths are stored under the directory as configured. Resolving only
+        # the root put every one of them outside it when the configured
+        # directory was reached through a symlink, so no result could be
+        # saved while readiness passed. Links below the root are refused.
+        return Path(os.path.abspath(self._results_dir))
+
     def _checked_result_dir(self, file_path: str) -> Path:
         path = Path(file_path)
         if ".." in path.parts:
             raise ValueError(f"Unsafe result path outside results_dir: {file_path!r}")
-        root = self._results_dir.resolve(strict=False)
+        root = self._root()
         resolved = Path(os.path.abspath(path))
         try:
             relative = resolved.relative_to(root)
@@ -317,7 +324,7 @@ class LocalResultStore:
         for row in rows:
             try:
                 path = self._checked_result_dir(str(row["file_path"]))
-                relative = path.relative_to(self._results_dir.resolve(strict=False))
+                relative = path.relative_to(self._root())
                 identity = _RunIdentity(*relative.parts)
             except (OSError, TypeError, ValueError):
                 # Unsafe metadata is still eligible for metadata cleanup; its

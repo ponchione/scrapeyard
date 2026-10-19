@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A `SCRAPEYARD_STORAGE_RESULTS_DIR` reached through a symlink (a bind to
+  another disk, or `/tmp` on macOS) holds results. The path check resolved
+  the root but not the paths stored under it, so every result save failed
+  as outside the directory while readiness, which writes the directory
+  itself, passed. Links below the root are still refused. The production
+  volume is not a symlink.
 - The browser asset cache's 32 MiB bound counts each entry's URL and
   headers as well as its body. Only bodies counted, so a page that had the
   browser fetch cacheable scripts with empty bodies, long URLs and large

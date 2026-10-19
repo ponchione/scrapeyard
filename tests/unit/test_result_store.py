@@ -267,6 +267,23 @@ async def test_save_result_rejects_symlinked_run_dir_outside_results_dir(store, 
     assert not (outside / "results.json").exists()
 
 
+async def test_a_results_dir_reached_through_a_symlink_holds_results(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    (tmp_path / "disk").mkdir()
+    (tmp_path / "results").symlink_to(tmp_path / "disk", target_is_directory=True)
+    store = LocalResultStore(str(tmp_path / "results"), _lookup)
+
+    meta = await store.save_result("j-1", [{"price": 9.99}], run_id="run-1")
+
+    assert (await store.get_result("j-1", meta.run_id)).data == [{"price": 9.99}]
+    assert (tmp_path / "disk" / "acme" / "scrape-prices" / "run-1" / "results.json").is_file()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "disk" / "acme" / "scrape-prices" / "run-2").symlink_to(outside)
+    with pytest.raises(ValueError, match="outside results_dir"):
+        await store.save_result("j-1", [{"price": 1}], run_id="run-2")
+
+
 async def test_save_result_offloads_filesystem_work(store):
     data = [{"price": 9.99}]
     run_dir = store._results_dir / "acme" / "scrape-prices" / "run-1"
