@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from contextlib import suppress
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+
+def shield(awaitable: Awaitable[T]) -> Coroutine[Any, Any, T]:
+    """Await *awaitable* without passing the caller's cancellation on to it.
+
+    As with ``asyncio.shield``, the work starts at once and runs on when its
+    caller is cancelled or times out. From Python 3.14 ``asyncio.shield`` also
+    logs a failure that comes after its caller stopped waiting, even one that
+    is retrieved, as ``consume_result_when_done`` does; this waits with
+    ``asyncio.wait``, which neither cancels the work nor logs.
+    """
+
+    return _await_task(asyncio.ensure_future(awaitable))
+
+
+async def _await_task(task: asyncio.Future[T]) -> T:
+    if not task.done():
+        await asyncio.wait((task,))
+    return task.result()
 
 
 async def await_cleanup(awaitable: Awaitable[T]) -> T:
@@ -16,7 +35,7 @@ async def await_cleanup(awaitable: Awaitable[T]) -> T:
     cancelled = False
     while not task.done():
         try:
-            await asyncio.shield(task)
+            await shield(task)
         except asyncio.CancelledError:
             cancelled = True
     result = task.result()
@@ -41,9 +60,9 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
 def consume_result_when_done(future: asyncio.Future[Any]) -> None:
     """Retrieve the result of work nobody awaits any more, whenever it ends.
 
-    ``asyncio.shield`` stops watching its inner future once the caller is
-    cancelled or times out. A failure that arrives later is otherwise logged
-    as "Future exception was never retrieved".
+    A shielded wait stops watching its work once the caller is cancelled or
+    times out. A failure that arrives later is otherwise logged as "Future
+    exception was never retrieved".
     """
 
     future.add_done_callback(_consume_task_result)
@@ -74,7 +93,7 @@ async def await_with_timeout(
     try:
         if timeout is None:
             try:
-                return await asyncio.shield(task)
+                return await shield(task)
             except asyncio.CancelledError:
                 if task.cancelled():
                     raise AwaitableCancelled from None

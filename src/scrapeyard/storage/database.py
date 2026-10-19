@@ -14,7 +14,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from scrapeyard.common.async_tools import await_cleanup
+from scrapeyard.common.async_tools import await_cleanup, shield
 
 # Mapping of database filename to its forward-only migration history.
 _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
@@ -419,7 +419,7 @@ async def db_transaction(
         rollback = asyncio.create_task(db.rollback())
         while not rollback.done():
             try:
-                await asyncio.shield(rollback)
+                await shield(rollback)
             except asyncio.CancelledError:
                 continue
         rollback.result()
@@ -499,7 +499,7 @@ async def _connect(path: Path) -> aiosqlite.Connection:
     """
     opening = asyncio.ensure_future(aiosqlite.connect(path))
     try:
-        return await asyncio.shield(opening)
+        return await shield(opening)
     except asyncio.CancelledError:
         await await_cleanup(_close_when_opened(opening))
         raise

@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline, shield
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
@@ -721,7 +721,7 @@ class HttpWebhookDispatcher:
 
         if evicted_client is not None:
             try:
-                await asyncio.shield(evicted_client.aclose())
+                await shield(evicted_client.aclose())
             except asyncio.CancelledError:
                 await self._release_client(logical_hostname, client)
                 raise

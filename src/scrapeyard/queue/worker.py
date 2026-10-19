@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from scrapeyard.common.async_tools import shield
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.json_encoding import compact_json_size
@@ -483,7 +484,7 @@ async def _handle_worker_cancellation(
         )
     )
     try:
-        await asyncio.shield(recovery)
+        await shield(recovery)
     except asyncio.CancelledError:
         await recovery
     return True

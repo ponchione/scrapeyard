@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from scrapeyard.common.async_tools import shield
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.host_verdicts import PublicHostVerdicts
 from scrapeyard.common.run_threads import run_thread_work
@@ -102,7 +103,7 @@ async def assert_public_url_in_run(
     while not verdicts.is_fresh(host):
         shared = verdicts.lookups.get(host)
         if shared is not None and not waited:
-            outcome = await run_budget.wait_for(asyncio.shield(shared))
+            outcome = await run_budget.wait_for(shield(shared))
             waited = True
             if outcome is _ABANDONED:
                 continue

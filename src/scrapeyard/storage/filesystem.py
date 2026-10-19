@@ -13,6 +13,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
+from scrapeyard.common.async_tools import shield
 from scrapeyard.common.json_encoding import compact_json_bytes, iter_json_bytes
 
 T = TypeVar("T")
@@ -132,7 +133,7 @@ async def cleanup_safe_to_thread(
     cancellation_requested = False
     while True:
         try:
-            result = await asyncio.shield(task)
+            result = await shield(task)
             break
         except asyncio.CancelledError:
             cancellation_requested = True

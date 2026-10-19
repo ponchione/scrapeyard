@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypedDict
 
+from scrapeyard.common.async_tools import shield
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.protocols import JobStore
 
@@ -256,4 +257,4 @@ class HealthCache:
                 self._projects_refresh_task = refresh
                 refresh.add_done_callback(self._refresh_finished)
 
-        return await asyncio.shield(refresh)
+        return await shield(refresh)

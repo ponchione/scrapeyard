@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, NoReturn, TypeVar
 
-from scrapeyard.common.async_tools import cancel_task_nowait
+from scrapeyard.common.async_tools import cancel_task_nowait, shield
 from scrapeyard.common.host_verdicts import PublicHostVerdicts
 from scrapeyard.common.traffic import HostTraffic
 
@@ -317,7 +317,7 @@ class RunBudget:
         task.cancel()
         while not task.done():
             try:
-                await asyncio.shield(task)
+                await shield(task)
             except asyncio.CancelledError:
                 continue
             except Exception:

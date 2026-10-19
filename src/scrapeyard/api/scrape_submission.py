@@ -12,6 +12,7 @@ from typing import Any
 
 from arq.jobs import ResultNotFound
 
+from scrapeyard.common.async_tools import shield
 from scrapeyard.common.ids import generate_run_id
 from scrapeyard.common.paths import MAX_PATH_PART_BYTES, safe_path_part
 from scrapeyard.common.qualification import qualification_checkpoint
@@ -245,7 +246,7 @@ async def wait_for_queued_job(
         queued_job.result(timeout=timeout_seconds, poll_delay=poll_delay_seconds)
     )
     try:
-        await asyncio.shield(result_task)
+        await shield(result_task)
     except TimeoutError:
         return False
     except ResultNotFound:

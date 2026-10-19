@@ -6,7 +6,12 @@ import asyncio
 
 import pytest
 
-from scrapeyard.common.async_tools import MonotonicDeadline, await_with_timeout
+from scrapeyard.common.async_tools import (
+    MonotonicDeadline,
+    await_with_timeout,
+    consume_result_when_done,
+    shield,
+)
 
 
 @pytest.mark.asyncio
@@ -64,3 +69,34 @@ async def test_deadline_budget_is_shared_between_phases() -> None:
     with pytest.raises(asyncio.TimeoutError):
         await deadline.run(asyncio.sleep(0.02))
     assert deadline.remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_shielded_work_outlives_its_caller_and_fails_unreported() -> None:
+    loop = asyncio.get_running_loop()
+    reported: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    release = asyncio.Event()
+
+    async def fails_late() -> None:
+        await release.wait()
+        raise OSError("disk went away")
+
+    try:
+        work = asyncio.ensure_future(fails_late())
+        consume_result_when_done(work)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(shield(work), timeout=0.01)
+        assert not work.done()
+
+        release.set()
+        with pytest.raises(OSError, match="disk went away"):
+            await work
+        await asyncio.sleep(0)
+        # asyncio.shield reports this failure from Python 3.14.
+        assert reported == []
+
+        assert await shield(asyncio.sleep(0, result="value")) == "value"
+    finally:
+        loop.set_exception_handler(previous_handler)

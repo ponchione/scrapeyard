@@ -64,18 +64,22 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "I", "UP", "C4", "SIM"]
+select = ["E", "F", "W", "B", "I", "UP", "C4", "SIM", "TID251"]
 # UP042's StrEnum changes what str() and format() give for a member, and
 # ErrorType's values are a contract. UP017 and UP047 only respell
 # timezone.utc and TypeVar generics.
 ignore = ["E501", "UP017", "UP035", "UP042", "UP047", "SIM105", "SIM110"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"asyncio.shield".msg = "From Python 3.14 it logs a late failure its caller retrieves; use scrapeyard.common.async_tools.shield"
+"asyncio.iscoroutinefunction".msg = "Deprecated from Python 3.14; use inspect.iscoroutinefunction"
 
 [tool.ruff.lint.per-file-ignores]
 "src/scrapeyard/api/routes.py" = ["B008"]
 # The models keep Optional/Union spellings; ruff 0.10 moved Optional to UP045.
 "src/scrapeyard/config/schema.py" = ["UP007", "UP045"]
 "src/scrapeyard/models/job.py" = ["UP007", "UP045"]
-"tests/**/*.py" = ["B007", "C408", "SIM117"]
+"tests/**/*.py" = ["B007", "C408", "SIM117", "TID251"]
 
 [tool.ruff.lint.isort]
 # Keep `import x as x` re-exports in the same statement as their siblings.

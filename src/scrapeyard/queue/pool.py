@@ -16,7 +16,7 @@ from arq.utils import timestamp_ms
 from arq.worker import Worker, func
 from redis.exceptions import RedisError
 
-from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline
+from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline, shield
 from scrapeyard.common.settings import get_settings
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import (
@@ -934,7 +934,7 @@ class WorkerPool:
             # arq's abort answers True when it is itself cancelled, so a caller
             # cancelled while it waits would read a finished abort and report
             # the run quiescent. Shielded, the caller's cancellation stays its own.
-            aborted = await asyncio.shield(abort)
+            aborted = await shield(abort)
         except asyncio.CancelledError:
             abort.cancel()
             raise
