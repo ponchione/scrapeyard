@@ -54,20 +54,24 @@ def url_hostname(url: str) -> str | None:
         return None
 
 
-def url_site(url: str) -> str | None:
-    """Return the registrable domain of *url*'s host, or ``None`` without a host.
+def host_site(hostname: str) -> str:
+    """Return the registrable domain of *hostname*, as :func:`registrable_domain`.
 
-    A Unicode name is taken in the ASCII form browsers report its requests in.
+    A Unicode name is taken in the ASCII form browsers report its requests in,
+    so a site compares equal however its requests were recorded.
     """
-    hostname = url_hostname(url)
-    if not hostname:
-        return None
     if not hostname.isascii():
         from scrapeyard.engine.url_guard import UnsafeURLError, canonical_hostname
 
         with suppress(UnsafeURLError):
             hostname = canonical_hostname(hostname)
     return registrable_domain(hostname)
+
+
+def url_site(url: str) -> str | None:
+    """Return the site (:func:`host_site`) of *url*'s host, or ``None`` without a host."""
+    hostname = url_hostname(url)
+    return host_site(hostname) if hostname else None
 
 
 @dataclass
@@ -118,7 +122,7 @@ class HostTraffic:
 
     def _counts(self, url: str, site: str | None) -> _HostCounts:
         hostname = url_hostname(url) or "unknown-host"
-        third_party = site is not None and registrable_domain(hostname) != site
+        third_party = site is not None and host_site(hostname) != site
         counts = self._hosts.get(hostname)
         if counts is None:
             if len(self._hosts) >= self._max_hosts:

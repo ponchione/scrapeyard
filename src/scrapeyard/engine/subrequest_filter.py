@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from scrapeyard.common.traffic import registrable_domain, url_hostname, url_site
+from scrapeyard.common.traffic import host_site, url_hostname, url_site
 
 
 def glob_matches(parts: tuple[str, ...], text: str) -> bool:
@@ -63,7 +63,7 @@ class SubrequestFilter:
             hostname = url_hostname(url)
             if (
                 hostname is not None
-                and registrable_domain(hostname) != self.site
+                and host_site(hostname) != self.site
                 and not self._allowed(hostname)
             ):
                 return True

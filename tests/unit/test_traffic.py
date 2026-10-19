@@ -47,6 +47,22 @@ def _counts(
     return {"requests": requests, "blocked": blocked, "cached": cached, "bytes": bytes}
 
 
+def test_a_unicode_site_is_first_party_however_its_requests_are_recorded() -> None:
+    # A basic fetch records the host as configured; Chromium reports xn--.
+    traffic = HostTraffic()
+    site = url_site("https://www.bücher.de/katalog")
+    traffic.request("https://www.bücher.de/katalog", site, "document")
+    traffic.request("https://cdn.xn--bcher-kva.de/app.js", site, "script")
+    traffic.request("https://cdn.xn--bcher-kva.com/app.js", site, "script")
+
+    report = traffic.snapshot()
+
+    assert report["first_party"]["hosts"] == 2
+    assert [host["host"] for host in report["hosts"] if host["third_party"]] == [
+        "cdn.xn--bcher-kva.com"
+    ]
+
+
 def test_report_keeps_hosts_only_and_splits_first_and_third_party() -> None:
     traffic = HostTraffic()
     site = url_site("https://www.example.test/catalog?page=2")
