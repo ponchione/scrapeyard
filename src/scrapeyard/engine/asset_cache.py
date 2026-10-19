@@ -10,6 +10,7 @@ fulfilled from memory after the guard has admitted them.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -25,9 +26,10 @@ MAX_ENTRY_BYTES = 8 * 1024 * 1024
 # Counting only bodies let a page fill memory with empty responses that had
 # long URLs and headers.
 _ENTRY_OVERHEAD_BYTES = 512
-# A header kept is two strings in a dict, about 100 bytes besides its text,
-# so many short headers cost about ten times their length.
-_HEADER_OVERHEAD_BYTES = 128
+# A header kept is two strings in a dict. Python holds about 50 bytes for a
+# string besides its text, and four bytes a character for text with one
+# character past U+FFFF, so each string counts as Python sizes it.
+_HEADER_SLOT_BYTES = 32
 # The body is stored decoded and re-framed on fulfill; cookies are never replayed.
 _DROPPED_HEADERS = frozenset({
     "connection", "content-encoding", "content-length", "keep-alive", "set-cookie",
@@ -148,7 +150,7 @@ class AssetCache:
             + len(key[1])
             + len(body)
             + sum(
-                _HEADER_OVERHEAD_BYTES + len(name) + len(value)
+                _HEADER_SLOT_BYTES + sys.getsizeof(name) + sys.getsizeof(value)
                 for name, value in kept_headers.items()
             )
         )
