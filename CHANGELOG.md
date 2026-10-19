@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A public IP address spelled with non-ASCII digits (`https://８.８.８.８/`)
+  is refused like other hostnames IDNA 2003 and IDNA 2008 read differently.
+  The guard accepted it while every key derived from the URL refused it: a
+  config with such a target failed its whole run, other targets' results
+  included, on every fire, and a page's next link spelled so failed its
+  target as `http_error` where it now stops as `unsafe_next_url`. Private
+  addresses spelled so are still reported as non-public.
 - The URL guard refuses a hostname longer than 253 characters, the most a
   DNS name can have, before it encodes it. IDNA encodes a label before it
   checks the label's length, and Python's punycode is quadratic, so a next

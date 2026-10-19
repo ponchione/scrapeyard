@@ -276,21 +276,17 @@ def public_dns_hostname(
         literal = ipaddress.ip_address(canonical)
     except ValueError:
         literal = None
-    if literal is not None:
-        if _ip_is_blocked(literal):
-            raise UnsafeURLError(f"URL points at non-public IP {literal}")
-        return None
-
-    legacy_ipv4 = _legacy_ipv4_address(canonical)
-    if legacy_ipv4 is not None:
-        if _ip_is_blocked(legacy_ipv4):
-            raise UnsafeURLError(f"URL points at non-public IP {legacy_ipv4}")
-        return None
+    if literal is None:
+        literal = _legacy_ipv4_address(canonical)
+    if literal is not None and _ip_is_blocked(literal):
+        raise UnsafeURLError(f"URL points at non-public IP {literal}")
 
     # Last, so a Unicode spelling of a blocked name or of a private address is
-    # still reported as what it is.
+    # still reported as what it is. A public address spelled in Unicode
+    # (８.８.８.８) is refused too: httpx cannot request it, and every key
+    # derived from the URL refuses it.
     _require_one_reading(host, canonical)
-    return canonical
+    return None if literal is not None else canonical
 
 
 def assert_public_url(

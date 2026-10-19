@@ -156,6 +156,25 @@ def test_assert_public_url_rejects_idna_ipv4_literals_without_dns(host: str) -> 
         assert_public_url(f"http://{host}/resource", resolve_dns=False)
 
 
+@pytest.mark.parametrize("host", ["８.８.８.８", "８．８．８．８", "１３４７４４０７２"])
+def test_public_ip_spelled_in_unicode_is_refused_as_every_key_refuses_it(
+    monkeypatch, host: str
+) -> None:
+    lookups: list[str] = []
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo", _answer_public(lookups)
+    )
+    url = f"https://{host}/item"
+
+    # The guard passed these, and the run then failed on the target's
+    # domain-guard key, which refuses them.
+    for check in (public_dns_hostname, assert_public_url, resolve_public_url, url_host_label):
+        with pytest.raises(UnsafeURLError, match="read differently by IDNA 2003 and IDNA 2008"):
+            check(url)
+    assert canonical_url_origin(url) is None
+    assert lookups == []
+
+
 def test_assert_public_url_allows_public_idna_hostname_without_dns() -> None:
     assert_public_url("https://bücher.example/resource", resolve_dns=False)
 
