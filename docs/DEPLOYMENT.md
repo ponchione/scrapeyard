@@ -1904,9 +1904,10 @@ A single valid `Content-Length` is checked before reading as an optimization,
 but decoded chunks remain authoritative for compressed, chunked, missing, or
 misleading lengths. A compressed body is inflated at most 64 KiB at a time
 (zstd about 2 MiB) and each piece is counted before the next is decoded, so a
-small compressed body cannot inflate past the ceiling in memory; a zstd window
-over 8 MB, or more than four content codings, fails as a decoding error. Crossing the byte ceiling or monotonic run deadline closes
-and awaits the socket task before the structured budget failure is returned;
+small compressed body cannot inflate past the ceiling in memory. Under stacked
+codings what each hands the next is counted too. A zstd window over 8 MB, or
+more than four content codings, fails as a decoding error. Crossing the byte
+ceiling or monotonic run deadline closes and awaits the socket task before the structured budget failure is returned;
 only a bounded body is handed to Scrapling's parser. The Compose admission
 threshold is 3072 MiB under a 4 GiB cgroup ceiling, leaving an explicit 1 GiB
 reserve for active response bodies, browser processes, serialization, SQLite,
@@ -1922,9 +1923,9 @@ is written by temporary file plus atomic replacement before metadata commit.
 
 `POST /scrape` optionally accepts one `Idempotency-Key` header of 1–128 visible
 ASCII bytes. `jobs.db` stores only its SHA-256 digest, scoped by the caller's
-identity: a named credential's `identity`, or a legacy key's digest. When API authentication is disabled, the scope is the single
-literal `local-development` identity; local clients must therefore coordinate key
-uniqueness. The raw YAML SHA-256, job ID, run ID, derived sync/async response
+identity: a named credential's `identity`, or a legacy key's digest. When API
+authentication is disabled, the scope is the single literal `local-development`
+identity; local clients must therefore coordinate key uniqueness. The raw YAML SHA-256, job ID, run ID, derived sync/async response
 mode, creation time, and expiry are inserted in the same immediate SQLite
 transaction as the job. A matching retry cannot enqueue again; different YAML
 returns `409`.

@@ -238,14 +238,16 @@ async def fetch_streaming_response(
                     await budget.check_fetched_capacity(declared)
             body = bytearray()
 
-            async def keep(pieces: Iterator[bytes]) -> None:
+            async def keep(pieces: Iterator[tuple[bytes, bool]]) -> None:
                 # Each piece is bounded, so the budget stops a body that
                 # inflates past it near its ceiling, and the request's
-                # timeout can still end one inflating within it.
-                for piece in pieces:
+                # timeout can still end one inflating within it. What one
+                # of stacked codings hands the next is charged as well.
+                for piece, kept in pieces:
                     if budget is not None:
                         await budget.consume_fetched_bytes(len(piece))
-                    body.extend(piece)
+                    if kept:
+                        body.extend(piece)
                     await asyncio.sleep(0)
 
             decoder = content_decoder(response.headers)

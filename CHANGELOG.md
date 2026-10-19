@@ -470,7 +470,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   gigabytes in memory before the budget saw any of it: 1.6 KB of brotli
   took the process to 3.2 GB, and 6 KB past the container's 4 GB limit,
   which would end every run in flight. Such a body now stops at the ceiling
-  as `budget_exceeded`, as it already did once decoded. A zstd body whose
+  as `budget_exceeded`, as it already did once decoded. Under stacked
+  codings what each hands the next is charged too, so a page sent in gzip
+  inside gzip counts its inner gzip as well as itself. A zstd body whose
   window is over 8 MB (the limit RFC 9659 sets and browsers keep) and a
   response with more than four content codings now fail as a decoding error
   (`http_error`).

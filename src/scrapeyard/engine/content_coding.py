@@ -5,6 +5,8 @@ response of about 2 KB in brotli, or in gzip inside gzip, became gigabytes in
 memory before the run's byte budget saw any of it. These decoders follow
 httpx's choice of codings but yield at most about ``PIECE_BYTES`` per step
 (zstd about 2 MiB), so the caller charges the budget as the body inflates.
+Under stacked codings every coding's output is handed out to be charged, not
+only the body's.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ _brotli = _optional_module("brotli")
 _zstandard = _optional_module("zstandard")
 
 
-class ContentDecoder(Protocol):
+class _CodingDecoder(Protocol):
     def decode(self, data: bytes) -> Iterator[bytes]: ...
 
     def flush(self) -> Iterator[bytes]: ...
@@ -63,7 +65,9 @@ class _ZlibDecoder:
         self._raw_fallback = not gzip
 
     def decode(self, data: bytes) -> Iterator[bytes]:
-        while data:
+        # Input after the stream's end is ignored, as httpx ignores it; zlib
+        # would keep it, copying all it kept on every call.
+        while data and not self._decompressor.eof:
             try:
                 piece = self._decompressor.decompress(data, PIECE_BYTES)
             except zlib.error as exc:
@@ -147,28 +151,37 @@ class _ZstdDecoder:
         yield from ()
 
 
-class _ChainedDecoder:
-    """Several codings, undone in the reverse of the order they were applied."""
+class ContentDecoder:
+    """Undoes a response's codings, in the reverse of the order they were applied.
 
-    def __init__(self, decoders: Sequence[ContentDecoder]) -> None:
-        self._decoders = tuple(decoders)
+    Each step yields ``(piece, kept)``: a piece of the body is kept, and a piece
+    one coding hands to the next is not. Both were inflated, so the caller
+    charges both. A coding that takes input and yields nothing (an ended
+    stream, empty deflate blocks, brotli metadata, zstd skippable frames)
+    would otherwise let the coding before it inflate unseen.
+    """
 
-    def decode(self, data: bytes) -> Iterator[bytes]:
-        return self._through(1, self._decoders[0].decode(data))
+    def __init__(self, decoders: Sequence[_CodingDecoder]) -> None:
+        self._decoders = tuple(decoders) or (_IdentityDecoder(),)
 
-    def flush(self) -> Iterator[bytes]:
+    def decode(self, data: bytes) -> Iterator[tuple[bytes, bool]]:
+        return self._through(0, self._decoders[0].decode(data))
+
+    def flush(self) -> Iterator[tuple[bytes, bool]]:
         for index, decoder in enumerate(self._decoders):
-            yield from self._through(index + 1, decoder.flush())
+            yield from self._through(index, decoder.flush())
 
-    def _through(self, index: int, pieces: Iterator[bytes]) -> Iterator[bytes]:
-        if index == len(self._decoders):
-            yield from pieces
+    def _through(self, index: int, pieces: Iterator[bytes]) -> Iterator[tuple[bytes, bool]]:
+        if index == len(self._decoders) - 1:
+            for piece in pieces:
+                yield piece, True
             return
         for piece in pieces:
-            yield from self._through(index + 1, self._decoders[index].decode(piece))
+            yield piece, False
+            yield from self._through(index + 1, self._decoders[index + 1].decode(piece))
 
 
-_DECODERS: dict[str, Callable[[], ContentDecoder]] = {
+_DECODERS: dict[str, Callable[[], _CodingDecoder]] = {
     "gzip": lambda: _ZlibDecoder(gzip=True),
     "deflate": lambda: _ZlibDecoder(gzip=False),
 }
@@ -195,8 +208,4 @@ def content_decoder(headers: httpx.Headers) -> ContentDecoder:
             f"Response applies {len(decoders)} content codings; at most "
             f"{MAX_CONTENT_CODINGS} are decoded"
         )
-    if not decoders:
-        return _IdentityDecoder()
-    if len(decoders) == 1:
-        return decoders[0]
-    return _ChainedDecoder(decoders[::-1])
+    return ContentDecoder(decoders[::-1])

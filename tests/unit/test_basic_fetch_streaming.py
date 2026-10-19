@@ -452,13 +452,15 @@ async def test_compressed_page_decodes_whole(coding, encode) -> None:
         for index in range(20_000)
     ) + b"</body></html>"
 
+    # Under stacked codings what the outer one hands the inner one counts too.
+    handed_on = len(gzip.compress(page)) if coding == "gzip, gzip" else 0
     server, url = await _serve_encoded(coding, encode(page))
     try:
         response = await fetch_streaming_response(
             Fetcher,
             url,
             {"timeout": 5, "stealthy_headers": False},
-            budget=_budget(fetched_bytes=len(page)),
+            budget=_budget(fetched_bytes=len(page) + handed_on),
         )
     finally:
         server.close()
@@ -476,6 +478,41 @@ async def test_compressed_body_is_charged_as_it_inflates(coding, encode) -> None
     del inflated
 
     server, url = await _serve_encoded(coding, encoded)
+    tracemalloc.start()
+    try:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await fetch_streaming_response(
+                Fetcher,
+                url,
+                {"timeout": 5, "stealthy_headers": False},
+                budget=_budget(fetched_bytes=256 * 1024),
+            )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        server.close()
+        await server.wait_closed()
+
+    assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
+    assert peak < 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        lambda size: gzip.compress(b"<p>ok</p>") + b"\0" * size,
+        # Empty stored blocks: a stream that inflates to nothing and never ends.
+        lambda size: gzip.compress(b"")[:10] + b"\0\0\0\xff\xff" * (size // 5),
+    ],
+    ids=["after-the-end", "empty-blocks"],
+)
+async def test_what_one_coding_hands_the_next_is_charged(inner) -> None:
+    # The inner gzip yields next to nothing, so only the body's few bytes were
+    # charged while the outer one inflated 32 MiB; zlib also kept all that
+    # followed an ended stream, copying it on every read.
+    encoded = gzip.compress(inner(32 * 1024 * 1024))
+
+    server, url = await _serve_encoded("gzip, gzip", encoded)
     tracemalloc.start()
     try:
         with pytest.raises(BudgetExceeded) as exc_info:
