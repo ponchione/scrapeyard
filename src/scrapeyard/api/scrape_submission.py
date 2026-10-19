@@ -87,8 +87,14 @@ async def submit_scrape_job(
             )
             qualification_checkpoint("after_enqueue_before_claim")
         except Exception:
-            with suppress(Exception):
-                await job_store.rollback_queued_submission(job.job_id, submitted_run_id)
+            # Acceptance and a replayed POST read the receipt from the moment
+            # the job committed, so either may already have reported this run.
+            # A submission with a receipt is left to the stale-queue
+            # reconciler, as a crash here leaves it; only one nobody can find
+            # again is removed.
+            if idempotency is None:
+                with suppress(Exception):
+                    await job_store.rollback_queued_submission(job.job_id, submitted_run_id)
             raise
 
     if not wait_for_completion:

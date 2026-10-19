@@ -1934,7 +1934,11 @@ failed-enqueue rollback retain their documented behavior and remove associated
 records by foreign-key cascade.
 A crash after the SQLite transaction but before Redis acceptance leaves the
 persisted queued run for the existing stale-queue reconciler; a retry never
-risks a second enqueue merely to close that cross-system window.
+risks a second enqueue merely to close that cross-system window. A failed
+enqueue of a submission with an `Idempotency-Key` is left the same way, and
+the `POST` answers `500`: the receipt is readable from the commit, so
+`/scrape/acceptance` or a replay may already have reported the run. Only a
+submission without a key, which nobody can find again, is rolled back.
 
 ### Result artifact reconciliation
 

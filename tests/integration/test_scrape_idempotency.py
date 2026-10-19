@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from scrapeyard.api.dependencies import get_worker_pool
 from scrapeyard.engine.scraper import TargetResult
@@ -191,6 +192,41 @@ async def test_read_only_acceptance_lookup_survives_lost_response_and_expires_wi
     assert expired.status_code == 404
     assert (await client.get("/scrape/acceptance", headers=_headers("unknown-key"))).status_code == 404
     assert len(calls) == 1
+
+
+async def test_failed_enqueue_keeps_a_run_whose_receipt_was_read(test_app, monkeypatch):
+    transport = ASGITransport(app=test_app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _receipt_outlives_failed_enqueue(client, monkeypatch)
+
+
+async def _receipt_outlives_failed_enqueue(client, monkeypatch) -> None:
+    pool = get_worker_pool()
+    enqueue_started, redis_fails = asyncio.Event(), asyncio.Event()
+
+    async def stalls_then_fails(*_args, **_kwargs):
+        enqueue_started.set()
+        await redis_fails.wait()
+        raise ConnectionError("Redis went away")
+
+    monkeypatch.setattr(pool, "enqueue", stalls_then_fails)
+    submission = asyncio.create_task(
+        client.post("/scrape", content=_yaml(), headers=_headers("stalled-enqueue"))
+    )
+    await asyncio.wait_for(enqueue_started.wait(), timeout=5)
+    # The client's POST timed out, so it asks whether the submission landed.
+    receipt = await client.get("/scrape/acceptance", headers=_headers("stalled-enqueue"))
+    redis_fails.set()
+    failed = await submission
+
+    assert receipt.status_code == 200
+    assert failed.status_code == 500
+    identity = receipt.json()
+    run = await client.get(f"/jobs/{identity['job_id']}/runs/{identity['run_id']}")
+    assert run.status_code == 200
+    assert run.json()["status"] == "queued"
+    again = await client.get("/scrape/acceptance", headers=_headers("stalled-enqueue"))
+    assert again.json()["run_id"] == identity["run_id"]
 
 
 async def test_acceptance_lookup_requires_exactly_one_valid_header(client):

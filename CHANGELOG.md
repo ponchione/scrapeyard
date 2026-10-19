@@ -383,6 +383,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A `POST /scrape` with an `Idempotency-Key` whose Redis enqueue fails no
+  longer deletes the job: the queued run is left to the stale-queue
+  reconciler, as a crash at that point leaves it, and the `POST` still
+  answers `500`. The receipt is readable from the moment the job commits,
+  so while a stalled enqueue was in flight `/scrape/acceptance` answered
+  `200` (and a replay `202`) for a run the rollback then deleted; a client
+  that had timed out and recovered it, as Eyebox does, polled a `404`. A
+  submission without a key is still rolled back.
 - A public IP address spelled with non-ASCII digits (`https://８.８.８.８/`)
   is refused like other hostnames IDNA 2003 and IDNA 2008 read differently.
   The guard accepted it while every key derived from the URL refused it: a
