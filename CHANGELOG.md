@@ -109,6 +109,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- The image's Python moves from 3.12.11, its base since 0.6.0, to the 3.12.15
+  security release (`python:3.12.15-slim-bookworm`, pinned by digest).
 - Python 3.12 is the minimum supported version, up from 3.10. It is what the
   production image runs and what `python3` is on the Ubuntu 24.04 production
   host. CI and the dependency audit no longer run a 3.10 leg, and the code

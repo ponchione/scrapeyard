@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG PYTHON_IMAGE="python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7"
+ARG PYTHON_IMAGE="python:3.12.15-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
 
 # Export the production lock with the same pinned toolchain used by CI.
 FROM ${PYTHON_IMAGE} AS builder
@@ -46,8 +46,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     XDG_CACHE_HOME=/opt/scrapeyard-cache
 
-LABEL org.opencontainers.image.base.name="python:3.12.11-slim-bookworm" \
-      org.opencontainers.image.base.digest="sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7" \
+LABEL org.opencontainers.image.base.name="python:3.12.15-slim-bookworm" \
+      org.opencontainers.image.base.digest="sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258" \
       org.scrapeyard.os.snapshot="${DEBIAN_SNAPSHOT}" \
       org.scrapeyard.runtime.uid="10001" \
       org.scrapeyard.browser.playwright.version="${PLAYWRIGHT_VERSION}" \
