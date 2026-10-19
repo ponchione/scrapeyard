@@ -847,7 +847,7 @@ schedule, still requires `delete`.
 `GET /scrape/acceptance` with the original `Idempotency-Key` and caller credential
 recovers an unexpired submission receipt without POSTing or enqueueing. It uses
 `submit` scope for that caller/project and returns job/run/config hash plus receipt
-creation/expiry.404 means unavailable, and never authorizes a replacement POST.
+creation/expiry. 404 means unavailable, and never authorizes a replacement POST.
 Existing retention and explicit key-reuse behavior of POST remain unchanged;
 clients must persist their intent/deadline and stop when recovery is uncertain.
 

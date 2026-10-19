@@ -6,6 +6,84 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-16, third pass** (no release; pull request #41): a targeted
+  audit, done locally, of what the first two passes left: the basic fetch
+  path, the URL and IP guards, API authentication and idempotency, the page
+  and asset caches, the operator scripts and the migration paths. The
+  production host was not touched.
+  - Fifteen findings fixed without entries, each with a test seen failing on
+    the old code. The worst two were in the basic fetch path. httpx inflated
+    each network read in one call with no output limit, so a 1.7 KB brotli
+    body took 3.1 GiB before the run's byte budget saw it (6.5 KB took 12 GiB
+    and stalled the event loop 23 s): one response could have the container
+    killed with every run in it. Bodies are now inflated 64 KiB at a time
+    (zstd about 2 MiB, its window capped at 8 MB) under at most four codings;
+    the 1.7 KB body now peaks at 217 MiB with stalls under 0.05 s. And a page
+    declaring `charset=punycode` ran CPython's quadratic decoder on the event
+    loop (1.28 MB stalled the process 34 s, past every timeout); it is now
+    read as UTF-8.
+  - The guards: a non-ASCII host in a next link was IDNA-encoded before its
+    length was checked, in time quadratic in its distinct characters (16,000
+    took 16 s of a shared run thread); and a public IP spelled in fullwidth
+    digits passed the guard, then crashed the helpers that key hosts and
+    failed the whole run outside the per-target handling. Also,
+    `block_third_party` blocked a Unicode-named site's requests to itself.
+  - The API: a failed enqueue rolled back a submission whose receipt
+    `GET /scrape/acceptance` may already have handed out, so Eyebox could
+    record a run that then answered `404`; it is now left to the stale-queue
+    reconciler. A set but empty credential map (`{}`) left the API open with
+    every scope, and credentials sharing an identity shared receipts across
+    different projects.
+  - Caches and results: a page-cache write that failed failed the fetched
+    page as `network_error` and counted toward the site's circuit breaker;
+    the page cache wrote resolved secrets and URL credentials to disk in
+    plain text; the asset cache's 32 MiB bound counted bodies alone (2,000
+    empty-bodied entries held 294 MiB); and a results directory reached
+    through a symlink failed every save while readiness passed.
+  - Operator scripts: a backup witness taken with no `read` credential
+    listed no job, and every restore test then passed comparing nothing; the
+    host check read a backup completed in the future as fresh until the
+    clock passed it; and backups counted Redis's keys in the first database
+    alone, so a DSN naming another made every archive fail to restore.
+  - A schedule naming day 7, which the second pass made valid, stops a
+    release from before it from starting after a rollback, and numeric days
+    move by one; `docs/DEPLOYMENT.md` now says how to check first. Three
+    statements were corrected: the idempotency scope of a named credential
+    is its identity, the host check's `400` carries no version header, and
+    the acceptance `404` means no receipt yet, not that none will exist.
+  - A fresh adversarial agent reviewed the security-sensitive commits and
+    found six faults in this pass's own fixes, all closed. Under stacked
+    codings only the body's pieces were charged, so an inner coding that
+    yields nothing (an ended gzip stream with zeros after it, or empty
+    stored blocks) let the outer one inflate unseen: 64 KB inflated 64 MiB
+    with 9 bytes charged, and zlib kept what followed the ended stream,
+    copying it on every read (11 s of the event loop). Every coding's output
+    is now charged. The cleanup scan still started from the resolved root,
+    so under a symlinked results directory it refused every run and removed
+    nothing (and pruning had never worked there). The page cache missed a
+    secret httpx partly re-encodes, and secrets in the content type, click
+    snapshots, a lowercased host or HTML entities; the asset cache counted
+    short headers at a tenth of what Python holds; a basic fetch of a
+    Unicode-named target counted its own page as third-party once the site
+    was taken in ASCII; and a Redis refusing `INFO` read as holding no keys.
+    The same agent checked those fixes twice. The first check found a
+    secret encoded twice or with `+` for a space, headers of wide
+    characters counted at a quarter, and a restore test that ended without
+    saying why; the second, a secret in a JSON string or behind an
+    entity-encoded `%`, and a check that casefolded a page once per secret.
+    All are closed; the last two were checked by their tests alone.
+  - Opened TD-109 to TD-115, all deferred. Left as found: a database first
+    created by 0.5.0 or 0.5.1 has `job_runs.heartbeat_at` nullable and last,
+    where a fresh one has it `NOT NULL` (every insert names it); an older
+    release on a database a newer one migrated reports a migration "recorded
+    in the wrong database" rather than a newer database; and decoding and
+    parsing an in-budget 90 MiB page stall the event loop about 2 s.
+    Scrapling's `lru_cache` on `ResponseEncoding.get_value`, which would
+    keep 128 pages' text, is already undone by an import in production.
+    Unconfirmed: a page's WebRTC traffic never reaches the route guard (the
+    host policy confines it); a CRLF checkout would hash migrations
+    differently in backup validation; and a scheduled fire between the last
+    idle check and the stop could fail a restore test without cause.
 - **2026-10-16, second pass** (no release; pull request #40): a targeted
   audit in place of the cancelled 72-hour soak, done locally, of the secret
   storage, the code pull request #39 changed, the scheduler and webhooks,
@@ -399,7 +477,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-109**) and use this template:
+7. **New findings** take the next free ID (**TD-116**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -435,6 +513,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the 2026-10-12 pass (`ae31c5c`) | Locally, ruff, mypy (107 files) and `pytest -W error` pass on 3.12: 2,799 passed, 17 skipped, 90.5% coverage; CI ran both 3.12 and 3.10. Run them with `umask 022`: under a group-writable umask 35 boot-service tests fail, because the release script refuses group-writable files. On GitHub at the same commit, on the pinned runtime (Docker 28.5.2, containerd.io 1.7.29, runc 1.3.3, Compose 2.38.2): CI, Dependency audit, browser smoke (run 38313372663) and the release rehearsal (run 38313372661) pass, and Container security passed one commit earlier. A push that touches the container lanes' paths now takes about 40 minutes to go green |
 | After the 2026-10-16 audit (`e830567`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,144 passed, 19 skipped, 90.62% coverage; on 3.10, one commit of code earlier (`f792fa7`), 3,142 passed and 19 skipped, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
 | After the second 2026-10-16 pass (`1e6e8a8`) | Locally, ruff over `src tests scripts security`, mypy (112 files) and `pytest -W error` pass on 3.12: 3,165 passed, 19 skipped, 90.65% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (339 passed, 22 skipped) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
+| After the third 2026-10-16 pass (code at `ca4a8cb`) | Locally, ruff over `src tests scripts security`, mypy (113 files) and `pytest -W error` pass on 3.12: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `0e7b332`) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -470,7 +549,8 @@ Mapped on 2026-10-09 against Eyebox `a466ee2`. The client code is
   400, 401, 403, 413 and 422 as permanent; anything else sends it to
   `GET /scrape/acceptance`.
 - `GET /scrape/acceptance` returns `project`, `config_hash`, `job_id` and
-  `run_id`. A 404 means the submission was not accepted.
+  `run_id`. A 404 means no unexpired receipt exists yet (a POST still in
+  flight may commit after it), and never authorizes a replacement POST.
 - `GET /jobs/{id}/runs/{run_id}` returns `job_id`, `project`, `name`, `run_id`,
   `config_hash` and `status`, and must work while the run is queued. Status
   must be one of queued, running, complete, partial, failed or cancelled; any
@@ -576,7 +656,7 @@ to release, with the host's current release as `previous_revision`.
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-108.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-115.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -603,6 +683,13 @@ to release, with the host's current release as `previous_revision`.
 | TD-106 | P3 | deferred | With the default backoff a webhook is dead-lettered after about 15 s of receiver errors |
 | TD-107 | P3 | deferred | A Redis stall that trips the poll watchdog during a run ends in a failed shutdown |
 | TD-108 | P3 | deferred | The rehearsal deploys releases whose images its daemon already holds |
+| TD-109 | P3 | deferred | The page cache has no size bound or expiry, and an entry can be torn or corrupt |
+| TD-110 | P3 | deferred | Fetch errors are classified by words in the exception's message |
+| TD-111 | P3 | deferred | Stealthy basic requests send impossible Sec-Fetch headers |
+| TD-112 | P3 | deferred | Backup retention keeps a count, so one day's runs can evict every older archive |
+| TD-113 | P3 | deferred | Migrations run with foreign keys on, so rebuilding a referenced table deletes its children |
+| TD-114 | P3 | deferred | Some IP spellings are read unlike a browser reads them |
+| TD-115 | P3 | deferred | Authorization answers say more than they need to |
 
 ## Ready to implement
 
@@ -1668,6 +1755,181 @@ an archive whose images are present but unloadable would still pass.
 remove both releases' image IDs and build tags before the first deploy,
 and to stream `docker events --filter type=image` to a file from the start
 of the run.
+
+### TD-109 — The page cache has no size bound or expiry, and an entry can be torn or corrupt
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the third 2026-10-16 pass, in `PageCache`
+(`src/scrapeyard/engine/page_cache.py`):
+- Nothing bounds or expires it. Each recording run adds up to
+  `run_max_fetched_bytes` under new keys, nothing in `storage/cleanup.py`
+  reads `SCRAPEYARD_PAGE_CACHE_DIR`, and a recorder killed mid-write leaves
+  its temporary file for good. Under the shipped Compose the only writable
+  places are `/data`, beside the databases, and the 512 MiB `/tmp` that
+  Chromium uses.
+- A page's HTML and its metadata are replaced by two writes, HTML first. A
+  failure between them, or two recorders of one key, replays new HTML with
+  the old `final_url` (the base for relative next links), status and click
+  snapshots: two concurrent recorders gave 9,102 mixed pairs in 19,852 loads.
+- `load` reads only a missing file and bad JSON or UTF-8 as a miss, and
+  nothing is fsynced. After a power loss a zero-length HTML file replays as
+  success with no rows; metadata that is a list or holds a bad status fails
+  as `http_error`, and an unreadable file as `network_error`.
+- A record or replay run that finds the setting unset at run time (it
+  changed after the run was accepted) fails as `cache_miss`, which is not
+  among Eyebox's frozen values.
+
+**Why deferred:** production leaves `SCRAPEYARD_PAGE_CACHE_DIR` unset, and a
+submission asking for record or replay is then refused with a `422`; the
+cache is a development aid. Eyebox's one config that asks for `record`
+(`sportsmans-known-optics.yaml`) is accepted only where it is set. This pass
+made a failed write leave the fetched page as fetched (`stored: false`) and
+kept resolved secrets and URL credentials out of the cache.
+
+**Revisit when:** the cache is set on a shared host. The fix is a per-project
+byte cap checked before each store; expiry by age, swept by the cleanup loop
+with orphaned temporary files; one file per entry, or the HTML named by its
+hash and referenced from the metadata; an fsync before each replace; and any
+`OSError`, `ValueError` or `TypeError` in `load` read as a miss.
+
+### TD-110 — Fetch errors are classified by words in the exception's message
+
+**Priority:** P3 · **Status:** deferred · **Contract:** moves some failures between `error_type` values
+
+**Problem:** found by the third 2026-10-16 pass. `classify_fetch_exception`
+(`src/scrapeyard/engine/fetch_classifier.py`) matches marker words in the
+exception's text. Without a proxy:
+- `RemoteProtocolError: Server disconnected without sending a response` is
+  `http_error` and retried as transient, while a peer that closes mid-body
+  is `network_error`.
+- A redirect hop the URL guard refuses (`Hostname 'tunnel.localhost' is
+  blocked`) is `proxy_rejected`, because the quoted host holds a marker word.
+- A `Location` httpx cannot parse (`http://[::1/`) raises from httpx's own
+  redirect builder, which runs even with `follow_redirects=False`, and is
+  retried three times as `http_error`.
+
+**Why deferred:** each fix moves a failure from one frozen `error_type` to
+another, and how Eyebox handles each value would need checking first.
+
+**Revisit when:** Eyebox agrees to the change. The fix is to map
+`httpx.TransportError` other than `ProxyError` to `network_error` before
+matching markers, an `UnsafeURLError` straight to `http_error`, and not to
+retry a `RemoteProtocolError` raised for the `Location` header.
+
+### TD-111 — Stealthy basic requests send impossible Sec-Fetch headers
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none; what retailers receive changes
+
+**Problem:** found by the third 2026-10-16 pass. With `stealthy_headers` on,
+its default, `_request_headers` (`src/scrapeyard/engine/basic_fetch.py`)
+sends Scrapling's `generate_headers(browser_mode=False)`, and browserforge
+1.2.4 has the four Sec-Fetch values rotated: `Sec-Fetch-Site: ?1`,
+`Sec-Fetch-Mode: same-site`, `Sec-Fetch-User: document`,
+`Sec-Fetch-Dest: navigate`, in 50 of 50 generated sets. No browser sends
+that, and anti-bot vendors check these headers. The effect on block rates is
+unmeasured.
+
+**Why deferred:** correcting it changes what every basic request sends to
+retailers, which needs the owner's word.
+
+**Revisit when:** the owner agrees, or basic targets are blocked more often.
+The fix is to set, after generation, `Sec-Fetch-Site: none` (`cross-site`
+with the generated Google referer), `Sec-Fetch-Mode: navigate`,
+`Sec-Fetch-User: ?1` and `Sec-Fetch-Dest: document`, and to compare block
+rates on the beta's basic targets before and after.
+
+### TD-112 — Backup retention keeps a count, so one day's runs can evict every older archive
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the third 2026-10-16 pass. `prune` in
+`security/backup.sh` keeps the newest `SCRAPEYARD_BACKUP_KEEP` (7) archives
+whatever their age. `docs/DEPLOYMENT.md` asks for a backup before each
+promotion, so a troubled rollout retried a few times on one day deletes the
+last archives from before it: in a stub run, seven runs on one day left only
+that day's seven. Until TD-21's off-host store exists they are the only
+copies.
+
+**Why deferred:** it takes seven runs in a day, and TD-21 is where retention
+is decided.
+
+**Revisit when:** TD-21's store is chosen, or backups are taken by hand around
+promotions. The fix is to keep the newest `KEEP` archives and also the newest
+of each of the last `KEEP` UTC days.
+
+### TD-113 — Migrations run with foreign keys on, so rebuilding a referenced table deletes its children
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the third 2026-10-16 pass. `_apply_migration`
+(`src/scrapeyard/storage/database.py`) runs each file inside
+`BEGIN IMMEDIATE` on a connection with `foreign_keys = ON`, and SQLite
+ignores `PRAGMA foreign_keys` inside a transaction. A migration that rebuilt
+`jobs` the way `016` rebuilt `webhook_deliveries` (create, copy, drop,
+rename) would cascade its `DROP TABLE` into `scrape_idempotency` and
+`queued_run_snapshots`, silently and in the commit that records it: a
+hypothetical `026` starting with `PRAGMA foreign_keys = OFF;` left none of
+their rows. No current migration does this.
+
+**Why deferred:** nothing rebuilds a referenced table today.
+
+**Revisit when:** a migration rebuilds a table others reference, as TD-48's
+would. The fix is to turn foreign keys off before `BEGIN IMMEDIATE`, run
+`PRAGMA foreign_key_check` before `COMMIT` and abort on any row, and turn
+them on again.
+
+### TD-114 — Some IP spellings are read unlike a browser reads them
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found by the third 2026-10-16 pass.
+- `_legacy_ipv4_address` (`src/scrapeyard/engine/url_guard.py`) uses
+  `inet_aton`, which refuses an empty hex part, so `0x7f.0x.0x.1` and `0x`
+  pass the URL check as DNS names, where WHATWG URL parsing, which browsers
+  follow, reads them as 127.0.0.1 and 0.0.0.0. Chromium rewrites the host
+  before the route guard sees it, and the guard then blocks it; the basic,
+  proxy and CDP paths need DNS, which fails. But the verdict before
+  navigation is wrong, and a path that did not rewrite the host would reach
+  loopback. Camoufox was not tried.
+- `domain_guard_host` and `canonical_url_origin` do not fold legacy or
+  IPv4-mapped spellings, so `8.8.8.8`, `134744072`, `8.8.2056` and
+  `::ffff:8.8.8.8` are four domain-guard keys for one address, and a
+  cooled-down IP host can be reached by another spelling. The domain-guard
+  routes refuse bracketed IPv6 hosts and names with `_`, so such a cooldown
+  cannot be cleared before it ends.
+
+**Why deferred:** neither reaches a private address today, and the domain
+guard bounds load on a site rather than guarding anything.
+
+**Revisit when:** a fetch path that does not rewrite hosts is added, or a
+cooldown needs clearing on such a host. The fix is to parse IPv4 by WHATWG
+rules, or refuse a host whose last label is numeric or `0x`-prefixed and does
+not parse; to fold legacy and mapped spellings in `canonical_url_origin`; and
+to let the routes' host pattern take bracketed IPv6 and `_`.
+
+### TD-115 — Authorization answers say more than they need to
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none; Eyebox's own-project calls are unchanged
+
+**Problem:** found by the third 2026-10-16 pass.
+- `get_job`, `get_exact_run`, the live-job branch of `get_results`,
+  `cancel_job`, `trigger_job` and `_set_schedule_enabled`
+  (`src/scrapeyard/api/routes.py`) look the job up before checking the
+  caller's scope and project. Another project's live job then answers
+  `403 Caller is not authorized for project '<project>'` where an absent one
+  answers `404`, which confirms the job and names its project; `get_results`
+  means not to do that for retained results. Job IDs are UUID4s, so it needs
+  a leaked ID.
+- `/openapi.json`, `/docs` and `/redoc` answer any valid credential, a
+  `health-detail` one included.
+
+**Why deferred:** both need a valid credential, and the first a leaked job
+ID as well.
+
+**Revisit when:** a second tenant's credential is issued. The fix is the same
+`404` whenever the project check fails on these lookups, and
+`openapi_url=None`, or a scope, for the schema and its pages.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 

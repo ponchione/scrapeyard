@@ -4,7 +4,8 @@
 
 The unprefixed HTTP paths expose Scrapeyard API contract version `1`. Every
 HTTP response, including middleware rejections, carries
-`X-Scrapeyard-API-Version: 1`. Additive fields and new endpoints may be added
+`X-Scrapeyard-API-Version: 1`, except the `400` for a `Host` the deployment
+does not name, which is answered before anything else. Additive fields and new endpoints may be added
 within version 1. Removing or renaming a field, changing its meaning/type, or
 moving records requires a new negotiated or path-prefixed API version.
 
