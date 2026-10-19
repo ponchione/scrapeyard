@@ -252,6 +252,8 @@ def test_restarts_and_policy_records_fail_once_for_what_is_new(host, capsys):
         (30, "active", "FAIL backup: last completed 30.0 h ago"),
         (3, "inactive", "FAIL backup: last completed 3.0 h ago, 1.8 MB, kept on this host only; timer inactive"),
         (None, "active", "FAIL backup: no backup has completed; its timer is active"),
+        # Made while the clock was ahead: it read as fresh for the 10 days.
+        (-240, "active", "FAIL backup: last completed 240.0 h in the future; timer active"),
     ],
 )
 def test_an_old_or_missing_backup_or_a_stopped_timer_fails(host, capsys, hours_ago, timer, expected):

@@ -383,6 +383,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The host check fails `backup` when the last backup completed more than
+  15 minutes in the future. A backup made while the clock was ahead read
+  as fresh until the clock passed it, however many runs failed meanwhile.
 - `security/backup.sh` refuses to take a witness, with nothing stopped,
   when no configured credential holds the `read` scope. The witness then
   listed no job, and every restore test of such a backup reported the job

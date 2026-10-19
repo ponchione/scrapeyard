@@ -316,6 +316,10 @@ def check_backup(max_age_hours: float, now: float) -> Result:
     except (OSError, ValueError, KeyError, TypeError):
         return Result("backup", False, f"{BACKUP_STATUS} could not be read; its timer is {timer}")
     age = (now - completed_at) / 3600
+    if age < -0.25:
+        # A run made while the clock was ahead would read as fresh until the
+        # clock passed it, however many runs failed in between.
+        return Result("backup", False, f"last completed {-age:.1f} h in the future; timer {timer}")
     where = "uploaded" if status.get("uploaded") is True else "kept on this host only"
     detail = f"last completed {age:.1f} h ago, {int(status.get('bytes') or 0) / 1e6:.1f} MB, {where}; timer {timer}"
     return Result("backup", age <= max_age_hours and timer == "active", detail)
