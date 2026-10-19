@@ -75,13 +75,18 @@ def parse_api_credentials(
     """Parse the named JSON credential map and optional migration-only keys."""
 
     credentials: list[APICredential] = []
-    if raw.strip():
+    if raw:
+        # Unset, the API is open for local development. Set, it must name a
+        # credential: '{}' or a blank value passed Compose's check for an
+        # unset variable and left every route open with every scope.
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("SCRAPEYARD_API_CREDENTIALS must be valid JSON") from exc
         if not isinstance(parsed, dict):
             raise ValueError("SCRAPEYARD_API_CREDENTIALS must be a JSON object")
+        if not parsed:
+            raise ValueError("SCRAPEYARD_API_CREDENTIALS must name at least one credential")
         for name, spec in parsed.items():
             if not isinstance(name, str) or _CREDENTIAL_NAME_RE.fullmatch(name) is None:
                 raise ValueError(f"Invalid API credential name: {name!r}")

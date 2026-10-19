@@ -74,6 +74,9 @@ def test_revocation_removes_only_revoked_secret_without_identity_ambiguity():
     "raw,match",
     [
         ("[]", "JSON object"),
+        # Both passed Compose's check for an unset variable and opened the API.
+        ("{}", "at least one credential"),
+        (" ", "valid JSON"),
         (json.dumps({"bad name": {}}), "credential name"),
         (
             json.dumps(

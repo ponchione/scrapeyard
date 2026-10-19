@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Startup refuses a `SCRAPEYARD_API_CREDENTIALS` that is set but names no
+  credential (`{}`, or a blank value). Both passed Compose's check for an
+  unset variable and parsed to no credentials, which leaves the API open
+  with every scope, as it is for local development, with only a warning in
+  the log.
 - A `POST /scrape` with an `Idempotency-Key` whose Redis enqueue fails no
   longer deletes the job: the queued run is left to the stale-queue
   reconciler, as a crash at that point leaves it, and the `POST` still

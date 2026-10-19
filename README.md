@@ -594,7 +594,7 @@ profile.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects |
+| `SCRAPEYARD_API_CREDENTIALS` | empty | Named JSON credentials with identity, secret, scopes, and optional projects. Unset, with no legacy keys, leaves the API open for local development; set, it must name at least one credential |
 | `SCRAPEYARD_API_KEYS` | empty | Deprecated full-admin migration allow-list; remove after converting to named credentials |
 | `SCRAPEYARD_SECRET_REFERENCE_ALLOWLIST` | empty | JSON map of project names to permitted `SCRAPEYARD_SECRET_*` references; `*` defines explicitly shared names |
 | `SCRAPEYARD_ENCRYPTION_KEYS` | empty | Required JSON key-ID to base64 32-byte AES key map for persisted secrets; startup fails while empty |
