@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `block_third_party` no longer blocks the requests of a target whose
+  host is a Unicode name to its own site (`www.bücher.de` loading from
+  `cdn.xn--bcher-kva.de`), and `run_budget.traffic` no longer counts them
+  as third-party: the site is now taken in the ASCII form the browser
+  reports requests in.
 - The host check fails `backup` when the last backup completed more than
   15 minutes in the future. A backup made while the clock was ahead read
   as fresh until the clock passed it, however many runs failed meanwhile.

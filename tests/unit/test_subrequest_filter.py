@@ -57,6 +57,17 @@ def test_third_party_blocking_keeps_the_registrable_domain_and_allowed_hosts() -
     assert not subrequest_filter.blocks("data:text/plain,hello")
 
 
+def test_third_party_blocking_reads_a_unicode_target_as_the_browser_does() -> None:
+    # Chromium reports the site's own requests by their xn-- name.
+    subrequest_filter = SubrequestFilter.for_target(
+        BrowserConfig(block_third_party=True), "https://www.bücher.de/katalog",
+    )
+    assert subrequest_filter is not None
+
+    assert not subrequest_filter.blocks("https://cdn.xn--bcher-kva.de/app.js")
+    assert subrequest_filter.blocks("https://cdn.xn--bcher-kva.com/app.js")
+
+
 def test_url_patterns_apply_to_first_party_and_allowed_hosts() -> None:
     subrequest_filter = _filter(
         block_third_party=True,

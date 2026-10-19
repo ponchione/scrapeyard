@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -54,9 +55,19 @@ def url_hostname(url: str) -> str | None:
 
 
 def url_site(url: str) -> str | None:
-    """Return the registrable domain of *url*'s host, or ``None`` without a host."""
+    """Return the registrable domain of *url*'s host, or ``None`` without a host.
+
+    A Unicode name is taken in the ASCII form browsers report its requests in.
+    """
     hostname = url_hostname(url)
-    return registrable_domain(hostname) if hostname else None
+    if not hostname:
+        return None
+    if not hostname.isascii():
+        from scrapeyard.engine.url_guard import UnsafeURLError, canonical_hostname
+
+        with suppress(UnsafeURLError):
+            hostname = canonical_hostname(hostname)
+    return registrable_domain(hostname)
 
 
 @dataclass
