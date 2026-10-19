@@ -18,7 +18,7 @@ dependencies = [
     # Scrapling 0.2 passes a deprecated no-op parser option. Keep the temporary,
     # exact test warning filter bounded to this security-fixed lxml API line.
     "lxml>=6.1.1,<6.2.0",
-    "arq>=0.26,<0.27",
+    "arq>=0.28,<0.29",
     "redis>=5.3.1,<6.0.0",
     "starlette>=1.3.1,<2.0.0",
     "tldextract>=5.3.1,<6.0.0",

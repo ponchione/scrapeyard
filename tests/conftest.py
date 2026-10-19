@@ -57,6 +57,13 @@ async def _scrapeyard_temp_dirs(tmp_path, monkeypatch):
             ),
             category=DeprecationWarning,
         )
+        # uvicorn 0.34 calls asyncio.iscoroutinefunction, which warns from
+        # Python 3.14 and goes in 3.16 (TD-117). Ruff bans it in this code.
+        warnings.filterwarnings(
+            "ignore",
+            message=r"'asyncio\.iscoroutinefunction' is deprecated",
+            category=DeprecationWarning,
+        )
 
         monkeypatch.setenv("SCRAPEYARD_DB_DIR", str(tmp_path / "db"))
         monkeypatch.setenv("SCRAPEYARD_LOG_DIR", str(tmp_path / "logs"))

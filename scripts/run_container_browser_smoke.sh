@@ -127,6 +127,7 @@ run_egress_policy() {
       SCRAPEYARD_EGRESS_POLICY_ID="$SCRAPEYARD_EGRESS_POLICY_ID" \
       security/install-docker-egress-policy.sh "$action" ;;
     container)
+      # Stands in for the host, whose python3 is 3.12 like this image's.
       docker run --rm --network host --cap-add NET_ADMIN --cap-add NET_RAW \
         -e SCRAPEYARD_EGRESS_INTERFACE -e SCRAPEYARD_EGRESS_POLICY_ID \
         -v "$ROOT_DIR:/repo:ro" \
@@ -283,7 +284,7 @@ org.scrapeyard.browser.camoufox.release=beta.24
 org.scrapeyard.browser.camoufox.sha256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e381ba2676a4888
 org.scrapeyard.browser.ubo.version=1.72.2
 org.scrapeyard.browser.ubo.sha256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
-org.opencontainers.image.base.digest=sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
+org.opencontainers.image.base.digest=sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83
 EOF
 
 if ((EUID == 0)); then

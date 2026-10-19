@@ -316,14 +316,14 @@ zookeeper = ["kazoo"]
 
 [[package]]
 name = "arq"
-version = "0.26.3"
+version = "0.28.0"
 description = "Job queues in python with asyncio and redis"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "arq-0.26.3-py3-none-any.whl", hash = "sha256:9f4b78149a58c9dc4b88454861a254b7c4e7a159f2c973c89b548288b77e9005"},
-    {file = "arq-0.26.3.tar.gz", hash = "sha256:362063ea3c726562fb69c723d5b8ee80827fdefda782a8547da5be3d380ac4b1"},
+    {file = "arq-0.28.0-py3-none-any.whl", hash = "sha256:b1696bf5614d60f4172a2c0cbdc177e23ba03a5eb9acc29bd8181f4ea71fff94"},
+    {file = "arq-0.28.0.tar.gz", hash = "sha256:a458188aefc2d7ee17d136f80d8fa8df1d6eba4ceebdead87e9f172d027dc311"},
 ]
 
 [package.dependencies]
@@ -4538,4 +4538,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "da226332cc10b2696c5ba93f059b49bf3acb2f90088795730aba94958292bf1d"
+content-hash = "e539c84878d57a3e5bcb6b2aae27db8696cd800fa3bf106aa6e08befc985a7b6"

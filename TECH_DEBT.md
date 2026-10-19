@@ -445,7 +445,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    checking the [Eyebox contract](#eyebox-contract) and running the Eyebox
    checks in step 5 before merging.
 5. **Run the checks locally, then open a pull request.** GitHub Actions runs
-   them again, on Python 3.12, and runs the container lanes when
+   them again, on Python 3.12 and 3.14, and runs the container lanes when
    their paths change. Read a failed job's log with
    `gh api repos/{owner}/{repo}/actions/jobs/<job_id>/logs`.
 
@@ -477,7 +477,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    index, and add a line under `Unreleased` in `CHANGELOG.md`. For partial
    progress, delete the finished sub-items and say what remains. IDs are never
    reused or renumbered.
-7. **New findings** take the next free ID (**TD-117**) and use this template:
+7. **New findings** take the next free ID (**TD-118**) and use this template:
 
    ```markdown
    ### TD-NN — <the problem, stated as a fact>
@@ -516,6 +516,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the third 2026-10-16 pass (code at `ca4a8cb`) | Locally, ruff over `src tests scripts security`, mypy (113 files) and `pytest -W error` pass on 3.12: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `0e7b332`) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
 | After raising the floor to Python 3.12 (2026-10-19) | Locally on 3.12.14, ruff over `src tests scripts security`, mypy (113 files, `python_version` 3.12) and `pytest -W error` pass: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. `scripts/audit_dependencies.py all` and the packaging-tool audit find nothing; the wheel and sdist build, carry all 25 migrations and install. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `8eab6dd`) and its 54 configs pass. The relock dropped the 3.10 backports and moved numpy from 2.2.6 to 2.4.2 on 3.12 |
 | After moving the image to Python 3.12.15 (2026-10-19) | Built locally from `python:3.12.15-slim-bookworm` in 174 s (4.9 GB, as the 3.12.11 image measures here): the container scan passes, and `tests/smoke/verify_fetch_sessions.py` passes inside it for Chromium, stealth Chromium and Camoufox under the production seccomp profile and capabilities (the WSL host has no AppArmor). The container, rehearsal and release-artifact tests pass (108). The browser smoke lane and the release rehearsal were not run locally: they need AppArmor and rewrite the host's `DOCKER-USER` chain, so they run on the pull request |
+| After moving the image to Python 3.14 (2026-10-19) | Locally, ruff over `src tests scripts security` and mypy (113 files, `python_version` 3.12) pass, and `pytest -W error` passes on 3.12.14 (3,221 passed, 19 skipped, 90.74% coverage) and 3.14.8 (3,221 passed, 19 skipped, 90.75%). The 19 live Redis tests pass on both, and `scripts/audit_dependencies.py all` finds nothing on either. Built from `python:3.14.8-slim-bookworm` in 168 s, the image passes the container scan, and `tests/smoke/verify_fetch_sessions.py` passes inside it for Chromium, stealth Chromium and Camoufox under the production seccomp profile and capabilities. With `asyncio.shield` put back, four tests fail on 3.14. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `5d93b7c`) and its 54 configs pass |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -648,8 +649,6 @@ to release, with the host's current release as `previous_revision`.
 **Coordinated:**
 - TD-45: needs the owner's choice of route, and Eyebox to move with it.
 - TD-24: needs real `reuse_browser` runs.
-- TD-116: needs the owner's word on upgrading arq and uvicorn before the
-  image can move to Python 3.14.
 - TD-17 to TD-21: deployment qualification; not single PRs.
   - TD-18 and TD-17 wait for the owner: what to do about the retailers that
     refuse the host's address, and leave to run each beta job from it.
@@ -660,7 +659,8 @@ to release, with the host's current release as `previous_revision`.
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-115.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-115, and
+TD-117.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -694,7 +694,7 @@ to release, with the host's current release as `previous_revision`.
 | TD-113 | P3 | deferred | Migrations run with foreign keys on, so rebuilding a referenced table deletes its children |
 | TD-114 | P3 | deferred | Some IP spellings are read unlike a browser reads them |
 | TD-115 | P3 | deferred | Authorization answers say more than they need to |
-| TD-116 | P3 | coordinated | The image cannot move past Python 3.12 without code and dependency changes |
+| TD-117 | P3 | deferred | Locked dependencies hold the image at Python 3.14 |
 
 ## Ready to implement
 
@@ -810,76 +810,6 @@ Where it doesn't help:
 **Done when:** the defaults are confirmed or changed based on before/after
 measurements on real runs with identical records, and README states the
 measured effect instead of fixture numbers.
-
-### TD-116 — The image cannot move past Python 3.12 without code and dependency changes
-
-**Priority:** P3 · **Area:** runtime, dependencies · **Risk:** medium · **Contract:** none; the HTTP API and the `error_type` values do not change · **Depends on:** the owner's word on the arq and uvicorn upgrades
-
-**Problem:** tried on 2026-10-19 with the lock of the 3.12 floor. The image
-runs Python 3.12 (3.12.15 since this entry), which has security fixes until
-October 2028, so nothing forces the move.
-- **3.15.0:** the image installs with `--only-binary=:all:`, and 15 compiled
-  production packages have no cp315 wheel at their locked versions. Twelve
-  have one in a later release (cffi 2.1.0, greenlet 3.5.1, hiredis 3.5.0,
-  httptools 0.9.0, lxml 6.1.2, maxminddb 3.2.0, numpy 2.5.2, orjson 3.12.0,
-  pydantic-core 2.48.0, regex 2026.9.3, uvloop 0.23.0, watchfiles 1.2.0);
-  brotli 1.2.0, PyYAML 6.0.3 and zstandard 0.25.0 have none in any release.
-  Whatever blocks 3.14 below blocks 3.15 too.
-- **3.14.8:** every locked package has a cp314 wheel, and the whole lock
-  installs from wheels alone. With the base set to
-  `python:3.14.8-slim-bookworm@sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83`
-  and `LANG` set (below), the image builds in 164 s, the container scan
-  passes, and the fetch-session check passes inside it for Chromium,
-  stealth Chromium and Camoufox under the production seccomp profile (the
-  WSL host had no AppArmor). `pytest -W error` on 3.14.8 fails 27 tests and
-  passes 3,193, for four reasons:
-  1. From 3.14, when the caller of `asyncio.shield` gives up (a timeout or
-     a cancel) and the shielded work fails later, asyncio reports "X
-     exception in shielded future" to the loop's exception handler, which
-     logs it at ERROR with a traceback. Scrapeyard retrieves those failures
-     itself (`consume_result_when_done`), and on 3.12 nothing is logged.
-     Three tests show it: a readiness probe that fails after its timeout
-     (`main._timed_sync_probe`) and abandoned run-thread work
-     (`common/run_threads.py`). `src` has 14 `asyncio.shield` calls.
-  2. arq 0.26.3 and uvicorn 0.34.3 call `asyncio.iscoroutinefunction`,
-     deprecated in 3.14 and removed in 3.16, and uvicorn's uvloop setup
-     calls the deprecated `asyncio.set_event_loop_policy`: four tests. arq
-     0.28.0 and uvicorn 0.54.0 call neither.
-  3. A caught `urllib.error.HTTPError` left unclosed warns when collected:
-     seven handlers in `security/health-check.py`, `tests/smoke/verify_api.py`,
-     `tests/rehearsal/verify_deployment.py`,
-     `tests/qualification/run_qualification.py` and one test, 12 tests.
-  4. From 3.13 a `sqlite3` connection left unclosed warns when collected,
-     and `with sqlite3.connect()` commits without closing:
-     `scripts/qualification_backup.py` and its tests, eight tests (which ones
-     depends on when the collector runs).
-- The python images set `LANG=C.UTF-8` only up to 3.12. Without it the build
-  stops when unzip meets Camoufox's Japanese font names, and the browsers
-  would run under another locale.
-
-**Code:** `src/scrapeyard/common/async_tools.py` (`consume_result_when_done`),
-every `asyncio.shield` in `src`; `Dockerfile`; the files in 3 and 4;
-`.github/workflows/ci.yml` and `dependency-audit.yml`.
-
-**Fix:**
-- a. Where a caller may give up on work it leaves running, wait with
-  `asyncio.wait({task}, timeout=…)`, which neither cancels the work nor
-  logs, in place of `asyncio.shield`, and keep `consume_result_when_done`.
-- b. With the owner's word, upgrade arq to 0.28 and uvicorn to 0.54.
-  uvicorn is pinned below 0.35, `tests/unit/test_result_responses.py`
-  drives its h11 and httptools protocols, and `queue/pool.py` subclasses
-  arq's `Worker`.
-- c. Close each `HTTPError` (`with exc:`) and each `sqlite3` connection
-  (`contextlib.closing`). The local branch `python-314-image` (not pushed)
-  holds the base image change, `LANG` and the `HTTPError` part.
-- d. Add a `Quality / Python 3.14` leg, move the distribution build, live
-  Redis and the Chromium install to it, and audit dependencies on both.
-  Keep mypy and the floor at 3.12: the Ubuntu 24.04 host runs the host
-  scripts with its own `python3`, 3.12.
-
-**Done when:** `pytest -W error` passes on 3.12 and 3.14, and the container
-lanes and the release rehearsal pass on the pull request that moves the
-image. 3.15 also waits for cp315 wheels of brotli, PyYAML and zstandard.
 
 ## Operational and deployment qualification
 
@@ -2005,6 +1935,39 @@ ID as well.
 **Revisit when:** a second tenant's credential is issued. The fix is the same
 `404` whenever the project check fails on these lookups, and
 `openapi_url=None`, or a scope, for the schema and its pages.
+
+### TD-117 — Locked dependencies hold the image at Python 3.14
+
+**Priority:** P3 · **Status:** deferred · **Contract:** none
+
+**Problem:** found when the image moved to Python 3.14 (TD-116).
+- **3.15:** the image installs with `--only-binary=:all:`, and 15 compiled
+  production packages have no cp315 wheel at their locked versions. Twelve
+  have one in a later release (cffi 2.1.0, greenlet 3.5.1, hiredis 3.5.0,
+  httptools 0.9.0, lxml 6.1.2, maxminddb 3.2.0, numpy 2.5.2, orjson 3.12.0,
+  pydantic-core 2.48.0, regex 2026.9.3, uvloop 0.23.0, watchfiles 1.2.0);
+  brotli 1.2.0, PyYAML 6.0.3 and zstandard 0.25.0 had none in any release on
+  2026-10-19.
+- **3.16:** uvicorn 0.34.3, pinned below 0.35, checks the application with
+  `asyncio.iscoroutinefunction` and, under the default `--loop auto`, sets
+  uvloop up with `asyncio.set_event_loop_policy`. Both warn from 3.14 and go
+  in 3.16, where the server would not start. On 3.14 Python hides a
+  library's `DeprecationWarning`, `tests/conftest.py` ignores the first, and
+  no test sets uvloop up. Ruff bans `asyncio.iscoroutinefunction` in
+  Scrapeyard's own code.
+
+**Why deferred:** 3.14 has security fixes until October 2030, and 3.16 is
+due in October 2027. uvicorn 0.36.0 calls neither function, but builds the
+server's loop from a factory where it set a policy, and later releases
+change startup exit codes (0.50) and proxy-header handling (0.48, 0.49,
+0.53).
+
+**Revisit when:** the image is to move past 3.14, or uvicorn is upgraded for
+another reason. 3.15 needs cp315 wheels of brotli, PyYAML and zstandard, then
+a relock. 3.16 needs uvicorn 0.36 or later, tried against
+`tests/unit/test_result_responses.py` (which drives its h11 and httptools
+protocols) and the container lanes; the filter in `tests/conftest.py` then
+goes.
 
 ## Consumer-side follow-ups (fix in Eyebox)
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG PYTHON_IMAGE="python:3.12.15-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+ARG PYTHON_IMAGE="python:3.14.8-slim-bookworm@sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83"
 
 # Export the production lock with the same pinned toolchain used by CI.
 FROM ${PYTHON_IMAGE} AS builder
@@ -39,15 +39,18 @@ ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
 ARG DEBIAN_SNAPSHOT=20261008T000000Z
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+# The python images set LANG only up to 3.12. unzip needs a UTF-8 locale for
+# Camoufox's font names, and the browsers keep the locale they ran with.
+ENV LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/home/scrapeyard \
     TMPDIR=/tmp \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     XDG_CACHE_HOME=/opt/scrapeyard-cache
 
-LABEL org.opencontainers.image.base.name="python:3.12.15-slim-bookworm" \
-      org.opencontainers.image.base.digest="sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258" \
+LABEL org.opencontainers.image.base.name="python:3.14.8-slim-bookworm" \
+      org.opencontainers.image.base.digest="sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83" \
       org.scrapeyard.os.snapshot="${DEBIAN_SNAPSHOT}" \
       org.scrapeyard.runtime.uid="10001" \
       org.scrapeyard.browser.playwright.version="${PLAYWRIGHT_VERSION}" \

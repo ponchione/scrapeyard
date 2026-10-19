@@ -109,8 +109,26 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
-- The image's Python moves from 3.12.11, its base since 0.6.0, to the 3.12.15
-  security release (`python:3.12.15-slim-bookworm`, pinned by digest).
+- The image's Python moves from 3.12.11, its base since 0.6.0, to 3.14.8
+  (`python:3.14.8-slim-bookworm`, pinned by digest; TD-116). The image sets
+  `LANG=C.UTF-8` itself, as the python images stopped doing after 3.12:
+  unzip needs it for Camoufox's font names, and the browsers keep the locale
+  they ran under. Python 3.12 stays the minimum, for the host's scripts. CI's
+  quality gate and the dependency audit run on both; mypy checks against
+  3.12, and the distribution build, live Redis and the real-browser tests run
+  on 3.14.
+- Work whose caller stops waiting (a readiness probe past its timeout, a
+  cancelled cleanup, abandoned thread work) runs on under
+  `scrapeyard.common.async_tools.shield` instead of `asyncio.shield`. From
+  3.14 `asyncio.shield` logs such work's later failure at ERROR with a
+  traceback even though Scrapeyard retrieves it; the helper waits with
+  `asyncio.wait`, which does not. Ruff bans `asyncio.shield` and
+  `asyncio.iscoroutinefunction`.
+- arq moves from 0.26.3 to 0.28.0, which no longer calls
+  `asyncio.iscoroutinefunction`, deprecated from 3.14.
+- The host check, the smoke, rehearsal and qualification scripts close each
+  `HTTPError` they catch, and `scripts/qualification_backup.py` its SQLite
+  connections. Python warns about either left open, from 3.14 and 3.13.
 - Python 3.12 is the minimum supported version, up from 3.10. It is what the
   production image runs and what `python3` is on the Ubuntu 24.04 production
   host. CI and the dependency audit no longer run a 3.10 leg, and the code

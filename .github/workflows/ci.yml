@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,9 +53,14 @@ jobs:
       - name: Lint
         run: poetry run ruff check src tests scripts security
       - name: Type check
+        # mypy checks against python_version 3.12 from pyproject.toml whatever
+        # the interpreter, so a second leg would repeat the same run.
+        if: matrix.python-version == '3.12'
         run: poetry run mypy src
       - name: Install Chromium for the real-browser integration tests
-        # tests/integration/test_browser_traffic.py skips without it.
+        # tests/integration/test_browser_traffic.py skips without it. One leg
+        # is enough: those tests exercise the browser, not the interpreter.
+        if: matrix.python-version == '3.14'
         # Chromium's sandbox needs unprivileged user namespaces, which Ubuntu
         # 24.04 denies to programs without an AppArmor profile. In production
         # the container's profile grants them; here the runner is told to.
@@ -77,7 +82,7 @@ jobs:
           retention-days: 7
 
   build:
-    name: Distribution build / Python 3.12
+    name: Distribution build / Python 3.14
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -85,15 +90,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Cache immutable dependency downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/pip
             ~/.cache/pypoetry/artifacts
-          key: build-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
-          restore-keys: build-${{ runner.os }}-py3.12-
+          key: build-${{ runner.os }}-py3.14-${{ hashFiles('poetry.lock') }}
+          restore-keys: build-${{ runner.os }}-py3.14-
       - name: Install pinned Poetry tooling
         run: |
           python -m pip install --upgrade "pip==${PIP_VERSION}"
@@ -123,7 +128,7 @@ jobs:
           retention-days: 7
 
   live-redis:
-    name: Live Redis / Python 3.12
+    name: Live Redis / Python 3.14
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -146,15 +151,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Cache immutable dependency downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/pip
             ~/.cache/pypoetry/artifacts
-          key: live-redis-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
-          restore-keys: live-redis-${{ runner.os }}-py3.12-
+          key: live-redis-${{ runner.os }}-py3.14-${{ hashFiles('poetry.lock') }}
+          restore-keys: live-redis-${{ runner.os }}-py3.14-
       - name: Install pinned Poetry tooling
         run: |
           python -m pip install --upgrade "pip==${PIP_VERSION}"
