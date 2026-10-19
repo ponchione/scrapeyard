@@ -867,7 +867,7 @@ class LocalResultStore:
         """Scan at most *limit* runs or empty/malformed namespace entries."""
 
         scanned_entries: list[_ScannedArtifactEntry] = []
-        root = self._results_dir.resolve(strict=False)
+        root = self._root()
 
         def namespace_leaves(parts: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
             directory = root.joinpath(*parts)
@@ -878,7 +878,10 @@ class LocalResultStore:
                     state.malformed_entries_ignored += 1
                     yield parts
                     return
-                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                # The root may be reached through a link; nothing below it.
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                if parts:
+                    flags |= getattr(os, "O_NOFOLLOW", 0)
                 descriptor = os.open(directory, flags)
                 try:
                     with os.scandir(descriptor) as entries:
@@ -989,7 +992,8 @@ class LocalResultStore:
 
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            root_fd = os.open(self._results_dir, flags)
+            # The root may be reached through a link; nothing below it.
+            root_fd = os.open(self._root(), flags & ~getattr(os, "O_NOFOLLOW", 0))
             try:
                 if len(parts) == 2:
                     project_fd = os.open(parts[0], flags, dir_fd=root_fd)

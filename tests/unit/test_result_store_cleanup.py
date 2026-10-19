@@ -558,6 +558,28 @@ async def test_reconciliation_keeps_metadata_backed_result_without_parent_job(st
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_removes_an_orphan_under_a_results_dir_reached_through_a_symlink(
+    tmp_path,
+):
+    await init_db(str(tmp_path / "db"))
+    (tmp_path / "disk").mkdir()
+    (tmp_path / "results").symlink_to(tmp_path / "disk", target_is_directory=True)
+    store = LocalResultStore(str(tmp_path / "results"), _lookup)
+    orphan = tmp_path / "disk" / "test-project" / "test-job" / "run-orphan"
+    orphan.mkdir(parents=True)
+    (orphan / "results.json").write_text("{}", encoding="utf-8")
+    _backdate_tree(tmp_path / "disk" / "test-project")
+    try:
+        report = await store.reconcile_artifacts(grace_seconds=86400, dry_run=False, now=NOW)
+    finally:
+        await close_db()
+
+    assert not report.operation_failures
+    assert report.directories_removed == 1
+    assert list((tmp_path / "disk").iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_paginates_metadata_and_filesystem_work(store):
     for index in range(3):
         await store.save_result(
