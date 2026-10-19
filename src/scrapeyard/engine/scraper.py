@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,7 @@ from scrapeyard.queue.cancellation import (
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_BASIC_REDIRECTS = 10
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ScrapeContext:
@@ -690,16 +692,28 @@ async def _fetch_page(
             debug.update(counts)
             raise FetchError(response.status, debug=debug)
     if page_cache is not None and page_cache.mode is PageCacheMode.record:
-        await run_thread_work(
-            _record_fetched_page,
-            page_cache,
-            url,
-            fetcher_type,
-            response,
-            str(debug.get("final_url") or url),
-            run_budget=budget,
-        )
         debug["page_cache"] = {"mode": PageCacheMode.record.value}
+        try:
+            await run_thread_work(
+                _record_fetched_page,
+                page_cache,
+                url,
+                fetcher_type,
+                response,
+                str(debug.get("final_url") or url),
+                run_budget=budget,
+            )
+        except (OSError, UnicodeError) as exc:
+            # The page was fetched. A cache the service cannot write (full,
+            # read-only, another owner's) is not the site's failure: it must
+            # neither fail the target as network_error nor trip the host's
+            # circuit breaker.
+            logger.warning(
+                "Page cache could not record a page host=%s error_type=%s",
+                url_host_label(url),
+                type(exc).__name__,
+            )
+            debug["page_cache"]["stored"] = False
     return FetchOutcome(page=response, debug=debug)
 
 

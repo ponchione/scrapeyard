@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A page that `execution.page_cache: record` cannot write to the cache
+  directory (full, read-only, another owner's) is returned as fetched, with
+  `"stored": false` in its `debug.page_cache`. The write error failed the
+  target as `network_error` after the site had answered, quoted the
+  service's cache path, and counted against the host's circuit breaker, so
+  three such pages kept every job's requests to that host off for 300 s.
 - Startup refuses named credentials that share an `identity` but not their
   `projects`. Idempotency keys and receipts belong to the identity, so a
   credential limited to one project learned from `/scrape/acceptance` that

@@ -182,6 +182,25 @@ async def test_record_then_replay_reproduces_results_without_network(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_a_cache_that_cannot_be_written_does_not_fail_the_fetched_pages(
+    tmp_path, monkeypatch
+):
+    network = _Network()
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", network)
+    (tmp_path / "cache").write_text("not a directory")
+
+    with activate_page_cache(_cache(tmp_path, PageCacheMode.record)):
+        result = await _scrape(_target(), tmp_path)
+
+    # It failed the target as network_error, which counts against the host's
+    # circuit breaker, after the site had answered.
+    assert result.is_success and result.error_type is None
+    assert _names(result) == ["A", "B", "C", "D"]
+    assert len(network.requests) == 3
+    assert result.debug["page_cache"] == {"mode": "record", "stored": False}
+
+
+@pytest.mark.asyncio
 async def test_replay_miss_fails_first_page_and_stops_pagination_gracefully(tmp_path, monkeypatch):
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _no_network)
     cache = _cache(tmp_path, PageCacheMode.replay)

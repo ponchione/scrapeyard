@@ -543,6 +543,8 @@ recorded fails the target (or stops pagination) with `cache_miss`. Results
 carry a top-level `page_cache` field and, in replay, each target's
 `recorded_at`. Replayed output is not a live observation of the site. Jobs that
 set `record` or `replay` are rejected when the service has no cache directory.
+A page `record` cannot write (the directory is full, read-only or not the
+service's) is still returned; its `debug.page_cache` says `"stored": false`.
 
 `retry.max_attempts` is the total number of attempts per request, including the
 initial attempt. HTTP 401, 403 and 407 stop immediately even when listed as
