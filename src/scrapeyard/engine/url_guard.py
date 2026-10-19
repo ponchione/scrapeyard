@@ -409,6 +409,12 @@ def reset_deployment_secret_redaction(token: Token[tuple[str, ...]]) -> None:
     _ACTIVE_DEPLOYMENT_SECRETS.reset(token)
 
 
+def active_deployment_secrets() -> tuple[str, ...]:
+    """Return the resolved secrets of the run in this context."""
+
+    return _ACTIVE_DEPLOYMENT_SECRETS.get()
+
+
 def redact_deployment_secrets(text: str, secret_values: Any = None) -> str:
     """Replace raw and URL-encoded forms of resolved deployment secrets."""
 

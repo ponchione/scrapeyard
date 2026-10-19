@@ -528,8 +528,8 @@ cache could reuse (`GET`, status 200, a positive `max-age` or `Expires`, no
 same site's targets are answered from memory while fresh. The request still
 passes every guard and block rule first; it is counted as `cached` in
 `run_budget.traffic` instead of as a request, and it uses no request budget. The
-cache holds up to 32 MiB per run, URLs and headers included (8 MiB per response body), outlives replaced
-browsers and is dropped when the run's targets finish. Cached bodies reach the
+cache holds up to 32 MiB per run, URLs and headers included (8 MiB per response
+body), outlives replaced browsers and is dropped when the run's targets finish. Cached bodies reach the
 browser through the Playwright driver, which adds roughly 20 MB to its peak
 memory per running browser.
 
@@ -544,7 +544,7 @@ carry a top-level `page_cache` field and, in replay, each target's
 `recorded_at`. Replayed output is not a live observation of the site. Jobs that
 set `record` or `replay` are rejected when the service has no cache directory.
 A page `record` cannot write (the directory is full, read-only or not the
-service's), or does not write because the page or its URL holds a resolved
+service's), or does not write because something it would write holds a resolved
 `SCRAPEYARD_SECRET_*` value, is still returned; its `debug.page_cache` says
 `"stored": false`. Recorded URLs keep no userinfo.
 

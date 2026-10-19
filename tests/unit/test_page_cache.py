@@ -231,6 +231,33 @@ async def test_record_writes_nothing_that_holds_a_resolved_secret(tmp_path, monk
     assert not any("tok-9f1c2e7d5a" in text for text in written)
 
 
+@pytest.mark.parametrize(
+    ("secret", "page"),
+    [
+        # httpx keeps "/" but escapes "<" and ">", so neither form matched.
+        ("tok/en<1>", {"final_url": f"{BASE}?key=tok/en%3C1%3E"}),
+        ("tok-9f1c2e7d5a", {"content_type": "text/html; tok-9f1c2e7d5a"}),
+        ("AbCdEf0123456789", {"final_url": "https://abcdef0123456789.example.test/list"}),
+        ("tok<9f1c2e7d5a", {"html": "<p>tok&lt;9f1c2e7d5a</p>"}),
+        ("tok-9f1c2e7d5a", {"click_pagination": {"pages": 2, "next": "tok-9f1c2e7d5a"}}),
+    ],
+    ids=["partly-escaped", "content-type", "lowercased-host", "html-entity", "click-snapshot"],
+)
+def test_no_reading_of_a_resolved_secret_is_written(tmp_path, secret, page):
+    cache = _cache(tmp_path, PageCacheMode.record)
+    token = activate_deployment_secret_redaction((secret,))
+    try:
+        stored = cache.store(BASE, "basic", **{
+            "html": "<p>1</p>", "final_url": BASE, "status": 200, "content_type": "text/html",
+            **page,
+        })
+    finally:
+        reset_deployment_secret_redaction(token)
+
+    assert stored is False
+    assert not [path for path in (tmp_path / "cache").rglob("*") if path.is_file()]
+
+
 def test_recorded_final_url_keeps_no_userinfo(tmp_path):
     cache = _cache(tmp_path, PageCacheMode.record)
 

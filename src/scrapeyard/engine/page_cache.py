@@ -10,22 +10,24 @@ Replayed output is not a live observation of the site.
 from __future__ import annotations
 
 import hashlib
+import html as html_text
 import json
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import PageCacheMode
 from scrapeyard.engine.scrape_models import ScrapeStop
 from scrapeyard.engine.url_guard import (
+    active_deployment_secrets,
     redact_deployment_secrets_with_count,
     redact_userinfo_in_url,
     url_host_label,
@@ -125,12 +127,6 @@ class PageCache:
         The cache is plain text kept without retention, outside the encrypted
         store every other persisted copy of a resolved secret is in.
         """
-        if any(
-            redact_deployment_secrets_with_count(text)[1] for text in (html, final_url)
-        ):
-            return False
-        html_path, meta_path = self._paths(url, fetcher, click_index)
-        html_path.parent.mkdir(parents=True, exist_ok=True)
         meta = {
             "url": redact_userinfo_in_url(url),
             "final_url": _without_userinfo(final_url),
@@ -142,9 +138,45 @@ class PageCache:
         }
         if click_pagination is not None:
             meta["click_pagination"] = click_pagination
+        if _holds_a_secret([html, *_strings(meta)]):
+            return False
+        html_path, meta_path = self._paths(url, fetcher, click_index)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(html_path, html)
         _atomic_write(meta_path, json.dumps(meta, sort_keys=True))
         return True
+
+
+def _holds_a_secret(texts: Iterable[str]) -> bool:
+    """Whether any of *texts* holds a resolved secret of the run.
+
+    A client re-encodes what it sends (httpx keeps ``/`` but escapes ``<``),
+    lowercases a host, and a page may echo a secret as HTML entities or in
+    another case, so each text is also read unquoted and unescaped, and all
+    are compared without case. A secret transformed otherwise (base64, say)
+    is not recognized.
+    """
+    secrets = active_deployment_secrets()
+    if not secrets:
+        return False
+    folded = tuple(secret.casefold() for secret in secrets)
+    for text in texts:
+        for reading in {text, unquote(text), html_text.unescape(text)}:
+            if redact_deployment_secrets_with_count(reading.casefold(), folded)[1]:
+                return True
+    return False
+
+
+def _strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(key)
+            yield from _strings(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _strings(item)
 
 
 def _without_userinfo(url: str) -> str:
