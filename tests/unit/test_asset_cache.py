@@ -148,6 +148,18 @@ async def test_urls_and_headers_count_toward_the_bound() -> None:
     assert cache.size <= 1024 * 1024
 
 
+async def test_many_short_headers_count_what_they_hold() -> None:
+    cache = AssetCache(max_bytes=1024 * 1024)
+    scripts = [_request(f"https://www.example.test/{index}.js") for index in range(100)]
+    headers = {f"x{index}": "1" for index in range(1000)}
+    for script in scripts:
+        await cache.store(SITE, _response(b"", headers=headers, request=script))
+
+    # Counted by their length alone, all 100 entries fit in 1 MiB.
+    kept = [script for script in scripts if cache.lookup(SITE, script) is not None]
+    assert 0 < len(kept) < 10
+
+
 async def test_a_response_whose_body_is_gone_is_skipped() -> None:
     response = _response()
 

@@ -411,7 +411,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   headers as well as its body. Only bodies counted, so a page that had the
   browser fetch cacheable scripts with empty bodies, long URLs and large
   headers kept them all for the run: 2,000 such responses held about
-  294 MiB against an accounted size of 0.
+  294 MiB against an accounted size of 0. Each header also counts 128
+  bytes for what Python holds besides its text, so many short headers are
+  not undercounted tenfold.
 - `execution.page_cache: record` no longer writes a resolved deployment
   secret, or a URL's userinfo, to the cache directory in plain text. The
   recorded `final_url` kept both (the query of a target URL holding a
