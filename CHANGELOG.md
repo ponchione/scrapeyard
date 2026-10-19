@@ -485,7 +485,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   cannot register, by its cron or by a time zone the image's zone data no
   longer holds, no longer stops the service from starting: it is left
   unscheduled and reported in readiness as `persisted_config_invalid`.
-  Eyebox's schedules restrict neither field.
+  Eyebox's schedules restrict neither field. A rollback to an earlier
+  release reads numeric days the old way again, and that release does not
+  start while a stored schedule names day 7; DEPLOYMENT.md says how to
+  check before rolling back.
 - A cancellation that reaches a worker just after it recorded its own run
   as `failed` (every target failed, or a run limit) no longer deletes the
   run's result. The worker kept the result only for `complete` and

@@ -740,6 +740,16 @@ the release that was not promoted. In the last two cases promote a retained
 release to settle it. A release refused by the checks before the deployment
 changes nothing, and `promote` says only why it was refused.
 
+A release built before the day-of-week fix (commit `7298d04`) reads a
+schedule's numeric day of week in APScheduler's numbering, which starts at
+Monday and has no 7. Rolled back to, it fires a schedule stored with a
+numeric day a day later than written (`1-5` from Tuesday to Saturday), and
+if a stored schedule names day 7 (`7`, `0-7`, `5-7`) it does not start: the
+promotion fails after the application was stopped. Before such a rollback,
+list `schedule_cron` from `GET /jobs` with a `read` credential that has no
+`projects` list, and rewrite any numeric day of week by name (`mon-fri`,
+`sun`), which both readings share.
+
 Only one start or promotion runs at a time. Each takes a lock before it reads
 the `current` link and keeps it until the link has been moved, so a start of
 the boot service that had to wait for a promotion starts the release that was
