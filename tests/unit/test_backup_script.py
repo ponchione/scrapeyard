@@ -599,7 +599,7 @@ def test_backup_copies_while_stopped_and_encrypts_only_after_the_application_is_
         ({"COPY_FAILS": "yes"}, "the backup set could not be created"),
         ({"SAVE_FAILS": "yes"}, "Redis did not save a settled copy"),
         # redis-cli prints an error reply and leaves its status at 0.
-        ({"KEYSPACE_REFUSED": "yes"}, "Redis did not answer"),
+        ({"KEYSPACE_REFUSED": "yes"}, "Redis did not say how many keys it holds"),
         ({"DUMP_COPY_FAILS": "yes"}, "Redis's dump could not be copied"),
         ({"STOP_FAILS": "yes"}, "could not be stopped"),
         # systemctl reports success for a stop whose own command failed.
@@ -1142,6 +1142,7 @@ def test_redis_keys_are_counted_in_whichever_database_holds_them(host):
         ({"REDIS_LOADS": ""}, "Redis did not load the dump", False),
         # Redis started with its append-only file ignores a bare dump and is empty.
         ({"RESTORED_KEYS": "0"}, "the isolated Redis holds 0 keys after loading 4", False),
+        ({"KEYSPACE_REFUSED": "yes"}, "the isolated Redis did not say how many keys it holds", False),
         ({"IMAGES_MISSING": "yes"}, "is not loaded on this host", False),
         ({"HAS_ROUTE": "yes"}, "has a route off the host", True),
     ],

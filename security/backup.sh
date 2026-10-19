@@ -646,9 +646,9 @@ snapshot() {
   # changes Redis. The same count before and after SAVE is therefore the
   # number of keys in the dump, which a restore compares with what it loads.
   for _ in 1 2 3 4 5; do
-    before=$(redis_keys "$redis") || fail "Redis did not answer"
+    before=$(redis_keys "$redis") || fail "Redis did not say how many keys it holds"
     if [[ "$(redis_cli "$redis" SAVE)" == OK ]]; then
-      after=$(redis_keys "$redis") || fail "Redis did not answer"
+      after=$(redis_keys "$redis") || fail "Redis did not say how many keys it holds"
       if [[ "$before" == "$after" && "$after" =~ ^[0-9]+$ ]]; then
         REDIS_KEYS=$after
         break
@@ -1276,7 +1276,8 @@ YAML
     restore_volumes "$owner"
     compose up -d --no-deps --no-build --pull never --wait redis || fail "the isolated Redis did not start"
     isolated_redis=$(service_container "$PROJECT" redis)
-    present=$(redis_keys "$isolated_redis")
+    present=$(redis_keys "$isolated_redis") || \
+      fail "the isolated Redis did not say how many keys it holds"
     [[ "$(redis_cli "$isolated_redis" INFO persistence | sed -n 's/^aof_enabled://p')" == 1 ]] || \
       fail "the isolated Redis does not run with its append-only file"
     # Keys go on expiring, so fewer may be left; all of them gone is the
