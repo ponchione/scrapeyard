@@ -227,8 +227,9 @@ def test_fixture_serves_deterministic_static_dynamic_redirect_and_protected_scen
             try:
                 opener.open(f"{origin}{path}", timeout=2)
             except urllib.error.HTTPError as exc:
-                assert exc.code == 302
-                assert exc.headers["Location"] == expected
+                with exc:
+                    assert exc.code == 302
+                    assert exc.headers["Location"] == expected
 
         urllib.request.urlopen(f"{origin}/protected?case=unit-proof", timeout=2).read()
         stats = json.loads(urllib.request.urlopen(f"{origin}/__stats", timeout=2).read())

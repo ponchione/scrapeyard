@@ -120,7 +120,9 @@ class Harness:
                 value = json.loads(body) if body else None
                 return response.status, value
         except urllib.error.HTTPError as exc:
-            body = exc.read()
+            # Closed, as from Python 3.14 an unclosed one warns when collected.
+            with exc:
+                body = exc.read()
             try:
                 value = json.loads(body) if body else None
             except json.JSONDecodeError:

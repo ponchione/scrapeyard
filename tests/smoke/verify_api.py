@@ -48,7 +48,9 @@ def _request(
             payload = response.read()
             return response.status, json.loads(payload) if payload else None
     except urllib.error.HTTPError as exc:
-        payload = exc.read()
+        # Closed, as from Python 3.14 an unclosed one warns when collected.
+        with exc:
+            payload = exc.read()
         try:
             value = json.loads(payload) if payload else None
         except json.JSONDecodeError:

@@ -111,7 +111,9 @@ try:
     with opener.open(request, timeout=10) as response:
         code, body = response.status, response.read()
 except urllib.error.HTTPError as error:
-    code, body = error.code, error.read()
+    # Closed, as from Python 3.14 an unclosed one warns when collected.
+    with error:
+        code, body = error.code, error.read()
 except OSError as error:
     print(json.dumps({"error": type(error).__name__}))
     raise SystemExit(0)
@@ -414,7 +416,8 @@ def check_tunnel(ready_url: str | None) -> Result:
         with opener.open(ready_url, timeout=5) as response:
             code = response.status
     except urllib.error.HTTPError as error:
-        code = error.code
+        with error:
+            code = error.code
     except OSError as error:
         return Result("tunnel", False, f"connector active; readiness not answered ({type(error).__name__})")
     return Result("tunnel", code == 200, f"connector active; readiness HTTP {code}")
@@ -529,7 +532,8 @@ def send(url: str, body: str, headers: dict[str, str]) -> str:
         with opener.open(request, timeout=SEND_SECONDS) as response:
             return f"HTTP {response.status}"
     except urllib.error.HTTPError as error:
-        return f"HTTP {error.code}"
+        with error:
+            return f"HTTP {error.code}"
     except Exception as error:  # noqa: BLE001 - its text can hold the URL, which is a credential
         return type(error).__name__
 

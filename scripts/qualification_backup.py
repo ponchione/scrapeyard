@@ -410,7 +410,7 @@ def _sqlite_contract(
         path = payload / "db" / database
         if not path.is_file():
             raise BackupError(f"required database absent from payload: {database}")
-        with sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True) as db:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)) as db:
             integrity = db.execute("PRAGMA integrity_check").fetchone()
             if integrity != ("ok",):
                 raise BackupError(f"SQLite integrity check failed for {database}: {integrity}")
@@ -481,12 +481,12 @@ def _sqlite_contract(
     jobs_db = payload / "db" / "jobs.db"
     results_db = payload / "db" / "results_meta.db"
     errors_db = payload / "db" / "errors.db"
-    with sqlite3.connect(f"file:{jobs_db}?mode=ro&immutable=1", uri=True) as jobs:
+    with closing(sqlite3.connect(f"file:{jobs_db}?mode=ro&immutable=1", uri=True)) as jobs:
         job_run_pairs = {
             (row[0], row[1])
             for row in jobs.execute("SELECT job_id, run_id FROM job_runs")
         }
-    with sqlite3.connect(f"file:{results_db}?mode=ro&immutable=1", uri=True) as results:
+    with closing(sqlite3.connect(f"file:{results_db}?mode=ro&immutable=1", uri=True)) as results:
         for job_id, run_id, file_path in results.execute(
             "SELECT job_id, run_id, file_path FROM results_meta"
         ):
@@ -500,7 +500,7 @@ def _sqlite_contract(
             )
             if not (payload / "results" / relative / "results.json").is_file():
                 raise BackupError(f"result artifact is missing for {job_id}/{run_id}")
-    with sqlite3.connect(f"file:{errors_db}?mode=ro&immutable=1", uri=True) as errors:
+    with closing(sqlite3.connect(f"file:{errors_db}?mode=ro&immutable=1", uri=True)) as errors:
         for job_id, run_id in errors.execute("SELECT job_id, run_id FROM errors"):
             if (job_id, run_id) not in job_run_pairs:
                 raise BackupError(f"error row has no matching job/run: {job_id}/{run_id}")
@@ -535,7 +535,7 @@ def _relocate_result_metadata(
     """Rewrite artifact paths in a staged restore for its destination root."""
     results_db = payload / "db" / "results_meta.db"
     destination_root = destination_data_root.resolve()
-    with sqlite3.connect(results_db) as db:
+    with closing(sqlite3.connect(results_db)) as db:
         rows = db.execute("SELECT rowid, file_path FROM results_meta").fetchall()
         relocated: list[tuple[str, int]] = []
         for row_id, file_path in rows:

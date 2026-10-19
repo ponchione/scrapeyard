@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import gc
 import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,14 @@ def _yaml(path: str) -> dict:
     return yaml.load(Path(path).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+@contextmanager
+def _sqlite(path: Path) -> Iterator[sqlite3.Connection]:
+    # Commits as sqlite3's own context manager does, then closes, which it
+    # does not: from Python 3.13 a connection left open warns when collected.
+    with closing(sqlite3.connect(path)) as db, db:
+        yield db
+
+
 def _minimal_data(root: Path) -> None:
     db_dir = root / "db"
     result_dir = root / "results" / "project" / "job" / "run-1"
@@ -49,7 +58,7 @@ def _minimal_data(root: Path) -> None:
     (adaptive_dir / "selectors.json").write_text('{"selector":"h1"}\n', encoding="utf-8")
 
     for database, migrations in _DB_MIGRATIONS.items():
-        with sqlite3.connect(db_dir / database) as db:
+        with _sqlite(db_dir / database) as db:
             assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
             db.execute(
                 """CREATE TABLE schema_migrations (
@@ -74,7 +83,7 @@ def _minimal_data(root: Path) -> None:
                     ),
                 )
 
-    with sqlite3.connect(db_dir / "jobs.db") as db:
+    with _sqlite(db_dir / "jobs.db") as db:
         db.execute(
             """INSERT INTO jobs
                    (job_id, project, name, status, config_yaml, created_at)
@@ -100,7 +109,7 @@ def _minimal_data(root: Path) -> None:
                        '2026-07-12T00:00:00+00:00',
                        '2026-07-12T00:00:00+00:00')"""
         )
-    with sqlite3.connect(db_dir / "errors.db") as db:
+    with _sqlite(db_dir / "errors.db") as db:
         db.execute(
             """INSERT INTO errors
                    (job_id, run_id, project, target_url, attempt, timestamp,
@@ -108,7 +117,7 @@ def _minimal_data(root: Path) -> None:
                VALUES ('job-1', 'run-1', 'project', 'https://example.com', 1,
                        '2026-07-12T00:00:00+00:00', 'fetch_error', 'basic', 'fail')"""
         )
-    with sqlite3.connect(db_dir / "results_meta.db") as db:
+    with _sqlite(db_dir / "results_meta.db") as db:
         db.execute(
             """INSERT INTO results_meta
                    (job_id, project, run_id, status, record_count, file_path,
@@ -181,7 +190,7 @@ def test_backup_manifest_round_trip_and_inconsistency_detection(tmp_path: Path) 
     assert (restored / "adaptive/project/selectors.json").read_bytes() == (
         data / "adaptive/project/selectors.json"
     ).read_bytes()
-    with sqlite3.connect(restored / "db/results_meta.db") as db:
+    with _sqlite(restored / "db/results_meta.db") as db:
         restored_path = db.execute("SELECT file_path FROM results_meta").fetchone()[0]
     assert restored_path == str((restored / "results/project/job/run-1").resolve())
 
@@ -194,9 +203,6 @@ def test_backup_manifest_round_trip_and_inconsistency_detection(tmp_path: Path) 
 
 
 def _wal_mode(data: Path) -> list[str]:
-    # The connections that filled the databases are closed first, or WAL mode
-    # is set while they still hold them.
-    gc.collect()
     for database in sorted((data / "db").glob("*.db")):
         db = sqlite3.connect(database)
         try:
@@ -245,7 +251,6 @@ def test_backup_reads_an_empty_log_left_beside_a_database_without_making_more(tm
 def test_backup_refuses_a_database_a_crash_left_half_written(tmp_path: Path) -> None:
     data = tmp_path / "data"
     _minimal_data(data)
-    gc.collect()
     # A rollback journal beside it: the pages in the file are not all committed.
     (data / "db" / "errors.db-journal").write_bytes(b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7" + bytes(504))
 
@@ -333,10 +338,10 @@ def test_backup_accepts_results_intentionally_retained_after_job_deletion(
     data = tmp_path / "data"
     backup = tmp_path / "backup"
     _minimal_data(data)
-    with sqlite3.connect(data / "db/jobs.db") as db:
+    with _sqlite(data / "db/jobs.db") as db:
         db.execute("DELETE FROM job_runs")
         db.execute("DELETE FROM jobs")
-    with sqlite3.connect(data / "db/errors.db") as db:
+    with _sqlite(data / "db/errors.db") as db:
         db.execute("DELETE FROM errors")
 
     create_backup(data, backup, quiesced=True)
@@ -350,7 +355,7 @@ def test_backup_rejects_result_metadata_outside_declared_data_root(
 ) -> None:
     data = tmp_path / "data"
     _minimal_data(data)
-    with sqlite3.connect(data / "db/results_meta.db") as db:
+    with _sqlite(data / "db/results_meta.db") as db:
         db.execute(
             "UPDATE results_meta SET file_path = ?",
             ("/tmp/attacker/results/project/job/run-1",),
@@ -385,7 +390,7 @@ def test_backup_rejects_incomplete_current_database_contract(
 ) -> None:
     data = tmp_path / "data"
     _minimal_data(data)
-    with sqlite3.connect(data / "db/jobs.db") as db:
+    with _sqlite(data / "db/jobs.db") as db:
         db.execute(mutation)
 
     with pytest.raises(BackupError, match=message):
@@ -432,7 +437,7 @@ def test_restore_rolls_back_partial_directory_install_for_safe_retry(
     monkeypatch.setattr("scripts.qualification_backup.os.replace", original_replace)
     restore_backup(backup, destination)
     assert (destination / "results/project/job/run-1/results.json").is_file()
-    with sqlite3.connect(destination / "db/results_meta.db") as db:
+    with _sqlite(destination / "db/results_meta.db") as db:
         restored_path = db.execute("SELECT file_path FROM results_meta").fetchone()[0]
     assert restored_path == str((destination / "results/project/job/run-1").resolve())
 
