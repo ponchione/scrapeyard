@@ -117,8 +117,16 @@ def _hostname_is_blocked(host: str) -> bool:
 _CLIENT_ESCAPED_HOST_CHARS = frozenset("<>^")
 
 
+# No DNS name is longer. IDNA encodes a label before it checks the label's
+# length, and Python's punycode is quadratic, so a page's next link with a
+# host of 16,000 distinct non-ASCII characters held a run thread for 16 s.
+_MAX_HOSTNAME_CHARS = 253
+
+
 def _idna2003_hostname(host: str) -> str:
     """Return the ASCII form Python's resolver gives *host* (IDNA 2003)."""
+    if len(host.rstrip(".")) > _MAX_HOSTNAME_CHARS:
+        raise UnsafeURLError(f"URL hostname is longer than {_MAX_HOSTNAME_CHARS} characters")
     try:
         return host.encode("idna").decode("ascii").lower().rstrip(".")
     except UnicodeError as exc:

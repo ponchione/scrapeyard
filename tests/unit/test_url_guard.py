@@ -179,7 +179,7 @@ def _answer_public(calls: list[str]):
         "ｓｔｒａße.test",
         "my_site.straße.test",
         "☃.straße.test",
-        "straße" + "\u00ad" * 1100 + ".test",
+        "straße" + "\u00ad" * 100 + ".test",
         "a\u1806b.test",
         "Ꭰ.test",  # Cherokee: mapped by browsers, kept by Python's Unicode 3.2 tables
         # One name to a browser, but not valid IDNA 2008, so httpx sends nothing.
@@ -198,6 +198,34 @@ def test_hostname_idna_versions_read_differently_is_refused(monkeypatch, host: s
         with pytest.raises(UnsafeURLError, match="read differently by IDNA 2003 and IDNA 2008"):
             check(url)
     assert canonical_url_origin(url) is None
+    assert lookups == []
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "".join(chr(0x4E00 + index) for index in range(20_000)) + ".test",
+        "straße" + "\u00ad" * 1100 + ".test",
+        ".".join(["a" * 50] * 6),
+    ],
+    ids=["distinct-cjk", "soft-hyphens", "ascii"],
+)
+def test_hostname_longer_than_a_dns_name_is_refused_before_it_is_encoded(
+    monkeypatch, host: str
+) -> None:
+    lookups: list[str] = []
+    monkeypatch.setattr(
+        "scrapeyard.engine.url_guard.socket.getaddrinfo", _answer_public(lookups)
+    )
+    url = f"https://{host}/next"
+
+    started = time.monotonic()
+    for check in (public_dns_hostname, assert_public_url, resolve_public_url, url_host_label):
+        with pytest.raises(UnsafeURLError, match="longer than 253 characters"):
+            check(url)
+    assert canonical_url_origin(url) is None
+    # Python's punycode encoder is quadratic: the CJK host took about 25 s.
+    assert time.monotonic() - started < 1
     assert lookups == []
 
 

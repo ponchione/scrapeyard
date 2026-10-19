@@ -383,6 +383,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The URL guard refuses a hostname longer than 253 characters, the most a
+  DNS name can have, before it encodes it. IDNA encodes a label before it
+  checks the label's length, and Python's punycode is quadratic, so a next
+  link whose host was 16,000 distinct non-ASCII characters held one of the
+  four run threads for 16 s (a 300 KB host, minutes) while it was judged.
+  Such a link now stops pagination as `unsafe_next_url` at once.
 - A `basic` page that declares `charset=punycode` is read as UTF-8, as
   other charsets no browser uses already were. Python's punycode decoder
   is pure Python and quadratic, and decoding runs on the event loop: a
