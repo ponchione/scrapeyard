@@ -1888,7 +1888,10 @@ fetched-byte ceiling counts decoded body chunks as they are read, including
 redirect and application-level retry responses against one shared run budget.
 A single valid `Content-Length` is checked before reading as an optimization,
 but decoded chunks remain authoritative for compressed, chunked, missing, or
-misleading lengths. Crossing the byte ceiling or monotonic run deadline closes
+misleading lengths. A compressed body is inflated at most 64 KiB at a time
+(zstd about 2 MiB) and each piece is counted before the next is decoded, so a
+small compressed body cannot inflate past the ceiling in memory; a zstd window
+over 8 MB, or more than four content codings, fails as a decoding error. Crossing the byte ceiling or monotonic run deadline closes
 and awaits the socket task before the structured budget failure is returned;
 only a bounded body is handed to Scrapling's parser. The Compose admission
 threshold is 3072 MiB under a 4 GiB cgroup ceiling, leaving an explicit 1 GiB

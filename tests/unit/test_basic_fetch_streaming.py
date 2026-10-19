@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import random
 import time
+import tracemalloc
+import zlib
 from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
+import brotli
 import httpcore
 import httpx
 import pytest
+import zstandard
 from scrapling import Fetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
@@ -399,6 +404,115 @@ async def test_decoded_body_crosses_ceiling_despite_small_content_length() -> No
 
     assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
     assert exc_info.value.observed_amount == len(body)
+
+
+_CODINGS = pytest.mark.parametrize(
+    ("coding", "encode"),
+    [
+        ("gzip", gzip.compress),
+        ("deflate", zlib.compress),
+        ("br", lambda body: brotli.compress(body, quality=5)),
+        ("zstd", lambda body: zstandard.ZstdCompressor().compress(body)),
+        ("gzip, gzip", lambda body: gzip.compress(gzip.compress(body))),
+        ("deflate", lambda body: zlib.compress(body, wbits=-zlib.MAX_WBITS)),
+        ("zstd", lambda body: b"".join(
+            zstandard.ZstdCompressor().compress(half)
+            for half in (body[: len(body) // 2], body[len(body) // 2 :])
+        )),
+    ],
+    ids=["gzip", "deflate", "br", "zstd", "gzip-in-gzip", "raw-deflate", "zstd-two-frames"],
+)
+
+
+async def _serve_encoded(coding: str, encoded: bytes) -> tuple[asyncio.AbstractServer, str]:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _read_request(reader)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                + f"Content-Encoding: {coding}\r\n".encode()
+                + f"Content-Length: {len(encoded)}\r\n\r\n".encode()
+                + encoded
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+
+    return await _request_url(handler)
+
+
+@_CODINGS
+async def test_compressed_page_decodes_whole(coding, encode) -> None:
+    rng = random.Random(0)
+    page = b"<html><body>" + b"".join(
+        b"<p>%d %s</p>" % (index, rng.randbytes(24).hex().encode())
+        for index in range(20_000)
+    ) + b"</body></html>"
+
+    server, url = await _serve_encoded(coding, encode(page))
+    try:
+        response = await fetch_streaming_response(
+            Fetcher,
+            url,
+            {"timeout": 5, "stealthy_headers": False},
+            budget=_budget(fetched_bytes=len(page)),
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert response.body == page.decode()
+
+
+@_CODINGS
+async def test_compressed_body_is_charged_as_it_inflates(coding, encode) -> None:
+    # 32 MiB of zeros is 26 bytes of brotli. Decoded a network read at a time,
+    # the whole of it was in memory before the budget saw any of it.
+    inflated = b"\0" * (32 * 1024 * 1024)
+    encoded = encode(inflated)
+    del inflated
+
+    server, url = await _serve_encoded(coding, encoded)
+    tracemalloc.start()
+    try:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await fetch_streaming_response(
+                Fetcher,
+                url,
+                {"timeout": 5, "stealthy_headers": False},
+                budget=_budget(fetched_bytes=256 * 1024),
+            )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        server.close()
+        await server.wait_closed()
+
+    assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
+    assert peak < 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("coding", "encoded"),
+    [
+        ("gzip, gzip, gzip, gzip, gzip", b"\x1f\x8b"),
+        ("zstd", zstandard.ZstdCompressor().compress(b"x" * 4096)[:-4]),
+        ("br", b"\xff\xff\xff not brotli"),
+    ],
+    ids=["five-codings", "truncated-zstd", "corrupt-br"],
+)
+async def test_body_that_cannot_be_decoded_fails_as_a_decoding_error(coding, encoded) -> None:
+    server, url = await _serve_encoded(coding, encoded)
+    try:
+        with pytest.raises(httpx.DecodingError):
+            await fetch_streaming_response(
+                Fetcher, url, {"timeout": 5, "stealthy_headers": False}, budget=_budget(),
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def test_slow_continuous_body_closes_socket_before_deadline_error_returns() -> None:

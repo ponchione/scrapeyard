@@ -6,7 +6,7 @@ import asyncio
 import codecs
 import re
 import ssl
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import AsyncExitStack
 from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
@@ -23,6 +23,7 @@ from tldextract import tldextract
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.traffic import OFFLINE_TLD_EXTRACTOR
+from scrapeyard.engine.content_coding import content_decoder
 from scrapeyard.engine.url_guard import canonical_url_origin
 
 _STREAM_CHUNK_BYTES = 64 * 1024
@@ -232,10 +233,21 @@ async def fetch_streaming_response(
                 if declared is not None:
                     await budget.check_fetched_capacity(declared)
             body = bytearray()
-            async for chunk in response.aiter_bytes(chunk_size=_STREAM_CHUNK_BYTES):
-                if budget is not None:
-                    await budget.consume_fetched_bytes(len(chunk))
-                body.extend(chunk)
+
+            async def keep(pieces: Iterator[bytes]) -> None:
+                # Each piece is bounded, so the budget stops a body that
+                # inflates past it near its ceiling, and the request's
+                # timeout can still end one inflating within it.
+                for piece in pieces:
+                    if budget is not None:
+                        await budget.consume_fetched_bytes(len(piece))
+                    body.extend(piece)
+                    await asyncio.sleep(0)
+
+            decoder = content_decoder(response.headers)
+            async for chunk in response.aiter_raw(chunk_size=_STREAM_CHUNK_BYTES):
+                await keep(decoder.decode(chunk))
+            await keep(decoder.flush())
             body_bytes = bytes(body)
             text, encoding = _decode_body(body_bytes, response.encoding or "utf-8")
             result = Response(

@@ -383,6 +383,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A compressed `basic` response is inflated a bounded piece at a time
+  (64 KiB, or about 2 MiB for zstd), and each piece is charged to the run's
+  fetched-byte budget before the next is decoded. httpx decoded each network
+  read whole, so a few kilobytes of brotli, or of gzip inside gzip, became
+  gigabytes in memory before the budget saw any of it: 1.6 KB of brotli
+  took the process to 3.2 GB, and 6 KB past the container's 4 GB limit,
+  which would end every run in flight. Such a body now stops at the ceiling
+  as `budget_exceeded`, as it already did once decoded. A zstd body whose
+  window is over 8 MB (the limit RFC 9659 sets and browsers keep) and a
+  response with more than four content codings now fail as a decoding error
+  (`http_error`).
 - DEPLOYMENT.md and JOB_LIFECYCLE.md no longer say a request still running
   at the end of a stop's 5 s request drain gets no answer: Uvicorn answers
   it with a plain-text `500`. For `POST /jobs/{id}/cancel` that `500` can
