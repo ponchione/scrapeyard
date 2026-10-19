@@ -13,6 +13,7 @@ import hashlib
 import html as html_text
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -150,33 +151,45 @@ def _holds_a_secret(texts: Iterable[str]) -> bool:
     """Whether any of *texts* holds a resolved secret of the run.
 
     A client re-encodes what it sends (httpx keeps ``/`` but escapes ``<``),
-    lowercases a host, and a page may echo a secret as HTML entities, encoded
-    again inside another URL, or in another case, so each text is read in each
-    of those forms and compared without case. A secret transformed otherwise
-    (base64, say) is not recognized.
+    lowercases a host, and a page may echo a secret as HTML entities, in a
+    JSON string, encoded again inside another URL, or in another case, so each
+    text is read in each of those forms and compared without case. A secret
+    transformed otherwise (base64, say) is not recognized.
     """
     secrets = {secret.casefold() for secret in active_deployment_secrets()}
     if not secrets:
         return False
-    return any(
-        secret in reading.casefold()
-        for text in texts
-        for reading in _readings(text)
-        for secret in secrets
-    )
+    for text in texts:
+        for reading in _readings(text):
+            folded = reading.casefold()
+            if any(secret in folded for secret in secrets):
+                return True
+    return False
+
+
+# The escapes a JSON encoder may use for characters a secret holds: PHP's
+# writes "/" as "\/", Go's "<" as "\u003c".
+_JSON_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|/)")
 
 
 def _readings(text: str) -> Iterator[str]:
-    yield text
-    yield html_text.unescape(text)
-    for decode in (unquote, unquote_plus):
-        reading = text
-        for _ in range(4):
-            decoded = decode(reading)
-            if decoded == reading:
-                break
-            reading = decoded
-            yield reading
+    unescaped = (
+        text,
+        html_text.unescape(text),
+        _JSON_ESCAPE.sub(lambda match: chr(int(match[1], 16)) if match[1] else "/", text),
+    )
+    for index, base in enumerate(unescaped):
+        if base in unescaped[:index]:
+            continue
+        yield base
+        for decode in (unquote, unquote_plus):
+            reading = base
+            for _ in range(4):
+                decoded = decode(reading)
+                if decoded == reading:
+                    break
+                reading = decoded
+                yield reading
 
 
 def _strings(value: Any) -> Iterator[str]:

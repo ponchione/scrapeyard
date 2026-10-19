@@ -86,7 +86,8 @@ request so an environment-secret rotation does not silently change an already
 accepted delivery. The page cache (`execution.page_cache: record`) is plain
 text, so it does not record a page that would write a resolved secret, in its
 HTML, final URL, content type or click snapshots, whether as sent,
-percent-encoded (up to four times over), as HTML entities or in another case. A secret the site echoes
+percent-encoded (up to four times over), as HTML entities, in a JSON string or
+in another case. A secret the site echoes
 transformed otherwise (base64, say) is not recognized, so record no run whose
 secrets a site may echo that way. The URLs it records keep no userinfo.
 

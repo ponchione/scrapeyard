@@ -243,10 +243,13 @@ async def test_record_writes_nothing_that_holds_a_resolved_secret(tmp_path, monk
         # A login redirect carrying the URL httpx sent, encoded once more.
         ("tok/en<1>", {"final_url": f"{BASE}?next=%2Flist%3Fkey%3Dtok%2Fen%253C1%253E"}),
         ("tok en/1", {"html": '<a href="/p?key=tok+en%2F1">next</a>'}),
+        ("AbC/dEf+GhI0123=", {"html": '<script>var t = "AbC\\/dEf+GhI0123=";</script>'}),
+        ("tok/en<1>", {"html": '<script>var t = "tok/en\\u003c1>";</script>'}),
+        ("tok/en<1>", {"html": '<a href="/p?key=tok&#37;2Fen&#37;3C1&#37;3E">next</a>'}),
     ],
     ids=[
         "partly-escaped", "content-type", "lowercased-host", "html-entity", "click-snapshot",
-        "escaped-twice", "form-encoded",
+        "escaped-twice", "form-encoded", "json-slash", "json-unicode", "entity-percent",
     ],
 )
 def test_no_reading_of_a_resolved_secret_is_written(tmp_path, secret, page):

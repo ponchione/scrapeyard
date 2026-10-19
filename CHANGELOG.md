@@ -422,8 +422,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   retention, where SECRET_STORAGE.md promised every persisted copy is
   encrypted. A page that would write a resolved secret anywhere (HTML,
   final URL, content type, click snapshots), as sent, percent-encoded
-  (twice, or with `+` for a space, included), as HTML entities or in
-  another case, is now not
+  (twice, or with `+` for a space, included), as HTML entities, in a JSON
+  string or in another case, is now not
   recorded (`"stored": false`), and userinfo is dropped from the URL. A
   secret transformed otherwise, such as base64, is not recognized.
 - A page that `execution.page_cache: record` cannot write to the cache
