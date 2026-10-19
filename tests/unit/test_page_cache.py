@@ -240,8 +240,14 @@ async def test_record_writes_nothing_that_holds_a_resolved_secret(tmp_path, monk
         ("AbCdEf0123456789", {"final_url": "https://abcdef0123456789.example.test/list"}),
         ("tok<9f1c2e7d5a", {"html": "<p>tok&lt;9f1c2e7d5a</p>"}),
         ("tok-9f1c2e7d5a", {"click_pagination": {"pages": 2, "next": "tok-9f1c2e7d5a"}}),
+        # A login redirect carrying the URL httpx sent, encoded once more.
+        ("tok/en<1>", {"final_url": f"{BASE}?next=%2Flist%3Fkey%3Dtok%2Fen%253C1%253E"}),
+        ("tok en/1", {"html": '<a href="/p?key=tok+en%2F1">next</a>'}),
     ],
-    ids=["partly-escaped", "content-type", "lowercased-host", "html-entity", "click-snapshot"],
+    ids=[
+        "partly-escaped", "content-type", "lowercased-host", "html-entity", "click-snapshot",
+        "escaped-twice", "form-encoded",
+    ],
 )
 def test_no_reading_of_a_resolved_secret_is_written(tmp_path, secret, page):
     cache = _cache(tmp_path, PageCacheMode.record)

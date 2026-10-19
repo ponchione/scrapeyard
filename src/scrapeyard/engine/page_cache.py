@@ -21,14 +21,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, unquote_plus, urlsplit, urlunsplit
 
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import PageCacheMode
 from scrapeyard.engine.scrape_models import ScrapeStop
 from scrapeyard.engine.url_guard import (
     active_deployment_secrets,
-    redact_deployment_secrets_with_count,
     redact_userinfo_in_url,
     url_host_label,
 )
@@ -151,20 +150,33 @@ def _holds_a_secret(texts: Iterable[str]) -> bool:
     """Whether any of *texts* holds a resolved secret of the run.
 
     A client re-encodes what it sends (httpx keeps ``/`` but escapes ``<``),
-    lowercases a host, and a page may echo a secret as HTML entities or in
-    another case, so each text is also read unquoted and unescaped, and all
-    are compared without case. A secret transformed otherwise (base64, say)
-    is not recognized.
+    lowercases a host, and a page may echo a secret as HTML entities, encoded
+    again inside another URL, or in another case, so each text is read in each
+    of those forms and compared without case. A secret transformed otherwise
+    (base64, say) is not recognized.
     """
-    secrets = active_deployment_secrets()
+    secrets = {secret.casefold() for secret in active_deployment_secrets()}
     if not secrets:
         return False
-    folded = tuple(secret.casefold() for secret in secrets)
-    for text in texts:
-        for reading in {text, unquote(text), html_text.unescape(text)}:
-            if redact_deployment_secrets_with_count(reading.casefold(), folded)[1]:
-                return True
-    return False
+    return any(
+        secret in reading.casefold()
+        for text in texts
+        for reading in _readings(text)
+        for secret in secrets
+    )
+
+
+def _readings(text: str) -> Iterator[str]:
+    yield text
+    yield html_text.unescape(text)
+    for decode in (unquote, unquote_plus):
+        reading = text
+        for _ in range(4):
+            decoded = decode(reading)
+            if decoded == reading:
+                break
+            reading = decoded
+            yield reading
 
 
 def _strings(value: Any) -> Iterator[str]:
