@@ -124,6 +124,9 @@ elif command == "exec":
             # The database a connection starts in, the first.
             print(keys if database == "0" else "0")
         elif question == "INFO" and rest[3:] == ["keyspace"]:
+            if env.get("KEYSPACE_REFUSED") == "yes":
+                print("NOPERM User default has no permissions to run the 'info' command\r")
+                sys.exit(0)
             # Redis lists only the databases that hold keys.
             print("# Keyspace\r")
             if keys != "0":
@@ -595,6 +598,8 @@ def test_backup_copies_while_stopped_and_encrypts_only_after_the_application_is_
     [
         ({"COPY_FAILS": "yes"}, "the backup set could not be created"),
         ({"SAVE_FAILS": "yes"}, "Redis did not save a settled copy"),
+        # redis-cli prints an error reply and leaves its status at 0.
+        ({"KEYSPACE_REFUSED": "yes"}, "Redis did not answer"),
         ({"DUMP_COPY_FAILS": "yes"}, "Redis's dump could not be copied"),
         ({"STOP_FAILS": "yes"}, "could not be stopped"),
         # systemctl reports success for a stop whose own command failed.

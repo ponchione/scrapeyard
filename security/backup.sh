@@ -263,6 +263,8 @@ redis_cli() {
 redis_keys() {
   local info
   info=$(redis_cli "$1" INFO keyspace) || return 1
+  # An error reply lists no database either, and is not "no keys".
+  grep -q '^# Keyspace$' <<< "$info" || return 1
   awk -F '[:=,]' '/^db[0-9]+:keys=/ { keys += $3 } END { print keys + 0 }' <<< "$info"
 }
 
