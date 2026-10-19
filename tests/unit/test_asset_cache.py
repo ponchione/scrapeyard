@@ -111,7 +111,7 @@ async def test_expired_entries_are_not_served(monkeypatch: pytest.MonkeyPatch) -
 
 
 async def test_the_cache_is_bounded_per_entry_and_in_total() -> None:
-    cache = AssetCache(max_bytes=10, max_entry_bytes=6)
+    cache = AssetCache(max_entry_bytes=6)
     await cache.store(SITE, _response(b"x" * 7))
     assert cache.size == 0
     await cache.store(SITE, _response(b"x" * 7, headers={"content-length": "3"}))
@@ -121,14 +121,31 @@ async def test_the_cache_is_bounded_per_entry_and_in_total() -> None:
         return _request(f"https://www.example.test/{name}.js")
 
     await cache.store(SITE, _response(b"x" * 4, request=script("a")))
+    entry = cache.size
+    cache = AssetCache(max_bytes=2 * entry, max_entry_bytes=6)
+    await cache.store(SITE, _response(b"x" * 4, request=script("a")))
     await cache.store(SITE, _response(b"x" * 4, request=script("b")))
     cache.lookup(SITE, script("a"))  # a is now the most recently used
     await cache.store(SITE, _response(b"x" * 4, request=script("c")))
 
-    assert cache.size == 8
+    assert cache.size == 2 * entry
     assert cache.lookup(SITE, script("b")) is None
     assert cache.lookup(SITE, script("a")) is not None
     assert cache.lookup(SITE, script("c")) is not None
+
+
+async def test_urls_and_headers_count_toward_the_bound() -> None:
+    cache = AssetCache(max_bytes=1024 * 1024)
+    scripts = [
+        _request(f"https://www.example.test/{index}.js?{'q' * 50_000}") for index in range(100)
+    ]
+    for script in scripts:
+        await cache.store(SITE, _response(b"", headers={"x-pad": "p" * 100_000}, request=script))
+
+    # Empty bodies counted nothing, so all 100 (15 MB) were kept.
+    kept = [script for script in scripts if cache.lookup(SITE, script) is not None]
+    assert 0 < len(kept) < 10
+    assert cache.size <= 1024 * 1024
 
 
 async def test_a_response_whose_body_is_gone_is_skipped() -> None:

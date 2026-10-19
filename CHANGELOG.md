@@ -383,6 +383,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- The browser asset cache's 32 MiB bound counts each entry's URL and
+  headers as well as its body. Only bodies counted, so a page that had the
+  browser fetch cacheable scripts with empty bodies, long URLs and large
+  headers kept them all for the run: 2,000 such responses held about
+  294 MiB against an accounted size of 0.
 - `execution.page_cache: record` no longer writes a resolved deployment
   secret, or a URL's userinfo, to the cache directory in plain text. The
   recorded `final_url` kept both (the query of a target URL holding a

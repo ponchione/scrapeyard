@@ -528,7 +528,7 @@ cache could reuse (`GET`, status 200, a positive `max-age` or `Expires`, no
 same site's targets are answered from memory while fresh. The request still
 passes every guard and block rule first; it is counted as `cached` in
 `run_budget.traffic` instead of as a request, and it uses no request budget. The
-cache holds up to 32 MiB per run (8 MiB per response), outlives replaced
+cache holds up to 32 MiB per run, URLs and headers included (8 MiB per response body), outlives replaced
 browsers and is dropped when the run's targets finish. Cached bodies reach the
 browser through the Playwright driver, which adds roughly 20 MB to its peak
 memory per running browser.

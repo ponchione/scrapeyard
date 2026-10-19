@@ -21,6 +21,10 @@ from typing import Any
 CACHED_RESOURCE_TYPES = frozenset({"script", "stylesheet"})
 MAX_CACHE_BYTES = 32 * 1024 * 1024
 MAX_ENTRY_BYTES = 8 * 1024 * 1024
+# Besides its body an entry holds its URL, its headers and their bookkeeping.
+# Counting only bodies let a page fill memory with empty responses that had
+# long URLs and headers.
+_ENTRY_OVERHEAD_BYTES = 512
 # The body is stored decoded and re-framed on fulfill; cookies are never replayed.
 _DROPPED_HEADERS = frozenset({
     "connection", "content-encoding", "content-length", "keep-alive", "set-cookie",
@@ -34,6 +38,7 @@ class CachedAsset:
     headers: dict[str, str]
     body: bytes
     expires_at: float
+    size: int = 0
 
 
 def freshness_seconds(headers: dict[str, str]) -> float | None:
@@ -132,16 +137,24 @@ class AssetCache:
         if len(body) > self._max_entry_bytes:
             return
         key = (site, response.request.url)
+        kept_headers = {
+            name: value for name, value in headers.items() if name not in _DROPPED_HEADERS
+        }
+        size = (
+            _ENTRY_OVERHEAD_BYTES
+            + len(key[1])
+            + len(body)
+            + sum(len(name) + len(value) for name, value in kept_headers.items())
+        )
         self._remove(key)
         self._entries[key] = CachedAsset(
             status=response.status,
-            headers={
-                name: value for name, value in headers.items() if name not in _DROPPED_HEADERS
-            },
+            headers=kept_headers,
             body=body,
             expires_at=time.monotonic() + lifetime,
+            size=size,
         )
-        self._bytes += len(body)
+        self._bytes += size
         while self._bytes > self._max_bytes:
             self._remove(next(iter(self._entries)))
 
@@ -152,4 +165,4 @@ class AssetCache:
     def _remove(self, key: tuple[str | None, str]) -> None:
         asset = self._entries.pop(key, None)
         if asset is not None:
-            self._bytes -= len(asset.body)
+            self._bytes -= asset.size
