@@ -23,7 +23,7 @@ class _QueuedJob:
 
     async def result(self, timeout: float | None = None, *, poll_delay: float = 0.5) -> None:
         if self.should_timeout:
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
 
 class _CancelledQueuedJob:

@@ -8,9 +8,9 @@ production credentials, deployment access, or public scrape targets.
 
 The `CI` workflow exposes these checks:
 
-- `Quality / Python 3.10` and `Quality / Python 3.12` install the lock file,
-  validate it, run Ruff and mypy over their configured scopes, and run the full
-  pytest suite with branch coverage and the 80% coverage floor.
+- `Quality / Python 3.12` installs the lock file, validates it, runs Ruff and
+  mypy over their configured scopes, and runs the full pytest suite with branch
+  coverage and the 80% coverage floor.
 - `Distribution build / Python 3.12` builds both the wheel and sdist and then
   verifies that each archive contains exactly the checked-in SQL migrations.
 - `Live Redis / Python 3.12` runs only the `live_redis` tests against an
@@ -23,17 +23,17 @@ lock file, smoke harness, or runtime API/config/browser/queue/storage paths.
 This intentionally resource-intensive lane does not replace or weaken any of
 the always-on CI, live-Redis, distribution, or dependency-audit gates.
 
-The separate `Dependency audit` workflow exposes `Python 3.10` and `Python
-3.12` checks. Each audits the pinned packaging tools and both the locked
-development environment and exported production-only graph. It runs on every
+The separate `Dependency audit` workflow exposes a `Python 3.12` check. It
+audits the pinned packaging tools and both the locked development environment
+and exported production-only graph. It runs on every
 pull request and push to `main`, can be dispatched manually, and runs on a
 weekly Monday schedule. The CI workflow does not
 duplicate those audit jobs.
 
-The minimum supported interpreter is Python 3.10. Python 3.12 matches the
-Docker production runtime. The complete static and default test gates run on
-both. Distribution and live-service behavior run on the production version to
-keep those focused lanes bounded.
+The minimum supported interpreter is Python 3.12. The Docker production image
+runs it, and so does `python3` on the Ubuntu 24.04 production host, which runs
+the deployment and backup scripts. Scrapeyard ships only as that image, so
+every gate runs on 3.12.
 
 From an environment with Poetry 2.3.4 and `poetry-plugin-export` 1.10.0, the
 local equivalents of the CI gates are:
@@ -115,8 +115,8 @@ After both graceful termination and `SIGKILL` of the owner, a replacement must
 reach liveness using the same identity. Never run this check against production
 state. See [SCALING.md](SCALING.md) for the supported topology and state map.
 
-Run the install, lint, type, and full-suite commands once under Python 3.10 and
-once under Python 3.12 when reproducing the complete matrix locally. The live
+Run the install, lint, type, and full-suite commands under Python 3.12 to
+reproduce the CI matrix locally. The live
 Redis script is the local equivalent of the service lane: it enables API-key
 authentication, checks configurable host port `56379`, starts a dedicated
 Compose project, uses Redis database 15, and always removes its containers,
@@ -174,11 +174,9 @@ workflow publishes them.
 
 Recommended branch-protection checks are all of the following:
 
-- `CI / Quality / Python 3.10`
 - `CI / Quality / Python 3.12`
 - `CI / Distribution build / Python 3.12`
 - `CI / Live Redis / Python 3.12`
-- `Dependency audit / Python 3.10`
 - `Dependency audit / Python 3.12`
 
 For pull requests matched by its path filter, also require `Container and

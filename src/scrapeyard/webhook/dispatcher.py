@@ -410,7 +410,7 @@ class HttpWebhookDispatcher:
             try:
                 remaining = config.timeout - (time.monotonic() - sent_at)
                 if remaining > 0:
-                    with suppress(asyncio.TimeoutError, httpx.HTTPError):
+                    with suppress(TimeoutError, httpx.HTTPError):
                         await asyncio.wait_for(self._drain_response(response), timeout=remaining)
                 elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -489,8 +489,8 @@ class HttpWebhookDispatcher:
             )
         except (
             URLResolutionError,
-            # The total deadline; a separate class from TimeoutError before 3.11.
-            asyncio.TimeoutError,
+            # The total deadline.
+            TimeoutError,
             httpx.TimeoutException,
             httpx.ConnectError,
             httpx.HTTPError,
@@ -527,7 +527,7 @@ class HttpWebhookDispatcher:
         """Stop scheduling, drain bounded work within grace, then cancel.
 
         Live tasks that miss the deadline remain tracked and cause
-        :class:`asyncio.TimeoutError`; a later startup cannot overlap them.
+        :class:`TimeoutError`; a later startup cannot overlap them.
         """
 
         self._accepting_tasks = False
@@ -540,7 +540,7 @@ class HttpWebhookDispatcher:
             coordinator.cancel()
             try:
                 await deadline.run(asyncio.gather(coordinator, return_exceptions=True))
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 unresolved_phases.append("coordinator")
 
         queue = self._queue
@@ -553,7 +553,7 @@ class HttpWebhookDispatcher:
                     await queue.join()
                 else:
                     await deadline.run(queue.join())
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 timed_out = True
 
         cancelled = 0
@@ -564,7 +564,7 @@ class HttpWebhookDispatcher:
         if self._worker_tasks:
             try:
                 await deadline.run(asyncio.gather(*self._worker_tasks, return_exceptions=True))
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # A cancelled gather and its child tasks can require one more
                 # non-blocking loop turn to publish their terminal state.
                 await asyncio.sleep(0)
@@ -609,7 +609,7 @@ class HttpWebhookDispatcher:
                 unresolved_phases.append("coordinator")
             if "workers" not in unresolved_phases and self._worker_tasks:
                 unresolved_phases.append("workers")
-            raise asyncio.TimeoutError(
+            raise TimeoutError(
                 "Webhook shutdown deadline exceeded in phase(s): "
                 + ", ".join(unresolved_phases)
             )
@@ -657,14 +657,14 @@ class HttpWebhookDispatcher:
             await deadline.run(self._client_close_task)
         except AwaitableCancelled:
             pass
-        except asyncio.TimeoutError:
+        except TimeoutError:
             unresolved_phases.append("http_client")
         finally:
             if self._client_close_task.done():
                 self._client_close_task = None
 
         if unresolved_phases:
-            raise asyncio.TimeoutError(
+            raise TimeoutError(
                 "Webhook shutdown deadline exceeded in phase(s): " + ", ".join(unresolved_phases)
             )
 
@@ -1159,7 +1159,7 @@ class HttpWebhookDispatcher:
                 await self._wake_event.wait()
             else:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return
 
     def _delivery_deadline(self, delivery: WebhookDelivery) -> datetime:

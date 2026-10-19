@@ -4,7 +4,7 @@ version = "0.6.0"
 description = "Config-driven web scraping microservice built on Scrapling"
 authors = []
 readme = "README.md"
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "fastapi>=0.136.1,<0.137.0",
     "uvicorn[standard]>=0.34.0,<0.35.0",
@@ -60,12 +60,15 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "I", "UP", "C4", "SIM"]
-ignore = ["E501", "UP035", "SIM105", "SIM110"]
+# UP042's StrEnum changes what str() and format() give for a member, and
+# ErrorType's values are a contract. UP017 and UP047 only respell
+# timezone.utc and TypeVar generics.
+ignore = ["E501", "UP017", "UP035", "UP042", "UP047", "SIM105", "SIM110"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/scrapeyard/api/routes.py" = ["B008"]
@@ -79,7 +82,7 @@ ignore = ["E501", "UP035", "SIM105", "SIM110"]
 combine-as-imports = true
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
 # Full first-party production scope: poetry run mypy src/scrapeyard
 

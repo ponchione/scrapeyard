@@ -120,7 +120,7 @@ async def _send_unless_stalled(send: Send, message: Message) -> bool:
 
     try:
         await asyncio.wait_for(send(message), timeout=_RESPONSE_SEND_STALL_SECONDS)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Abandoned a result response its client stopped reading stall_seconds=%s",
             _RESPONSE_SEND_STALL_SECONDS,

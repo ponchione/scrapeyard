@@ -246,7 +246,7 @@ async def wait_for_queued_job(
     )
     try:
         await asyncio.shield(result_task)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False
     except ResultNotFound:
         # Delivery reconciliation or an obsolete handler can remove the arq

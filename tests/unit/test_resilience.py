@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -83,7 +82,7 @@ class TestRetryHandler:
             httpx.WriteError("request write failed"),
             httpx.RemoteProtocolError("incomplete upstream response"),
             httpx.ProxyError("proxy tunnel failed"),
-            asyncio.TimeoutError("operation timed out"),
+            TimeoutError("operation timed out"),
         ],
     )
     async def test_retries_on_httpx_connection_and_timeout_failures(self, failure):
@@ -101,7 +100,7 @@ class TestRetryHandler:
             httpx.ReadError("response reset"),
             httpx.RemoteProtocolError("incomplete upstream response"),
             httpx.ProxyError("proxy tunnel failed"),
-            asyncio.TimeoutError("operation timed out"),
+            TimeoutError("operation timed out"),
         ],
     )
     async def test_persistent_transient_failures_use_every_configured_attempt(self, failure):

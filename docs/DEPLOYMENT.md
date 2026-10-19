@@ -493,7 +493,7 @@ select arbitrary public destinations while excluding every rebinding target.
 
 ## Retained release artifacts and rollback
 
-Prepare a release on a build/qualification host with Docker, Python 3.10+, and
+Prepare a release on a build/qualification host with Docker, Python 3.12+, and
 at least 15 GiB free disk. Use an isolated host or ensure the qualification
 lane's fixed subnets and ports are unused. This builds the selected **committed**
 revision, runs the existing security scans and complete quick qualification,

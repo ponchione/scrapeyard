@@ -865,7 +865,7 @@ class BrowserSession:
             try:
                 try:
                     await asyncio.wait_for(release_page(), timeout=_PAGE_RELEASE_SECONDS)
-                except asyncio.TimeoutError as exc:
+                except TimeoutError as exc:
                     raise httpx.NetworkError("Browser did not release the page") from exc
                 stopped = True
             except BaseException:

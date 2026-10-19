@@ -45,7 +45,7 @@ examples/       Example scrape configs
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.12+
 - Poetry
 - Redis for real app runs
 - Docker and Docker Compose for the bundled local stack

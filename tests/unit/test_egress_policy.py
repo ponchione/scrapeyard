@@ -176,12 +176,8 @@ async def test_egress_attestation_counts_a_hanging_challenge_as_denied(monkeypat
         await _stop_servers(challenge, liveness)
 
 
-class _Python310AsyncioTimeoutError(Exception):
-    """asyncio.TimeoutError before Python 3.11: not the builtin TimeoutError."""
-
-
 @pytest.mark.asyncio
-async def test_egress_attestation_handles_python310_asyncio_timeouts(monkeypatch):
+async def test_egress_attestation_handles_connect_timeouts(monkeypatch):
     challenge, liveness, challenge_port, liveness_port = (
         await _start_controlled_probe()
     )
@@ -190,10 +186,9 @@ async def test_egress_attestation_handles_python310_asyncio_timeouts(monkeypatch
 
     async def time_out(host, port, *args, **kwargs):
         if port == timing_out_port:
-            raise _Python310AsyncioTimeoutError
+            raise TimeoutError
         return await real_open_connection(host, port, *args, **kwargs)
 
-    monkeypatch.setattr(asyncio, "TimeoutError", _Python310AsyncioTimeoutError)
     monkeypatch.setattr(asyncio, "open_connection", time_out)
     try:
         await attest_connected_ip_policy(_settings(challenge_port, liveness_port))

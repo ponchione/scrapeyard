@@ -26,7 +26,7 @@ def test_static_package_metadata_uses_pep621_single_version_source() -> None:
 
     assert 'name = "scrapeyard"' in project
     assert 'version = "0.6.0"' in project
-    assert 'requires-python = ">=3.10,<4.0"' in project
+    assert 'requires-python = ">=3.12,<4.0"' in project
     for field in ("name", "version", "description", "authors", "readme"):
         assert re.search(rf"(?m)^{field}\s*=", poetry) is None
 

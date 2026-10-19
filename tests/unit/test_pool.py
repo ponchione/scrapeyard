@@ -421,7 +421,7 @@ async def test_start_raises_clear_error_on_redis_connect_timeout(monkeypatch, ca
         close = getattr(awaitable, "close", None)
         if callable(close):
             close()
-        raise asyncio.TimeoutError
+        raise TimeoutError
 
     monkeypatch.setattr(
         "scrapeyard.queue.pool.get_settings",

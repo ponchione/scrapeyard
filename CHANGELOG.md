@@ -109,6 +109,12 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `--boot-service`.
 
 ### Changed
+- Python 3.12 is the minimum supported version, up from 3.10. It is what the
+  production image runs and what `python3` is on the Ubuntu 24.04 production
+  host. CI and the dependency audit no longer run a 3.10 leg, and the code
+  drops its 3.10 handling of `asyncio.TimeoutError`. The lock no longer needs
+  a numpy that runs on 3.10, so the image's numpy, which only camoufox uses,
+  moves from 2.2.6 to 2.4.2, the version already locked for 3.13 and later.
 - A worker that has finished no poll of the queue for 60 seconds counts as
   ended (TD-92): readiness fails with `worker runner task stalled` and the
   process ends itself as for TD-89. arq gives its Redis connections no read

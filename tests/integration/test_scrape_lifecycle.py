@@ -456,7 +456,7 @@ async def test_sync_scrape_returns_202_when_timeout_expires(client, monkeypatch)
             observed["timeout"] = timeout
             observed["poll_delay"] = poll_delay
             if timeout == 0:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             await asyncio.sleep(0.01)
 
     async def _enqueue(*_args, **_kwargs):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -218,8 +217,8 @@ def classify_fetch_exception(
         # The page was fetched; a selector's value or its transform went past
         # a limit the deployment sets.
         return ErrorType.selector_engine_error, None, debug
-    # Distinct classes before Python 3.11; BrowserTransportTimeout is a TimeoutError.
-    if isinstance(exc, TimeoutError | asyncio.TimeoutError | httpx.TimeoutException):
+    # BrowserTransportTimeout is a TimeoutError.
+    if isinstance(exc, TimeoutError | httpx.TimeoutException):
         return (
             ErrorType.navigation_timeout if fetcher_type != FetcherType.basic else ErrorType.timeout,
             None,

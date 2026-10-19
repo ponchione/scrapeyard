@@ -92,7 +92,7 @@ async def await_with_timeout(
                     raise AwaitableCancelled
                 return task.result()
         cancel_task_nowait(task)
-        raise asyncio.TimeoutError
+        raise TimeoutError
     except asyncio.CancelledError:
         cancel_task_nowait(task)
         raise

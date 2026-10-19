@@ -320,7 +320,7 @@ async def _shutdown_runtime_services(
             await deadline.run(task)
         except AwaitableCancelled:
             pass
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             record_failure(phase, exc)
         except Exception as exc:
             record_failure(phase, exc)
@@ -626,7 +626,7 @@ async def _timed_async_probe(
 ) -> ProbeResult:
     try:
         return await asyncio.wait_for(awaitable, timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return ProbeResult(False, f"{name} probe timed out after {timeout:g}s")
     except Exception as exc:
         return ProbeResult(False, f"{name} probe failed: {type(exc).__name__}")
@@ -643,7 +643,7 @@ async def _timed_sync_probe(
     consume_result_when_done(probe)
     try:
         return await asyncio.wait_for(asyncio.shield(probe), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "%s readiness probe is still running after the %.3fs response timeout",
             name,
@@ -663,7 +663,7 @@ async def _project_summary_readiness_probe(
         return {}, ProbeResult(True)
     try:
         return await _health.project_summary(timeout=timeout), ProbeResult(True)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return (
             _health.cached_project_summary,
             ProbeResult(False, f"project summary probe timed out after {timeout:g}s"),
@@ -689,7 +689,7 @@ async def _queue_depth_readiness_probe(
             dict[str, int | None],
             await asyncio.wait_for(pool.queue_depths(), timeout=timeout),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return (
             unavailable,
             ProbeResult(False, f"redis queue depth probe timed out after {timeout:g}s"),

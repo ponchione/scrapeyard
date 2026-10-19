@@ -445,7 +445,7 @@ it. Read [How to use this list](#how-to-use-this-list) and the
    checking the [Eyebox contract](#eyebox-contract) and running the Eyebox
    checks in step 5 before merging.
 5. **Run the checks locally, then open a pull request.** GitHub Actions runs
-   them again, on Python 3.10 and 3.12, and runs the container lanes when
+   them again, on Python 3.12, and runs the container lanes when
    their paths change. Read a failed job's log with
    `gh api repos/{owner}/{repo}/actions/jobs/<job_id>/logs`.
 
@@ -514,6 +514,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After the 2026-10-16 audit (`e830567`, not pushed) | Locally, ruff over `src tests scripts security`, mypy (111 files) and `pytest -W error` pass on 3.12: 3,144 passed, 19 skipped, 90.62% coverage; on 3.10, one commit of code earlier (`f792fa7`), 3,142 passed and 19 skipped, in a scratch environment built from the lock. The 19 live Redis tests pass against an append-only Redis 7.4.11. Eyebox's client tests (337 passed, 22 skipped) and its 54 configs pass. Trivy finds the Redis 7.4.11 image clean but for the excepted CVE-2026-84782, and the new probe image clean. The application image was not rebuilt, and nothing ran on GitHub |
 | After the second 2026-10-16 pass (`1e6e8a8`) | Locally, ruff over `src tests scripts security`, mypy (112 files) and `pytest -W error` pass on 3.12: 3,165 passed, 19 skipped, 90.65% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (339 passed, 22 skipped) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
 | After the third 2026-10-16 pass (code at `ca4a8cb`) | Locally, ruff over `src tests scripts security`, mypy (113 files) and `pytest -W error` pass on 3.12: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `0e7b332`) and its 54 configs pass. No image was rebuilt locally; the container lanes run on the pull request |
+| After raising the floor to Python 3.12 (2026-10-19) | Locally on 3.12.14, ruff over `src tests scripts security`, mypy (113 files, `python_version` 3.12) and `pytest -W error` pass: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. `scripts/audit_dependencies.py all` and the packaging-tool audit find nothing; the wheel and sdist build, carry all 25 migrations and install. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `8eab6dd`) and its 54 configs pass. The relock dropped the 3.10 backports and moved numpy from 2.2.6 to 2.4.2 on 3.12 |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.

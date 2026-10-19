@@ -125,7 +125,7 @@ async def test_scrape_target_classifies_http_not_found(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_scrape_target_classifies_navigation_timeout_for_browser_fetchers(monkeypatch, tmp_path):
     async def _raise_timeout(*_args, **_kwargs):
-        raise asyncio.TimeoutError()
+        raise TimeoutError()
 
     monkeypatch.setattr("scrapeyard.engine.scraper._fetch_page", _raise_timeout)
 

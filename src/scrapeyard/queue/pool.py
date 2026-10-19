@@ -147,7 +147,7 @@ class _PriorityJobHandle:
         while True:
             remaining = None if deadline is None else deadline - monotonic()
             if remaining is not None and remaining <= 0:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             snapshot_awaitable = self._pool._delivery_snapshot(self._run_id)
             snapshot = (
                 await snapshot_awaitable
@@ -156,7 +156,7 @@ class _PriorityJobHandle:
             )
             remaining = None if deadline is None else deadline - monotonic()
             if remaining is not None and remaining <= 0:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             if snapshot.state is QueueDeliveryState.complete:
                 if self._pool.redis is None:
                     raise RuntimeError("Redis disconnected while waiting for queue result")
@@ -226,7 +226,7 @@ class _PriorityWorker(Worker):
                 self.pool.delete(self.health_check_key),
                 timeout=_HEALTH_KEY_DELETE_SECONDS,
             )
-        except (RedisError, OSError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, RedisError, OSError) as exc:
             # The key expires by itself; the connections must still be closed.
             logger.warning(
                 "Could not remove the worker's health key while closing: %s",
@@ -417,7 +417,7 @@ class WorkerPool:
                 ),
                 timeout=timeout_seconds,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             logger.error(
                 "Timed out connecting to Redis queue %s after %ss",
                 self._queue_name,
@@ -597,7 +597,7 @@ class WorkerPool:
                 await deadline.run(self._runner_task)
             except AwaitableCancelled:
                 pass
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 unresolved_phases.append("runner")
             except Exception as exc:
                 # The runner has ended, which is what the stop needs. What
@@ -618,15 +618,15 @@ class WorkerPool:
                     "Worker shutdown drain window expired; active-job cancellation "
                     "remains unresolved"
                 )
-            raise asyncio.TimeoutError(
+            raise TimeoutError(
                 "Worker shutdown deadline exceeded in phase(s): "
                 + ", ".join(unresolved_phases)
             )
 
         try:
             await deadline.run(self._worker.close())
-        except asyncio.TimeoutError:
-            raise asyncio.TimeoutError(
+        except TimeoutError:
+            raise TimeoutError(
                 "Worker shutdown deadline exceeded in phase(s): redis_close"
             ) from None
 
@@ -938,7 +938,7 @@ class WorkerPool:
         except asyncio.CancelledError:
             abort.cancel()
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "Run abort timed out run_id=%s redis_state=%s queue_outcome=%s "
                 "cancellation_phase=arq_abort grace_seconds=%s",

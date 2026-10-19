@@ -544,7 +544,7 @@ async def test_shutdown_retains_database_for_unresolved_webhook_task(monkeypatch
     app = FastAPI()
     app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
     app.state.webhook_dispatcher = SimpleNamespace(shutdown_pending=True)
-    close_webhook = AsyncMock(side_effect=asyncio.TimeoutError("webhook workers"))
+    close_webhook = AsyncMock(side_effect=TimeoutError("webhook workers"))
     close_database = AsyncMock()
     monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
     monkeypatch.setattr(main_module, "close_db", close_database)

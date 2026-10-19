@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import httpx
 import pytest
 
@@ -35,7 +33,7 @@ def test_classify_fetch_exception_prefers_page_signal_for_blocked_fetch_errors()
 
 
 def test_classify_fetch_exception_maps_browser_timeout_for_dynamic_fetcher():
-    error_type, http_status, debug = classify_fetch_exception(asyncio.TimeoutError(), FetcherType.dynamic)
+    error_type, http_status, debug = classify_fetch_exception(TimeoutError(), FetcherType.dynamic)
 
     assert error_type == ErrorType.navigation_timeout
     assert http_status is None
@@ -43,8 +41,7 @@ def test_classify_fetch_exception_maps_browser_timeout_for_dynamic_fetcher():
 
 
 @pytest.mark.parametrize("fetcher", [FetcherType.dynamic, FetcherType.stealthy])
-def test_classify_fetch_exception_maps_browser_transport_timeout_on_every_python(fetcher):
-    # A builtin TimeoutError, which is not asyncio.TimeoutError before 3.11.
+def test_classify_fetch_exception_maps_browser_transport_timeout(fetcher):
     debug = {"final_url": "https://example.com/slow", "main_document_status": None}
     exc = BrowserTransportTimeout("Page.goto: Timeout 30000ms exceeded.", debug=debug)
 
