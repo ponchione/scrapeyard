@@ -993,7 +993,9 @@ sudo security/install-chromium-apparmor-profile.sh remove
 
 - `identity` is stable audit/idempotency attribution. During rotation, deploy
   old and new named credentials with the same identity, move clients to the
-  new secret, then remove and restart without the old entry. Authentication
+  new secret, then remove and restart without the old entry. Credentials that
+  share an identity share its idempotency keys and receipts, so startup
+  refuses them unless they name the same projects. Authentication
   compares every configured secret in constant time before selecting a match.
 - Available scopes are `submit`, `read`, `schedule-admin`, `delete`,
   `health-detail`, and `transport-admin`. Reserve `transport-admin` for
@@ -1907,8 +1909,8 @@ is written by temporary file plus atomic replacement before metadata commit.
 ### Ad-hoc submission idempotency
 
 `POST /scrape` optionally accepts one `Idempotency-Key` header of 1–128 visible
-ASCII bytes. `jobs.db` stores only its SHA-256 digest, scoped by the validated
-API-key digest. When API authentication is disabled, the scope is the single
+ASCII bytes. `jobs.db` stores only its SHA-256 digest, scoped by the caller's
+identity: a named credential's `identity`, or a legacy key's digest. When API authentication is disabled, the scope is the single
 literal `local-development` identity; local clients must therefore coordinate key
 uniqueness. The raw YAML SHA-256, job ID, run ID, derived sync/async response
 mode, creation time, and expiry are inserted in the same immediate SQLite

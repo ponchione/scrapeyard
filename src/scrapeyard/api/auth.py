@@ -116,6 +116,15 @@ def parse_api_credentials(
             raise ValueError(f"Duplicate API credential name: {credential.name!r}")
         digests.add(digest)
         names.add(credential.name)
+    # An identity owns its idempotency keys and receipts, so credentials that
+    # share one, as a rotation's old and new do, must reach the same projects.
+    projects_by_identity: dict[str, frozenset[str] | None] = {}
+    for credential in credentials:
+        projects = projects_by_identity.setdefault(credential.identity, credential.projects)
+        if projects != credential.projects:
+            raise ValueError(
+                f"Credentials with identity {credential.identity!r} must name the same projects"
+            )
     return tuple(credentials)
 
 

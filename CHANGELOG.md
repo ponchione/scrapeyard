@@ -383,6 +383,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- Startup refuses named credentials that share an `identity` but not their
+  `projects`. Idempotency keys and receipts belong to the identity, so a
+  credential limited to one project learned from `/scrape/acceptance` that
+  another project's key was in use, and that project's name, and a `POST`
+  reusing the key answered `409`, blocking the other project's retry.
+  A rotation's old and new credentials, which name the same projects, are
+  unaffected. DEPLOYMENT.md said keys were scoped by the API key's digest.
 - Startup refuses a `SCRAPEYARD_API_CREDENTIALS` that is set but names no
   credential (`{}`, or a blank value). Both passed Compose's check for an
   unset variable and parsed to no credentials, which leaves the API open

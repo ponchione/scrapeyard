@@ -77,6 +77,25 @@ def test_revocation_removes_only_revoked_secret_without_identity_ambiguity():
         # Both passed Compose's check for an unset variable and opened the API.
         ("{}", "at least one credential"),
         (" ", "valid JSON"),
+        (
+            json.dumps(
+                {
+                    "alpha": {
+                        "identity": "shared",
+                        "secret": "alpha-secret-000000000",
+                        "scopes": ["submit"],
+                        "projects": ["alpha"],
+                    },
+                    "beta": {
+                        "identity": "shared",
+                        "secret": "beta-secret-0000000000",
+                        "scopes": ["submit"],
+                        "projects": ["beta"],
+                    },
+                }
+            ),
+            "same projects",
+        ),
         (json.dumps({"bad name": {}}), "credential name"),
         (
             json.dumps(
