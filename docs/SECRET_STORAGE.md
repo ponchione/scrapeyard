@@ -83,7 +83,9 @@ substring redaction. Persisted results include a non-sensitive
 values or group keys were changed by that protection. A
 terminal webhook stores an encrypted copy of the resolved retry
 request so an environment-secret rotation does not silently change an already
-accepted delivery.
+accepted delivery. The page cache (`execution.page_cache: record`) is plain
+text, so it does not record a page whose HTML or final URL holds a resolved
+secret, and the URLs it records keep no userinfo.
 
 ## Encryption envelope and key configuration
 

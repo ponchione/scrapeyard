@@ -531,8 +531,12 @@ def _record_fetched_page(
     fetcher_type: FetcherType,
     response: Any,
     final_url: str,
-) -> None:
-    """Store one successful page and any click-pagination snapshots it carries."""
+) -> bool:
+    """Store one successful page and any click-pagination snapshots it carries.
+
+    Returns False at the first page the cache refuses because it holds a
+    resolved deployment secret; the pages after it are not stored either.
+    """
     click_meta: dict[str, Any] | None = None
     click_result = getattr(response, CLICK_PAGINATION_ATTRIBUTE, None)
     if isinstance(click_result, ClickPaginationResult):
@@ -541,7 +545,7 @@ def _record_fetched_page(
             # Parse to store the same serialized HTML as the first page.
             with captured.parsed() as snapshot:
                 snapshot_url = getattr(snapshot, "url", None)
-                cache.store(
+                if not cache.store(
                     url,
                     fetcher_type.value,
                     html=_response_html(snapshot),
@@ -549,9 +553,10 @@ def _record_fetched_page(
                     status=int(getattr(snapshot, "status", None) or 200),
                     content_type=_response_header(snapshot, "content-type") or "text/html",
                     click_index=index,
-                )
+                ):
+                    return False
         click_meta = {"pages": len(click_result.pages), "stop_reason": click_result.stop_reason}
-    cache.store(
+    return cache.store(
         url,
         fetcher_type.value,
         html=_response_html(response),
@@ -694,7 +699,7 @@ async def _fetch_page(
     if page_cache is not None and page_cache.mode is PageCacheMode.record:
         debug["page_cache"] = {"mode": PageCacheMode.record.value}
         try:
-            await run_thread_work(
+            stored = await run_thread_work(
                 _record_fetched_page,
                 page_cache,
                 url,
@@ -713,6 +718,14 @@ async def _fetch_page(
                 url_host_label(url),
                 type(exc).__name__,
             )
+            stored = False
+        else:
+            if not stored:
+                logger.warning(
+                    "Page cache did not record a page that holds a deployment secret host=%s",
+                    url_host_label(url),
+                )
+        if not stored:
             debug["page_cache"]["stored"] = False
     return FetchOutcome(page=response, debug=debug)
 

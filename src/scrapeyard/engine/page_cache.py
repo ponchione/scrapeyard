@@ -25,7 +25,11 @@ from urllib.parse import urlsplit, urlunsplit
 from scrapeyard.common.paths import safe_path_part
 from scrapeyard.config.schema import PageCacheMode
 from scrapeyard.engine.scrape_models import ScrapeStop
-from scrapeyard.engine.url_guard import redact_userinfo_in_url, url_host_label
+from scrapeyard.engine.url_guard import (
+    redact_deployment_secrets_with_count,
+    redact_userinfo_in_url,
+    url_host_label,
+)
 from scrapeyard.models.job import ErrorType
 
 
@@ -115,12 +119,21 @@ class PageCache:
         content_type: str,
         click_index: int = 0,
         click_pagination: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
+        """Write one page, or nothing and return False if it holds a run's secret.
+
+        The cache is plain text kept without retention, outside the encrypted
+        store every other persisted copy of a resolved secret is in.
+        """
+        if any(
+            redact_deployment_secrets_with_count(text)[1] for text in (html, final_url)
+        ):
+            return False
         html_path, meta_path = self._paths(url, fetcher, click_index)
         html_path.parent.mkdir(parents=True, exist_ok=True)
         meta = {
             "url": redact_userinfo_in_url(url),
-            "final_url": final_url,
+            "final_url": _without_userinfo(final_url),
             "status": status,
             "content_type": content_type,
             "fetcher": fetcher,
@@ -131,6 +144,16 @@ class PageCache:
             meta["click_pagination"] = click_pagination
         _atomic_write(html_path, html)
         _atomic_write(meta_path, json.dumps(meta, sort_keys=True))
+        return True
+
+
+def _without_userinfo(url: str) -> str:
+    # Replay never connects and keys pages without userinfo, so the
+    # credentials a URL carried are not needed to read it back.
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit(parsed._replace(netloc=parsed.netloc.rpartition("@")[2]))
 
 
 def _atomic_write(path: Path, text: str) -> None:

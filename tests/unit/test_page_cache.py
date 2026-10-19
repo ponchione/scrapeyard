@@ -42,7 +42,11 @@ from scrapeyard.engine.scraper import (
     _replay_cached_page,
     scrape_target,
 )
-from scrapeyard.engine.url_guard import ResolvedPublicURL
+from scrapeyard.engine.url_guard import (
+    ResolvedPublicURL,
+    activate_deployment_secret_redaction,
+    reset_deployment_secret_redaction,
+)
 from scrapeyard.models.job import ErrorType
 
 BASE = "https://shop.example.test/list"
@@ -198,6 +202,43 @@ async def test_a_cache_that_cannot_be_written_does_not_fail_the_fetched_pages(
     assert _names(result) == ["A", "B", "C", "D"]
     assert len(network.requests) == 3
     assert result.debug["page_cache"] == {"mode": "record", "stored": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "html"),
+    [
+        (f"{BASE}?key=tok-9f1c2e7d5a", _page_html(["A"], None)),
+        (BASE, _page_html(["A"], None).replace("</body>", "<p>tok-9f1c2e7d5a</p></body>")),
+    ],
+    ids=["in-the-url", "in-the-page"],
+)
+async def test_record_writes_nothing_that_holds_a_resolved_secret(tmp_path, monkeypatch, url, html):
+    async def site(_fetcher_cls, requested, _call_kwargs, **_kwargs):
+        return _response(requested, html)
+
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", site)
+    token = activate_deployment_secret_redaction(("tok-9f1c2e7d5a",))
+    try:
+        with activate_page_cache(_cache(tmp_path, PageCacheMode.record)):
+            result = await _scrape(_target().model_copy(update={"url": url}), tmp_path)
+    finally:
+        reset_deployment_secret_redaction(token)
+
+    assert result.is_success and _names(result) == ["A"]
+    assert result.debug["page_cache"] == {"mode": "record", "stored": False}
+    written = [path.read_text() for path in (tmp_path / "cache").rglob("*") if path.is_file()]
+    assert not any("tok-9f1c2e7d5a" in text for text in written)
+
+
+def test_recorded_final_url_keeps_no_userinfo(tmp_path):
+    cache = _cache(tmp_path, PageCacheMode.record)
+
+    assert cache.store(BASE, "basic", html="<p>1</p>", final_url="https://user:S3CRET@shop.example.test/list",
+                       status=200, content_type="text/html")
+
+    assert cache.load(BASE, "basic").final_url == BASE
+    assert not any("S3CRET" in path.read_text() for path in (tmp_path / "cache").rglob("*.json"))
 
 
 @pytest.mark.asyncio

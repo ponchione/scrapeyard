@@ -383,6 +383,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- `execution.page_cache: record` no longer writes a resolved deployment
+  secret, or a URL's userinfo, to the cache directory in plain text. The
+  recorded `final_url` kept both (the query of a target URL holding a
+  `SCRAPEYARD_SECRET_*` value, or `user:password@`), and a page that echoed
+  a secret was stored with it, outside the encrypted store and with no
+  retention, where SECRET_STORAGE.md promised every persisted copy is
+  encrypted. A page or final URL holding a resolved secret is now not
+  recorded (`"stored": false`), and userinfo is dropped from the URL.
 - A page that `execution.page_cache: record` cannot write to the cache
   directory (full, read-only, another owner's) is returned as fetched, with
   `"stored": false` in its `debug.page_cache`. The write error failed the
