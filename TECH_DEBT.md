@@ -6,6 +6,30 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-20, go-live pass**: an audit of `3205b39`, done locally, then
+  the fixes below, each with a test seen failing on the old code.
+  - TD-115 closed: another project's job answers every job route as an absent
+    one does (`404`, or `204` from a delete, which leaves it alone), and the
+    application no longer serves `/openapi.json`, `/docs` or `/redoc`.
+  - TD-114 closed: IPv4 hosts are read by WHATWG URL rules, as browsers read
+    them, where `inet_aton` passed `0x7f.0x.0x.1` and `0x` as DNS names; a
+    host whose last label is a number and that is no address is refused; the
+    domain guard keys every spelling of an address as one; and its routes take
+    bracketed IPv6 hosts and names with `_`.
+  - TD-107 closed: reproduced on arq 0.28 by a new live test (a Redis stall
+    with a run in flight). When cancelled runs are still waiting on Redis half
+    way through the stop's reserve, the stop drops the Redis connections, so
+    arq's hung result writes fail and the stop completes.
+  - Live basic and browser fetches parse the page on the run's threads, as
+    replay did: on the event loop a 20 MiB page held every other run and the
+    API for 326-345 ms (now 14 ms), a 2 MiB one 30-62 ms (now 1-4 ms).
+  - Test time: the backup-script harness no longer runs its stub tools under
+    coverage, which made that file about half the suite's time; and the
+    egress installer's signal test resets SIGHUP and SIGINT, which a pytest
+    started under `nohup` or with `&` ignores and bash then cannot trap.
+  - Unchanged and found sound: the query plans of the 259 distinct statements
+    the store and integration tests run, the price patterns (linear), log
+    rotation and retention.
 - **2026-10-16, third pass** (no release; pull request #41): a targeted
   audit, done locally, of what the first two passes left: the basic fetch
   path, the URL and IP guards, API authentication and idempotency, the page
@@ -517,6 +541,7 @@ Measured on 2026-10-09 at `b0b285e`.
 | After raising the floor to Python 3.12 (2026-10-19) | Locally on 3.12.14, ruff over `src tests scripts security`, mypy (113 files, `python_version` 3.12) and `pytest -W error` pass: 3,220 passed, 19 skipped, 90.74% coverage. The 19 live Redis tests pass against the append-only Redis 7.4.11 of `docker-compose.yml`. `scripts/audit_dependencies.py all` and the packaging-tool audit find nothing; the wheel and sdist build, carry all 25 migrations and install. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `8eab6dd`) and its 54 configs pass. The relock dropped the 3.10 backports and moved numpy from 2.2.6 to 2.4.2 on 3.12 |
 | After moving the image to Python 3.12.15 (2026-10-19) | Built locally from `python:3.12.15-slim-bookworm` in 174 s (4.9 GB, as the 3.12.11 image measures here): the container scan passes, and `tests/smoke/verify_fetch_sessions.py` passes inside it for Chromium, stealth Chromium and Camoufox under the production seccomp profile and capabilities (the WSL host has no AppArmor). The container, rehearsal and release-artifact tests pass (108). The browser smoke lane and the release rehearsal were not run locally: they need AppArmor and rewrite the host's `DOCKER-USER` chain, so they run on the pull request |
 | After moving the image to Python 3.14 (2026-10-19) | Locally, ruff over `src tests scripts security` and mypy (113 files, `python_version` 3.12) pass, and `pytest -W error` passes on 3.12.14 (3,221 passed, 19 skipped, 90.74% coverage) and 3.14.8 (3,221 passed, 19 skipped, 90.75%). The 19 live Redis tests pass on both, and `scripts/audit_dependencies.py all` finds nothing on either. Built from `python:3.14.8-slim-bookworm` in 168 s, the image passes the container scan, and `tests/smoke/verify_fetch_sessions.py` passes inside it for Chromium, stealth Chromium and Camoufox under the production seccomp profile and capabilities. With `asyncio.shield` put back, four tests fail on 3.14. Eyebox's client tests (346 passed, 25 skipped, at Eyebox `5d93b7c`) and its 54 configs pass |
+| After the 2026-10-20 go-live pass | Locally, ruff over `src tests scripts security` and mypy (113 files) pass, and `pytest -W error` with a live Redis 7.4.11 passes on 3.12.14 (3,274 passed, none skipped, 91.19% coverage, 392 s where it took 656 s without the live tests) and 3.14.4 (3,274 passed, 382 s). The image builds, and `tests/smoke/verify_fetch_sessions.py` passes inside it for Chromium, stealth Chromium and Camoufox under the production seccomp profile and capabilities. Eyebox's client tests (347 passed, 25 skipped, at Eyebox `56e85a3`) and its 54 configs pass |
 
 Not run: live Redis tests, container builds, browser smoke, release
 qualification.
@@ -659,8 +684,8 @@ to release, with the host's current release as `previous_revision`.
     readiness, and a policy finding that cannot be put back).
   - TD-21 needs an off-host store, the owner's choice.
 
-**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88 and TD-102 to TD-115, and
-TD-117.
+**Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-102 to TD-106, TD-108
+to TD-113, and TD-117.
 
 **Consumer-side:** C-1 to C-10 are fixed in Eyebox.
 
@@ -685,15 +710,12 @@ TD-117.
 | TD-104 | P3 | deferred | A native cron schedule fires twice when the clocks go back |
 | TD-105 | P3 | deferred | An egress switch killed between its insert and its delete leaves two jumps every install refuses |
 | TD-106 | P3 | deferred | With the default backoff a webhook is dead-lettered after about 15 s of receiver errors |
-| TD-107 | P3 | deferred | A Redis stall that trips the poll watchdog during a run ends in a failed shutdown |
 | TD-108 | P3 | deferred | The rehearsal deploys releases whose images its daemon already holds |
 | TD-109 | P3 | deferred | The page cache has no size bound or expiry, and an entry can be torn or corrupt |
 | TD-110 | P3 | deferred | Fetch errors are classified by words in the exception's message |
 | TD-111 | P3 | deferred | Stealthy basic requests send impossible Sec-Fetch headers |
 | TD-112 | P3 | deferred | Backup retention keeps a count, so one day's runs can evict every older archive |
 | TD-113 | P3 | deferred | Migrations run with foreign keys on, so rebuilding a referenced table deletes its children |
-| TD-114 | P3 | deferred | Some IP spellings are read unlike a browser reads them |
-| TD-115 | P3 | deferred | Authorization answers say more than they need to |
 | TD-117 | P3 | deferred | Locked dependencies hold the image at Python 3.14 |
 
 ## Ready to implement
@@ -1713,31 +1735,6 @@ receives webhooks.
 **Revisit when:** a consumer relies on webhooks. The fix is settings for
 the base and the cap, with defaults whose retries span the age bound.
 
-### TD-107 — A Redis stall that trips the poll watchdog during a run ends in a failed shutdown
-
-**Priority:** P3 · **Status:** deferred · **Contract:** none
-
-**Problem:** found by the second 2026-10-16 pass. When a Redis that hangs
-trips TD-92's watchdog while a run is in progress, `WorkerPool.stop`
-(`src/scrapeyard/queue/pool.py`) drains and then cancels the run. Its
-handler records the run `failed` in SQLite, but arq 0.26.3's `run_job`
-then waits, shielded, for its result write on the Redis that does not
-answer, and `stop` cancels each task once. The cancellation reserve runs
-out, the stop raises `Worker shutdown deadline exceeded in phase(s):
-runner, active_jobs`, the instance guard is kept with a CRITICAL log, and
-the dispatcher and databases are not closed. The process ends (status 143)
-and Docker starts it again. Nothing durable is lost: the run is `failed`,
-and arq's buffered write runs when Redis resumes. The live stall test stops
-an idle worker only.
-
-**Why deferred:** the restart recovers, and the run's state is right; the
-cost is an unclean-looking shutdown on each such stall.
-
-**Revisit when:** a stall with a run in flight is seen, or the shutdown's
-logs feed an alert. The fix is to close the Redis connection pool under a
-short timeout once the reserve expires, so the hung reads fail and the
-tasks finish, and to extend the live stall test to a run in progress.
-
 ### TD-108 — The rehearsal deploys releases whose images its daemon already holds
 
 **Priority:** P3 · **Status:** deferred · **Contract:** none
@@ -1883,58 +1880,6 @@ their rows. No current migration does this.
 would. The fix is to turn foreign keys off before `BEGIN IMMEDIATE`, run
 `PRAGMA foreign_key_check` before `COMMIT` and abort on any row, and turn
 them on again.
-
-### TD-114 — Some IP spellings are read unlike a browser reads them
-
-**Priority:** P3 · **Status:** deferred · **Contract:** none
-
-**Problem:** found by the third 2026-10-16 pass.
-- `_legacy_ipv4_address` (`src/scrapeyard/engine/url_guard.py`) uses
-  `inet_aton`, which refuses an empty hex part, so `0x7f.0x.0x.1` and `0x`
-  pass the URL check as DNS names, where WHATWG URL parsing, which browsers
-  follow, reads them as 127.0.0.1 and 0.0.0.0. Chromium rewrites the host
-  before the route guard sees it, and the guard then blocks it; the basic,
-  proxy and CDP paths need DNS, which fails. But the verdict before
-  navigation is wrong, and a path that did not rewrite the host would reach
-  loopback. Camoufox was not tried.
-- `domain_guard_host` and `canonical_url_origin` do not fold legacy or
-  IPv4-mapped spellings, so `8.8.8.8`, `134744072`, `8.8.2056` and
-  `::ffff:8.8.8.8` are four domain-guard keys for one address, and a
-  cooled-down IP host can be reached by another spelling. The domain-guard
-  routes refuse bracketed IPv6 hosts and names with `_`, so such a cooldown
-  cannot be cleared before it ends.
-
-**Why deferred:** neither reaches a private address today, and the domain
-guard bounds load on a site rather than guarding anything.
-
-**Revisit when:** a fetch path that does not rewrite hosts is added, or a
-cooldown needs clearing on such a host. The fix is to parse IPv4 by WHATWG
-rules, or refuse a host whose last label is numeric or `0x`-prefixed and does
-not parse; to fold legacy and mapped spellings in `canonical_url_origin`; and
-to let the routes' host pattern take bracketed IPv6 and `_`.
-
-### TD-115 — Authorization answers say more than they need to
-
-**Priority:** P3 · **Status:** deferred · **Contract:** none; Eyebox's own-project calls are unchanged
-
-**Problem:** found by the third 2026-10-16 pass.
-- `get_job`, `get_exact_run`, the live-job branch of `get_results`,
-  `cancel_job`, `trigger_job` and `_set_schedule_enabled`
-  (`src/scrapeyard/api/routes.py`) look the job up before checking the
-  caller's scope and project. Another project's live job then answers
-  `403 Caller is not authorized for project '<project>'` where an absent one
-  answers `404`, which confirms the job and names its project; `get_results`
-  means not to do that for retained results. Job IDs are UUID4s, so it needs
-  a leaked ID.
-- `/openapi.json`, `/docs` and `/redoc` answer any valid credential, a
-  `health-detail` one included.
-
-**Why deferred:** both need a valid credential, and the first a leaked job
-ID as well.
-
-**Revisit when:** a second tenant's credential is issued. The fix is the same
-`404` whenever the project check fails on these lookups, and
-`openapi_url=None`, or a scope, for the schema and its pages.
 
 ### TD-117 — Locked dependencies hold the image at Python 3.14
 

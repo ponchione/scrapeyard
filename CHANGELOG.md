@@ -409,6 +409,23 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   independent cleanup phases, cancellation, and shutdown lifecycle behavior.
 
 ### Fixed
+- A project-scoped caller asking any job route for another project's job gets
+  what an absent job gets (`404`, or `204` from `DELETE /jobs/{id}`, which
+  leaves it alone), not a `403` naming the project (TD-115). The application
+  no longer serves `/openapi.json`, `/docs` or `/redoc`, which answered any
+  valid credential.
+- The URL guard reads IPv4 hosts as browsers do (WHATWG URL): `0x7f.0x.0x.1`
+  and `0x`, which passed as DNS names, are 127.0.0.1 and 0.0.0.0, and a host
+  ending in a number that is no address is refused. The domain guard keys
+  every spelling of an address as one, and `/domains/{host}/guard` takes
+  bracketed IPv6 hosts and names with `_` (TD-114).
+- A Redis that stops answering while a run is in flight no longer ends the
+  application's stop in a failure that keeps the instance guard and leaves
+  the databases open: the stop drops the Redis connections arq's result
+  writes hang on (TD-107).
+- Live basic and browser pages are decoded and parsed on the run's threads,
+  not the event loop, where a 20 MiB page held every other run and the API
+  for a third of a second.
 - `security/backup.sh` counts Redis's keys in every database. It counted
   the first alone, so with `SCRAPEYARD_REDIS_DSN` naming another one
   every backup recorded 0 keys and every restore of it failed when Redis
