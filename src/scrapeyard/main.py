@@ -512,6 +512,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Scrapeyard",
     description="Config-driven web scraping microservice",
+    # Served, they answered any valid credential, a health-detail one too.
+    # docs/API.md documents the API; app.openapi() still builds the schema.
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
     version=__version__,
     lifespan=lifespan,
 )

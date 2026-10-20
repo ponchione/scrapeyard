@@ -254,6 +254,15 @@ async def _get_job_or_404(job_store: JobStore, job_id: str) -> Job:
         raise_json_error(404, f"Job {job_id!r} not found")
 
 
+def _require_job_project(request: Request, project: str, job_id: str) -> None:
+    """Answer another project's job as an absent one.
+
+    A 403 naming the project would confirm the job exists and say whose it is.
+    """
+    if not get_authenticated_caller(request).permits_project(project):
+        raise_json_error(404, f"Job {job_id!r} not found")
+
+
 def _queued_scrape_response(
     job_id: str,
     *,
@@ -460,7 +469,7 @@ async def update_job(
 
     authorize_request(request, AuthScope.schedule_admin)
     existing = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.schedule_admin, project=existing.project)
+    _require_job_project(request, existing.project, job_id)
     parsed = await _read_valid_yaml_config(request, scope=AuthScope.schedule_admin)
     config = parsed.config
     if config.schedule is None:
@@ -494,8 +503,9 @@ async def _set_schedule_enabled(
     job_store: JobStore,
     scheduler: SchedulerService,
 ) -> dict[str, Any]:
+    authorize_request(request, AuthScope.schedule_admin)
     job = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.schedule_admin, project=job.project)
+    _require_job_project(request, job.project, job_id)
     outcome = await job_store.set_schedule_enabled(
         job_id,
         enabled=enabled,
@@ -558,8 +568,9 @@ async def trigger_job(
 ) -> Any:
     """Queue an immediate manual run using the current persisted config version."""
 
+    authorize_request(request, AuthScope.schedule_admin)
     job = await _get_job_or_404(job_store, job_id)
-    authorize_request(request, AuthScope.schedule_admin, project=job.project)
+    _require_job_project(request, job.project, job_id)
     try:
         run_id, config_hash = await scheduler.trigger_job_now(job_id)
     except KeyError:
@@ -627,11 +638,12 @@ async def get_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Any:
     """Get a single job by ID."""
+    authorize_request(request, AuthScope.read)
     try:
         job, run_count, last_run_at = await job_store.get_job_with_stats(job_id)
     except KeyError:
         raise_json_error(404, f"Job {job_id!r} not found")
-    authorize_request(request, AuthScope.read, project=job.project)
+    _require_job_project(request, job.project, job_id)
 
     runs = await job_store.get_job_runs(job_id, limit=10)
     next_run_at = scheduler.get_next_run_time(job_id)
@@ -653,11 +665,12 @@ async def get_exact_run(
     job_store: JobStore = Depends(get_job_store),
 ) -> Any:
     """Read one immutable accepted run; unavailable history returns 404."""
+    authorize_request(request, AuthScope.read)
     try:
         project = await job_store.get_job_project(job_id)
     except KeyError:
         raise_json_error(404, f"Job {job_id!r} not found")
-    authorize_request(request, AuthScope.read, project=project)
+    _require_job_project(request, project, job_id)
     state = await job_store.get_job_run_state(job_id, run_id)
     if state is None:
         raise_json_error(404, "Exact run identity is unavailable")
@@ -681,8 +694,10 @@ async def delete_job(
         job = await job_store.get_job(job_id)
     except KeyError:
         job = None
-    if job is not None:
-        authorize_request(request, AuthScope.delete, project=job.project)
+    if job is not None and not get_authenticated_caller(request).permits_project(job.project):
+        # An absent job's deletion is already done; another project's job must
+        # read the same, and is left alone.
+        return no_content_response()
     try:
         await delete_reserved_job(
             job_id,
@@ -708,7 +723,13 @@ async def cancel_job(
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> Response:
     """Cancel the current queued/running delivery and wait for quiescence."""
+    if not {AuthScope.submit, AuthScope.delete} & get_authenticated_caller(request).scopes:
+        # Before the lookup: a caller that may cancel nothing learns nothing.
+        # The scope named depends on the request alone: submit is the least
+        # that may cancel an exact run.
+        authorize_request(request, AuthScope.submit if run_id is not None else AuthScope.delete)
     job = await _get_job_or_404(job_store, job_id)
+    _require_job_project(request, job.project, job_id)
     scope = AuthScope.delete
     if (
         run_id is not None
@@ -719,7 +740,7 @@ async def cancel_job(
         # currently owns a job, and any scheduled job (cancelling one disables
         # its schedule), still need delete.
         scope = AuthScope.submit
-    authorize_request(request, scope, project=job.project)
+    authorize_request(request, scope)
     try:
         await cancel_current_job(
             job_id,
@@ -756,8 +777,9 @@ async def get_results(
         job = await job_store.get_job(job_id)
     except KeyError:
         job = None
-    if job is not None:
-        authorize_request(request, AuthScope.read, project=job.project)
+    if job is not None and not caller.permits_project(job.project):
+        # Another project's live job reads as absent, as its retained results do.
+        job = None
 
     if (
         run_id is None

@@ -272,13 +272,18 @@ async def test_project_scoped_reader_cannot_enumerate_or_read_other_project(
 
     unfiltered = await authorized_client.get("/jobs", headers=_headers("reader"))
     other = await authorized_client.get("/jobs/beta-job", headers=_headers("reader"))
+    absent = await authorized_client.get("/jobs/no-such-job", headers=_headers("reader"))
     filtered = await authorized_client.get(
         "/jobs?project=alpha",
         headers=_headers("reader"),
     )
 
     assert unfiltered.status_code == 403
-    assert other.status_code == 403
+    # Another project's job reads as an absent one: neither its existence nor
+    # its project is confirmed (TD-115).
+    assert other.status_code == absent.status_code == 404
+    assert other.json()["error"] == absent.json()["error"].replace("no-such-job", "beta-job")
+    assert "beta" not in other.json()["error"].replace("beta-job", "")
     assert filtered.status_code == 200
 
 
@@ -318,7 +323,7 @@ async def test_scheduled_job_cannot_transfer_historical_results_between_projects
         f"/results/{job_id}",
         headers=_headers("beta-reader"),
     )
-    assert denied.status_code == 403
+    assert denied.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -443,7 +448,8 @@ async def test_submit_scope_cancels_only_an_exact_adhoc_run_in_its_project(autho
     assert own.status_code == 204
     assert (await get_job_store().get_job("own")).status is JobStatus.cancelled
     assert stale.status_code == 409
-    for denied in (current, other_project, scheduled, reader, delete):
+    assert other_project.status_code == 404
+    for denied in (current, scheduled, reader, delete):
         assert denied.status_code == 403
         assert denied.json()["code"] == "forbidden"
     for job_id in ("unnamed-run", "other-project", "scheduled"):
@@ -583,5 +589,70 @@ async def test_acceptance_lookup_keeps_caller_submit_scope_and_exact_run_keeps_r
     assert forbidden.status_code == 403
     path = f"/jobs/{accepted.json()['job_id']}/runs/{accepted.json()['run_id']}"
     assert (await authorized_client.get(path, headers=_headers("reader"))).status_code == 200
-    assert (await authorized_client.get(path, headers=_headers("beta-reader"))).status_code == 403
+    assert (await authorized_client.get(path, headers=_headers("beta-reader"))).status_code == 404
     assert (await authorized_client.get(path, headers=_headers("submitter"))).status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "method", "path", "body"),
+    [
+        ("reader", "GET", "/jobs/{id}", None),
+        ("reader", "GET", "/jobs/{id}/runs/{id}-run", None),
+        ("reader", "GET", "/results/{id}", None),
+        ("deleter", "POST", "/jobs/{id}/cancel", None),
+        ("deleter", "DELETE", "/jobs/{id}", None),
+        ("scheduler", "POST", "/jobs/{id}/pause", None),
+        ("scheduler", "POST", "/jobs/{id}/resume", None),
+        ("scheduler", "POST", "/jobs/{id}/trigger", None),
+        ("scheduler", "PUT", "/jobs/{id}", _schedule_yaml("alpha")),
+    ],
+)
+async def test_another_projects_job_answers_as_an_absent_one(
+    authorized_client, role, method, path, body,
+):
+    await _save_active_job("beta-live", project="beta", scheduled=True)
+
+    async def ask(job_id: str):
+        return await authorized_client.request(
+            method,
+            path.format(id=job_id),
+            content=body,
+            headers={**_headers(role), "content-type": "application/x-yaml"},
+        )
+
+    other, absent = await ask("beta-live"), await ask("absent-job")
+
+    # 404, or 204 for a delete: an absent job's deletion is already done.
+    assert other.status_code == absent.status_code == (204 if method == "DELETE" else 404)
+    if absent.content:
+        assert other.json() == {
+            **absent.json(),
+            "error": absent.json()["error"].replace("absent-job", "beta-live"),
+        }
+    assert (await get_job_store().get_job("beta-live")).status is JobStatus.queued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+async def test_the_schema_and_its_pages_are_not_served(path):
+    from scrapeyard.main import app
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("monitor"))
+
+    assert response.status_code in (401, 404)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_may_cancel_nothing_learns_nothing_from_cancel(authorized_client):
+    # An unrestricted credential with neither submit nor delete must not tell
+    # an existing job of any project from an absent one.
+    await _save_active_job("beta-live", project="beta")
+
+    existing = await authorized_client.post("/jobs/beta-live/cancel", headers=_headers("monitor"))
+    absent = await authorized_client.post("/jobs/absent-job/cancel", headers=_headers("monitor"))
+
+    assert existing.status_code == absent.status_code == 403
+    assert existing.json() == absent.json()
+    assert (await get_job_store().get_job("beta-live")).status is JobStatus.queued

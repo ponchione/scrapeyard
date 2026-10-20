@@ -270,6 +270,14 @@ Every success response has a concrete Pydantic schema, including distinct
 route error uses the shared error schema. The two `204` lifecycle operations
 intentionally have no response body.
 
+The application does not serve the schema or its pages (`/openapi.json`,
+`/docs`, `/redoc`); `scrapeyard.main.app.openapi()` builds it from a checkout.
+
+A project-scoped caller asking for another project's job, by any job route,
+gets the answer an absent job gets: `404`, or `204` from `DELETE /jobs/{id}`,
+which leaves that job alone. A `403` would confirm the job and name its
+project.
+
 ## Operations endpoints
 
 `GET /health` and `GET /health/live` are public, minimal process-liveness
