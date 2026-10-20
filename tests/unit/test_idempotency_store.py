@@ -7,15 +7,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from scrapeyard.models.job import Job
-from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import IdempotentJobAction
-
-
-@pytest.fixture()
-async def store(tmp_path):
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 def _job(index: int, *, created_at: datetime) -> Job:

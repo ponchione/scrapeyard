@@ -7,19 +7,12 @@ from typing import Any
 import pytest
 
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_queries import build_list_jobs_with_stats_query
 from scrapeyard.storage.job_store import (
     DuplicateJobError,
-    SQLiteJobStore,
     is_duplicate_job_integrity_error,
 )
-
-
-@pytest.fixture()
-async def store(tmp_path):
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 def _make_job(**overrides: Any) -> Job:

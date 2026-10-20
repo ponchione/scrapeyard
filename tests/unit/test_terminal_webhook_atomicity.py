@@ -10,7 +10,7 @@ import pytest
 
 from scrapeyard.config.loader import load_config
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import RunOwnershipError, TerminalIntentAction
 from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
@@ -34,12 +34,6 @@ target:
   selectors:
     title: h1
 {webhook}"""
-
-
-@pytest.fixture()
-async def store(tmp_path) -> SQLiteJobStore:
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 async def _claim(

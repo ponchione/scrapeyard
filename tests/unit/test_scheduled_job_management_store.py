@@ -5,17 +5,10 @@ from datetime import datetime, timezone
 import pytest
 
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.storage.database import init_db
-from scrapeyard.storage.job_store import DuplicateJobError, SQLiteJobStore
+from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.types import ScheduledJobMutationAction
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
-
-
-@pytest.fixture()
-async def store(tmp_path):
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 def _job(**overrides) -> Job:

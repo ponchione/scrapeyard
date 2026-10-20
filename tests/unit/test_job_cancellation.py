@@ -9,18 +9,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from scrapeyard.models.job import Job, JobStatus
-from scrapeyard.storage.database import get_db, init_db
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import CancellationAction, RunOwnershipError
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 YAML = "project: test\nname: cancel\ntarget:\n  url: https://example.com\n  selectors:\n    title: h1\n"
-
-
-@pytest.fixture()
-async def store(tmp_path) -> SQLiteJobStore:
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 async def _save_queued(store: SQLiteJobStore, run_id: str = "run-1") -> None:

@@ -8,15 +8,8 @@ from typing import Any
 import pytest
 
 from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
-from scrapeyard.storage.database import get_db, init_db
-from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.database import get_db
 from scrapeyard.storage.secret_envelope import SecretDecryptionError
-
-
-@pytest.fixture()
-async def store(tmp_path):
-    await init_db(str(tmp_path / "db"))
-    return SQLiteJobStore()
 
 
 def _make_job(**overrides: Any) -> Job:

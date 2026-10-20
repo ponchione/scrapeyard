@@ -4,7 +4,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from scrapeyard.storage.database import init_db
+from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import SaveResultMeta
+
+
+@pytest.fixture
+async def store(tmp_path) -> SQLiteJobStore:
+    """A job store on freshly migrated databases; a module may define its own."""
+    await init_db(str(tmp_path / "db"))
+    return SQLiteJobStore()
 
 
 @pytest.fixture
