@@ -22,6 +22,7 @@ from scrapling.engines.toolbelt.fingerprints import (
 from tldextract import tldextract
 
 from scrapeyard.common.budgets import RunBudget
+from scrapeyard.common.run_threads import run_thread_work
 from scrapeyard.common.traffic import OFFLINE_TLD_EXTRACTOR
 from scrapeyard.engine.content_coding import content_decoder
 from scrapeyard.engine.url_guard import canonical_url_origin
@@ -128,6 +129,11 @@ def _decode_body(body: bytes, encoding: str) -> tuple[str, str]:
     if codecs.lookup(encoding).name != "utf-8" and _SURROGATE_RE.search(text):
         return body.decode("utf-8", errors="replace"), "utf-8"
     return text, encoding
+
+
+def _parsed_response(body: bytes, encoding: str, response_kwargs: dict[str, Any]) -> Response:
+    text, parse_encoding = _decode_body(body, encoding)
+    return Response(text=text, body=body, encoding=parse_encoding, **response_kwargs)
 
 
 def _apply_cookie_jar(
@@ -254,27 +260,39 @@ async def fetch_streaming_response(
             async for chunk in response.aiter_raw(chunk_size=_STREAM_CHUNK_BYTES):
                 await keep(decoder.decode(chunk))
             await keep(decoder.flush())
-            body_bytes = bytes(body)
-            text, encoding = _decode_body(body_bytes, response.encoding or "utf-8")
-            result = Response(
-                url=str(response.url),
-                text=text,
-                body=body_bytes,
-                status=response.status_code,
-                reason=response.reason_phrase,
-                encoding=encoding,
-                cookies=_response_cookie_metadata(response.cookies),
-                headers=dict(response.headers),
-                request_headers=dict(response.request.headers),
-                method=response.request.method,
-                history=[],
-                **parser_arguments,
+            downloaded = (
+                bytes(body),
+                response.encoding or "utf-8",
+                {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "reason": response.reason_phrase,
+                    "cookies": _response_cookie_metadata(response.cookies),
+                    "headers": dict(response.headers),
+                    "request_headers": dict(response.request.headers),
+                    "method": response.request.method,
+                    "history": [],
+                    **parser_arguments,
+                },
+                response.num_bytes_downloaded,
             )
-            setattr(result, RECEIVED_BYTES_ATTRIBUTE, response.num_bytes_downloaded)
-            return result
+            return downloaded
+
+    async def _parse(downloaded: tuple[bytes, str, dict[str, Any], int]) -> Any:
+        # Decoding and parsing take about 14 ms per MiB, so they run on the
+        # run's threads: on the event loop a 20 MiB page held every other run,
+        # and the API, for a third of a second. Outside the request's own
+        # timeout, which ends at the last body byte: a page that has arrived
+        # is not refetched because the threads were busy.
+        body_bytes, encoding, response_kwargs, received = downloaded
+        result = await run_thread_work(
+            _parsed_response, body_bytes, encoding, response_kwargs, run_budget=budget,
+        )
+        setattr(result, RECEIVED_BYTES_ATTRIBUTE, received)
+        return result
 
     if budget is None and total_timeout is None:
-        return await _request()
+        return await _parse(await _request())
     task: asyncio.Task[Any] | None = None
     run_remaining: float | None = None
     try:
@@ -298,7 +316,7 @@ async def fetch_streaming_response(
         raise
     assert task is not None
     if task in done:
-        return task.result()
+        return await _parse(task.result())
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     if not request_limit_first:

@@ -399,12 +399,12 @@ class BrowserSession:
         history: list[Any],
     ) -> Response:
         content = await self._capture_html(page, budget)
-        return Response(
-            text=content,
-            body=content.encode("utf-8"),
-            **await self._response_kwargs(
-                page, context, engine, first_response, final_response, history=history,
-            ),
+        response_kwargs = await self._response_kwargs(
+            page, context, engine, first_response, final_response, history=history,
+        )
+        # Parsing takes about 14 ms per MiB; off the event loop, as basic pages are.
+        return await run_thread_work(
+            _html_response, content, response_kwargs, run_budget=budget,
         )
 
     async def _click_snapshot(
@@ -885,3 +885,7 @@ class BrowserSession:
                     await asyncio.gather(*releasing)
                 if budget is not None and stopped:
                     await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))
+
+
+def _html_response(html: str, response_kwargs: dict[str, Any]) -> Response:
+    return Response(text=html, body=html.encode("utf-8"), **response_kwargs)

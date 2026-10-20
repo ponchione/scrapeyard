@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import gzip
 import random
+import threading
 import time
 import tracemalloc
 import zlib
@@ -467,6 +469,57 @@ async def test_compressed_page_decodes_whole(coding, encode) -> None:
         await server.wait_closed()
 
     assert response.body == page.decode()
+
+
+async def test_page_is_parsed_off_the_event_loop(monkeypatch) -> None:
+    # Parsing takes about 14 ms per MiB; on the loop a large page stalls every
+    # other run and the API with it.
+    from scrapeyard.engine import basic_fetch
+
+    parsed_on: list[threading.Thread] = []
+
+    class RecordingResponse(basic_fetch.Response):
+        def __init__(self, *args, **kwargs) -> None:
+            parsed_on.append(threading.current_thread())
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(basic_fetch, "Response", RecordingResponse)
+    page = b"<html><body><h1>off the loop</h1></body></html>"
+    server, url = await _serve_encoded("identity", page)
+    try:
+        response = await fetch_streaming_response(
+            Fetcher, url, {"timeout": 5, "stealthy_headers": False}, budget=_budget(),
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert response.css_first("h1::text") == "off the loop"
+    assert parsed_on and threading.current_thread() not in parsed_on
+
+
+async def test_busy_run_threads_do_not_time_out_a_page_that_has_arrived(monkeypatch) -> None:
+    # The request's timeout ends at its last body byte; waiting for a thread
+    # to parse the page is not the server's slowness, and must not refetch it.
+    from scrapeyard.common.run_threads import RunThreadPool
+
+    pool = RunThreadPool(1)
+    monkeypatch.setattr(
+        "scrapeyard.api.dependencies.get_run_thread_pool", functools.cache(lambda: pool)
+    )
+    busy = asyncio.ensure_future(pool.run(time.sleep, 1.5))
+    server, url = await _serve_encoded("identity", b"<html><body><h1>arrived</h1></body></html>")
+    try:
+        response = await fetch_streaming_response(
+            Fetcher, url, {"timeout": 0.5, "stealthy_headers": False}, budget=_budget(),
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+        await busy
+        pool.shutdown()
+
+    assert response.css_first("h1::text") == "arrived"
 
 
 @_CODINGS
