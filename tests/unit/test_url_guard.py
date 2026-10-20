@@ -412,6 +412,34 @@ def test_assert_public_url_rejects_legacy_ipv4_private_octal_without_dns() -> No
         assert_public_url("http://0300.0250.0001.0001/resource", resolve_dns=False)
 
 
+@pytest.mark.parametrize(
+    ("host", "address"),
+    [
+        # inet_aton refused an empty hex part, so these passed as DNS names
+        # where a browser requests 127.0.0.1 and 0.0.0.0 (TD-114).
+        ("0x7f.0x.0x.1", "127.0.0.1"),
+        ("0x", "0.0.0.0"),
+        ("0X7F.1", "127.0.0.1"),
+        ("10.0x", "10.0.0.0"),
+    ],
+)
+def test_ipv4_spellings_are_read_as_a_browser_reads_them(host: str, address: str) -> None:
+    with pytest.raises(UnsafeURLError, match=f"non-public IP {re.escape(address)}$"):
+        assert_public_url(f"http://{host}/", resolve_dns=False)
+
+
+@pytest.mark.parametrize("host", ["www.8.8.8.8", "shop.123", "08.1.1.1", "1.2.3.4.5", "1.256.1.1"])
+def test_a_host_ending_in_a_number_must_be_an_ipv4_address(host: str) -> None:
+    # A browser refuses each; none is a name DNS should be asked for.
+    with pytest.raises(UnsafeURLError, match="ends in a number"):
+        assert_public_url(f"http://{host}/", resolve_dns=False)
+
+
+@pytest.mark.parametrize("host", ["example.com", "a1.example", "123.example", "0x8.8.8.8"])
+def test_names_and_public_ipv4_spellings_still_pass(host: str) -> None:
+    assert_public_url(f"http://{host}/", resolve_dns=False)
+
+
 @pytest.mark.parametrize("host", ["a{}b.test", "{}", "1.2.3.{}"])
 def test_lone_surrogate_hostname_is_an_unsafe_url(host: str) -> None:
     # Built in code: an escaped surrogate in source can arrive as another character.

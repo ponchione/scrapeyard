@@ -185,14 +185,14 @@ def canonical_url_origin(url: str) -> tuple[str, str, int] | None:
     scheme = parsed.scheme.lower()
     if not scheme or not raw_host:
         return None
-    try:
-        literal = ipaddress.ip_address(raw_host.rstrip("."))
-    except ValueError:
+    literal = _folded_ip(raw_host.rstrip("."))
+    if literal is None:
         try:
             host = canonical_hostname(raw_host)
         except UnsafeURLError:
             return None
-    else:
+        literal = _folded_ip(host)
+    if literal is not None:
         host = str(literal)
     port = (
         parsed_port
@@ -202,15 +202,75 @@ def canonical_url_origin(url: str) -> tuple[str, str, int] | None:
     return scheme, host, port
 
 
-def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
-    """Parse IPv4 forms accepted by socket/http stacks but not ipaddress."""
-    try:
-        packed = socket.inet_aton(host)
-    except (OSError, ValueError):
-        # ValueError: a host inet_aton can't encode (a lone surrogate) is not
-        # an address either; the hostname checks that follow reject it.
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def _ipv4_number(part: str) -> int | None:
+    """WHATWG URL's IPv4 number parser: decimal, ``0`` octal or ``0x`` hex."""
+    if not part:
         return None
-    return ipaddress.IPv4Address(packed)
+    radix = 10
+    if len(part) >= 2 and part[:2] in ("0x", "0X"):
+        part, radix = part[2:], 16
+    elif len(part) >= 2 and part[0] == "0":
+        part, radix = part[1:], 8
+    if not part:
+        return 0  # "0x" and "0" read as zero.
+    digits = "0123456789abcdefABCDEF"[: radix if radix != 16 else 22]
+    if any(char not in digits for char in part):
+        return None
+    return int(part, radix)
+
+
+def _host_parts(host: str) -> list[str]:
+    parts = host.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        parts.pop()
+    return parts
+
+
+def _ends_in_a_number(host: str) -> bool:
+    """Whether a browser must read *host* as IPv4 (WHATWG "ends in a number")."""
+    last = _host_parts(host)[-1]
+    if last and set(last) <= _ASCII_DIGITS:
+        return True
+    return _ipv4_number(last) is not None
+
+
+def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
+    """Parse *host* as an IPv4 address the way a browser does (WHATWG URL).
+
+    Covers the forms ``ipaddress`` refuses: fewer than four parts, octal and
+    hex parts, ``0x`` alone. ``inet_aton`` read those differently: it refused
+    an empty hex part, so ``0x7f.0x.0x.1`` passed as a name a browser
+    requests as 127.0.0.1.
+    """
+    if not host or not _ends_in_a_number(host):
+        return None
+    parts = _host_parts(host)
+    if len(parts) > 4:
+        return None
+    numbers = [_ipv4_number(part) for part in parts]
+    if any(number is None for number in numbers):
+        return None
+    values = [number for number in numbers if number is not None]
+    if any(value > 255 for value in values[:-1]) or values[-1] >= 256 ** (5 - len(values)):
+        return None
+    address = values[-1]
+    for index, value in enumerate(values[:-1]):
+        address += value * 256 ** (3 - index)
+    return ipaddress.IPv4Address(address)
+
+
+def _folded_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The one address every spelling of an IP host names, or None for a name."""
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        return _legacy_ipv4_address(host)
+    if isinstance(literal, ipaddress.IPv6Address) and literal.ipv4_mapped is not None:
+        return literal.ipv4_mapped
+    return literal
 
 
 def public_dns_hostname(
@@ -280,6 +340,10 @@ def public_dns_hostname(
         literal = _legacy_ipv4_address(canonical)
     if literal is not None and _ip_is_blocked(literal):
         raise UnsafeURLError(f"URL points at non-public IP {literal}")
+    if literal is None and _ends_in_a_number(canonical.rstrip(".")):
+        # A browser refuses such a host, or reads it as an address this
+        # parser does not; either way it is no DNS name.
+        raise UnsafeURLError("URL hostname ends in a number but is not an IPv4 address")
 
     # Last, so a Unicode spelling of a blocked name or of a private address is
     # still reported as what it is. A public address spelled in Unicode

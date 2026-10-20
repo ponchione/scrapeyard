@@ -26,7 +26,9 @@ from scrapeyard.engine.url_guard import canonical_url_origin, url_host_label
 from scrapeyard.models.job import ErrorType
 
 _DAY_KEY_TTL_SECONDS = 2 * 86400
-_HOST_PATTERN = re.compile(r"^[a-z0-9.\-]+(?::\d{1,5})?$")
+# A name (``_`` included, as in the targets a run may fetch) or a bracketed
+# IPv6 address, either with an optional port.
+_HOST_PATTERN = re.compile(r"^(?:[a-z0-9._\-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?$")
 
 
 def domain_guard_host(url: str) -> str:

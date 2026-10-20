@@ -48,6 +48,12 @@ def _local_guard() -> tuple[LocalDomainGuard, _Clock]:
         ("https://www.Example.test/a", "example.test"),
         ("https://shop.example.test:8443/a", "shop.example.test"),
         ("https://example.test:443/", "example.test"),
+        # One address, one key, however it is spelled (TD-114).
+        ("https://8.8.8.8/", "8.8.8.8"),
+        ("https://134744072/", "8.8.8.8"),
+        ("https://8.8.2056/", "8.8.8.8"),
+        ("https://0x8.0x8.0x8.0x8/", "8.8.8.8"),
+        ("https://[::ffff:8.8.8.8]/", "8.8.8.8"),
     ],
 )
 def test_guard_host_matches_run_level_denial_identity(url, host):
@@ -62,6 +68,15 @@ def test_operator_host_must_be_a_bare_host(value):
 
 def test_operator_host_is_normalized_like_target_urls():
     assert normalize_guard_host("WWW.Example.test") == "example.test"
+
+
+@pytest.mark.parametrize(
+    "value,host",
+    [("[2001:db8::1]", "2001:db8::1"), ("my_shop.example.test", "my_shop.example.test")],
+)
+def test_operator_can_name_every_host_a_cooldown_is_kept_for(value, host):
+    # Each is a host a run can fetch and cool down; the routes refused both.
+    assert normalize_guard_host(value) == host == domain_guard_host(f"https://{value}/x")
 
 
 @pytest.mark.parametrize(
