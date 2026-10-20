@@ -14,7 +14,11 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ## Unreleased
 
 ### Deployment qualification
-- Release `fbc340c` runs on the production host since 2026-10-14 (TD-89,
+- Release `e31e6a3` runs on the production host since 2026-10-20, promoted
+  over `fbc340c` after a backup. Readiness, the host check, a stored result
+  read back byte for byte, a replayed submission and Eyebox's result parser
+  passed afterwards.
+- Release `fbc340c` ran on the production host from 2026-10-14 (TD-89,
   TD-90, TD-91, TD-20's host check and TD-21's fixes). Its settings name the
   hosts a request may give, which were first read off the host's own
   traffic. After each change the host's checks passed (tunnel included),

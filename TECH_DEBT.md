@@ -30,6 +30,13 @@ it. Read [How to use this list](#how-to-use-this-list) and the
   - Unchanged and found sound: the query plans of the 259 distinct statements
     the store and integration tests run, the price patterns (linear), log
     rotation and retention.
+  - Release `e31e6a3` (rehearsed by run 39467377387 against `fbc340c`) was
+    promoted on the production host on 2026-10-20 after a backup. It brought
+    Redis 7.4.11. Afterwards the host check passed with its new backup and
+    health scripts installed, a stored result read back byte for byte, a
+    fixed-key submission replayed, Eyebox's parser read the result, and an
+    absent job and `/openapi.json` answered `404`. The backups are still kept
+    on the host only, with no upload installed.
 - **2026-10-16, third pass** (no release; pull request #41): a targeted
   audit, done locally, of what the first two passes left: the basic fetch
   path, the URL and IP guards, API authentication and idempotency, the page
