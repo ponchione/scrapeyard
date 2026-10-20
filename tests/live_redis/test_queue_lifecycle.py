@@ -866,6 +866,49 @@ async def test_worker_whose_redis_stops_answering_asks_once_to_end_and_a_restart
 
 @pytest.mark.asyncio
 @pytest.mark.live_redis
+async def test_a_redis_stall_during_a_run_records_it_failed_and_the_stop_completes(
+    redis_relay, short_poll_stall, client, monkeypatch,
+):
+    # TD-107: the run's handler records it failed, then arq waits, shielded,
+    # to write its result to the Redis that does not answer.
+    started = asyncio.Event()
+
+    async def _scrape_target(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("scrapeyard.queue.worker.scrape_target", _scrape_target)
+    pool = get_worker_pool()
+    runner_exits = client._transport.app.state.live_runner_exits
+    response = await client.post(
+        "/scrape",
+        content=_async_scrape_yaml(),
+        headers={"content-type": "application/x-yaml"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    redis_relay.stall()
+    try:
+        for _ in range(200):
+            if runner_exits:
+                break
+            await asyncio.sleep(0.05)
+        assert len(runner_exits) == 1
+        assert isinstance(runner_exits[0], WorkerPollStalled)
+
+        await pool.stop(timeout=5)
+
+        assert pool.shutdown_pending is False
+        job = await get_job_store().get_job(job_id)
+        assert job.status is JobStatus.failed
+    finally:
+        redis_relay.flow()
+
+
+@pytest.mark.asyncio
+@pytest.mark.live_redis
 async def test_sync_scrape_waits_for_real_redis_completion(client, monkeypatch):
     async def _fake_scrape_target(*_args, **_kwargs):
         return TargetResult(

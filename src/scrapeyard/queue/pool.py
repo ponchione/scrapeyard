@@ -16,7 +16,12 @@ from arq.utils import timestamp_ms
 from arq.worker import Worker, func
 from redis.exceptions import RedisError
 
-from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline, shield
+from scrapeyard.common.async_tools import (
+    AwaitableCancelled,
+    MonotonicDeadline,
+    await_with_timeout,
+    shield,
+)
 from scrapeyard.common.settings import get_settings
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.cancellation import (
@@ -573,6 +578,7 @@ class WorkerPool:
         )
         drain_seconds = grace_seconds - cancellation_reserve
         drain_timed_out = False
+        connections_dropped = False
         unresolved_phases: list[str] = []
         pending = [
             task for task in self._worker.tasks.values()
@@ -588,7 +594,17 @@ class WorkerPool:
                     task.cancel()
                 # Cancelled jobs record their terminal state within the
                 # reserve, before Redis and the worker are closed.
-                await asyncio.wait(still_running, timeout=deadline.remaining)
+                remaining = deadline.remaining
+                _done, still_running = await asyncio.wait(
+                    still_running, timeout=None if remaining is None else remaining / 2,
+                )
+                if still_running:
+                    # The run is recorded; arq then waits, shielded, to write
+                    # its result to Redis. A Redis that has stopped answering
+                    # never replies, so drop the connections: the hung reads
+                    # fail and the tasks end within the stop (TD-107).
+                    connections_dropped = await self._drop_redis_connections(deadline)
+                    await asyncio.wait(still_running, timeout=deadline.remaining)
 
         if self._worker.main_task is not None:
             self._worker.main_task.cancel()
@@ -624,7 +640,23 @@ class WorkerPool:
             )
 
         try:
-            await deadline.run(self._worker.close())
+            if connections_dropped and self._redis is not None:
+                # The worker's close() first deletes its health-check key (it
+                # expires on its own), which a Redis that stopped answering
+                # holds past the deadline. Its runs' outcomes are logged here.
+                outcomes = await asyncio.gather(
+                    *self._worker.tasks.values(), return_exceptions=True,
+                )
+                for job_id, outcome in zip(list(self._worker.tasks), outcomes, strict=True):
+                    if isinstance(outcome, Exception):
+                        logger.warning(
+                            "Queue delivery %s ended with %s while the worker closed",
+                            job_id,
+                            type(outcome).__name__,
+                        )
+                await deadline.run(self._redis.aclose(close_connection_pool=True))
+            else:
+                await deadline.run(self._worker.close())
         except TimeoutError:
             raise TimeoutError(
                 "Worker shutdown deadline exceeded in phase(s): redis_close"
@@ -639,6 +671,28 @@ class WorkerPool:
             logger.info(
                 "Worker shutdown drain window expired; active-job cancellation completed"
             )
+
+    async def _drop_redis_connections(self, deadline: MonotonicDeadline) -> bool:
+        """Close every Redis connection, in use or not; return whether it did."""
+        if self._redis is None:
+            return False
+        remaining = deadline.remaining
+        try:
+            # Half of what is left, so closing what remains still has time.
+            await await_with_timeout(
+                self._redis.connection_pool.disconnect(inuse_connections=True),
+                timeout=None if remaining is None else remaining / 2,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not drop the Redis connections during shutdown: %s",
+                type(exc).__name__,
+            )
+            return False
+        logger.warning(
+            "Dropped the Redis connections: cancelled runs were still waiting on Redis"
+        )
+        return True
 
     async def enqueue(
         self,
