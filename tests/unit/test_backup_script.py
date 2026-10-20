@@ -422,8 +422,16 @@ class _Host:
         self.tool("zstd", "#!/bin/bash\nexec cat\n")
         # The script's own pauses are not what is tested.
         self.tool("sleep", "#!/bin/bash\nexit 0\n")
+        # pytest-cov instruments every Python subprocess, and each run of the
+        # script starts hundreds of stub tools; none of them is Scrapeyard's
+        # code, and instrumenting them made this file most of the suite's time.
+        inherited = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("COV_CORE_") and name != "COVERAGE_PROCESS_START"
+        }
         self.env = dict(
-            os.environ,
+            inherited,
             PATH=f"{self.bin}:{os.environ['PATH']}",
             CALLS=str(self.calls),
             STATE=str(self.state),

@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
@@ -217,7 +218,11 @@ def _environment(bin_dir: Path, state_dir: Path) -> dict[str, str]:
 
 
 def _run(
-    installer: Path, env: dict[str, str], action: str = "install"
+    installer: Path,
+    env: dict[str, str],
+    action: str = "install",
+    *,
+    default_signals: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [os.fspath(installer), action],
@@ -225,7 +230,16 @@ def _run(
         capture_output=True,
         text=True,
         check=False,
+        preexec_fn=_default_stop_signals if default_signals else None,
     )
+
+
+def _default_stop_signals() -> None:
+    # Bash cannot trap a signal ignored when it starts, and a pytest started
+    # under nohup, or with & from a script, ignores SIGHUP or SIGINT. systemd
+    # starts the installer with neither ignored.
+    for signum in (signal.SIGHUP, signal.SIGINT):
+        signal.signal(signum, signal.SIG_DFL)
 
 
 def _assert_old_policy_active(state_dir: Path) -> None:
@@ -329,7 +343,11 @@ def test_a_stop_just_after_the_switch_insert_restores_one_jump_and_fails(
     shutil.rmtree(state_dir)
     shutil.copytree(baseline, state_dir)
 
-    result = _run(installer, {**env, "SIGNAL_AT": str(insert), "SIGNAL_NAME": signal_name})
+    result = _run(
+        installer,
+        {**env, "SIGNAL_AT": str(insert), "SIGNAL_NAME": signal_name},
+        default_signals=True,
+    )
 
     # An interrupted switch never reports success.
     assert result.returncode == status
