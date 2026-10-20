@@ -208,10 +208,6 @@ class RunBudget:
         return self._estimated_result_bytes
 
     @property
-    def remaining_browser_debug_bytes(self) -> int:
-        return max(0, self.max_browser_debug_bytes - self._browser_debug_bytes)
-
-    @property
     def remaining_fetched_bytes(self) -> int:
         return max(0, self.max_fetched_bytes - self._fetched_bytes)
 

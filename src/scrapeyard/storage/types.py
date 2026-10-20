@@ -313,12 +313,6 @@ class ResultReconciliationReport:
         return len(self.artifact_failures) + len(self.operation_failures)
 
     @property
-    def inspected_items(self) -> int:
-        """Return work charged to artifact reconciliation cycle budgets."""
-
-        return self.metadata_rows_inspected + self.filesystem_entries_inspected
-
-    @property
     def has_more(self) -> bool:
         """Return whether either independent keyset scan has more work."""
 

@@ -188,11 +188,9 @@ async def _startup_runtime_services(app: FastAPI) -> None:
     settings = get_settings()
     services = build_runtime_services()
     _assign_runtime_services(app, services)
-    app.state.terminal_intent_reconciliation = (
-        await reconcile_terminal_webhook_intents(
-            job_store=get_job_store(),
-            result_store=services.result_store,
-        )
+    await reconcile_terminal_webhook_intents(
+        job_store=get_job_store(),
+        result_store=services.result_store,
     )
     await services.webhook_dispatcher.startup()
     services.worker_pool.on_runner_exit = _end_process_after_worker_loss
@@ -512,13 +510,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Scrapeyard",
     description="Config-driven web scraping microservice",
+    version=__version__,
+    lifespan=lifespan,
     # Served, they answered any valid credential, a health-detail one too.
     # docs/API.md documents the API; app.openapi() still builds the schema.
     openapi_url=None,
     docs_url=None,
     redoc_url=None,
-    version=__version__,
-    lifespan=lifespan,
 )
 
 
