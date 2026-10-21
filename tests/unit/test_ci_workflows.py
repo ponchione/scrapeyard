@@ -50,8 +50,8 @@ def test_ci_required_gate_contracts() -> None:
 
     live_redis = workflow["jobs"]["live-redis"]
     assert live_redis["services"]["redis"]["image"] == (
-        "redis:7.4.11-alpine@sha256:"
-        "858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
+        "redis:7.4.11-bookworm@sha256:"
+        "44960b3100c48159a66d28c18b0588c193492e25f7551d60e51dd464fc3eca5b"
     )
     assert live_redis["env"]["SCRAPEYARD_API_CREDENTIALS"]
     assert live_redis["env"]["SCRAPEYARD_REDIS_DSN"].endswith("/15")
