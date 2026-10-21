@@ -284,6 +284,8 @@ org.scrapeyard.browser.camoufox.release=beta.24
 org.scrapeyard.browser.camoufox.sha256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e381ba2676a4888
 org.scrapeyard.browser.ubo.version=1.72.2
 org.scrapeyard.browser.ubo.sha256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
+org.scrapeyard.browser.driver-node.version=24.22.1
+org.scrapeyard.browser.driver-node.sha256=eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 org.opencontainers.image.base.digest=sha256:48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83
 EOF
 

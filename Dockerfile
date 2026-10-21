@@ -34,6 +34,14 @@ ARG CAMOUFOX_BROWSER_SHA256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e38
 ARG UBO_VERSION=1.72.2
 ARG UBO_FILE_ID=4888680
 ARG UBO_SHA256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
+# Both Python drivers ship their own Node (playwright 1.58.0: 24.13.0,
+# rebrowser-playwright 1.52.0: 22.14.0), and no release of either carries a
+# Node with the October 21, 2026 security fixes. The image runs both on this
+# Node instead. The hash is the one in the release's SHASUMS256.txt, whose
+# signature verified against releaser key
+# 5BE8A3F6C8A5C01D106C0AD820B1A390B168D356 in github.com/nodejs/release-keys.
+ARG NODE_VERSION=24.22.1
+ARG NODE_SHA256=eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
@@ -47,6 +55,7 @@ ENV LANG=C.UTF-8 \
     HOME=/home/scrapeyard \
     TMPDIR=/tmp \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_NODEJS_PATH=/opt/node/bin/node \
     XDG_CACHE_HOME=/opt/scrapeyard-cache
 
 LABEL org.opencontainers.image.base.name="python:3.14.8-slim-bookworm" \
@@ -62,7 +71,9 @@ LABEL org.opencontainers.image.base.name="python:3.14.8-slim-bookworm" \
       org.scrapeyard.browser.camoufox.release="${CAMOUFOX_BROWSER_RELEASE}" \
       org.scrapeyard.browser.camoufox.sha256="${CAMOUFOX_BROWSER_SHA256}" \
       org.scrapeyard.browser.ubo.version="${UBO_VERSION}" \
-      org.scrapeyard.browser.ubo.sha256="${UBO_SHA256}"
+      org.scrapeyard.browser.ubo.sha256="${UBO_SHA256}" \
+      org.scrapeyard.browser.driver-node.version="${NODE_VERSION}" \
+      org.scrapeyard.browser.driver-node.sha256="${NODE_SHA256}"
 
 WORKDIR /app
 COPY --from=builder /build/requirements.txt .
@@ -102,6 +113,22 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && mkdir -p \
         /data/db /data/results /data/adaptive /data/logs \
         "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}/camoufox" \
+    && curl --fail --location --retry 3 \
+        --output /tmp/node.tar.gz \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
+    && echo "${NODE_SHA256}  /tmp/node.tar.gz" | sha256sum --check --strict \
+    && mkdir -p "$(dirname "${PLAYWRIGHT_NODEJS_PATH}")" \
+    && tar -xzf /tmp/node.tar.gz --no-same-owner --strip-components=2 \
+        -C "$(dirname "${PLAYWRIGHT_NODEJS_PATH}")" "node-v${NODE_VERSION}-linux-x64/bin/node" \
+    && rm /tmp/node.tar.gz \
+    && test "$("${PLAYWRIGHT_NODEJS_PATH}" --version)" = "v${NODE_VERSION}" \
+    && for driver in playwright rebrowser_playwright; do \
+        bundled="$(python -c "import pathlib, ${driver}; print(pathlib.Path(${driver}.__file__).parent/'driver'/'node')")" \
+        && rm "${bundled}" \
+        && ln -s "${PLAYWRIGHT_NODEJS_PATH}" "${bundled}" \
+        && test "$("${bundled}" --version)" = "v${NODE_VERSION}" \
+        || exit 1; \
+    done \
     && python -m playwright install --with-deps --no-shell chromium \
     && python -m rebrowser_playwright install --no-shell chromium \
     && curl --fail --location --retry 3 \
@@ -128,7 +155,7 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && python -m camoufox path \
     && chown -R "${SCRAPEYARD_UID}:${SCRAPEYARD_GID}" /data /home/scrapeyard \
     && chmod 0750 /data /data/db /data/results /data/adaptive /data/logs \
-    && chmod -R a-w "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}" \
+    && chmod -R a-w "${PLAYWRIGHT_BROWSERS_PATH}" "${XDG_CACHE_HOME}" /opt/node \
     && apt-get purge -y unzip \
     && apt-get autoremove -y \
     && dpkg-query -W -f='${Package}=${Version}\n' | sort \
