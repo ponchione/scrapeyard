@@ -68,7 +68,9 @@ jobs:
           poetry run playwright install --with-deps chromium
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test with coverage
-        run: poetry run pytest -W error -rs --junitxml=test-results/junit.xml --cov-report=xml:coverage.xml
+        # One pytest-xdist worker per runner CPU; coverage is combined across
+        # workers. Serially the suite took 10-11 minutes per leg (2026-10-21).
+        run: poetry run pytest -n auto -W error -rs --junitxml=test-results/junit.xml --cov-report=xml:coverage.xml
       - name: Upload test diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

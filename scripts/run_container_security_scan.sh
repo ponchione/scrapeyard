@@ -32,6 +32,11 @@ done
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+# One vulnerability database for every scan of this run: it is downloaded
+# once instead of once per image, and every image is judged against the same
+# data. The volume lives only as long as this run.
+TRIVY_CACHE="$(docker volume create)"
+trap 'docker volume rm --force "$TRIVY_CACHE" >/dev/null' EXIT
 
 docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
@@ -42,7 +47,11 @@ docker run --rm \
 # scan_vulnerabilities IMAGE REPORT [EXCEPTIONS]
 scan_vulnerabilities() {
   local image=$1 report=$2 exceptions=${3:-}
-  local mounts=(-v /var/run/docker.sock:/var/run/docker.sock:ro -v "$OUTPUT_DIR:/out")
+  local mounts=(
+    -v /var/run/docker.sock:/var/run/docker.sock:ro
+    -v "$OUTPUT_DIR:/out"
+    -v "$TRIVY_CACHE:/tmp/trivy-cache"
+  )
   local options=()
   if [[ -n $exceptions ]]; then
     mounts+=(-v "$exceptions:/exceptions.yaml:ro")
@@ -71,7 +80,9 @@ done
 docker run --rm \
   -v "$ROOT_DIR:/workspace:ro" \
   -v "$OUTPUT_DIR:/out" \
+  -v "$TRIVY_CACHE:/tmp/trivy-cache" \
   "$TRIVY_IMAGE" config \
+  --cache-dir /tmp/trivy-cache \
   --severity HIGH,CRITICAL \
   --format json \
   --output /out/configuration.json \

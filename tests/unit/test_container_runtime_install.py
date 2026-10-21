@@ -282,7 +282,8 @@ def test_deployment_guide_names_the_versions_the_lanes_install() -> None:
 @pytest.mark.parametrize(
     ("workflow_file", "job_name", "first_use"),
     [
-        ("release-rehearsal.yml", "release-rehearsal", "release_artifact.py create"),
+        ("release-rehearsal.yml", "release", "release_artifact.py create"),
+        ("release-rehearsal.yml", "release-rehearsal", "run_deployment_rehearsal.sh"),
         (
             "container-browser-smoke.yml",
             "production-container-smoke",

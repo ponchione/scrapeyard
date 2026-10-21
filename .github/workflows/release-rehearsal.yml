@@ -30,11 +30,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release-rehearsal:
-    name: Retained release / deploy and roll back
+  revisions:
+    name: Select the candidate and the previous revision
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
-
+    timeout-minutes: 5
+    outputs:
+      candidate: ${{ steps.revisions.outputs.candidate }}
+      previous: ${{ steps.revisions.outputs.previous }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,9 +60,76 @@ jobs:
           fi
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "previous=$previous" >> "$GITHUB_OUTPUT"
-          echo "releases=$RUNNER_TEMP/scrapeyard-releases" >> "$GITHUB_OUTPUT"
+
+  release:
+    # The two releases are built, scanned and qualified on separate runners at
+    # the same time; on one runner they took about 21 of the lane's 35 minutes
+    # one after the other (2026-10-21). Each is a clean Docker host, so neither
+    # build reuses the other's layers.
+    name: Build, scan and qualify the ${{ matrix.role }} release
+    needs: revisions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      # A rehearsal needs both releases; stop the other when one fails.
+      fail-fast: true
+      matrix:
+        role: [previous, candidate]
+    env:
+      REVISION: ${{ needs.revisions.outputs[matrix.role] }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release is built from a commit, not from the working tree.
+          fetch-depth: 0
       - name: Install the container runtime the deployment guide names
         # Before anything is built: the runner image's Docker is replaced.
+        run: sudo ./scripts/install_container_runtime.sh
+      - name: Show Docker runner capacity
+        run: |
+          docker version
+          docker compose version
+          runc --version
+          df -h . /var/lib/docker "$RUNNER_TEMP" || true
+          free -h
+      - name: Build, scan and qualify the release
+        run: >-
+          python3 scripts/release_artifact.py create
+          "$RUNNER_TEMP/scrapeyard-releases/scrapeyard-release-$REVISION"
+          --revision "$REVISION"
+      - name: Pack the release as an operator receives it
+        # Root runs a release, so the archive must not carry this runner's account.
+        run: |
+          archive="scrapeyard-release-$REVISION.tar.zst"
+          tar -C "$RUNNER_TEMP/scrapeyard-releases" --owner=0 --group=0 --numeric-owner --zstd \
+            -cf "$archive" "scrapeyard-release-$REVISION"
+          sha256sum "$archive" | tee "$archive.sha256"
+      - name: Hand the release to the rehearsal
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.role }}-${{ github.run_attempt }}
+          path: |
+            scrapeyard-release-${{ env.REVISION }}.tar.zst
+            scrapeyard-release-${{ env.REVISION }}.tar.zst.sha256
+          # The archive is already compressed.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+
+  release-rehearsal:
+    name: Retained release / deploy and roll back
+    needs: [revisions, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE: ${{ needs.revisions.outputs.candidate }}
+      PREVIOUS: ${{ needs.revisions.outputs.previous }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the container runtime the deployment guide names
+        # Before anything is loaded: the runner image's Docker is replaced.
         run: sudo ./scripts/install_container_runtime.sh
       - name: Install age for the backup rehearsal
         # The distribution's package, as the deployment guide installs it on a host.
@@ -75,23 +144,32 @@ jobs:
           runc --version
           df -h . /var/lib/docker "$RUNNER_TEMP" || true
           free -h
-      - name: Build, scan and qualify the previous release
-        run: >-
-          python3 scripts/release_artifact.py create
-          "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.previous }}"
-          --revision "${{ steps.revisions.outputs.previous }}"
-      - name: Build, scan and qualify the candidate release
-        run: >-
-          python3 scripts/release_artifact.py create
-          "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
-          --revision "${{ steps.revisions.outputs.candidate }}"
+      - name: Receive both releases
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-archives
+          merge-multiple: true
+      - name: Check and unpack both releases
+        # This host built neither release; every image comes from the archives.
+        run: |
+          cd "$RUNNER_TEMP/release-archives"
+          sha256sum -c "scrapeyard-release-$CANDIDATE.tar.zst.sha256" "scrapeyard-release-$PREVIOUS.tar.zst.sha256"
+          releases="$RUNNER_TEMP/scrapeyard-releases"
+          mkdir "$releases"
+          for revision in "$PREVIOUS" "$CANDIDATE"; do
+            tar --zstd -xpf "scrapeyard-release-$revision.tar.zst" -C "$releases"
+            python3 "$GITHUB_WORKSPACE/scripts/release_artifact.py" verify "$releases/scrapeyard-release-$revision"
+          done
+          # Only the candidate's archive is handed over.
+          rm "scrapeyard-release-$PREVIOUS.tar.zst" "scrapeyard-release-$PREVIOUS.tar.zst.sha256"
       - name: Deploy the candidate, refuse bad deployments, roll back, and rehearse the boot service
         run: >-
           sudo env
           "SCRAPEYARD_REHEARSAL_DIAGNOSTICS_DIR=$GITHUB_WORKSPACE/artifacts/deployment-rehearsal"
           ./scripts/run_deployment_rehearsal.sh --boot-service
-          --candidate "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.candidate }}"
-          --previous "${{ steps.revisions.outputs.releases }}/scrapeyard-release-${{ steps.revisions.outputs.previous }}"
+          --candidate "$RUNNER_TEMP/scrapeyard-releases/scrapeyard-release-$CANDIDATE"
+          --previous "$RUNNER_TEMP/scrapeyard-releases/scrapeyard-release-$PREVIOUS"
       - name: Hand the rehearsal evidence back to the runner account
         if: always()
         run: |
@@ -106,17 +184,12 @@ jobs:
           path: artifacts/deployment-rehearsal/
           if-no-files-found: warn
           retention-days: 30
-      - name: Pack the rehearsed candidate release and check the archive
-        env:
-          CANDIDATE: ${{ steps.revisions.outputs.candidate }}
-          PREVIOUS: ${{ steps.revisions.outputs.previous }}
-          RELEASES: ${{ steps.revisions.outputs.releases }}
+      - name: Check the rehearsed candidate release archive
+        # The archive handed over is the one this job unpacked and rehearsed.
         run: |
           archive="scrapeyard-release-$CANDIDATE.tar.zst"
-          # Root runs a release, so the archive must not carry this runner's account.
-          tar -C "$RELEASES" --owner=0 --group=0 --numeric-owner --zstd -cf "$archive" \
-            "scrapeyard-release-$CANDIDATE"
-          sha256sum "$archive" | tee "$archive.sha256"
+          mv "$RUNNER_TEMP/release-archives/$archive" "$RUNNER_TEMP/release-archives/$archive.sha256" .
+          sha256sum -c "$archive.sha256"
           # Extract it as the deployment guide says and check what an operator would get.
           check="$RUNNER_TEMP/release-archive-check"
           sudo mkdir "$check"
@@ -133,7 +206,7 @@ jobs:
           {
             echo "### Release $CANDIDATE"
             echo
-            echo "Built, scanned, qualified, deployed and rolled back to \`$PREVIOUS\` on this runner."
+            echo "Built, scanned, qualified, deployed and rolled back to \`$PREVIOUS\` in this run."
             echo
             echo '```'
             cat "$archive.sha256"
@@ -144,10 +217,10 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: scrapeyard-release-${{ steps.revisions.outputs.candidate }}
+          name: scrapeyard-release-${{ env.CANDIDATE }}
           path: |
-            scrapeyard-release-${{ steps.revisions.outputs.candidate }}.tar.zst
-            scrapeyard-release-${{ steps.revisions.outputs.candidate }}.tar.zst.sha256
+            scrapeyard-release-${{ env.CANDIDATE }}.tar.zst
+            scrapeyard-release-${{ env.CANDIDATE }}.tar.zst.sha256
           # The archive is already compressed.
           compression-level: 0
           if-no-files-found: error
