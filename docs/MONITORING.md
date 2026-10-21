@@ -131,6 +131,7 @@ run; what it reports through is a hook the operator installs.
 | `units` | Any unit on the host has failed, the check's own aside. |
 | `restarts` | Since the last check, an application, Redis or probe container was restarted (TD-89's ending included), or `scrapeyard.service` or the tunnel's unit was. Once, with the counts. |
 | `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
+| `edge` | Given `--edge-url`: the public `/health`, asked through Cloudflare, Access and the tunnel with the service token in `/etc/scrapeyard/edge-access.json`, does not answer `200` with status `ok`, or the token file is not root's alone (mode 600). A 502 from a connector with no connection, a 401 from a revoked or expired token and a redirect all fail. Not judged while the application is stopped on purpose, as for `application`. |
 | `hooks` | A hook is installed that root cannot trust, or a ping line is not one `https` URL with no login, space or comment; nothing is sent through it. |
 | `previous-run` | The run before this one ended before it reported (once). |
 | `delivery` | A warning, not a failure: the last run could not hand the report to one of the hooks (by its kind and host, or the command's exit status). It is said through the others, and the state stays as it was. ntfy hears of changes of state only, so with ntfy alone a dead topic shows in the journal and nowhere else; in the status file the line has `"ok": false` and `"warning": true`. |
@@ -168,9 +169,27 @@ the host to work.
 The tunnel's connector serves its own readiness on loopback
 (`http://127.0.0.1:20241/ready` by default), but the connector unit in
 `security/systemd/` drops every packet from loopback (`IPAddressDeny`), so the
-host cannot read it. The check then judges the connector by its unit alone;
-an alert from the tunnel's side, such as Cloudflare's tunnel health
-notification, covers a connector that runs and has no connection.
+host cannot read it. Without `--edge-url` the check judges the connector by
+its unit alone. With it, the check asks the application's `/health` the way
+Eyebox does, through the public name, so a connector that runs and has no
+connection, a broken route or DNS record, and an Access policy that no longer
+admits the token all fail it. Give the check its own Access service token, in
+a policy of its own on the application, so that it can be revoked without
+touching Eyebox's:
+
+```bash
+# {"client_id": "...", "client_secret": "..."} of the monitor's service token
+sudo install -m 600 /dev/stdin /etc/scrapeyard/edge-access.json < edge-access.json
+sudo install -d /etc/systemd/system/scrapeyard-health.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/local/sbin/scrapeyard-health --edge-url https://<public name>/health\n' |
+  sudo tee /etc/systemd/system/scrapeyard-health.service.d/edge.conf
+sudo systemctl daemon-reload
+sudo scrapeyard-health --dry-run --edge-url https://<public name>/health
+```
+
+The service token expires (after a year by default); the check fails with
+401 from then on. Rotate it as the consumer's is rotated
+([DEPLOYMENT.md](DEPLOYMENT.md)).
 
 Install it from a release:
 

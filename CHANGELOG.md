@@ -13,6 +13,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ## Unreleased
 
+### Monitoring
+- The host check takes `--edge-url`: it asks the public `/health` through
+  Cloudflare, Access and the tunnel with a service token of its own, so a
+  connector with no connection or an Access policy that refuses the token
+  fails the check. The connector's loopback readiness stays unreadable from
+  the host.
+
 ### Deployment qualification
 - Release `e31e6a3` runs on the production host since 2026-10-20, promoted
   over `fbc340c` after a backup. Readiness, the host check, a stored result

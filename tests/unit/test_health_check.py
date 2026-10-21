@@ -20,6 +20,7 @@ import pytest
 SCRIPT = Path("security/health-check.py")
 SETTING_SECRET = "settings-secret-0123456789"
 PING_TOKEN = "ping-token-4f1e9c"
+ACCESS_SECRET = "access-secret-7d2a91"
 
 
 def _load() -> ModuleType:
@@ -59,8 +60,20 @@ class _ReceiverHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        # The application's readiness, for the in-container probe.
         self.server.received.append((self.path, dict(self.headers), ""))
+        if self.path.startswith("/edge"):
+            # The public /health: ok only for the right Access token.
+            granted = self.headers.get("CF-Access-Client-Secret") == ACCESS_SECRET
+            code = int(self.path.rpartition("-")[2]) if granted and "-" in self.path else 200 if granted else 401
+            body = json.dumps({"status": "ok"}).encode() if code == 200 else b""
+            self.send_response(code)
+            if code == 302:
+                self.send_header("Location", "/login")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # The application's readiness, for the in-container probe.
         payload = json.dumps(
             {
                 "status": "unhealthy",
@@ -160,6 +173,7 @@ def host(tmp_path, monkeypatch) -> Host:
         "SETTINGS_FILE": settings,
         "PING_FILE": root / "etc/scrapeyard/health-ping",
         "HOOK_FILE": root / "etc/scrapeyard/health-hook",
+        "EDGE_ACCESS_FILE": root / "etc/scrapeyard/edge-access.json",
         "STATE_FILE": root / "var/lib/scrapeyard/health-status.json",
         "BACKUP_STATUS": root / "var/lib/scrapeyard/backup-status.json",
         "POLICY_RECORD": root / "var/lib/scrapeyard/policy-restored.log",
@@ -537,3 +551,39 @@ def test_a_delivery_that_failed_is_reported_by_the_next_run(host, receiver, caps
     # ntfy heard the first state only: a warning is no change of state.
     assert [path for path, _headers, _body in receiver.received].count("/topic") == 1
     assert PING_TOKEN not in out
+
+
+def test_the_edge_check_asks_through_access_and_fails_on_anything_but_ok(host, receiver, capsys):
+    access = host.module.EDGE_ACCESS_FILE
+
+    out, _state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge")
+    assert "FAIL edge:" in out and "edge-access.json" in out
+    assert not receiver.received
+
+    access.write_text(json.dumps({"client_id": "monitor.access", "client_secret": ACCESS_SECRET}))
+    access.chmod(0o644)
+    out, _state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge")
+    assert "FAIL edge:" in out and "root's alone" in out and not receiver.received
+
+    access.chmod(0o600)
+    out, state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge")
+    assert "ok   edge: the public name answered HTTP 200 through Access and the tunnel, status ok" in out
+    assert "OK (9 checks)" in out and state["status"] == "ok"
+    headers = {name.lower(): value for name, value in receiver.received[-1][1].items()}
+    assert headers["cf-access-client-id"] == "monitor.access"
+    assert headers["user-agent"] == "scrapeyard-health"
+
+    # The tunnel's 502 while its connector has no connection, Access refusing
+    # a token it no longer knows, and a redirect (to a login page) all fail.
+    for path, expected in (("/edge-502", "HTTP 502"), ("/edge-302", "HTTP 302")):
+        out, state = _check(host, capsys, "--edge-url", f"{receiver.url}{path}")
+        assert f"FAIL edge: the public name answered {expected}" in out and state["status"] == "fail"
+    access.write_text(json.dumps({"client_id": "monitor.access", "client_secret": "revoked"}))
+    out, _state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge")
+    assert "FAIL edge: the public name answered HTTP 401" in out
+    assert ACCESS_SECRET not in out + host.module.STATE_FILE.read_text()
+
+    # While a backup has the application stopped, the 502 is expected.
+    host.module.BACKUP_STOP_MARKER.touch()
+    out, _state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge-502")
+    assert "ok   edge: not judged: a backup has it stopped" in out

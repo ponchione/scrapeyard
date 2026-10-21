@@ -5,8 +5,9 @@ Installed as /usr/local/sbin/scrapeyard-health and run every five minutes by
 scrapeyard-health.timer. Each run checks the application's readiness, the
 free space and inodes where the host keeps its data, the age of the last
 backup, the policy watch's timer and record, the host's failed units, the
-restarts of the application's containers and units, and the tunnel's
-connector. It prints one line for each, writes them to
+restarts of the application's containers and units, the tunnel's
+connector, and, given --edge-url, the application's /health asked through
+Cloudflare, Access and the tunnel as a consumer would. It prints one line for each, writes them to
 /var/lib/scrapeyard/health-status.json, and hands the same report to:
 
 - /etc/scrapeyard/health-ping, root's alone (mode 600): one line for each
@@ -43,11 +44,14 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SETTINGS_FILE = Path("/etc/scrapeyard/deploy.env")
 PING_FILE = Path("/etc/scrapeyard/health-ping")
 HOOK_FILE = Path("/etc/scrapeyard/health-hook")
+# A Cloudflare Access service token, {"client_id": ..., "client_secret": ...},
+# root's alone, for --edge-url.
+EDGE_ACCESS_FILE = Path("/etc/scrapeyard/edge-access.json")
 STATE_FILE = Path("/var/lib/scrapeyard/health-status.json")
 BACKUP_STATUS = Path("/var/lib/scrapeyard/backup-status.json")
 POLICY_RECORD = Path("/var/lib/scrapeyard/policy-restored.log")
@@ -423,6 +427,45 @@ def check_tunnel(ready_url: str | None) -> Result:
     return Result("tunnel", code == 200, f"connector active; readiness HTTP {code}")
 
 
+def check_edge(url: str) -> Result:
+    """Ask the application's liveness the way a consumer does: through Cloudflare, Access and the tunnel."""
+
+    planned = planned_stop()
+    if planned:
+        return Result("edge", True, f"not judged: {planned}")
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in PING_SCHEMES or not parts.hostname or parts.username is not None:
+        return Result("edge", False, "--edge-url is not one https URL with no login")
+    try:
+        trusted(EDGE_ACCESS_FILE, private=True)
+        token = json.loads(EDGE_ACCESS_FILE.read_text(encoding="utf-8"))
+        headers = {
+            "CF-Access-Client-Id": str(token["client_id"]),
+            "CF-Access-Client-Secret": str(token["client_secret"]),
+        }
+    except Unusable as error:
+        return Result("edge", False, str(error))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return Result("edge", False, f"{EDGE_ACCESS_FILE} is not usable ({type(error).__name__})")
+    # The zone's Browser Integrity Check refuses urllib's own User-Agent.
+    request = urllib.request.Request(url, headers={"User-Agent": "scrapeyard-health", **headers})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects)
+        with opener.open(request, timeout=SEND_SECONDS) as response:
+            code, body = response.status, response.read(4096)
+    except urllib.error.HTTPError as error:
+        with error:
+            code, body = error.code, b""
+    except Exception as error:  # noqa: BLE001 - its text can hold the URL
+        return Result("edge", False, f"the public name did not answer ({type(error).__name__})")
+    try:
+        status = json.loads(body).get("status") if code == 200 else None
+    except (ValueError, AttributeError):
+        status = None
+    detail = f"the public name answered HTTP {code} through Access and the tunnel"
+    return Result("edge", status == "ok", detail if code != 200 else f"{detail}, status {status}")
+
+
 def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[str, Any]) -> list[Result]:
     now = time.time()
     results: list[Result] = []
@@ -434,7 +477,7 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
     except (OSError, ValueError, RuntimeError) as error:
         found = {}
         results.append(Result("deployment", False, f"its containers could not be found: {error}"))
-    checks = (
+    checks: list[tuple[str, Callable[[], Result]]] = [
         ("application", lambda: check_application(found)),
         ("disk", lambda: check_disk(args.disk_min_free_percent, args.disk_min_free_gib)),
         ("backup", lambda: check_backup(args.backup_max_age_hours, now)),
@@ -442,7 +485,9 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
         ("units", check_units),
         ("restarts", lambda: check_restarts(found, state, new_state)),
         ("tunnel", lambda: check_tunnel(args.tunnel_ready_url)),
-    )
+    ]
+    if args.edge_url:
+        checks.append(("edge", lambda: check_edge(args.edge_url)))
     for name, check in checks:
         try:
             results.append(check())
@@ -677,6 +722,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--disk-min-free-gib", type=float, default=2.0)
     parser.add_argument("--backup-max-age-hours", type=float, default=26.0)
     parser.add_argument("--tunnel-ready-url", help="the connector's own readiness, such as http://127.0.0.1:20241/ready")
+    parser.add_argument(
+        "--edge-url",
+        help=f"the public /health, such as https://scrapeyard.example.net/health, asked with the Access token in {EDGE_ACCESS_FILE}",
+    )
     parser.add_argument(
         "--label",
         default="Scrapeyard host",
