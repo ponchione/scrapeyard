@@ -5,7 +5,7 @@ ARG PYTHON_IMAGE="python:3.14.8-slim-bookworm@sha256:48b13b003dda20b16f9442b8475
 # Export the production lock with the same pinned toolchain used by CI.
 FROM ${PYTHON_IMAGE} AS builder
 
-ARG PIP_VERSION=26.2.1
+ARG PIP_VERSION=26.2.2
 ARG POETRY_VERSION=2.3.4
 ARG POETRY_EXPORT_VERSION=1.10.0
 RUN pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" && \
@@ -22,7 +22,7 @@ RUN poetry export --only main -f requirements.txt -o requirements.txt
 # Runtime inputs are immutable or explicitly recorded in OCI labels/SBOM.
 FROM ${PYTHON_IMAGE} AS runtime
 
-ARG PIP_VERSION=26.2.1
+ARG PIP_VERSION=26.2.2
 ARG PLAYWRIGHT_VERSION=1.58.0
 ARG PLAYWRIGHT_CHROMIUM_REVISION=1208
 ARG REBROWSER_PLAYWRIGHT_VERSION=1.52.0

@@ -24,6 +24,9 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ### Dependencies
 - certifi 2026.10.19, for PYSEC-2026-4320.
+- pip 26.2.2 in the image, CI, the audit job and the dev lock. pip 26.2.1 and
+  26.1.2 vendor certifi 2026.06.17 and 2026.02.25, which still trust
+  emSign ECC Root CA - G3.
 
 ### Deployment qualification
 - Release `7bccba5` runs on the production host since 2026-10-21 15:27 UTC,

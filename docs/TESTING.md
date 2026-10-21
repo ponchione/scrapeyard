@@ -62,7 +62,7 @@ poetry run python scripts/audit_dependencies.py all
 
 ## Packaging metadata and toolchain
 
-The supported packaging toolchain is pip 26.2.1, Poetry 2.3.4, and
+The supported packaging toolchain is pip 26.2.2, Poetry 2.3.4, and
 `poetry-plugin-export` 1.10.0. Install the same versions in an isolated Poetry
 tool environment and verify them before changing the lock or building a
 release:
@@ -900,7 +900,7 @@ poetry run python scripts/audit_dependencies.py all
 
 Production export requires Poetry's `export` command. The Docker builder and
 dependency-audit workflow use the audited combination of Poetry 2.3.4,
-`poetry-plugin-export` 1.10.0, and pip 26.2.1. With another Poetry 2.x
+`poetry-plugin-export` 1.10.0, and pip 26.2.2. With another Poetry 2.x
 installation where the command is absent, install the official export plugin
 into Poetry's tool environment. The export is derived only from `poetry.lock`
 and the main dependency group; repeated exports from the same lock are

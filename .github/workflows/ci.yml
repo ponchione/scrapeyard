@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PIP_VERSION: "26.2.1"
+  PIP_VERSION: "26.2.2"
   POETRY_VERSION: "2.3.4"
   POETRY_EXPORT_VERSION: "1.10.0"
 
