@@ -14,6 +14,10 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ## Unreleased
 
 ### Monitoring
+- The host check judges a planned stop after 180 s instead of 600 s, and a
+  failure then says `maintenance overdue:` with what has the application
+  stopped and for how long. `backup` fails once when the last backup kept
+  the application stopped longer than 180 s.
 - The host check takes `--expires LABEL=YYYY-MM-DD` (repeatable) and fails
   from `--expiry-warn-days` (30) before the first.
 - The host check takes `--edge-url`: it asks the public `/health` through
@@ -45,6 +49,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   launches.
 
 ### Deployment
+- Bounded maintenance (after the 2026-10-21 outage): the backup gives up its
+  copy and the application's start after 120 s each
+  (`SCRAPEYARD_BACKUP_COPY_TIMEOUT_SECONDS`,
+  `SCRAPEYARD_BACKUP_START_TIMEOUT_SECONDS`) and restarts
+  `scrapeyard.service` on a start that hangs. `scrapeyard-deploy` limits the
+  backup to 900 s and a promotion to 300 s, stops a unit that runs over, and
+  after any failure, timeout or stop while the application may be stopped
+  restarts `scrapeyard.service` if it is not active within 120 s. Its unit's
+  limit is 2 h (was 3 h). `scrapeyard-deploy` no longer prints its exit code
+  at the end of a failure message.
 - Fixed: `scrapeyard-deploy` took `/run/scrapeyard/deploy.lock`, the release
   wrapper's lock, for its whole run, so the application could not be started
   again after its pre-promotion backup. On the production host on 2026-10-21

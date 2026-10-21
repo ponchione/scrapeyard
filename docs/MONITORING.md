@@ -124,9 +124,9 @@ run; what it reports through is a hook the operator installs.
 | Check | Fails when |
 | --- | --- |
 | `deployment` | Docker did not list or describe the deployment's containers, or `docker.service` is stopped, failed or stopping. Then Docker is not asked at all: its socket would start a stopped Docker for the first client, and the boot service, which Docker wants, would start the application with it in the middle of maintenance. |
-| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup has it stopped, or the boot service's start or stop or a promotion is under way, and for ten minutes at most; between the retries of a start that keeps failing it is judged. |
+| `application` | The application's container is not running, or its readiness is not `200`. Readiness is asked from inside the container, with the credential its own health check takes (liveness, from a release older than that check); the line names what failed (`redis`, `worker`, ...) and what Docker says. Not judged while a backup has it stopped, or the boot service's start or stop or a promotion is under way, for 180 s at most (the longest of those measured on the first production host was 64 s); after that it is judged, and a failure says `maintenance overdue:` with what has it stopped and for how long. Between the retries of a start that keeps failing it is judged. Until 2026-10-21 the window was ten minutes. |
 | `disk` | `/`, `/var/lib/docker` or `/var/backups/scrapeyard` has less than 10% or 2 GiB free, or less than 10% of its inodes. |
-| `backup` | The last backup completed more than 26 hours ago or more than 15 minutes in the future (made while the clock was ahead, it would read as fresh until the clock passed it), none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. |
+| `backup` | The last backup completed more than 26 hours ago or more than 15 minutes in the future (made while the clock was ahead, it would read as fresh until the clock passed it), none has, its status file cannot be read, or `scrapeyard-backup.timer` is not active. Whether archives leave the host is said, not judged. Once, when the last backup kept the application stopped longer than 180 s (`application_down_seconds` in its status file). |
 | `policy-watch` | `scrapeyard-policy-watch.timer` is not active, or the watch wrote to its record since the last check (once, with the lines). The record's first line counts too. Without a status file to compare with, lines from the last 15 minutes count as new. |
 | `units` | Any unit on the host has failed, the check's own aside. |
 | `restarts` | Since the last check, an application, Redis or probe container was restarted (TD-89's ending included), or `scrapeyard.service` or the tunnel's unit was. Once, with the counts. |
@@ -253,8 +253,25 @@ exists on the operator's machine.
 Planned stops should not alert. While a backup has the application stopped
 (about 30 s from 04:40 UTC), or the boot service starts it after the
 unattended-upgrade reboot at 08:00 UTC, `application` and `edge` say "not
-judged" and the ping stays a success; the grace covers runs missed while the
-host reboots. A failing check sends `/fail` and alerts at once; a host that
+judged" and the ping stays a success, for 180 s at most; a stop that lasts
+longer fails both checks as `maintenance overdue`. The grace covers runs
+missed while the host reboots.
+
+**The 2026-10-21 outage was not reported.** The application was stopped by a
+backup from 20:35:58 to about 20:41:40 UTC (342.8 s, see TD-21). The host
+check's runs at 20:35:25 and 20:41:54 found it up; the run at 20:40:24,
+266 s into the stop, said `not judged: a backup has it stopped` for
+`application` and `edge` and sent a success ping (`HTTP 200`). No `/fail`
+was sent and no ping was missed, so healthchecks.io had nothing to alert
+on; whether anything reached the operator was not seen. With the 180 s
+window that run fails as overdue; the test
+`test_maintenance_is_not_judged_for_three_minutes_and_then_fails_as_overdue`
+replays it. A stop can still end between two runs, which are five minutes
+apart, before any run sees it overdue. For a backup's stop that is caught
+afterwards: `backup` fails once when the last backup's
+`application_down_seconds` is past 180 s (the incident's 342.8 s would have
+failed the 20:41:54 run). A promotion's or a start's stop of up to about 8
+minutes that ends between two runs is still not reported. A failing check sends `/fail` and alerts at once; a host that
 is down, or a timer that stopped, alerts after period plus grace.
 
 A real failure has reached healthchecks.io: at 13:19:58 UTC on 2026-10-21

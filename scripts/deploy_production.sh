@@ -52,10 +52,15 @@ echo "Copying it to $HOST..."
 scp -q "$archive" "$HOST:$remote"
 # The deployment runs in its own unit, so a dropped connection cannot stop it
 # half way; its output is printed when it ends (journalctl -fu scrapeyard-deploy).
+# Each wait that can leave the application stopped has its own limit in
+# security/deploy-release.sh, and the application is started again when one
+# runs out. The unit's limit is only a backstop above the sum of all of them
+# (host checks and uploads included); its stop limit leaves the script time to
+# start the application again (two minutes' wait, five for a restart).
 status=0
 # shellcheck disable=SC2029  # $remote and $sum are expanded here on purpose
 ssh "$HOST" "since=\$(date +%s); sudo systemd-run --quiet --unit scrapeyard-deploy --service-type=oneshot \
-  --wait --collect --property TimeoutStartSec=3h /usr/local/sbin/scrapeyard-deploy '$remote' '$sum'; s=\$?; \
+  --wait --collect --property TimeoutStartSec=2h --property TimeoutStopSec=8min /usr/local/sbin/scrapeyard-deploy '$remote' '$sum'; s=\$?; \
   sudo journalctl --no-pager -o cat -u scrapeyard-deploy --since @\$since; rm -f '$remote'; exit \$s" || status=$?
 ((status == 0)) || fail "the deployment on $HOST did not complete (exit $status); its output is above"
 echo "Deployed $commit (archive SHA-256 $sum)"

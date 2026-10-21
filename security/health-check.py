@@ -78,8 +78,12 @@ STARTING_OR_STOPPING = frozenset({
     "start-pre", "start", "start-post", "stop", "stop-sigterm", "stop-sigkill",
     "stop-post", "final-sigterm", "final-sigkill",
 })
-# A planned stop longer than this is judged all the same.
-PLANNED_WINDOW_SECONDS = 600
+# A planned stop longer than this is judged all the same, and a failure then
+# says the stop is overdue. Measured on the first production host
+# (2026-10-14 to 21): a backup's stop 26.5 to 33.4 s, the boot unit's start
+# 25 to 53 s, a promotion 32 to 64 s. Until 2026-10-21 this was 600 s, which
+# left a 342.8 s outage that day unjudged (docs/MONITORING.md).
+PLANNED_WINDOW_SECONDS = 180
 WATCH_TIMER = "scrapeyard-policy-watch.timer"
 BACKUP_TIMER = "scrapeyard-backup.timer"
 TUNNEL_UNIT = "cloudflared-scrapeyard.service"
@@ -222,27 +226,59 @@ def _show(unit: str, prop: str) -> str:
     return out.strip()
 
 
-def _changed_lately(unit: str) -> bool:
+def monotonic() -> float:
+    """systemd's monotonic clock, in seconds since boot."""
+
+    return time.monotonic()
+
+
+def _seconds_in_state(unit: str) -> float | None:
     try:
         changed = int(_show(unit, "StateChangeTimestampMonotonic")) / 1e6
     except ValueError:
-        return False
-    return changed > 0 and time.monotonic() - changed <= PLANNED_WINDOW_SECONDS
+        return None
+    return monotonic() - changed if changed > 0 else None
+
+
+def maintenance() -> tuple[str, float] | None:
+    """What has the application stopped or starting on purpose, and for how many seconds."""
+
+    try:
+        return "a backup has it stopped", time.time() - BACKUP_STOP_MARKER.stat().st_mtime
+    except FileNotFoundError:
+        pass
+    if _show(APP_UNIT, "SubState") in STARTING_OR_STOPPING:
+        age = _seconds_in_state(APP_UNIT)
+        if age is not None:
+            return f"{APP_UNIT} is starting or stopping it", age
+    if unit_state(PROMOTE_UNIT) in {"active", "activating"}:
+        age = _seconds_in_state(PROMOTE_UNIT)
+        if age is not None:
+            return "a promotion is under way", age
+    return None
 
 
 def planned_stop() -> str | None:
-    """What has the application stopped or starting on purpose, for ten minutes at most."""
+    """Maintenance still inside its window, which is not judged."""
 
-    try:
-        if time.time() - BACKUP_STOP_MARKER.stat().st_mtime <= PLANNED_WINDOW_SECONDS:
-            return "a backup has it stopped"
-    except FileNotFoundError:
-        pass
-    if _show(APP_UNIT, "SubState") in STARTING_OR_STOPPING and _changed_lately(APP_UNIT):
-        return f"{APP_UNIT} is starting or stopping it"
-    if unit_state(PROMOTE_UNIT) in {"active", "activating"} and _changed_lately(PROMOTE_UNIT):
-        return "a promotion is under way"
+    found = maintenance()
+    if found and found[1] <= PLANNED_WINDOW_SECONDS:
+        return found[0]
     return None
+
+
+def overdue(result: Result) -> Result:
+    """A failure during maintenance past its window says so."""
+
+    found = maintenance()
+    if result.ok or not found:
+        return result
+    return Result(
+        result.name,
+        False,
+        f"maintenance overdue: {found[0]} for {found[1]:.0f}s, past the {PLANNED_WINDOW_SECONDS}s allowed; "
+        + result.detail,
+    )
 
 
 def check_application(found: dict[str, dict[str, Any]]) -> Result:
@@ -312,7 +348,9 @@ def unit_state(unit: str) -> str:
     return out.strip() or "unknown"
 
 
-def check_backup(max_age_hours: float, now: float) -> Result:
+def check_backup(
+    max_age_hours: float, now: float, state: dict[str, Any] | None = None, new_state: dict[str, Any] | None = None
+) -> Result:
     timer = unit_state(BACKUP_TIMER)
     try:
         status = json.loads(BACKUP_STATUS.read_text(encoding="utf-8"))
@@ -329,7 +367,21 @@ def check_backup(max_age_hours: float, now: float) -> Result:
         return Result("backup", False, f"last completed {-age:.1f} h in the future; timer {timer}")
     where = "uploaded" if status.get("uploaded") is True else "kept on this host only"
     detail = f"last completed {age:.1f} h ago, {int(status.get('bytes') or 0) / 1e6:.1f} MB, {where}; timer {timer}"
-    return Result("backup", age <= max_age_hours and timer == "active", detail)
+    ok = age <= max_age_hours and timer == "active"
+    # A stop past the window that ended between two runs is never judged by
+    # `application`; the backup records how long it was, and that is said once.
+    down = status.get("application_down_seconds")
+    if new_state is not None:
+        new_state["long_stop_seen"] = (state or {}).get("long_stop_seen")
+        if isinstance(down, (int, float)) and down > PLANNED_WINDOW_SECONDS and new_state["long_stop_seen"] != status["completed_at"]:
+            new_state["long_stop_seen"] = status["completed_at"]
+            return Result(
+                "backup",
+                False,
+                f"the backup completed at {status['completed_at']} had the application stopped {down:.0f}s, "
+                f"past the {PLANNED_WINDOW_SECONDS}s allowed (once); {detail}",
+            )
+    return Result("backup", ok, detail)
 
 
 def check_policy_watch(state: dict[str, Any], new_state: dict[str, Any], now: float) -> Result:
@@ -503,16 +555,16 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
         found = {}
         results.append(Result("deployment", False, f"its containers could not be found: {error}"))
     checks: list[tuple[str, Callable[[], Result]]] = [
-        ("application", lambda: check_application(found)),
+        ("application", lambda: overdue(check_application(found))),
         ("disk", lambda: check_disk(args.disk_min_free_percent, args.disk_min_free_gib)),
-        ("backup", lambda: check_backup(args.backup_max_age_hours, now)),
+        ("backup", lambda: check_backup(args.backup_max_age_hours, now, state, new_state)),
         ("policy-watch", lambda: check_policy_watch(state, new_state, now)),
         ("units", check_units),
         ("restarts", lambda: check_restarts(found, state, new_state)),
         ("tunnel", lambda: check_tunnel(args.tunnel_ready_url)),
     ]
     if args.edge_url:
-        checks.append(("edge", lambda: check_edge(args.edge_url)))
+        checks.append(("edge", lambda: overdue(check_edge(args.edge_url))))
     if args.expires:
         checks.append(("expiry", lambda: check_expiries(args.expires, args.expiry_warn_days, now)))
     for name, check in checks:

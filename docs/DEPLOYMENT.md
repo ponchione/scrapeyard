@@ -1198,8 +1198,17 @@ The run's limits are settings of the unit, in a drop-in
 kept on the host, 7), `SCRAPEYARD_BACKUP_IDLE_TIMEOUT_SECONDS` (3600),
 `SCRAPEYARD_BACKUP_IDLE_POLL_SECONDS` (30), `SCRAPEYARD_BACKUP_MIN_FREE_MB`
 (1024, the room wanted beside what the copy itself takes),
-`SCRAPEYARD_BACKUP_SNAPSHOT_TIMEOUT_SECONDS` (900) and
-`SCRAPEYARD_BACKUP_UPLOAD_TIMEOUT_SECONDS` (1800). The restore test and
+`SCRAPEYARD_BACKUP_SNAPSHOT_TIMEOUT_SECONDS` (900),
+`SCRAPEYARD_BACKUP_UPLOAD_TIMEOUT_SECONDS` (1800), and two that bound the
+time the application is stopped:
+`SCRAPEYARD_BACKUP_COPY_TIMEOUT_SECONDS` (120, the copy of the data) and
+`SCRAPEYARD_BACKUP_START_TIMEOUT_SECONDS` (120, the application's start
+afterwards). A start that does not finish within its limit is given up and
+`scrapeyard.service` is restarted (`systemctl restart --no-block`), which
+replaces the stuck start and deploys the promoted release again; the run
+still writes and uploads its archive and fails. In 15 runs on the first
+production host the whole stop took 26.5 to 33.4 s, of which the start 25 to
+32 s. The restore test and
 restore read `SCRAPEYARD_BACKUP_MIN_FREE_MB` too, and
 `SCRAPEYARD_BACKUP_READY_TIMEOUT_SECONDS` (300): how long the restored copy
 may take to be ready. Give those on the command line, as in
@@ -1558,8 +1567,49 @@ It holds `/run/scrapeyard/guarded-deploy.lock`, so two do not overlap. It
 must never hold `deploy.lock`, the release wrapper's: the backup and the
 promotion start the application through the wrapper, and on 2026-10-21 a
 first version that took that lock held the application stopped for 5.7
-minutes, until it was stopped by hand (see TD-21). From the
-operator's machine, with `gh` signed in:
+minutes, until it was stopped by hand (see TD-21).
+
+**Bounds.** That outage lasted until an operator acted, because nothing in
+the run gave up: the backup's start of the application waited for a lock the
+run held, and the run's unit allowed three hours. Since then each wait that
+can leave the application stopped has a limit, chosen from what the first
+production host measured (2026-10-14 to 21), and the application is started
+again when one runs out:
+
+| Wait | Measured | Limit | When it runs out |
+| --- | --- | --- | --- |
+| The backup's copy, with the application stopped | a few seconds | 120 s (`SCRAPEYARD_BACKUP_COPY_TIMEOUT_SECONDS`) | The run fails and starts the application. |
+| The backup's start of the application | 25 to 32 s | 120 s (`SCRAPEYARD_BACKUP_START_TIMEOUT_SECONDS`) | `scrapeyard.service` is restarted; the run fails. |
+| The whole backup unit, its wait for an idle application included | 29 to 36 s | 900 s | The backup unit is stopped, which runs its own clean-up; the deployment fails before promoting. |
+| A promotion | 32 to 64 s | 300 s | The promotion's unit is stopped and the running release promoted again. |
+| After any of these, the application's unit active again | 25 to 53 s for a start | 120 s | `scrapeyard.service` is restarted (at most 300 s). |
+| Each upload to the store, after the promotion | about 100 s for both | 900 s | The run fails with exit 3; the new release keeps running. |
+
+A run that fails, runs out of time, or is stopped (`systemctl stop
+scrapeyard-deploy`, or its unit's own limit) while the application may be
+stopped ends the same way: unless the backup or a promotion is still running
+and will start or leave the application by itself, it waits up to 120 s for
+`scrapeyard.service` to be active and otherwise restarts it.
+`scripts/deploy_production.sh` gives the unit 2 hours, a backstop above the
+sum of every limit, host checks and uploads included, and 8 minutes to stop
+so that this recovery can run. A start that cannot succeed (a release that
+no longer starts) is left to the boot unit's own retries and to the host
+check, which judges a stop longer than 180 s
+([MONITORING.md](MONITORING.md#the-host-check)).
+
+Tested in isolation (`tests/unit/test_deploy_release.py`,
+`tests/unit/test_backup_script.py`): a backup that hangs with the application
+stopped, a promotion that hangs, a stop signal in the middle of the backup,
+and a start of the application that hangs; each ends within its limit with
+the application's unit restarted or the earlier release promoted. The
+backup script and host check from before fail their new tests (the hung
+start waited out the test's 60 s); the deployment script from before has no
+limits to set, so its tests cannot run on it. On systemd 255 (a user unit), ending a waiting
+`systemctl start` with `timeout` left the start job running, and
+`systemctl restart --no-block` replaced the stuck start and the unit became
+active, which is what the recovery relies on.
+
+From the operator's machine, with `gh` signed in:
 
 ```bash
 gh workflow run release-rehearsal.yml --ref main -f revision=<commit> \

@@ -308,6 +308,12 @@ case "$*" in
       exit 1
     fi
     [[ "${START_FAILS:-}" != yes ]] || exit 1
+    # A start held up as one was by a lock on 2026-10-21. The real sleep (the
+    # script's is a stand-in), exec'd, so the timeout that ends systemctl
+    # ends the wait itself.
+    [[ "${START_HANGS:-}" != yes || "$*" == *--no-block* ]] || exec /usr/bin/sleep 60
+    touch "$STATE/unit-active" "$STATE/app-running" ;;
+  "restart --no-block scrapeyard.service")
     touch "$STATE/unit-active" "$STATE/app-running" ;;
 esac
 '''
@@ -1784,6 +1790,30 @@ def _seconds(span: str) -> int:
     units = {"h": 3600, "min": 60, "s": 1, "": 1}
     number, unit = re.fullmatch(r"(\d+)(h|min|s|)", span).groups()  # type: ignore[union-attr]
     return int(number) * units[unit]
+
+
+def test_a_start_that_hangs_is_given_up_within_its_limit_and_the_unit_restarted(host):
+    started = time.monotonic()
+    result = host.run("run", START_HANGS="yes", SCRAPEYARD_BACKUP_START_TIMEOUT_SECONDS="2")
+
+    # Bounded by the limit, not by the unit's own 600 s or the stand-in's 60 s.
+    assert time.monotonic() - started < 30
+    assert result.returncode == 2
+    assert "did not start within 2s; restarting it" in result.stderr
+    calls = host.called("systemctl")
+    assert calls.index("systemctl start scrapeyard.service") < calls.index(
+        "systemctl restart --no-block scrapeyard.service"
+    )
+    assert host.application_is_running()
+    # The archive is still written, and the run still fails.
+    assert len(host.archives()) == 1 and not host.status.exists()
+
+
+@pytest.mark.parametrize("setting", ["START_TIMEOUT", "COPY_TIMEOUT"])
+def test_a_limit_of_the_stopped_window_must_be_a_positive_number(host, setting):
+    result = host.run("run", **{f"SCRAPEYARD_BACKUP_{setting}_SECONDS": "0"})
+
+    assert result.returncode == 2 and not host.called("systemctl stop")
 
 
 def test_backup_unit_runs_the_installed_script_and_always_ends_with_resume():
