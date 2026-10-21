@@ -26,6 +26,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - certifi 2026.10.19, for PYSEC-2026-4320.
 
 ### Deployment qualification
+- Release `7bccba5` runs on the production host since 2026-10-21 15:27 UTC,
+  promoted over `e31e6a3` after an uploaded backup, with certifi 2026.10.19
+  for GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320). Rehearsed in CI against
+  `ae5bb5e` and on an isolated VM from the real `e31e6a3`, rollback
+  included. Application down about 14 s for the promotion and 29.6 s for
+  the backup before it. Readiness, stored results, the external path, the
+  host check and healthchecks.io passed afterwards. Its bundle is in the R2
+  store.
 - 2026-10-21, later: `fwupd-refresh.timer` disabled on the host; releases
   `e31e6a3` and `fbc340c` kept in the R2 store (`security/upload-release-r2.sh`);
   a clean VM recovered from the store alone in about 2.5 minutes of
