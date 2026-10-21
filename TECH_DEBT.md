@@ -1532,15 +1532,48 @@ private key; it decrypts with that key to the host's file byte for byte.
   copy of both kept elsewhere is the owner's call, and no destination has
   been named. A host rebuilt by the provider (not a VM) is untried
   (TD-19).
-- 2026-10-21, 20:36 UTC: the first production run of `scrapeyard-deploy`
-  deadlocked with the release wrapper over `/run/scrapeyard/deploy.lock`
-  (the backup could not start the application again), and the application
-  was down 342.8 s until the deployment unit was stopped by hand. Nothing
-  was promoted; the backup completed and was uploaded; the host check then
-  passed 10 of 10. Fixed with its own lock and a test that fails on a
-  collision (pull request #54). Rerun at 21:22 UTC with the fix: backup
-  (down 29.0 s) uploaded, `7783ba3` promoted, host check 10 of 10 with the
-  public path, both releases in the store.
+- **Incident, 2026-10-21 20:35:58 to about 20:41:40 UTC.** The first
+  production run of `scrapeyard-deploy` held `/run/scrapeyard/deploy.lock`,
+  the lock the release wrapper takes to start the application, so its
+  pre-promotion backup stopped the application and could not start it
+  again. It was down 342.8 s, until the operator (this agent) stopped the
+  deployment unit; the backup's start then completed by itself. Nothing was
+  promoted; the backup completed and was uploaded; the host check then
+  passed 10 of 10. Nothing reported it: the one host check run inside the
+  stop (20:40:24) said "not judged: a backup has it stopped" and pinged
+  success, and no alert was seen
+  ([MONITORING.md](docs/MONITORING.md#on-the-first-production-host)).
+- **Lock fix** (pull request #54): the deployment's own
+  `guarded-deploy.lock`; its tests' backup and promotion stand-ins take the
+  wrapper's real lock. Rerun at 21:22 UTC: backup (down 29.0 s) uploaded,
+  `7783ba3` promoted, host check 10 of 10 with the public path, both
+  releases in the store.
+- **Safeguards** (pull request #56): the outage needed an operator because
+  no wait gave up. Now the backup gives up the copy after 120 s and the
+  application's start after 120 s and restarts `scrapeyard.service`; the
+  deployment gives the backup 900 s and a promotion 300 s, stops the unit
+  that runs over, and restarts `scrapeyard.service` when the application is
+  not active 120 s after a failure, a timeout or a stop of the deployment;
+  its unit's limit is 2 h as a backstop (was 3 h, with nothing inside
+  bounded). The host check judges a planned stop after 180 s (was 600 s) and
+  says `maintenance overdue`, and fails once for a backup whose recorded stop
+  passed 180 s. Limits from 15 backups (stop 26.5 to 33.4 s), 23 starts (25
+  to 53 s) and 10 promotions (32 to 64 s) on the host
+  ([DEPLOYMENT.md](docs/DEPLOYMENT.md#guarded-deployment)).
+- **Verification of the safeguards**: in isolation only, nothing was
+  interrupted in production. Tests with stand-ins for systemd (the backup and
+  host check tests fail on the scripts before the change; the old
+  deployment script has no limits to test): a backup start that hangs (given up at
+  its limit, unit restarted), a backup that hangs with the application
+  stopped, a promotion that hangs, a stop signal mid-backup, and the
+  20:40:24 run replayed (now `FAIL application: maintenance overdue`). On a
+  real systemd 255 user unit, a `systemctl start` ended by `timeout` left
+  its start job running and `restart --no-block` replaced it. Still
+  unverified: a real stall on the host, and that an overdue `/fail` reaches
+  the operator (TD-20's alert delivery).
+- Still open: a promotion's or a start's stop under about 8 minutes that
+  ends between two host check runs is not reported; a release that cannot
+  start is left to the boot unit's retries and the host check.
 - Done 2026-10-21: a guarded deployment (`scrapeyard-deploy`,
   [DEPLOYMENT.md](docs/DEPLOYMENT.md#guarded-deployment)) backs up to the
   store before promoting, checks the host and public path after, promotes

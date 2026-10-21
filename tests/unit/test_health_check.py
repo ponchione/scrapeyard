@@ -411,40 +411,63 @@ def _monotonic_us(seconds_ago: float) -> str:
     return str(int((time.monotonic() - seconds_ago) * 1e6))
 
 
+def _stopped_by_backup(seconds_ago: float):
+    def setup(host):
+        host.module.BACKUP_STOP_MARKER.touch()
+        os.utime(host.module.BACKUP_STOP_MARKER, (time.time() - seconds_ago,) * 2)
+    return setup
+
+
 @pytest.mark.parametrize(
-    ("setup", "judged"),
+    ("setup", "overdue"),
     [
         # A backup that stopped it a minute ago.
-        (lambda host: host.module.BACKUP_STOP_MARKER.touch(), False),
-        # One whose stop has lasted more than ten minutes.
-        (lambda host: (host.module.BACKUP_STOP_MARKER.touch(),
-                       os.utime(host.module.BACKUP_STOP_MARKER, (time.time() - 900,) * 2)), True),
+        (_stopped_by_backup(60), None),
+        # The 2026-10-21 outage as the 20:40:24 UTC run saw it: a backup had
+        # had it stopped for 266 s. That run said "not judged" and pinged
+        # success; it must fail.
+        (_stopped_by_backup(266), "a backup has it stopped for 266s"),
+        (_stopped_by_backup(900), "a backup has it stopped for 900s"),
         # The boot unit's start under way.
         (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "start",
-                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), False),
-        # Between retries of a start that keeps failing.
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), None),
+        # Between retries of a start that keeps failing: not maintenance at all.
         (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "auto-restart",
-                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), True),
-        # A start that has hung for more than ten minutes.
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(60)}), ""),
+        # A start that has hung past the window.
         (lambda host: host.shown.update({("scrapeyard.service", "SubState"): "start",
-                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(900)}), True),
+                                          ("scrapeyard.service", "StateChangeTimestampMonotonic"): _monotonic_us(200)}),
+         "scrapeyard.service is starting or stopping it for 200s"),
         # A promotion under way.
         (lambda host: (host.unit_states.update({"scrapeyard-promote.service": "active"}),
-                       host.shown.update({("scrapeyard-promote.service", "StateChangeTimestampMonotonic"): _monotonic_us(30)})), False),
+                       host.shown.update({("scrapeyard-promote.service", "StateChangeTimestampMonotonic"): _monotonic_us(30)})), None),
+        (lambda host: (host.unit_states.update({"scrapeyard-promote.service": "active"}),
+                       host.shown.update({("scrapeyard-promote.service", "StateChangeTimestampMonotonic"): _monotonic_us(400)})),
+         "a promotion is under way for 400s"),
     ],
 )
-def test_the_application_is_not_judged_for_ten_minutes_at_most_while_it_is_stopped_on_purpose(
-    host, capsys, setup, judged
-):
+def test_maintenance_is_not_judged_for_three_minutes_and_then_fails_as_overdue(host, capsys, setup, overdue):
     host.ready = {"code": 503, "asked": "/health/ready", "status": "unhealthy", "failing": ["redis"]}
     setup(host)
 
-    out, _state = _check(host, capsys)
+    out, state = _check(host, capsys)
 
-    if judged:
-        assert "FAIL application: not ready: HTTP 503" in out
+    if overdue is None:
+        assert "ok   application: not judged: " in out and state["status"] == "ok"
     else:
-        assert "ok   application: not judged: " in out
+        line = next(line for line in out.splitlines() if "application:" in line)
+        assert line.startswith("FAIL application: ") and "not ready: HTTP 503" in line
+        assert state["status"] == "fail"
+        if overdue:
+            assert f"maintenance overdue: {overdue}, past the 180s allowed" in line
+
+
+def test_a_stale_backup_marker_does_not_fail_an_application_that_is_up(host, capsys):
+    _stopped_by_backup(3 * 86400)(host)
+
+    out, state = _check(host, capsys)
+
+    assert "ok   application: ok" in out and "overdue" not in out and state["status"] == "ok"
 
 
 def test_ping_urls_must_be_https_and_plain(host, receiver, capsys, monkeypatch):
@@ -609,3 +632,24 @@ def test_a_credential_fails_the_check_from_thirty_days_before_it_expires(host, c
 
     out, _state = _check(host, capsys, "--expires", "r2-upload=2027/10/21")
     assert "FAIL expiry: --expires 'r2-upload=2027/10/21' is not LABEL=YYYY-MM-DD" in out
+
+
+def test_a_backup_that_kept_the_application_stopped_too_long_fails_the_check_once(host, capsys):
+    # The 2026-10-21 backup: 342.8 s down, ended between two runs.
+    status = json.loads(host.module.BACKUP_STATUS.read_text())
+    status["application_down_seconds"] = 342.8
+    host.module.BACKUP_STATUS.write_text(json.dumps(status))
+
+    out, state = _check(host, capsys)
+    assert "FAIL backup: the backup completed at" in out and "stopped 343s, past the 180s allowed (once)" in out
+    assert state["status"] == "fail"
+
+    out, state = _check(host, capsys)
+    assert "ok   backup: last completed" in out and state["status"] == "ok"
+
+    # A normal stop says nothing.
+    status["application_down_seconds"] = 29.0
+    status["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    host.module.BACKUP_STATUS.write_text(json.dumps(status))
+    out, state = _check(host, capsys)
+    assert "ok   backup: last completed" in out

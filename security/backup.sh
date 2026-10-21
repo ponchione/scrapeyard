@@ -26,6 +26,12 @@ IDLE_POLL=${SCRAPEYARD_BACKUP_IDLE_POLL_SECONDS:-30}
 MIN_FREE_MB=${SCRAPEYARD_BACKUP_MIN_FREE_MB:-1024}
 SNAPSHOT_TIMEOUT=${SCRAPEYARD_BACKUP_SNAPSHOT_TIMEOUT_SECONDS:-900}
 UPLOAD_TIMEOUT=${SCRAPEYARD_BACKUP_UPLOAD_TIMEOUT_SECONDS:-1800}
+# The two waits of a run while the application is stopped. In 15 runs on the
+# first production host (2026-10-14 to 21) the whole stop took 26.5 to 33.4 s:
+# the copy a few seconds and the application's start 25 to 32 s. A copy or a
+# start that takes longer is a fault, not a slow day; see docs/DEPLOYMENT.md.
+COPY_TIMEOUT=${SCRAPEYARD_BACKUP_COPY_TIMEOUT_SECONDS:-120}
+START_TIMEOUT=${SCRAPEYARD_BACKUP_START_TIMEOUT_SECONDS:-120}
 READY_TIMEOUT=${SCRAPEYARD_BACKUP_READY_TIMEOUT_SECONDS:-300}
 
 STOP_MARKER=$LOCK_DIR/backup-stopped-application
@@ -598,9 +604,22 @@ wait_until_idle() {
 # A start that fails is retried by the unit, not here. Extra arguments go to
 # systemctl.
 start_application() {
+  local status=0
   exec 7>&-
   APPLICATION_STOPPED=0
-  if ! systemctl start "$@" "$UNIT"; then
+  # A start waited for is bounded. systemctl's own wait would last as long as
+  # the unit's TimeoutStartSec (600 s), and a start held up by a lock waits
+  # that long and is then retried (2026-10-21: 342.8 s down).
+  timeout --kill-after=10 "$START_TIMEOUT" systemctl start "$@" "$UNIT" || status=$?
+  if ((status == 124 || status == 137)); then
+    # Ending systemctl leaves its start job behind. A restart replaces that
+    # job, stopping whatever of the start is stuck, and starts the promoted
+    # release again, as an operator would.
+    echo "scrapeyard backup: $UNIT did not start within ${START_TIMEOUT}s; restarting it" >&2
+    systemctl restart --no-block "$UNIT" || \
+      echo "scrapeyard backup: $UNIT could not be restarted; see systemctl status $UNIT" >&2
+    return 1
+  elif ((status != 0)); then
     echo "scrapeyard backup: $UNIT did not start; it retries by itself, see systemctl status $UNIT" >&2
     return 1
   fi
@@ -667,7 +686,7 @@ snapshot() {
   # read-only directory, so the helper reads a copy of the files, made here
   # and mounted at /data, the path the stored result metadata names.
   install -d -m 700 -o "${owner%:*}" -g "${owner#*:}" "$STAGE/copy" "$STAGE/out"
-  docker_within "$SNAPSHOT_TIMEOUT" run --rm --init --network none --read-only \
+  docker_within "$COPY_TIMEOUT" run --rm --init --network none --read-only \
     --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 64 \
     --user "$owner" --entrypoint sh \
     --mount "type=volume,source=$volume,target=/source,readonly" \
@@ -1046,10 +1065,10 @@ case "$ACTION" in
   run)
     [[ $# -eq 0 ]] || usage
     require_commands docker systemctl flock timeout age tar zstd sha256sum python3 df awk
-    for setting in KEEP IDLE_TIMEOUT IDLE_POLL MIN_FREE_MB SNAPSHOT_TIMEOUT UPLOAD_TIMEOUT; do
+    for setting in KEEP IDLE_TIMEOUT IDLE_POLL MIN_FREE_MB SNAPSHOT_TIMEOUT UPLOAD_TIMEOUT COPY_TIMEOUT START_TIMEOUT; do
       [[ "${!setting}" =~ ^(0|[1-9][0-9]{0,6})$ ]] || fail "a SCRAPEYARD_BACKUP_ setting is not a whole number: $setting"
     done
-    ((KEEP >= 1 && IDLE_POLL >= 1 && SNAPSHOT_TIMEOUT >= 1 && UPLOAD_TIMEOUT >= 1)) || \
+    ((KEEP >= 1 && IDLE_POLL >= 1 && SNAPSHOT_TIMEOUT >= 1 && UPLOAD_TIMEOUT >= 1 && COPY_TIMEOUT >= 1 && START_TIMEOUT >= 1)) || \
       fail "SCRAPEYARD_BACKUP_KEEP, the poll interval and the timeouts must be 1 or more"
     load_project_name
     project=$COMPOSE_PROJECT_NAME

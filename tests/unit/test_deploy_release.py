@@ -5,8 +5,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,9 @@ class _Host:
             ("RELEASE_TOOL=/usr/local/sbin/scrapeyard-release", f"RELEASE_TOOL={self.bin / 'scrapeyard-release'}"),
             ("UPLOAD_TOOL=/usr/local/sbin/scrapeyard-release-upload", f"UPLOAD_TOOL={self.bin / 'upload'}"),
             ("HEALTH_PAUSE=30", "HEALTH_PAUSE=0"),
+            ("BACKUP_LIMIT=900", "BACKUP_LIMIT=2"),
+            ("PROMOTE_LIMIT=300", "PROMOTE_LIMIT=2"),
+            ("START_WAIT=120", "START_WAIT=1"),
         ):
             assert text.count(old) == 1, old
             text = text.replace(old, new)
@@ -62,16 +67,26 @@ class _Host:
             "systemctl",
             'echo "systemctl $*" >> "$CALLS"\n'
             'now=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n'
-            'case "$2" in\n'
-            '  scrapeyard-health.service)\n'
+            'case "$1 $2" in\n'
+            '  "start scrapeyard-health.service")\n'
             '    status=ok; if [[ -s "$HEALTH_QUEUE" ]]; then status=$(head -n 1 "$HEALTH_QUEUE"); sed -i 1d "$HEALTH_QUEUE"; fi\n'
+            # As the real check: a stopped application fails it.
+            '    [[ "$(cat "$STATE/app" 2>/dev/null || echo active)" == active ]] || status=fail\n'
             '    printf \'{"checked_at":"%s","status":"%s","results":[{"name":"edge","ok":%s}]}\' "$now" "$status" '
             '"$([[ $status == ok ]] && echo true || echo false)" > "$STATE/health.json" ;;\n'
-            '  scrapeyard-backup.service)\n'
+            '  "start scrapeyard-backup.service")\n'
             '    flock -n "$WRAPPER_LOCK" true || { echo "backup: the wrapper lock is held" >&2; exit 1; }\n'
+            # A backup that stops the application and never ends, as one
+            # held up by a lock did on 2026-10-21.
+            '    [[ "${BACKUP_HANGS:-}" != yes ]] || { echo inactive > "$STATE/app"; exec /usr/bin/sleep 60; }\n'
             '    [[ "${BACKUP_FAILS:-}" != yes ]] || exit 1\n'
             '    printf \'{"completed_at":"%s","uploaded":%s,"release":"%s","archive":"/b/x.age"}\' "$now" '
             '"${BACKUP_UPLOADED:-true}" "$(basename "$(readlink "$CURRENT")")" > "$STATE/backup.json" ;;\n'
+            # The application's unit: active unless something stopped it.
+            '  "is-active scrapeyard.service")\n'
+            '    state=$(cat "$STATE/app" 2>/dev/null || echo active); echo "$state"; [[ $state == active ]] ;;\n'
+            '  "is-active "*) echo inactive; exit 3 ;;\n'
+            '  "restart scrapeyard.service") echo active > "$STATE/app" ;;\n'
             "esac\n",
         )
         self.tool(
@@ -79,7 +94,9 @@ class _Host:
             'echo "promote $2" >> "$CALLS"\n'
             'flock -n "$WRAPPER_LOCK" true || { echo "promote: the wrapper lock is held" >&2; exit 2; }\n'
             '[[ "$2" != "${PROMOTE_FAILS:-none}" ]] || exit 2\n'
-            'ln -sfn "$2" "$CURRENT"\n',
+            '[[ "$2" != "${PROMOTE_HANGS:-none}" ]] || { echo inactive > "$STATE/app"; exec /usr/bin/sleep 60; }\n'
+            'ln -sfn "$2" "$CURRENT"\n'
+            'echo active > "$STATE/app"\n',
         )
         self.tool("upload", 'echo "upload $*" >> "$CALLS"\n')
         self.env = dict(
@@ -236,3 +253,75 @@ def test_a_failed_promotion_that_left_the_old_release_well_is_not_promoted_again
     assert result.returncode == 1
     assert "still runs and the host check passes" in result.stderr
     assert [line for line in _acts(host) if line.startswith("promote")] == [f"promote {host.releases / NEW}"]
+
+
+def _application_state(host: _Host) -> str:
+    path = host.state / "app"
+    return path.read_text().strip() if path.exists() else "active"
+
+
+def test_a_backup_that_hangs_is_stopped_at_its_limit_and_the_application_restarted(host: _Host) -> None:
+    archive, checksum = host.archive()
+    started = time.monotonic()
+    result = host.run(archive, checksum, BACKUP_HANGS="yes")
+
+    assert time.monotonic() - started < 30
+    assert result.returncode == 2
+    assert "did not finish within 2s; nothing was promoted" in result.stderr
+    log = host.log()
+    # Stopped, then (its clean-up having left the application stopped) the
+    # application's unit restarted; nothing promoted.
+    assert log.index("systemctl stop scrapeyard-backup.service") < log.index("systemctl restart scrapeyard.service")
+    assert _application_state(host) == "active"
+    assert not [line for line in log if line.startswith(("promote", "upload"))]
+    assert os.readlink(host.current) == str(host.releases / OLD)
+
+
+def test_a_promotion_that_hangs_is_stopped_at_its_limit_and_the_earlier_release_promoted(host: _Host) -> None:
+    archive, checksum = host.archive()
+    started = time.monotonic()
+    result = host.run(archive, checksum, PROMOTE_HANGS=str(host.releases / NEW))
+
+    assert time.monotonic() - started < 30
+    assert result.returncode == 1
+    assert "did not finish within 2s" in result.stderr
+    assert "promoted again and the host check passes" in result.stderr
+    log = host.log()
+    assert log.index("systemctl stop scrapeyard-promote.service") < log.index(f"promote {host.releases / OLD}")
+    assert os.readlink(host.current) == str(host.releases / OLD)
+    assert not [line for line in log if line.startswith("upload")]
+
+
+def _descendants(pid: int) -> list[int]:
+    out = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)], capture_output=True, text=True).stdout
+    children = [int(word) for word in out.split()]
+    return children + [grandchild for child in children for grandchild in _descendants(child)]
+
+
+def test_a_deployment_stopped_during_the_backup_leaves_the_application_started(host: _Host) -> None:
+    archive, checksum = host.archive()
+    script = host.script.read_text().replace("BACKUP_LIMIT=2", "BACKUP_LIMIT=600")
+    host.script.write_text(script)
+    process = subprocess.Popen(
+        [str(host.script), str(archive), checksum],
+        env={**host.env, "BACKUP_HANGS": "yes"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 20
+    while _application_state(host) != "inactive":
+        assert time.monotonic() < deadline and process.poll() is None
+        time.sleep(0.1)
+    # As systemd stops a unit: every process of it is signalled.
+    for pid in [process.pid, *_descendants(process.pid)]:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    out, _err = process.communicate(timeout=30)
+
+    assert process.returncode == 143
+    assert "scrapeyard.service is not active 1s after the maintenance ended; restarting it" in out
+    assert _application_state(host) == "active"
+    assert not [line for line in host.log() if line.startswith("promote")]
