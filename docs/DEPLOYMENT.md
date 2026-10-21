@@ -1405,7 +1405,8 @@ keys are on the host and in Cloudflare only.
 | --- | --- |
 | Bucket | `scrapeyard-backups` in the operator's Cloudflare account, R2 Standard storage, location hint ENAM, default jurisdiction, created with no public access configured. |
 | Lock | Bucket lock rule `retain-35-days`, every object (empty prefix), 35 days from upload. Nobody, the host's key included, can delete or overwrite an object before then. |
-| Lifecycle | Rule `delete-after-36-days`: objects are deleted 36 days after upload, a day after their lock ends, so the rule never meets a locked object. Unfinished multipart uploads are aborted after 1 day. |
+| Lifecycle | `delete-backups-after-36-days` (prefix `scrapeyard-backup-`) and `delete-probes-after-36-days` (prefix `upload-probe-`) delete those objects 36 days after upload, a day after their lock ends, so no rule meets a locked object; `abort-multipart-after-1-day` (every prefix). Nothing deletes `releases/`. |
+| Releases | `releases/scrapeyard-release-<commit>.tar.zst` and its `.sha256`, packed as the release workflow packs a release, by `/usr/local/sbin/scrapeyard-release-upload` (root, 755; the same bytes as [`security/upload-release-r2.sh`](../security/upload-release-r2.sh)) with the backup hook's store and key. In the store since 2026-10-21: `e31e6a3` (1,257,948,526 bytes, SHA-256 `ce3afaf0e65c4f9d…`), the release running, and `fbc340c` (1,269,766,849 bytes, `29c9afa7c71432b4…`), its rollback. |
 | Host's key | An account API token, `scrapeyard-backup-upload`, with *Workers R2 Storage Bucket Item Write* (the dashboard's "Object Read & Write") on that bucket alone, expiring 2027-10-21. Its S3 form is in `/etc/scrapeyard/backup-store.json`, root:root, mode 600: the endpoint, the bucket, the access key id (the token's id) and the secret access key (the SHA-256 of the token's value). Listing the account's buckets with it answers 403. |
 | Hook | `/etc/scrapeyard/backup-upload`, root:root, mode 755, the same bytes as `security/backup-upload-r2.sh`. It signs with `curl --aws-sigv4`, gives the key to `curl` on standard input rather than its command line, and sends `If-None-Match: *`. |
 | Schedule | `scrapeyard-backup.timer`, daily at 04:40 UTC. Each run stops the application for about 30 s (28.0 s on 2026-10-21), then uploads. |
@@ -1421,13 +1422,30 @@ fails the run and replaces nothing; it never deletes, so the lock cannot
 make it fail on a deletion.
 
 **Cost** (Cloudflare's list prices on 2026-10-21): about 14 MB a day kept
-36 days is about 0.5 GB, with about 60 writes a month. R2's free tier
+36 days is about 0.5 GB, with about 60 writes a month, and the two releases
+2.5 GB: about 3 GB in all. R2's free tier
 (10 GB-month of Standard storage, 1 million Class A and 10 million Class B
 operations a month, no egress charge) covers that and a full download for a
 recovery: **$0 a month expected**. Amazon S3 Standard would be about $0.01 a
 month plus egress past 100 GB; R2 was chosen because the account and its API
-access existed already. Archives grow with the stored results: at about
-280 MB a day the 10 GB would be passed, at $0.015 per GB-month beyond it.
+access existed already. Each release kept adds about 1.3 GB; the 10 GB would
+be passed at about six releases, or with archives of about 200 MB a day, at
+$0.015 per GB-month beyond it. Cloudflare's auto-created budget alert emails
+the operator at $10 of spend.
+
+**Keeping releases.** After promoting a release, put it in the store from
+the host, then remove from the store, by hand, a release the host no longer
+retains (the lock keeps it at least 35 days; deleting needs an admin key or
+the dashboard, which the host's key is meant never to need):
+
+```bash
+sudo systemd-run --unit=scrapeyard-release-upload --property=Nice=19 \
+  /usr/local/sbin/scrapeyard-release-upload scrapeyard-release-<commit>
+journalctl -u scrapeyard-release-upload -o cat    # "uploaded releases/...", then the SHA-256
+```
+
+It packs at the lowest CPU and I/O priority (3 min 15 s of CPU for
+`e31e6a3`) in `/var/backups/scrapeyard` and removes the pack afterwards.
 
 **Rotating the host's key** before 2027-10-21: create a second token as the
 first was made (*R2 object storage → Overview → Manage API Tokens → Create
@@ -1453,8 +1471,29 @@ the downloaded copy passed in 18.9 s: 10 of 10 Redis keys loaded, 295 jobs
 identical to the witness, the newest complete and failed job, their
 decrypted configurations and results identical, on an internal network with
 no route off the host. The project, its volumes and network, the plaintext
-and the key on the host were removed after it. A restore onto a rebuilt host
-from the store has not been run (TD-21).
+and the key on the host were removed after it.
+
+**Recovery onto a clean host, from the store alone (2026-10-21).** On a
+fresh Ubuntu 24.04.5 VM (the cloud image, kernel 6.8, AppArmor on, 4 vCPU,
+8 GB) on the operator's machine, never the production host, following
+[Restoring onto a rebuilt host](#restoring-onto-a-rebuilt-host):
+
+| Step | Took |
+| --- | --- |
+| Fetch the `e31e6a3` release and the 12:49 archive from the store, with a read-only key for the bucket made for the test and revoked after it | 59 s (1.27 GB) |
+| Check both against their `.sha256` (and the archive against the recorded one), extract the release | 7 s |
+| `scripts/install_container_runtime.sh` of that release (Docker 29.9.0, Compose 5.6.0) | 12 s |
+| Cut the VM off the internet (QEMU `restrict=on`: no DNS, no route out), put back `deploy.env` from the operator's sealed copy (its SHA-256 equal to the host's), the recipients and, for the restore, the key; `scrapeyard-backup restore` | 52 s |
+| Link `current`, `systemctl enable --now scrapeyard.service`, until the application is healthy | 22 s |
+
+About 2.5 minutes of commands from a booted clean host, plus the operator's
+time. The loaded images had the production host's IDs. Readiness answered
+`200`; the newest complete job, the newest failed one and the job
+`399b4e0f…` answered with the same status as production, and their results
+had the same length and SHA-256 as production's. With no route off the VM,
+nothing could reach a retailer or a webhook. The VM, its disk, the key and
+the copy of `deploy.env` were destroyed after it. The RPO is a day (the
+timer).
 
 ### Testing a restore
 
@@ -1584,7 +1623,9 @@ or replaces anything.
    [container runtime](#container-runtime-versions), and
    `/srv/scrapeyard-releases` created as root.
 2. Extract the release that made the backup under `/srv/scrapeyard-releases`
-   as [above](#retained-release-artifacts-and-rollback). Its name is in the
+   as [above](#retained-release-artifacts-and-rollback), from the store's
+   `releases/` when the host is lost
+   ([the first production host's store](#the-first-production-hosts-store)). Its name is in the
    archive's `metadata.json`; `restore` names it when it is missing.
 3. Put `/etc/scrapeyard/deploy.env` back from the copy kept apart from the
    archives (root, mode 600), with the same `COMPOSE_PROJECT_NAME` and the

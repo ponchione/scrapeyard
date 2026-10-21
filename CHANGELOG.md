@@ -14,6 +14,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 ## Unreleased
 
 ### Monitoring
+- The host check takes `--expires LABEL=YYYY-MM-DD` (repeatable) and fails
+  from `--expiry-warn-days` (30) before the first.
 - The host check takes `--edge-url`: it asks the public `/health` through
   Cloudflare, Access and the tunnel with a service token of its own, so a
   connector with no connection or an Access policy that refuses the token
@@ -24,6 +26,13 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 - certifi 2026.10.19, for PYSEC-2026-4320.
 
 ### Deployment qualification
+- 2026-10-21, later: `fwupd-refresh.timer` disabled on the host; releases
+  `e31e6a3` and `fbc340c` kept in the R2 store (`security/upload-release-r2.sh`);
+  a clean VM recovered from the store alone in about 2.5 minutes of
+  commands; the host check's new `--expires` warns 30 days before the host's
+  three credentials expire. The rehearsal failures on pull request #46 were
+  the scan of the previous release finding certifi 2026.2.25, not
+  Playwright's download host (TD-118, closed).
 - 2026-10-21, production host (application still release `e31e6a3`):
   backups are uploaded to the R2 bucket `scrapeyard-backups` (35-day bucket
   lock, deleted at 36 days) by `security/backup-upload-r2.sh`, now checked

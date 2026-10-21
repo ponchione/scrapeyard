@@ -20,8 +20,22 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     ([MONITORING.md](docs/MONITORING.md#on-the-first-production-host)).
   - certifi 2026.10.19 for PYSEC-2026-4320, which had failed the dependency
     audit on `main` too. In the image from the next release only.
-  - New: TD-118, the release rehearsal cannot build the previous release's
-    image, since Playwright's download host does not resolve.
+  - TD-118, opened and closed the same day. `Retained release / deploy and
+    roll back` failed twice on pull request #46 (run 39601139356) in `Build,
+    scan and qualify the previous release`. The `getaddrinfo ENOTFOUND
+    playwright.download.prss.microsoft.com` lines are Playwright trying its
+    mirrors: each download then came from `cdn.playwright.dev` and the image
+    was built. The step failed in `scripts/run_container_security_scan.sh`:
+    the previous release (`31d0bcc`, the same lock as `e31e6a3`) has certifi
+    2026.2.25, which Trivy now reports as GHSA-6q48-6c7w-9gw2 (CRITICAL,
+    fixed in 2026.10.19); a scan of `e31e6a3`'s retained SBOM on the
+    operator's machine finds exactly that. On pull request #47, whose
+    previous release had the certifi fix, the rehearsal passed (run
+    39605831137). Nothing was changed in the workflow or the scan.
+  - `fwupd-refresh.timer` disabled on the host (TD-20). Releases `e31e6a3`
+    and `fbc340c` are in the store, and a clean VM was recovered from the
+    store alone (TD-21). The host check warns 30 days before a recorded
+    credential expires (`--expires`).
 - **2026-10-20, go-live pass**: an audit of `3205b39`, done locally, then
   the fixes below, each with a test seen failing on the old code.
   - TD-115 closed: another project's job answers every job route as an absent
@@ -708,8 +722,11 @@ to release, with the host's current release as `previous_revision`.
     cannot be put back).
   - TD-21 needs a restore onto a rebuilt host from the store, and the
     releases kept off the host.
-- TD-118: the release rehearsal needs Playwright's browsers from a host that
-  resolves.
+- The next release: `e31e6a3`, the release running, carries certifi
+  2026.2.25 (GHSA-6q48-6c7w-9gw2, CRITICAL), so a rehearsal with it as
+  `previous_revision` fails the scan of the previous release (see the
+  2026-10-21 entry). Rolling back to it is rolling back to that finding;
+  deciding how to rehearse the first release after it is the owner's call.
 
 **Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-102 to TD-106, TD-108
 to TD-113, and TD-117.
@@ -744,7 +761,6 @@ to TD-113, and TD-117.
 | TD-112 | P3 | deferred | Backup retention keeps a count, so one day's runs can evict every older archive |
 | TD-113 | P3 | deferred | Migrations run with foreign keys on, so rebuilding a referenced table deletes its children |
 | TD-117 | P3 | deferred | Locked dependencies hold the image at Python 3.14 |
-| TD-118 | P1 | operational | The release rehearsal cannot rebuild a release: Playwright's download host does not resolve |
 
 ## Ready to implement
 
@@ -1319,15 +1335,18 @@ is TD-85.
 
 **Still open:**
 - Alerts reaching the operator: the check `scrapeyard-host` should have a
-  5-minute period and a 10-minute grace. Neither those settings, its *up*
-  state, nor a failure or a missed ping reaching the operator's mail has
-  been seen; only hc-ping.com's `HTTP 200`. Both must be seen to alert and
-  recover.
-- `fwupd-refresh.service` fails (12:00, 12:53 and 13:06 UTC on 2026-10-21):
-  the host cannot reach `cdn.fwupd.org`, and `units` fails while the unit is
-  failed, so the operator is now alerted for it. The VM's only firmware
-  device is its virtual CPU. Disable `fwupd-refresh.timer`, or accept the
-  alerts: the owner's call.
+  5-minute period and a 10-minute grace. A real `/fail` (13:19:58 UTC) and
+  the success after it (13:20:30) reached hc-ping.com with `HTTP 200`, and
+  Cloudflare's history shows tunnel health emails sent on 2026-10-17 and
+  2026-10-21. Not seen: the check's settings, its *up* state, a missed ping,
+  and any of those emails arriving. That needs the owner's mailbox or a
+  read-only healthchecks.io API key.
+- Done 2026-10-21: `fwupd-refresh.timer` disabled (the host cannot reach
+  `cdn.fwupd.org`, and the VM has no firmware to update); package updates
+  unchanged. Reverse with `systemctl enable --now fwupd-refresh.timer`
+  ([MONITORING.md](docs/MONITORING.md#on-the-first-production-host)).
+- Done 2026-10-21: `expiry` fails 30 days before the R2 upload key and the
+  two Access service tokens expire (2027-10-21, 2027-10-21, 2027-10-12).
 - Unattended upgrades update `cloudflared` and restart it (06:18 UTC on
   2026-10-21) and reboot at 08:00 UTC; `edge` now notices an ingress that
   does not come back.
@@ -1456,14 +1475,19 @@ private key; it decrypts with that key to the host's file byte for byte.
   26 hours or a failed one (TD-20).
 
 **Still open:**
-- A restore onto a rebuilt host has run on a CI runner only (40 to 54
-  seconds for the command), not from the store.
-- Releases are still kept off the host only as workflow artifacts that
-  expire after 30 days; none is in the store.
-- Measured RPO is a day (the timer); RTO from the store onto a rebuilt host
-  is not measured.
-- The upload key and the monitor's Access token expire on 2027-10-21, and
-  nothing reminds the operator before then.
+- Done 2026-10-21: releases `e31e6a3` and `fbc340c` are in the store under
+  `releases/`, which no lifecycle rule deletes; `scrapeyard-release-upload`
+  puts a promoted release there. Removing old ones is by hand.
+- Done 2026-10-21: recovery from the store alone onto a clean Ubuntu 24.04
+  VM with no route out: about 2.5 minutes of commands (fetch 59 s, extract
+  7 s, runtime 12 s, restore 52 s, start to healthy 22 s); three known jobs
+  and their results identical to production's by SHA-256. RPO a day.
+- Still open: the recovery depends on the operator's machine for the age
+  key and the sealed `deploy.env`; a copy of both kept elsewhere is the
+  owner's call. A host rebuilt by the provider (not a VM) is untried
+  (TD-19).
+- Still open: putting a release in the store after each promotion is a
+  manual step.
 
 **Problem:**
 - The repository has a tested helper for quiesced backup sets, but no complete
@@ -1508,31 +1532,6 @@ and [release qualification](scripts/run_release_qualification.sh).
   recovery procedure are recorded.
 
 A manifest-only check or a provider disk snapshot does not close this item.
-
-### TD-118 — The release rehearsal cannot rebuild a release: Playwright's download host does not resolve
-
-**Priority:** P1 · **Status:** operational · **Contract:** none
-
-**Problem:** found on pull request #46, 2026-10-21. The job `Retained
-release / deploy and roll back` of `Release artifact and deployment
-rehearsal` failed twice (run 39601139356) in the step `Build, scan and
-qualify the previous release`: `python -m playwright install --with-deps
---no-shell chromium` in the Dockerfile fails with `getaddrinfo ENOTFOUND
-playwright.download.prss.microsoft.com`. The name did not resolve from the
-operator's machine or the production host either; `cdn.playwright.dev`
-did. Pull request #46 was merged with that check failing, since it changes
-no image. Every other check passed, the container smoke lane's
-`Production image / real browsers` among them, perhaps from cached layers
-(not checked). Until it is fixed no release can be built and rehearsed, so
-neither the certifi fix nor the new health check reaches a release.
-
-**Start here:** the `playwright install` lines of the `Dockerfile`, and
-whether Playwright 1.58.0 can be pointed at another host
-(`PLAYWRIGHT_DOWNLOAD_HOST`) with the same archives; the release must keep
-the revision checks that follow.
-
-**Done when:** the rehearsal builds both releases on a run, or the name
-resolves again and the rehearsal passes unchanged.
 
 ## Deferred
 
