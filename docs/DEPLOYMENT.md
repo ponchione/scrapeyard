@@ -1406,7 +1406,7 @@ keys are on the host and in Cloudflare only.
 | Bucket | `scrapeyard-backups` in the operator's Cloudflare account, R2 Standard storage, location hint ENAM, default jurisdiction, created with no public access configured. |
 | Lock | Bucket lock rule `retain-35-days`, every object (empty prefix), 35 days from upload. Nobody, the host's key included, can delete or overwrite an object before then. |
 | Lifecycle | `delete-backups-after-36-days` (prefix `scrapeyard-backup-`) and `delete-probes-after-36-days` (prefix `upload-probe-`) delete those objects 36 days after upload, a day after their lock ends, so no rule meets a locked object; `abort-multipart-after-1-day` (every prefix). Nothing deletes `releases/`. |
-| Releases | `releases/scrapeyard-release-<commit>.tar.zst` and its `.sha256`, packed as the release workflow packs a release, by `/usr/local/sbin/scrapeyard-release-upload` (root, 755; the same bytes as [`security/upload-release-r2.sh`](../security/upload-release-r2.sh)) with the backup hook's store and key. In the store since 2026-10-21: `e31e6a3` (1,257,948,526 bytes, SHA-256 `ce3afaf0e65c4f9d…`), the release running, and `fbc340c` (1,269,766,849 bytes, `29c9afa7c71432b4…`), its rollback. |
+| Releases | `releases/scrapeyard-release-<commit>.tar.zst` and its `.sha256`, packed as the release workflow packs a release, by `/usr/local/sbin/scrapeyard-release-upload` (root, 755; the same bytes as [`security/upload-release-r2.sh`](../security/upload-release-r2.sh)) with the backup hook's store and key. In the store since 2026-10-21: `e31e6a3` (1,257,948,526 bytes, SHA-256 `ce3afaf0e65c4f9d…`), then the release running, and `fbc340c` (1,269,766,849 bytes, `29c9afa7c71432b4…`). Since 2026-10-21 15:30 UTC also `7bccba5` (1,258,209,373 bytes, `840846ab04d9edfb…`), the release running; `e31e6a3` is its rollback. The store's packs are made on the host and their checksums differ from the CI artifact's (`7bccba5`: `c8ceefca20f6e3a4…`), though they hold the same files. |
 | Host's key | An account API token, `scrapeyard-backup-upload`, with *Workers R2 Storage Bucket Item Write* (the dashboard's "Object Read & Write") on that bucket alone, expiring 2027-10-21. Its S3 form is in `/etc/scrapeyard/backup-store.json`, root:root, mode 600: the endpoint, the bucket, the access key id (the token's id) and the secret access key (the SHA-256 of the token's value). Listing the account's buckets with it answers 403. |
 | Hook | `/etc/scrapeyard/backup-upload`, root:root, mode 755, the same bytes as `security/backup-upload-r2.sh`. It signs with `curl --aws-sigv4`, gives the key to `curl` on standard input rather than its command line, and sends `If-None-Match: *`. |
 | Schedule | `scrapeyard-backup.timer`, daily at 04:40 UTC. Each run stops the application for about 30 s (28.0 s on 2026-10-21), then uploads. |
@@ -1432,6 +1432,19 @@ access existed already. Each release kept adds about 1.3 GB; the 10 GB would
 be passed at about six releases, or with archives of about 200 MB a day, at
 $0.015 per GB-month beyond it. Cloudflare's auto-created budget alert emails
 the operator at $10 of spend.
+
+**Upgrading from a release the scan now refuses** (2026-10-21, `e31e6a3`
+to `7bccba5`). The rehearsal builds and scans the previous release too, so a
+`previous_revision` whose image has a new HIGH or CRITICAL finding fails it.
+Do not widen `security/trivy-dependency-exceptions.yaml` for that; it covers
+Redis and the probe only. Instead: dispatch the rehearsal with the fixed
+commit as `revision` and, as `previous_revision`, the commit that is the
+running release's code plus the fix (here `ae5bb5e`), so both builds pass
+the unchanged scans; then rehearse the real upgrade from the running
+release's retained bundle on an isolated host restored from the store
+(backup, `promote`, roll back, `promote`, reboot), as was done on a VM with
+no route off it. The running release stays the rollback target, with its
+finding, until the next release replaces it.
 
 **Keeping releases.** After promoting a release, put it in the store from
 the host, then remove from the store, by hand, a release the host no longer

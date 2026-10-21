@@ -6,6 +6,27 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-21, release `7bccba5`** (`main` after pull request #48): the
+  first release with certifi 2026.10.19, promoted on the production host
+  over `e31e6a3` at 15:27 UTC.
+  - Rehearsed by run 39617277107 against `ae5bb5e`, which is `e31e6a3`'s code
+    with the fix, so both builds pass the unchanged scans; `e31e6a3` itself
+    fails the scan of a previous release. No scan or exception was changed.
+  - Upgrade from the real `e31e6a3` rehearsed on an isolated Ubuntu 24.04 VM
+    restored from the store, with no route off it: backup, `promote` to
+    `7bccba5` (29 s), roll back to `e31e6a3` (16 s), forward again (15 s), a
+    reboot; three known jobs and their results identical by SHA-256 before
+    and after. The VM was destroyed.
+  - On the host: the CI bundle's SHA-256 (`c8ceefca20f6e3a4…`) matched the
+    run's log; `verify --scanned` passed; a backup (application down 29.6 s)
+    was uploaded to the store; `promote` took 56 s, with the application down
+    about 14 s (15:27:34 to 15:27:48 UTC). Afterwards: revision `7bccba5` and
+    certifi 2026.10.19 in the running container; readiness `200`; the same
+    three jobs' results identical by SHA-256; from outside, Access answered
+    401 without the token and `200` with it, `GET /jobs/{id}` 401 without
+    the key and `200` with Eyebox's, `/ready` 404; the host check 10 of 10;
+    healthchecks.io `HTTP 200`. Only the application image changed; Redis
+    and the probe kept their image IDs and Redis was not restarted.
 - **2026-10-21, off-host backups and alerting** (no release; pull request #46,
   then this record): on the production host, still running release
   `e31e6a3`.
@@ -722,11 +743,11 @@ to release, with the host's current release as `previous_revision`.
     cannot be put back).
   - TD-21 needs a restore onto a rebuilt host from the store, and the
     releases kept off the host.
-- The next release: `e31e6a3`, the release running, carries certifi
-  2026.2.25 (GHSA-6q48-6c7w-9gw2, CRITICAL), so a rehearsal with it as
-  `previous_revision` fails the scan of the previous release (see the
-  2026-10-21 entry). Rolling back to it is rolling back to that finding;
-  deciding how to rehearse the first release after it is the owner's call.
+- Release `7bccba5` runs on the production host since 2026-10-21 (see the
+  audit history). Its rollback target `e31e6a3` carries certifi 2026.2.25
+  (GHSA-6q48-6c7w-9gw2, CRITICAL): roll back to it only to recover, and
+  release forward. A rehearsal with `e31e6a3` as `previous_revision` fails
+  the scan of the previous release; use `ae5bb5e`, its code with the fix.
 
 **Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-102 to TD-106, TD-108
 to TD-113, and TD-117.

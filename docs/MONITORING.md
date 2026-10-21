@@ -205,21 +205,26 @@ sudo scrapeyard-health --dry-run
 
 ### On the first production host
 
-State on 2026-10-21. Three things run different code, so each is named:
+State on 2026-10-21, after 15:27 UTC. Three things can run different code,
+so each is named:
 
-- **Deployed application image:** release `e31e6a3`
-  (`org.opencontainers.image.revision`), promoted 2026-10-20 and linked from
-  `/srv/scrapeyard-releases/current`.
-- **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup` and
-  `scrapeyard-release` are byte for byte that release's `security/backup.sh`
-  and `security/manage-release.sh`. `/usr/local/sbin/scrapeyard-health` is
-  newer: `security/health-check.py` with `--edge-url` (pull request #46) and
-  `--expires` (pull request #48), which no release holds yet, installed by
-  hand; the copy from before both is `/root/scrapeyard-health.before-edge`.
+- **Deployed application image:** release `7bccba5`
+  (`org.opencontainers.image.revision`; image
+  `sha256:3f18e5139be17e6a…`, with certifi 2026.10.19), promoted 2026-10-21
+  over `e31e6a3` and linked from `/srv/scrapeyard-releases/current`
+  ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
+- **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup`,
+  `scrapeyard-release` and `scrapeyard-health` are byte for byte
+  `security/backup.sh`, `security/manage-release.sh` and
+  `security/health-check.py` of release `7bccba5`, which is also `main` at
+  that commit. `scrapeyard-health` was installed by hand from `main` before
+  the release existed; the copy from before `--edge-url` and `--expires` is
+  `/root/scrapeyard-health.before-edge`.
   `/etc/scrapeyard/backup-upload` is `security/backup-upload-r2.sh` and
   `/usr/local/sbin/scrapeyard-release-upload` is `security/upload-release-r2.sh`
   ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
-- **Repository `main`:** carries all of the above, and this record.
+- **Repository `main`:** `7bccba5` and later; later commits change
+  documentation only, unless the changelog says otherwise.
 
 What is installed, and what was seen:
 
