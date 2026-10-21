@@ -112,9 +112,11 @@ COMMIT=${BASH_REMATCH[2]}
 TARGET=$RELEASES/$NAME
 [[ -f "$ARCHIVE" ]] || fail "no file $ARCHIVE"
 
+# Not deploy.lock: the release wrapper takes that one to start the
+# application, which the backup and the promotion below both do.
 install -d -m 700 "$LOCK_DIR"
-exec 8>>"$LOCK_DIR/deploy.lock"
-flock -n 8 || fail "another deployment is under way"
+exec 8>>"$LOCK_DIR/guarded-deploy.lock"
+flock -n 8 || fail "another guarded deployment is under way"
 
 [[ -L "$CURRENT" ]] || fail "$CURRENT is not a link to a promoted release"
 PREVIOUS=$(readlink -- "$CURRENT")

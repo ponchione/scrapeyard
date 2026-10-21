@@ -1529,6 +1529,13 @@ private key; it decrypts with that key to the host's file byte for byte.
   copy of both kept elsewhere is the owner's call, and no destination has
   been named. A host rebuilt by the provider (not a VM) is untried
   (TD-19).
+- 2026-10-21, 20:36 UTC: the first production run of `scrapeyard-deploy`
+  deadlocked with the release wrapper over `/run/scrapeyard/deploy.lock`
+  (the backup could not start the application again), and the application
+  was down 342.8 s until the deployment unit was stopped by hand. Nothing
+  was promoted; the backup completed and was uploaded; the host check then
+  passed 10 of 10. Fixed with its own lock and a test that fails on a
+  collision (pull request #54).
 - Done 2026-10-21: a guarded deployment (`scrapeyard-deploy`,
   [DEPLOYMENT.md](docs/DEPLOYMENT.md#guarded-deployment)) backs up to the
   store before promoting, checks the host and public path after, promotes

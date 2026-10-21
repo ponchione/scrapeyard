@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -11,11 +12,18 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path("security/deploy-release.sh")
+WRAPPER = Path("security/deploy-secure-compose.sh")
 OLD = "scrapeyard-release-" + "a" * 40
 NEW_COMMIT = "b" * 40
 NEW = f"scrapeyard-release-{NEW_COMMIT}"
 
 pytestmark = pytest.mark.skipif(shutil.which("zstd") is None, reason="tar --zstd needs zstd")
+
+
+def _wrapper_lock_name() -> str:
+    match = re.search(r'exec 9>>"\$LOCK_DIR/([^"]+)"', WRAPPER.read_text(encoding="utf-8"))
+    assert match, "the wrapper's lock was not found"
+    return match.group(1)
 
 
 class _Host:
@@ -60,6 +68,7 @@ class _Host:
             '    printf \'{"checked_at":"%s","status":"%s","results":[{"name":"edge","ok":%s}]}\' "$now" "$status" '
             '"$([[ $status == ok ]] && echo true || echo false)" > "$STATE/health.json" ;;\n'
             '  scrapeyard-backup.service)\n'
+            '    flock -n "$WRAPPER_LOCK" true || { echo "backup: the wrapper lock is held" >&2; exit 1; }\n'
             '    [[ "${BACKUP_FAILS:-}" != yes ]] || exit 1\n'
             '    printf \'{"completed_at":"%s","uploaded":%s,"release":"%s","archive":"/b/x.age"}\' "$now" '
             '"${BACKUP_UPLOADED:-true}" "$(basename "$(readlink "$CURRENT")")" > "$STATE/backup.json" ;;\n'
@@ -68,6 +77,7 @@ class _Host:
         self.tool(
             "scrapeyard-release",
             'echo "promote $2" >> "$CALLS"\n'
+            'flock -n "$WRAPPER_LOCK" true || { echo "promote: the wrapper lock is held" >&2; exit 2; }\n'
             '[[ "$2" != "${PROMOTE_FAILS:-none}" ]] || exit 2\n'
             'ln -sfn "$2" "$CURRENT"\n',
         )
@@ -79,6 +89,8 @@ class _Host:
             STATE=str(self.state),
             CURRENT=str(self.current),
             HEALTH_QUEUE=str(self.health_queue),
+            # The lock the release wrapper takes before it starts the application.
+            WRAPPER_LOCK=str(tmp_path / "lock" / _wrapper_lock_name()),
         )
         self.release(self.releases / OLD, "a")
         self.current.symlink_to(self.releases / OLD)
