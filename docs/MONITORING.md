@@ -220,9 +220,15 @@ so each is named:
   `scrapeyard-release` and `scrapeyard-health` are byte for byte
   `security/backup.sh`, `security/manage-release.sh` and
   `security/health-check.py` of release `7bccba5`, which is also `main` at
-  that commit; none of them changed since. `/usr/local/sbin/scrapeyard-deploy`
+  that commit. Since 2026-10-21 22:26 UTC `scrapeyard-backup` and
+  `scrapeyard-health` are those of `main` at `f0507c6` (pull request #56,
+  bounded maintenance and the 180 s window); the copies before are
+  `/root/scrapeyard-backup.before-bounds` and
+  `/root/scrapeyard-health.before-bounds`. Its first run passed 10 of 10 and
+  pinged healthchecks.io (`HTTP 200`). `/usr/local/sbin/scrapeyard-deploy`
   and `scrapeyard-release-upload` are `security/deploy-release.sh` and
-  `security/upload-release-r2.sh` of `main` at `7f1f3e6`. `scrapeyard-health` was installed by hand from `main` before
+  `security/upload-release-r2.sh` of `main`; `scrapeyard-deploy` at
+  `f0507c6`, `scrapeyard-release-upload` at `7f1f3e6`. `scrapeyard-health` was installed by hand from `main` before
   the release existed; the copy from before `--edge-url` and `--expires` is
   `/root/scrapeyard-health.before-edge`.
   `/etc/scrapeyard/backup-upload` is `security/backup-upload-r2.sh` and

@@ -1569,7 +1569,9 @@ private key; it decrypts with that key to the host's file byte for byte.
   20:40:24 run replayed (now `FAIL application: maintenance overdue`). On a
   real systemd 255 user unit, a `systemctl start` ended by `timeout` left
   its start job running and `restart --no-block` replaced it. Still
-  unverified: a real stall on the host, and that an overdue `/fail` reaches
+  unverified: installed on the host 2026-10-21 22:26 UTC (host check 10 of
+  10 afterwards; the 04:40 UTC backup is the first real run with the
+  limits). Not exercised: a real stall on the host, and that an overdue `/fail` reaches
   the operator (TD-20's alert delivery).
 - Still open: a promotion's or a start's stop under about 8 minutes that
   ends between two host check runs is not reported; a release that cannot
