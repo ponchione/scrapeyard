@@ -587,3 +587,25 @@ def test_the_edge_check_asks_through_access_and_fails_on_anything_but_ok(host, r
     host.module.BACKUP_STOP_MARKER.touch()
     out, _state = _check(host, capsys, "--edge-url", f"{receiver.url}/edge-502")
     assert "ok   edge: not judged: a backup has it stopped" in out
+
+
+def test_a_credential_fails_the_check_from_thirty_days_before_it_expires(host, capsys):
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    later = (today + datetime.timedelta(days=200)).isoformat()
+    soon = (today + datetime.timedelta(days=29)).isoformat()
+    gone = (today - datetime.timedelta(days=1)).isoformat()
+
+    out, state = _check(host, capsys, "--expires", f"r2-upload={later}", "--expires", f"access-monitor={soon}")
+    assert f"FAIL expiry: renew: access-monitor {soon} (in 29 days)" in out
+    assert "r2-upload" not in out.split("FAIL expiry:")[1].splitlines()[0]
+    assert state["status"] == "fail"
+
+    out, state = _check(host, capsys, "--expires", f"r2-upload={later}")
+    assert f"ok   expiry: 1 recorded; the first, r2-upload {later}, in 200 days" in out
+    assert state["status"] == "ok"
+
+    out, _state = _check(host, capsys, "--expires", f"r2-upload={gone}", "--expiry-warn-days", "0")
+    assert f"FAIL expiry: renew: r2-upload {gone} (expired)" in out
+
+    out, _state = _check(host, capsys, "--expires", "r2-upload=2027/10/21")
+    assert "FAIL expiry: --expires 'r2-upload=2027/10/21' is not LABEL=YYYY-MM-DD" in out
