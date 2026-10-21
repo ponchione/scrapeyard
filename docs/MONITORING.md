@@ -132,6 +132,7 @@ run; what it reports through is a hook the operator installs.
 | `restarts` | Since the last check, an application, Redis or probe container was restarted (TD-89's ending included), or `scrapeyard.service` or the tunnel's unit was. Once, with the counts. |
 | `tunnel` | `cloudflared-scrapeyard.service` exists and is not active, or, given `--tunnel-ready-url`, the connector's own readiness is not `200`. |
 | `edge` | Given `--edge-url`: the public `/health`, asked through Cloudflare, Access and the tunnel with the service token in `/etc/scrapeyard/edge-access.json`, does not answer `200` with status `ok`, or the token file is not root's alone (mode 600). A 502 from a connector with no connection, a 401 from a revoked or expired token and a redirect all fail. Not judged while the application is stopped on purpose, as for `application`. |
+| `expiry` | Given `--expires LABEL=YYYY-MM-DD` (repeatable): the first of those days is `--expiry-warn-days` (30) or fewer days away, or has passed, or an entry is not in that form. For credentials whose expiry nothing on the host can read, such as an R2 key or an Access service token. After renewing one, change its date in the unit's drop-in. |
 | `hooks` | A hook is installed that root cannot trust, or a ping line is not one `https` URL with no login, space or comment; nothing is sent through it. |
 | `previous-run` | The run before this one ended before it reported (once). |
 | `delivery` | A warning, not a failure: the last run could not hand the report to one of the hooks (by its kind and host, or the command's exit status). It is said through the others, and the state stays as it was. ntfy hears of changes of state only, so with ntfy alone a dead topic shows in the journal and nowhere else; in the status file the line has `"ok": false` and `"warning": true`. |
@@ -212,20 +213,23 @@ State on 2026-10-21. Three things run different code, so each is named:
 - **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup` and
   `scrapeyard-release` are byte for byte that release's `security/backup.sh`
   and `security/manage-release.sh`. `/usr/local/sbin/scrapeyard-health` is
-  newer: `security/health-check.py` of `main` at `ae5bb5e` (pull request #46),
-  which no release holds yet, installed by hand; the copy it replaced is
-  `/root/scrapeyard-health.before-edge`. `/etc/scrapeyard/backup-upload` is
-  `security/backup-upload-r2.sh` ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
+  newer: `security/health-check.py` with `--edge-url` (pull request #46) and
+  `--expires` (pull request #48), which no release holds yet, installed by
+  hand; the copy from before both is `/root/scrapeyard-health.before-edge`.
+  `/etc/scrapeyard/backup-upload` is `security/backup-upload-r2.sh` and
+  `/usr/local/sbin/scrapeyard-release-upload` is `security/upload-release-r2.sh`
+  ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
 - **Repository `main`:** carries all of the above, and this record.
 
 What is installed, and what was seen:
 
 | What | Installed | Verified |
 | --- | --- | --- |
-| Public-path check | Drop-in `/etc/systemd/system/scrapeyard-health.service.d/edge.conf` runs `scrapeyard-health --edge-url https://scrapeyard.eyebox.io/health`. | 2026-10-21 12:52 UTC: all 9 checks passed, `edge: the public name answered HTTP 200 through Access and the tunnel, status ok`. From the host, `/health` without a token answers 401. |
+| Public-path check | Drop-in `/etc/systemd/system/scrapeyard-health.service.d/edge.conf` runs `scrapeyard-health --edge-url https://scrapeyard.eyebox.io/health` and the `--expires` below. | 2026-10-21 12:52 UTC: all 9 checks passed, `edge: the public name answered HTTP 200 through Access and the tunnel, status ok`. From the host, `/health` without a token answers 401. |
 | Monitor's Access token | Service token `scrapeyard-monitor-2026-10` (expires 2027-10-21), in `/etc/scrapeyard/edge-access.json`, root:root, mode 600. It is admitted by its own policy on the Access application `Scrapeyard API`, `Scrapeyard host monitor service token only` (decision Service Auth, precedence 2). Eyebox's token `eyebox-ingest-2026-10` and its policy (precedence 1) were not changed. | The token reached the host encrypted to a one-time key made on the host, and was never printed. Revoke it, or delete its policy, without touching Eyebox. |
 | healthchecks.io | `/etc/scrapeyard/health-ping`, root:root, mode 600, one `healthchecks` line for the check `scrapeyard-host`. The URL is the credential and is kept nowhere else on the host, not in the journal and not in this repository. | 2026-10-21 13:04 UTC: a run passed all 9 checks and hc-ping.com answered `HTTP 200`. |
-| Tunnel notification | Cloudflare's tunnel health notification for `scrapeyard-prod`, set up 2026-10-15 (TD-20). | Not fired end to end. |
+| Credential expiry | The same drop-in: `--expires r2-backup-upload=2027-10-21 --expires access-monitor=2027-10-21 --expires access-eyebox=2027-10-12`. `expiry` fails from 30 days before the first (`--expiry-warn-days`), so healthchecks.io alerts until it is renewed and the date changed here. | 2026-10-21 13:46 UTC: `ok expiry: 3 recorded; the first, access-eyebox 2027-10-12, in 356 days`, 10 of 10 checks. |
+| Cloudflare notifications | Email policies: `Scrapeyard tunnel health` (the tunnel `scrapeyard-prod`, since 2026-10-15), `Expiring Service Token Alert` and `Leaked Service Token Alert` (every Access service token), and the auto-created `Default budget alert` at $10. | Cloudflare's alert history shows tunnel health emails sent on 2026-10-17 (06:39 UTC) and 2026-10-21 (06:18 UTC, when unattended upgrades restarted `cloudflared`). Receipt in the operator's mailbox was not seen. |
 
 The check `scrapeyard-host` is meant to have the schedule type *Simple*, a
 **5-minute period** (the timer's) and a **10-minute grace**, with an email
@@ -243,14 +247,29 @@ judged" and the ping stays a success; the grace covers runs missed while the
 host reboots. A failing check sends `/fail` and alerts at once; a host that
 is down, or a timer that stopped, alerts after period plus grace.
 
-**Known source of false alerts (2026-10-21):** `fwupd-refresh.service`
-failed at 12:00, 12:53 and 13:06 UTC, and `units` fails while it is failed;
-the 13:04 run passed only because the failed state had just been cleared.
-`fwupdmgr refresh` times out reaching `cdn.fwupd.org`, which the host could
-not reach over IPv4 or IPv6 (`fwupd.org` and other sites answered at once).
-The VM's only firmware device is its virtual CPU, so the refresh has nothing
-to update. Whether to disable `fwupd-refresh.timer` or accept the alerts is
-the operator's decision (TD-20).
+A real failure has reached healthchecks.io: at 13:19:58 UTC on 2026-10-21
+a run failing on `fwupd-refresh.service` sent `/fail` (`HTTP 200`), and the
+run at 13:20:30 sent success. If the check is set up as above, that was a
+*down* and an *up* email; whether they arrived was not seen.
+
+**`fwupd-refresh.timer` is disabled (2026-10-21).** `fwupd-refresh.service`
+failed at 12:00, 12:53 and 13:06 UTC: `fwupdmgr refresh` times out reaching
+`cdn.fwupd.org`, which the host could not reach over IPv4 or IPv6
+(`fwupd.org` and other sites answered at once), and `units` fails while it
+is failed. The VM's only firmware device is its virtual CPU, so the refresh
+had nothing to update. The change, on the host:
+
+```bash
+sudo systemctl disable --now fwupd-refresh.timer
+sudo systemctl reset-failed fwupd-refresh.service
+```
+
+Package updates are untouched: `apt-daily.timer`, `apt-daily-upgrade.timer`
+and `unattended-upgrades.service` stay enabled. To reverse it:
+`sudo systemctl enable --now fwupd-refresh.timer`. Debian's packaging is
+meant to keep a timer the administrator disabled disabled when `fwupd` is
+upgraded; that was not tested, so check `systemctl is-enabled
+fwupd-refresh.timer` after an upgrade of `fwupd` or of the distribution.
 
 ## Suggested alerts
 

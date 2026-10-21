@@ -6,8 +6,9 @@ scrapeyard-health.timer. Each run checks the application's readiness, the
 free space and inodes where the host keeps its data, the age of the last
 backup, the policy watch's timer and record, the host's failed units, the
 restarts of the application's containers and units, the tunnel's
-connector, and, given --edge-url, the application's /health asked through
-Cloudflare, Access and the tunnel as a consumer would. It prints one line for each, writes them to
+connector, given --edge-url the application's /health asked through
+Cloudflare, Access and the tunnel as a consumer would, and given --expires
+how long the host's credentials have left. It prints one line for each, writes them to
 /var/lib/scrapeyard/health-status.json, and hands the same report to:
 
 - /etc/scrapeyard/health-ping, root's alone (mode 600): one line for each
@@ -466,6 +467,30 @@ def check_edge(url: str) -> Result:
     return Result("edge", status == "ok", detail if code != 200 else f"{detail}, status {status}")
 
 
+def check_expiries(expiries: list[str], warn_days: float, now: float) -> Result:
+    """Fail from warn_days before a credential the host relies on expires."""
+
+    soonest: list[tuple[int, str]] = []
+    for entry in expiries:
+        label, _sep, date = entry.partition("=")
+        try:
+            if not label or not re.fullmatch(r"[A-Za-z0-9._-]+", label):
+                raise ValueError
+            ends = datetime.date.fromisoformat(date) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else None
+            if ends is None:
+                raise ValueError
+        except ValueError:
+            return Result("expiry", False, f"--expires {entry!r} is not LABEL=YYYY-MM-DD")
+        today = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date()
+        soonest.append(((ends - today).days, f"{label} {date}"))
+    soonest.sort()
+    due = [f"{what} ({'expired' if days <= 0 else f'in {days} days'})" for days, what in soonest if days <= warn_days]
+    if due:
+        return Result("expiry", False, "renew: " + "; ".join(due))
+    days, what = soonest[0]
+    return Result("expiry", True, f"{len(soonest)} recorded; the first, {what}, in {days} days")
+
+
 def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[str, Any]) -> list[Result]:
     now = time.time()
     results: list[Result] = []
@@ -488,6 +513,8 @@ def check_all(args: argparse.Namespace, state: dict[str, Any], new_state: dict[s
     ]
     if args.edge_url:
         checks.append(("edge", lambda: check_edge(args.edge_url)))
+    if args.expires:
+        checks.append(("expiry", lambda: check_expiries(args.expires, args.expiry_warn_days, now)))
     for name, check in checks:
         try:
             results.append(check())
@@ -726,6 +753,13 @@ def main(argv: list[str] | None = None) -> int:
         "--edge-url",
         help=f"the public /health, such as https://scrapeyard.example.net/health, asked with the Access token in {EDGE_ACCESS_FILE}",
     )
+    parser.add_argument(
+        "--expires",
+        action="append",
+        metavar="LABEL=YYYY-MM-DD",
+        help="a credential the host relies on and the UTC day it expires; repeatable",
+    )
+    parser.add_argument("--expiry-warn-days", type=float, default=30.0)
     parser.add_argument(
         "--label",
         default="Scrapeyard host",
