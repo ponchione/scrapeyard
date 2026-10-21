@@ -202,6 +202,56 @@ sudo systemctl enable --now scrapeyard-health.timer
 sudo scrapeyard-health --dry-run
 ```
 
+### On the first production host
+
+State on 2026-10-21. Three things run different code, so each is named:
+
+- **Deployed application image:** release `e31e6a3`
+  (`org.opencontainers.image.revision`), promoted 2026-10-20 and linked from
+  `/srv/scrapeyard-releases/current`.
+- **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup` and
+  `scrapeyard-release` are byte for byte that release's `security/backup.sh`
+  and `security/manage-release.sh`. `/usr/local/sbin/scrapeyard-health` is
+  newer: `security/health-check.py` of `main` at `ae5bb5e` (pull request #46),
+  which no release holds yet, installed by hand; the copy it replaced is
+  `/root/scrapeyard-health.before-edge`. `/etc/scrapeyard/backup-upload` is
+  `security/backup-upload-r2.sh` ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
+- **Repository `main`:** carries all of the above, and this record.
+
+What is installed, and what was seen:
+
+| What | Installed | Verified |
+| --- | --- | --- |
+| Public-path check | Drop-in `/etc/systemd/system/scrapeyard-health.service.d/edge.conf` runs `scrapeyard-health --edge-url https://scrapeyard.eyebox.io/health`. | 2026-10-21 12:52 UTC: all 9 checks passed, `edge: the public name answered HTTP 200 through Access and the tunnel, status ok`. From the host, `/health` without a token answers 401. |
+| Monitor's Access token | Service token `scrapeyard-monitor-2026-10` (expires 2027-10-21), in `/etc/scrapeyard/edge-access.json`, root:root, mode 600. It is admitted by its own policy on the Access application `Scrapeyard API`, `Scrapeyard host monitor service token only` (decision Service Auth, precedence 2). Eyebox's token `eyebox-ingest-2026-10` and its policy (precedence 1) were not changed. | The token reached the host encrypted to a one-time key made on the host, and was never printed. Revoke it, or delete its policy, without touching Eyebox. |
+| healthchecks.io | `/etc/scrapeyard/health-ping`, root:root, mode 600, one `healthchecks` line for the check `scrapeyard-host`. The URL is the credential and is kept nowhere else on the host, not in the journal and not in this repository. | 2026-10-21 13:04 UTC: a run passed all 9 checks and hc-ping.com answered `HTTP 200`. |
+| Tunnel notification | Cloudflare's tunnel health notification for `scrapeyard-prod`, set up 2026-10-15 (TD-20). | Not fired end to end. |
+
+The check `scrapeyard-host` is meant to have the schedule type *Simple*, a
+**5-minute period** (the timer's) and a **10-minute grace**, with an email
+integration. **Not verified:** that the dashboard has those settings, that
+it shows the check *up*, and that a failure or a missed ping reaches the
+operator's mail. An `HTTP 200` from hc-ping.com says the ping was taken, not
+how the check is configured. A read-only API key of the project (Project
+Settings → API Access) would let the settings and last ping be read; none
+exists on the operator's machine.
+
+Planned stops should not alert. While a backup has the application stopped
+(about 30 s from 04:40 UTC), or the boot service starts it after the
+unattended-upgrade reboot at 08:00 UTC, `application` and `edge` say "not
+judged" and the ping stays a success; the grace covers runs missed while the
+host reboots. A failing check sends `/fail` and alerts at once; a host that
+is down, or a timer that stopped, alerts after period plus grace.
+
+**Known source of false alerts (2026-10-21):** `fwupd-refresh.service`
+failed at 12:00, 12:53 and 13:06 UTC, and `units` fails while it is failed;
+the 13:04 run passed only because the failed state had just been cleared.
+`fwupdmgr refresh` times out reaching `cdn.fwupd.org`, which the host could
+not reach over IPv4 or IPv6 (`fwupd.org` and other sites answered at once).
+The VM's only firmware device is its virtual CPU, so the refresh has nothing
+to update. Whether to disable `fwupd-refresh.timer` or accept the alerts is
+the operator's decision (TD-20).
+
 ## Suggested alerts
 
 - Page when `scrapeyard_background_task_up == 0` for two minutes or readiness
