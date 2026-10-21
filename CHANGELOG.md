@@ -24,6 +24,17 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ### Dependencies
 - certifi 2026.10.19, for PYSEC-2026-4320.
+- pip 26.2.2 in the image, CI, the audit job and the dev lock. pip 26.2.1 and
+  26.1.2 vendor certifi 2026.06.17 and 2026.02.25, which still trust
+  emSign ECC Root CA - G3.
+- Both browser drivers run on Node 24.22.1 in the image (October 21, 2026
+  Node security release: CVE-2026-105482, -105483, -106069 and others).
+  playwright 1.58.0 bundles Node 24.13.0 and rebrowser-playwright 1.52.0
+  bundles 22.14.0, and no driver release ships a fixed Node. The image pins
+  the release tarball's hash from its signed SHASUMS256.txt, sets
+  `PLAYWRIGHT_NODEJS_PATH`, and replaces each bundled `driver/node` with a
+  link to it. The container smoke proves which executable each driver
+  launches.
 
 ### Deployment qualification
 - Release `7bccba5` runs on the production host since 2026-10-21 15:27 UTC,
