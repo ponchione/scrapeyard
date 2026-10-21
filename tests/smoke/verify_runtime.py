@@ -38,10 +38,55 @@ def _assert_writable(path: Path) -> None:
         probe.flush()
 
 
+def _launched_driver_node(module_name: str) -> dict[str, str]:
+    """Start one driver and read which executable its Node process runs."""
+    import importlib
+    import subprocess
+
+    sync_api = importlib.import_module(f"{module_name}.sync_api")
+    before = _children()
+    with sync_api.sync_playwright() as driver:
+        drivers = [
+            pid for pid in _children() - before
+            if Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[1].endswith(b"/cli.js")
+        ]
+        assert len(drivers) == 1, f"{module_name} started {len(drivers)} driver processes"
+        executable = os.readlink(f"/proc/{drivers[0]}/exe")
+        browser = driver.chromium.launch(channel="chromium")
+        page = browser.new_page()
+        # rebrowser's patches leave set_content waiting on a world they do
+        # not create, on its own bundled Node as on this one; navigation works.
+        page.goto("data:text/html,<title>driver-node</title>")
+        assert page.title() == "driver-node"
+        browser.close()
+    version = subprocess.run(
+        [executable, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return {"executable": executable, "version": version}
+
+
+def _children() -> set[int]:
+    return {
+        int(pid)
+        for task in Path("/proc/self/task").iterdir()
+        for pid in (task / "children").read_text(encoding="utf-8").split()
+    }
+
+
 def main() -> None:
     import playwright
     import rebrowser_playwright
     from camoufox.pkgman import Version, launch_path
+
+    # The image replaces both drivers' bundled Node; the drivers must launch
+    # that one, and no other Node may be left beside them.
+    driver_node = Path(os.environ["PLAYWRIGHT_NODEJS_PATH"])
+    assert driver_node == Path("/opt/node/bin/node")
+    launched = {name: _launched_driver_node(name) for name in ("playwright", "rebrowser_playwright")}
+    for name, module in (("playwright", playwright), ("rebrowser_playwright", rebrowser_playwright)):
+        assert launched[name] == {"executable": str(driver_node), "version": "v24.22.1"}, launched
+        bundled = Path(module.__file__).parent / "driver" / "node"
+        assert bundled.is_symlink() and bundled.resolve() == driver_node, bundled
 
     uid = os.getuid()
     gid = os.getgid()
@@ -154,6 +199,7 @@ def main() -> None:
             "camoufox_browser_release": camoufox_version.release,
             "camoufox_executable": str(camoufox_executable),
             "ubo_version": "1.72.2",
+            "driver_node": launched,
         },
         "artifacts": {
             "result_files": len(result_files),

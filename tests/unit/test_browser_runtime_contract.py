@@ -60,6 +60,24 @@ def test_browser_driver_pins_match_the_versions_the_image_asserts() -> None:
         assert f'"{package}=={match.group(1)}"' in pyproject
 
 
+def test_browser_drivers_run_on_the_patched_node_not_their_bundled_one() -> None:
+    # playwright 1.58.0 bundles Node 24.13.0 and rebrowser-playwright 1.52.0
+    # bundles 22.14.0; the October 21, 2026 Node security release fixed both
+    # lines in 22.23.4 and 24.22.1.
+    dockerfile = Path("Dockerfile").read_text()
+    runtime = dockerfile[dockerfile.index("AS runtime"):]
+    node = tuple(int(part) for part in re.search(r"(?m)^ARG NODE_VERSION=(\S+)$", runtime).group(1).split("."))
+    assert node[0] == 24 and node >= (24, 22, 1)
+    assert re.search(r"(?m)^ARG NODE_SHA256=[0-9a-f]{64}$", runtime)
+    assert "PLAYWRIGHT_NODEJS_PATH=/opt/node/bin/node" in runtime
+    assert 'sha256sum --check --strict' in runtime[runtime.index("/tmp/node.tar.gz"):]
+    # Both bundled executables are replaced before either driver first runs.
+    replaced = runtime.index('ln -s "${PLAYWRIGHT_NODEJS_PATH}" "${bundled}"')
+    assert "for driver in playwright rebrowser_playwright" in runtime
+    assert replaced < runtime.index("python -m playwright install")
+    assert replaced < runtime.index("python -m rebrowser_playwright install")
+
+
 def test_docker_compose_enables_dynamic_stealth_sandbox_requirements() -> None:
     compose = Path("docker-compose.yml").read_text()
 
