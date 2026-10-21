@@ -205,19 +205,24 @@ sudo scrapeyard-health --dry-run
 
 ### On the first production host
 
-State on 2026-10-21, after 15:27 UTC. Three things can run different code,
+State on 2026-10-21, after 21:23 UTC. Three things can run different code,
 so each is named:
 
-- **Deployed application image:** release `7bccba5`
-  (`org.opencontainers.image.revision`; image
-  `sha256:3f18e5139be17e6a…`, with certifi 2026.10.19), promoted 2026-10-21
-  over `e31e6a3` and linked from `/srv/scrapeyard-releases/current`
-  ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
+- **Deployed release:** `7783ba3` (`main` after pull request #51), promoted
+  2026-10-21 21:23 UTC over `38d0483` by the guarded deployment and linked
+  from `/srv/scrapeyard-releases/current`
+  ([DEPLOYMENT.md](DEPLOYMENT.md#guarded-deployment)). Application image
+  `sha256:f57f9ecf1da7…`; Redis `redis:7.4.11-bookworm` (image
+  `sha256:e965140ddfcc…`, Debian 12); the probe's image unchanged.
+  `38d0483` (Node 24.22.1 and pip 26.2.2, pull request #53) is the
+  rollback.
 - **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup`,
   `scrapeyard-release` and `scrapeyard-health` are byte for byte
   `security/backup.sh`, `security/manage-release.sh` and
   `security/health-check.py` of release `7bccba5`, which is also `main` at
-  that commit. `scrapeyard-health` was installed by hand from `main` before
+  that commit; none of them changed since. `/usr/local/sbin/scrapeyard-deploy`
+  and `scrapeyard-release-upload` are `security/deploy-release.sh` and
+  `security/upload-release-r2.sh` of `main` at `7f1f3e6`. `scrapeyard-health` was installed by hand from `main` before
   the release existed; the copy from before `--edge-url` and `--expires` is
   `/root/scrapeyard-health.before-edge`.
   `/etc/scrapeyard/backup-upload` is `security/backup-upload-r2.sh` and

@@ -68,6 +68,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   store.
 
 ### Deployment qualification
+- Release `7783ba3` runs on the production host since 2026-10-21 21:23 UTC,
+  with Redis on `redis:7.4.11-bookworm`, promoted over `38d0483` by
+  `scrapeyard-deploy` from release run 39665930396 (archive digest and
+  checksum `983f103b…` matched). The backup before it was uploaded
+  (application down 29.0 s); after it the host check passed 10 of 10 with
+  the public path, Redis came back on Debian 12 with its 11 keys and
+  append-only file, and stored jobs and three completed results read back
+  with `200`. Both releases are in the R2 store.
 - Release `7bccba5` runs on the production host since 2026-10-21 15:27 UTC,
   promoted over `e31e6a3` after an uploaded backup, with certifi 2026.10.19
   for GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320). Rehearsed in CI against
