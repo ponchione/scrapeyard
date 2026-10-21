@@ -944,6 +944,9 @@ async def test_browser_budget_retains_limiter_until_cancellation_acknowledged() 
         max_extracted_records=100,
         max_serialized_result_bytes=4096,
         max_browser_debug_bytes=1024,
+        # A stopped clock: the fetch must start before the deadline passes,
+        # however long a busy machine takes to get from here to there.
+        clock=lambda: 0.0,
     )
     limiter = BrowserExecutionLimiter(1)
     cancellation_seen = asyncio.Event()

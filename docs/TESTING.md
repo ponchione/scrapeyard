@@ -10,8 +10,10 @@ The `CI` workflow exposes these checks:
 
 - `Quality / Python 3.12` and `Quality / Python 3.14` install the lock file,
   validate it, run Ruff over its configured scope, and run the full pytest
-  suite with branch coverage and the 80% coverage floor. The 3.12 leg also
-  runs mypy; the 3.14 leg installs Chromium for the real-browser tests.
+  suite with branch coverage and the 80% coverage floor, spread over one
+  pytest-xdist worker per runner CPU (`-n auto --dist worksteal`). The 3.12
+  leg also runs mypy; the 3.14 leg installs Chromium for the real-browser
+  tests.
 - `Distribution build / Python 3.14` builds both the wheel and sdist and then
   verifies that each archive contains exactly the checked-in SQL migrations.
 - `Live Redis / Python 3.14` runs only the `live_redis` tests against an
@@ -31,6 +33,9 @@ pull request and push to `main`, can be dispatched manually, and runs on a
 weekly Monday schedule. The CI workflow does not
 duplicate those audit jobs.
 
+Measured workflow timings, and why the lanes are shaped as they are, are in
+[ci-audit-2026-10-21.md](ci-audit-2026-10-21.md).
+
 The minimum supported interpreter is Python 3.12, which is `python3` on the
 Ubuntu 24.04 production host that runs the deployment and backup scripts. The
 Docker production image runs Python 3.14. The complete static and default test
@@ -46,7 +51,7 @@ poetry check --lock
 poetry sync --no-interaction
 poetry run ruff check src tests scripts security
 poetry run mypy src
-poetry run pytest -W error
+poetry run pytest -n auto --dist worksteal -W error
 rm -rf dist
 poetry build
 poetry run python scripts/inspect_distribution.py dist
@@ -836,12 +841,15 @@ bridge netfilter module and setting back as they were before the run (a
 module the kernel will not unload stays loaded). It leaves the loaded images.
 
 The `Release artifact and deployment rehearsal` workflow builds, scans and
-qualifies both releases with `scripts/release_artifact.py create`, installs
-`age` from the distribution's package, and then runs the rehearsal with
-`--boot-service`. It packs the candidate with root as
-the owner of every file, extracts the archive as the deployment guide says,
-and checks that the result verifies and holds nothing another account owns or
-can write to. On a pull request that touches the deployment files it uses the
+qualifies both releases with `scripts/release_artifact.py create`, each on
+its own runner at the same time, and packs each with root as the owner of
+every file. A third runner, which built neither, receives both archives,
+checks their SHA-256, unpacks and verifies them, installs `age` from the
+distribution's package, and then runs the rehearsal with `--boot-service`, so
+every image it runs comes from a release archive. It then extracts the
+candidate's archive, the same bytes it rehearsed, as the deployment guide
+says, and checks that the result verifies and holds nothing another account
+owns or can write to. On a pull request that touches the deployment files it uses the
 pull request's head and base. A manual dispatch takes `revision` and
 `previous_revision` (default: the branch head and its parent) and also uploads
 the candidate as `scrapeyard-release-<revision>` with its SHA-256, kept for 30

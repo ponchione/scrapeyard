@@ -498,16 +498,37 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
         "scripts/release_artifact.py",
         "scripts/run_deployment_rehearsal.sh",
     } <= paths
-    job = workflow["jobs"]["release-rehearsal"]
-    assert job["runs-on"] == "ubuntu-24.04"
+    jobs = workflow["jobs"]
+    assert {job["runs-on"] for job in jobs.values()} == {"ubuntu-24.04"}
+    assert not any(
+        step.get("uses", "").startswith("actions/cache@")
+        for job in jobs.values()
+        for step in job["steps"]
+    )
+    # Both releases are built from commits, so the jobs that choose and build
+    # them see the whole history.
+    for name in ("revisions", "release"):
+        assert jobs[name]["steps"][0]["with"]["fetch-depth"] == "0"
+    # Each release is built, scanned and qualified on its own runner, from the
+    # revision the revisions job chose, and only then rehearsed.
+    release = jobs["release"]
+    assert release["strategy"]["matrix"]["role"] == ["previous", "candidate"]
+    assert release["env"]["REVISION"] == "${{ needs.revisions.outputs[matrix.role] }}"
+    release_commands = [step.get("run", "") for step in release["steps"]]
+    assert sum("release_artifact.py create" in c for c in release_commands) == 1
+    pack = next(c for c in release_commands if "tar " in c)
+    assert "--owner=0 --group=0 --numeric-owner" in pack
+    job = jobs["release-rehearsal"]
+    assert set(job["needs"]) == {"revisions", "release"}
     steps = job["steps"]
-    assert steps[0]["with"]["fetch-depth"] == "0"
-    assert not any(step.get("uses", "").startswith("actions/cache@") for step in steps)
     commands = [step.get("run", "") for step in steps]
-    created = [command for command in commands if "release_artifact.py create" in command]
-    assert len(created) == 2
+    assert not any("release_artifact.py create" in c for c in commands)
     rehearsal = next(i for i, c in enumerate(commands) if "run_deployment_rehearsal.sh" in c)
-    assert all(commands.index(command) < rehearsal for command in created)
+    # The rehearsal host loads every image from the handed-over archives,
+    # after checking them.
+    unpack = next(i for i, c in enumerate(commands) if "sha256sum -c" in c)
+    assert unpack < rehearsal
+    assert "release_artifact.py\" verify" in commands[unpack]
     assert commands[rehearsal].startswith("sudo env ")
     assert "run_deployment_rehearsal.sh --boot-service" in commands[rehearsal]
     # The backup step encrypts with age, from the distribution's own package
@@ -520,13 +541,12 @@ def test_rehearsal_workflow_builds_both_releases_and_hands_over_only_a_dispatche
     assert evidence["if"] == "always()"
     assert release["if"] == "github.event_name == 'workflow_dispatch'"
     assert release["with"]["if-no-files-found"] == "error"
-    pack = next(step for step in steps if step.get("name", "").startswith("Pack the rehearsed"))
-    # Every run packs the release and checks what an operator would extract.
+    pack = next(step for step in steps if step.get("name", "").startswith("Check the rehearsed"))
+    # Every run checks the archive it rehearsed as an operator would extract it.
     assert "if" not in pack
-    assert "sha256sum" in pack["run"]
-    # Root runs a release, so neither the archive nor its extraction may keep
-    # the runner's account as the owner.
-    assert "--owner=0 --group=0 --numeric-owner" in pack["run"]
+    assert "sha256sum -c" in pack["run"]
+    # Root runs a release, so its extraction may not keep the runner's
+    # account as the owner.
     assert "--no-same-owner" in pack["run"]
     # The release it uploads must hold a scan of every image, not only the
     # application's, whatever revision it was built from.
