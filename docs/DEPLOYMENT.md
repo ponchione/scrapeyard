@@ -1554,7 +1554,11 @@ qualified and rehearsed, and refuses at the first step that does not hold:
    the store (`scrapeyard-release-upload`). A failure here leaves the new
    release running and exits 3.
 
-It holds `/run/scrapeyard/deploy.lock`, so two do not overlap. From the
+It holds `/run/scrapeyard/guarded-deploy.lock`, so two do not overlap. It
+must never hold `deploy.lock`, the release wrapper's: the backup and the
+promotion start the application through the wrapper, and on 2026-10-21 a
+first version that took that lock held the application stopped for 5.7
+minutes, until it was stopped by hand (see TD-21). From the
 operator's machine, with `gh` signed in:
 
 ```bash

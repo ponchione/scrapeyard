@@ -45,6 +45,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   launches.
 
 ### Deployment
+- Fixed: `scrapeyard-deploy` took `/run/scrapeyard/deploy.lock`, the release
+  wrapper's lock, for its whole run, so the application could not be started
+  again after its pre-promotion backup. On the production host on 2026-10-21
+  the application was down from 20:35:58 to about 20:41:40 UTC (backup
+  `application_down_seconds` 342.8) until the deployment was stopped by hand;
+  nothing was promoted, and the backup completed and was uploaded. The lock
+  is now `guarded-deploy.lock`, and the tests' backup and promotion stand-ins
+  take the wrapper's real lock, so a collision fails them.
 - `security/deploy-release.sh` (installed as `scrapeyard-deploy`) promotes
   a release archive only after the host check passes, the archive has the
   checksum from its workflow run and the running release's verifier
