@@ -226,12 +226,18 @@ def _show(unit: str, prop: str) -> str:
     return out.strip()
 
 
+def monotonic() -> float:
+    """systemd's monotonic clock, in seconds since boot."""
+
+    return time.monotonic()
+
+
 def _seconds_in_state(unit: str) -> float | None:
     try:
         changed = int(_show(unit, "StateChangeTimestampMonotonic")) / 1e6
     except ValueError:
         return None
-    return time.monotonic() - changed if changed > 0 else None
+    return monotonic() - changed if changed > 0 else None
 
 
 def maintenance() -> tuple[str, float] | None:

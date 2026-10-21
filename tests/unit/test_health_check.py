@@ -407,8 +407,13 @@ def test_without_a_status_file_only_recent_record_lines_are_new(host, capsys):
     assert "FAIL policy-watch: timer active; 1 new record line(s): " + lines[1] in out
 
 
+# A runner may have booted less than a few minutes ago, so the check is given
+# a monotonic clock far enough from boot for any test's past.
+MONOTONIC_NOW = 1_000_000.0
+
+
 def _monotonic_us(seconds_ago: float) -> str:
-    return str(int((time.monotonic() - seconds_ago) * 1e6))
+    return str(int((MONOTONIC_NOW - seconds_ago) * 1e6))
 
 
 def _stopped_by_backup(seconds_ago: float):
@@ -446,7 +451,10 @@ def _stopped_by_backup(seconds_ago: float):
          "a promotion is under way for 400s"),
     ],
 )
-def test_maintenance_is_not_judged_for_three_minutes_and_then_fails_as_overdue(host, capsys, setup, overdue):
+def test_maintenance_is_not_judged_for_three_minutes_and_then_fails_as_overdue(
+    host, capsys, monkeypatch, setup, overdue
+):
+    monkeypatch.setattr(host.module, "monotonic", lambda: MONOTONIC_NOW)
     host.ready = {"code": 503, "asked": "/health/ready", "status": "unhealthy", "failing": ["redis"]}
     setup(host)
 
