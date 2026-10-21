@@ -54,7 +54,9 @@ def _launched_driver_node(module_name: str) -> dict[str, str]:
         executable = os.readlink(f"/proc/{drivers[0]}/exe")
         browser = driver.chromium.launch(channel="chromium")
         page = browser.new_page()
-        page.set_content("<title>driver-node</title>")
+        # rebrowser's patches leave set_content waiting on a world they do
+        # not create, on its own bundled Node as on this one; navigation works.
+        page.goto("data:text/html,<title>driver-node</title>")
         assert page.title() == "driver-node"
         browser.close()
     version = subprocess.run(
