@@ -262,6 +262,10 @@ def _assert_old_policy_active(state_dir: Path) -> None:
         assert established < rejected
 
 
+# Twelve installer runs, each spawning dozens of shim processes: about 22
+# seconds on an idle machine, and past the default 60 when the test suite
+# runs one worker per CPU beside it.
+@pytest.mark.timeout(180)
 def test_policy_replacement_restores_prior_deny_path_at_every_mutation_stage(
     tmp_path: Path,
 ) -> None:
