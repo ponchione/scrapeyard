@@ -20,7 +20,20 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   fails the check. The connector's loopback readiness stays unreadable from
   the host.
 
+### Dependencies
+- certifi 2026.10.19, for PYSEC-2026-4320.
+
 ### Deployment qualification
+- 2026-10-21, production host (application still release `e31e6a3`):
+  backups are uploaded to the R2 bucket `scrapeyard-backups` (35-day bucket
+  lock, deleted at 36 days) by `security/backup-upload-r2.sh`, now checked
+  in, with a key for that bucket alone. A backup uploaded, and its copy
+  downloaded from the bucket passed `restore-test`. The host check of
+  `main` (`--edge-url`) is installed with a monitoring Access token of its
+  own and pings healthchecks.io; it passed, and the ping was answered
+  `HTTP 200`. The healthchecks.io check's settings and delivery of an alert
+  are not yet seen. See DEPLOYMENT.md ("The first production host's store")
+  and MONITORING.md ("On the first production host").
 - Release `e31e6a3` runs on the production host since 2026-10-20, promoted
   over `fbc340c` after a backup. Readiness, the host check, a stored result
   read back byte for byte, a replayed submission and Eyebox's result parser

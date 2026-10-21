@@ -6,6 +6,22 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-21, off-host backups and alerting** (no release; pull request #46,
+  then this record): on the production host, still running release
+  `e31e6a3`.
+  - TD-21: backups go to the R2 bucket `scrapeyard-backups` (35-day lock,
+    deleted at 36 days) through `security/backup-upload-r2.sh` with a key
+    for that bucket alone. A backup uploaded, and its copy downloaded from
+    the bucket passed `restore-test`
+    ([DEPLOYMENT.md](docs/DEPLOYMENT.md#the-first-production-hosts-store)).
+  - TD-20: the host check asks the public `/health` through Access with a
+    service token of its own (`--edge-url`, pull request #46, installed from
+    `main` at `ae5bb5e`), and pings healthchecks.io
+    ([MONITORING.md](docs/MONITORING.md#on-the-first-production-host)).
+  - certifi 2026.10.19 for PYSEC-2026-4320, which had failed the dependency
+    audit on `main` too. In the image from the next release only.
+  - New: TD-118, the release rehearsal cannot build the previous release's
+    image, since Playwright's download host does not resolve.
 - **2026-10-20, go-live pass**: an audit of `3205b39`, done locally, then
   the fixes below, each with a test seen failing on the old code.
   - TD-115 closed: another project's job answers every job route as an absent
@@ -686,10 +702,14 @@ to release, with the host's current release as `previous_revision`.
     refuse the host's address, and leave to run each beta job from it.
     Every retailer request from the host needs the owner's word.
   - TD-19 needs a rotation tried, and a host rebuilt from the runbook.
-  - TD-20 needs the owner to sign up for the alerting services the host
-    check reports to, and to decide two questions (the tunnel's own
-    readiness, and a policy finding that cannot be put back).
-  - TD-21 needs an off-host store, the owner's choice.
+  - TD-20 needs alerts seen to reach the operator, the healthchecks.io
+    check's settings confirmed, a decision on `fwupd-refresh`, and the two
+    questions below (the tunnel's own readiness, and a policy finding that
+    cannot be put back).
+  - TD-21 needs a restore onto a rebuilt host from the store, and the
+    releases kept off the host.
+- TD-118: the release rehearsal needs Playwright's browsers from a host that
+  resolves.
 
 **Deferred:** TD-48, TD-49, TD-85, TD-86, TD-88, TD-102 to TD-106, TD-108
 to TD-113, and TD-117.
@@ -724,6 +744,7 @@ to TD-113, and TD-117.
 | TD-112 | P3 | deferred | Backup retention keeps a count, so one day's runs can evict every older archive |
 | TD-113 | P3 | deferred | Migrations run with foreign keys on, so rebuilding a referenced table deletes its children |
 | TD-117 | P3 | deferred | Locked dependencies hold the image at Python 3.14 |
+| TD-118 | P1 | operational | The release rehearsal cannot rebuild a release: Playwright's download host does not resolve |
 
 ## Ready to implement
 
@@ -1284,18 +1305,36 @@ is TD-85.
 - Unattended upgrades now reboot at 08:00 UTC instead of 10:30, clear of
   Eyebox's beta schedules and after the backup's latest finish.
 
+**Done on the production host (2026-10-21):** see
+[MONITORING.md](docs/MONITORING.md#on-the-first-production-host).
+- The host check of `main` at `ae5bb5e` (pull request #46) is installed with
+  `--edge-url https://scrapeyard.eyebox.io/health`: every five minutes it
+  asks the public `/health` through Cloudflare, Access and the tunnel, with
+  the service token `scrapeyard-monitor-2026-10` (its own Access policy;
+  expires 2027-10-21). That covers a connector with no connection, a broken
+  route or record and a refused token, which the unit alone did not. First
+  run: 9 of 9 checks passed, the edge with `HTTP 200`.
+- `/etc/scrapeyard/health-ping` (root, mode 600) pings the healthchecks.io
+  check `scrapeyard-host`; at 13:04 UTC a passing run's ping got `HTTP 200`.
+
 **Still open:**
-- Alerts reaching the operator: the host check has nothing to send to
-  until the owner signs up for a service and installs
-  `/etc/scrapeyard/health-ping` (healthchecks.io for missed runs and
-  failures, ntfy for messages). Then a real failure and a no-data
-  condition (healthchecks.io's missed pings) must be seen to reach the
-  operator and recover.
+- Alerts reaching the operator: the check `scrapeyard-host` should have a
+  5-minute period and a 10-minute grace. Neither those settings, its *up*
+  state, nor a failure or a missed ping reaching the operator's mail has
+  been seen; only hc-ping.com's `HTTP 200`. Both must be seen to alert and
+  recover.
+- `fwupd-refresh.service` fails (12:00, 12:53 and 13:06 UTC on 2026-10-21):
+  the host cannot reach `cdn.fwupd.org`, and `units` fails while the unit is
+  failed, so the operator is now alerted for it. The VM's only firmware
+  device is its virtual CPU. Disable `fwupd-refresh.timer`, or accept the
+  alerts: the owner's call.
+- Unattended upgrades update `cloudflared` and restart it (06:18 UTC on
+  2026-10-21) and reboot at 08:00 UTC; `edge` now notices an ingress that
+  does not come back.
 - The tunnel's own readiness (`/ready` on the connector's metrics port)
   cannot be read from the host: the connector's unit drops loopback
-  (`IPAddressDeny`). The check judges the connector by its unit; allowing
-  loopback to the connector is the owner's call. Cloudflare's tunnel
-  health notification covers a connector that runs without a connection.
+  (`IPAddressDeny`). `edge` covers what it would have told; allowing
+  loopback to the connector is no longer needed for that.
 - Metrics collection: nothing scrapes `/metrics`. The host check reads
   readiness, which covers failed background work and disk, not queue age
   or saturation trends.
@@ -1397,12 +1436,34 @@ decrypted). A copy of `/etc/scrapeyard/deploy.env`, sealed with `age` to
 the backup recipient, was made for the operator, who keeps it with the
 private key; it decrypts with that key to the host's file byte for byte.
 
+**Done on the production host (2026-10-21):** see
+[DEPLOYMENT.md](docs/DEPLOYMENT.md#the-first-production-hosts-store).
+- Store: R2 bucket `scrapeyard-backups` (Standard, ENAM), bucket lock 35
+  days on every object, lifecycle deletion at 36 days, unfinished uploads
+  aborted after a day. Expected cost $0 a month (about 0.5 GB and 60 writes,
+  inside the free tier).
+- Hook `/etc/scrapeyard/backup-upload` = `security/backup-upload-r2.sh`, with
+  a bucket-scoped object key in `/etc/scrapeyard/backup-store.json` (root,
+  mode 600; token `scrapeyard-backup-upload`, expires 2027-10-21). A
+  re-upload, an overwrite and a delete of a locked probe object each
+  answered 409 and left it intact.
+- The backup at 12:49 UTC (14,066,043 bytes, application down 28.0 s)
+  uploaded both files, `uploaded: true`. Its copy, downloaded from the
+  bucket, matched the local SHA-256 and the recorded one, and
+  `restore-test` on it passed in 18.9 s (10 of 10 Redis keys, 295 jobs
+  identical, configurations and results decrypted and identical).
+- The host check pings healthchecks.io, which notices a backup older than
+  26 hours or a failed one (TD-20).
+
 **Still open:**
-- An off-host store and its upload hook (the owner's choice). Until then the
-  seven archives the host keeps protect against a mistake or a bad release,
-  not against losing the host.
 - A restore onto a rebuilt host has run on a CI runner only (40 to 54
-  seconds for the command), not from an off-host copy.
+  seconds for the command), not from the store.
+- Releases are still kept off the host only as workflow artifacts that
+  expire after 30 days; none is in the store.
+- Measured RPO is a day (the timer); RTO from the store onto a rebuilt host
+  is not measured.
+- The upload key and the monitor's Access token expire on 2027-10-21, and
+  nothing reminds the operator before then.
 
 **Problem:**
 - The repository has a tested helper for quiesced backup sets, but no complete
@@ -1447,6 +1508,31 @@ and [release qualification](scripts/run_release_qualification.sh).
   recovery procedure are recorded.
 
 A manifest-only check or a provider disk snapshot does not close this item.
+
+### TD-118 — The release rehearsal cannot rebuild a release: Playwright's download host does not resolve
+
+**Priority:** P1 · **Status:** operational · **Contract:** none
+
+**Problem:** found on pull request #46, 2026-10-21. The job `Retained
+release / deploy and roll back` of `Release artifact and deployment
+rehearsal` failed twice (run 39601139356) in the step `Build, scan and
+qualify the previous release`: `python -m playwright install --with-deps
+--no-shell chromium` in the Dockerfile fails with `getaddrinfo ENOTFOUND
+playwright.download.prss.microsoft.com`. The name did not resolve from the
+operator's machine or the production host either; `cdn.playwright.dev`
+did. Pull request #46 was merged with that check failing, since it changes
+no image. Every other check passed, the container smoke lane's
+`Production image / real browsers` among them, perhaps from cached layers
+(not checked). Until it is fixed no release can be built and rehearsed, so
+neither the certifi fix nor the new health check reaches a release.
+
+**Start here:** the `playwright install` lines of the `Dockerfile`, and
+whether Playwright 1.58.0 can be pointed at another host
+(`PLAYWRIGHT_DOWNLOAD_HOST`) with the same archives; the release must keep
+the revision checks that follow.
+
+**Done when:** the rehearsal builds both releases on a run, or the name
+resolves again and the rehearsal passes unchanged.
 
 ## Deferred
 
@@ -1865,7 +1951,9 @@ is decided.
 
 **Revisit when:** TD-21's store is chosen, or backups are taken by hand around
 promotions. The fix is to keep the newest `KEEP` archives and also the newest
-of each of the last `KEEP` UTC days.
+of each of the last `KEEP` UTC days. Since 2026-10-21 the R2 store keeps
+every uploaded archive for 36 days, so the count now bounds the host's
+local copies only.
 
 ### TD-113 — Migrations run with foreign keys on, so rebuilding a referenced table deletes its children
 

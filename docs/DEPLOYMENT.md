@@ -1366,9 +1366,12 @@ The hook is `/etc/scrapeyard/backup-upload`. The contract:
   can leave it out. Retention in the store is a rule of the store, not of
   the hook.
 
-No store has been chosen for the first production host, so this example for
-an S3-compatible store has not been run against one. Try a hook by hand with
-an archive before relying on it:
+The first production host uses Cloudflare R2
+([below](#the-first-production-hosts-store)) with
+[`security/backup-upload-r2.sh`](../security/backup-upload-r2.sh), which needs
+nothing but `curl` 7.75 or later. This sketch for another S3-compatible store
+has not been run against one. Try a hook by hand with an archive before
+relying on it:
 
 ```bash
 #!/bin/bash
@@ -1392,6 +1395,66 @@ cannot delete versions. The example stops at the first failure and cannot
 be run again for an archive that reached the store: the store refuses the
 archive's name the second time. If the archive arrived and its `.sha256` did
 not, send the checksum file by hand.
+
+### The first production host's store
+
+Installed and verified on 2026-10-21. Nothing here holds a credential; the
+keys are on the host and in Cloudflare only.
+
+| What | State |
+| --- | --- |
+| Bucket | `scrapeyard-backups` in the operator's Cloudflare account, R2 Standard storage, location hint ENAM, default jurisdiction, created with no public access configured. |
+| Lock | Bucket lock rule `retain-35-days`, every object (empty prefix), 35 days from upload. Nobody, the host's key included, can delete or overwrite an object before then. |
+| Lifecycle | Rule `delete-after-36-days`: objects are deleted 36 days after upload, a day after their lock ends, so the rule never meets a locked object. Unfinished multipart uploads are aborted after 1 day. |
+| Host's key | An account API token, `scrapeyard-backup-upload`, with *Workers R2 Storage Bucket Item Write* (the dashboard's "Object Read & Write") on that bucket alone, expiring 2027-10-21. Its S3 form is in `/etc/scrapeyard/backup-store.json`, root:root, mode 600: the endpoint, the bucket, the access key id (the token's id) and the secret access key (the SHA-256 of the token's value). Listing the account's buckets with it answers 403. |
+| Hook | `/etc/scrapeyard/backup-upload`, root:root, mode 755, the same bytes as `security/backup-upload-r2.sh`. It signs with `curl --aws-sigv4`, gives the key to `curl` on standard input rather than its command line, and sends `If-None-Match: *`. |
+| Schedule | `scrapeyard-backup.timer`, daily at 04:40 UTC. Each run stops the application for about 30 s (28.0 s on 2026-10-21), then uploads. |
+| On the host | The script still keeps the newest 7 archives in `/var/backups/scrapeyard` (`SCRAPEYARD_BACKUP_KEEP`; see TD-112). |
+
+The object permission R2 offers also allows deletion: there is no
+write-only R2 permission. The lock is what keeps a compromised host from
+removing the backups it made earlier, for 35 days. Checked on the host with a
+probe object, 2026-10-21: a second upload of the same name, an overwrite
+without `If-None-Match` and a `DELETE` each answered 409, and the object
+read back unchanged. The hook takes 409 and 412 as "already in the store",
+fails the run and replaces nothing; it never deletes, so the lock cannot
+make it fail on a deletion.
+
+**Cost** (Cloudflare's list prices on 2026-10-21): about 14 MB a day kept
+36 days is about 0.5 GB, with about 60 writes a month. R2's free tier
+(10 GB-month of Standard storage, 1 million Class A and 10 million Class B
+operations a month, no egress charge) covers that and a full download for a
+recovery: **$0 a month expected**. Amazon S3 Standard would be about $0.01 a
+month plus egress past 100 GB; R2 was chosen because the account and its API
+access existed already. Archives grow with the stored results: at about
+280 MB a day the 10 GB would be passed, at $0.015 per GB-month beyond it.
+
+**Rotating the host's key** before 2027-10-21: create a second token as the
+first was made (*R2 object storage → Overview → Manage API Tokens → Create
+Account API token*, *Object Read & Write*, the bucket alone, a TTL of a
+year, or through `POST /accounts/{id}/tokens` with that permission group).
+Write its access key id and secret access key into a new
+`backup-store.json` on the host (`sudo install -m 600 /dev/stdin ...`, never
+on a command line), run `sudo systemctl start scrapeyard-backup.service`, see
+`uploaded` in the status file, then revoke the old token. An expired token
+fails the next backup: the run fails, `uploaded` stays false in the status
+file, and the host check reports it.
+
+**Recovering from the store.** Download an archive and its `.sha256` with any
+S3 client that has a key for the bucket (the host's, or a read token made for
+the purpose), compare its SHA-256 with the `.sha256` file, then follow
+[Testing a restore](#testing-a-restore) or
+[Restoring onto a rebuilt host](#restoring-onto-a-rebuilt-host) with the
+private key the operator keeps off the host. On 2026-10-21 the archive
+`scrapeyard-backup-20261021T124942Z.tar.zst.age` (14,066,043 bytes, made by
+release `e31e6a3`) was downloaded from the bucket on the host; its SHA-256
+matched the local archive and the recorded checksum, and `restore-test` on
+the downloaded copy passed in 18.9 s: 10 of 10 Redis keys loaded, 295 jobs
+identical to the witness, the newest complete and failed job, their
+decrypted configurations and results identical, on an internal network with
+no route off the host. The project, its volumes and network, the plaintext
+and the key on the host were removed after it. A restore onto a rebuilt host
+from the store has not been run (TD-21).
 
 ### Testing a restore
 
