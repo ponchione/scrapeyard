@@ -15,6 +15,9 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     (`security/deploy-release.sh`, `scripts/deploy_production.sh`), started
     by the operator. Old releases pruned on the host after choosing and
     checking the rollback target `e31e6a3`.
+  - Release `7783ba3` (Debian Redis) promoted at 21:23 UTC by the guarded
+    deployment, after a first attempt at 20:36 that deadlocked on a shared
+    lock and held the application down 342.8 s (pull request #54 fixed it).
   - TD-20 and TD-21, unchanged and the owner's: the healthchecks.io check's
     settings and alert delivery, and a second copy of the recovery key.
 - **2026-10-21, release `7bccba5`** (`main` after pull request #48): the
@@ -1535,7 +1538,9 @@ private key; it decrypts with that key to the host's file byte for byte.
   was down 342.8 s until the deployment unit was stopped by hand. Nothing
   was promoted; the backup completed and was uploaded; the host check then
   passed 10 of 10. Fixed with its own lock and a test that fails on a
-  collision (pull request #54).
+  collision (pull request #54). Rerun at 21:22 UTC with the fix: backup
+  (down 29.0 s) uploaded, `7783ba3` promoted, host check 10 of 10 with the
+  public path, both releases in the store.
 - Done 2026-10-21: a guarded deployment (`scrapeyard-deploy`,
   [DEPLOYMENT.md](docs/DEPLOYMENT.md#guarded-deployment)) backs up to the
   store before promoting, checks the host and public path after, promotes
