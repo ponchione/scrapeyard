@@ -33,6 +33,9 @@ pull request and push to `main`, can be dispatched manually, and runs on a
 weekly Monday schedule. The CI workflow does not
 duplicate those audit jobs.
 
+Measured workflow timings, and why the lanes are shaped as they are, are in
+[ci-audit-2026-10-21.md](ci-audit-2026-10-21.md).
+
 The minimum supported interpreter is Python 3.12, which is `python3` on the
 Ubuntu 24.04 production host that runs the deployment and backup scripts. The
 Docker production image runs Python 3.14. The complete static and default test
