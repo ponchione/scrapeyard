@@ -130,7 +130,7 @@ def test_a_release_to_ship_needs_a_scan_report_naming_each_image(tmp_path):
     with pytest.raises(ValueError, match="no vulnerability report for its redis image"):
         release_artifact.verify_scanned(tmp_path, manifest)
     (reports / "vulnerabilities-dependency-1.json").write_text(
-        json.dumps({"ArtifactName": "redis:7.4.11-alpine", "Metadata": {"ImageID": images["redis"]}})
+        json.dumps({"ArtifactName": "redis:7.4.11-bookworm", "Metadata": {"ImageID": images["redis"]}})
     )
     (reports / "vulnerabilities-dependency-2.json").write_text(
         json.dumps({"ArtifactName": images["redis"]})

@@ -24,6 +24,14 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
 
 ### Dependencies
 - certifi 2026.10.19, for PYSEC-2026-4320.
+- Redis moves from `redis:7.4.11-alpine` (built 2026-09-21, OpenSSL
+  3.3.7-r1 with CVE-2026-84782) to `redis:7.4.11-bookworm`
+  (`sha256:44960b31…`, rebuilt 2026-10-21), which Trivy finds clean. The
+  same Redis version; the exception for CVE-2026-84782 is removed, not
+  renewed, and `security/trivy-dependency-exceptions.yaml` is empty. A
+  volume and append-only file written by the Alpine image load in the
+  Debian one and back (both run Redis as UID 999), and the backup's dump
+  load passes on it; the live Redis tests pass (20).
 - pip 26.2.2 in the image, CI, the audit job and the dev lock. pip 26.2.1 and
   26.1.2 vendor certifi 2026.06.17 and 2026.02.25, which still trust
   emSign ECC Root CA - G3.
@@ -35,6 +43,21 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   `PLAYWRIGHT_NODEJS_PATH`, and replaces each bundled `driver/node` with a
   link to it. The container smoke proves which executable each driver
   launches.
+
+### Deployment
+- `security/deploy-release.sh` (installed as `scrapeyard-deploy`) promotes
+  a release archive only after the host check passes, the archive has the
+  checksum from its workflow run and the running release's verifier
+  accepts it with its scans, its SQL is the running release's, and a
+  backup has reached the store; it checks the host, public path included,
+  afterwards and promotes the earlier release back when that fails, then
+  puts both releases in the R2 store. `scripts/deploy_production.sh` feeds
+  it from a successful dispatched release run on `main`, checked against
+  the artifact digest GitHub recorded. Started by the operator; nothing
+  runs it automatically.
+- `security/upload-release-r2.sh` takes the workflow's archive to upload
+  those bytes, and succeeds without uploading for a release already in the
+  store.
 
 ### Deployment qualification
 - Release `7bccba5` runs on the production host since 2026-10-21 15:27 UTC,

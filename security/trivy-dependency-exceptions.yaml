@@ -3,13 +3,7 @@
 # fixes. scripts/run_container_security_scan.sh applies this file to those
 # images only. Each entry says why it does not apply and expires; after that
 # date the gate fails again until the image digest is refreshed.
-vulnerabilities:
-  - id: CVE-2026-84782
-    statement: >-
-      OpenSSL information disclosure through DTLS handshake retransmission,
-      in libssl3/libcrypto3 3.3.7-r1 of redis:7.4.11-alpine (built
-      2026-09-21, before the fix). Redis speaks TCP only and runs here
-      without TLS, so it never makes a DTLS handshake. The entry covers the
-      egress probe's image too, which scans clean today; its probe is
-      Python, whose ssl module has no DTLS.
-    expired_at: 2026-11-30
+#
+# Empty since 2026-10-21: CVE-2026-84782 (OpenSSL in redis:7.4.11-alpine) was
+# closed by moving Redis to the rebuilt redis:7.4.11-bookworm, not renewed.
+vulnerabilities: []

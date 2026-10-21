@@ -957,7 +957,7 @@ bind-mounted data directory while the application is stopped:
 
 ```bash
 docker run --rm --user 0 -v scrapeyard_scrapeyard-data:/data \
-  redis:7.4.11-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
+  redis:7.4.11-bookworm@sha256:44960b3100c48159a66d28c18b0588c193492e25f7551d60e51dd464fc3eca5b \
   sh -c 'chown -R 10001:10001 /data && find /data -type d -exec chmod 0750 {} +'
 ```
 
@@ -1446,19 +1446,38 @@ release's retained bundle on an isolated host restored from the store
 no route off it. The running release stays the rollback target, with its
 finding, until the next release replaces it.
 
-**Keeping releases.** After promoting a release, put it in the store from
-the host, then remove from the store, by hand, a release the host no longer
-retains (the lock keeps it at least 35 days; deleting needs an admin key or
-the dashboard, which the host's key is meant never to need):
+**Keeping releases.** A [guarded deployment](#guarded-deployment) puts the
+release it promoted, and the one to roll back to, in the store itself. After
+a promotion by hand, put the release there from the host, then remove from
+the store, by hand, a release the host no longer retains (the lock keeps it
+at least 35 days; deleting needs an admin key or the dashboard, which the
+host's key is meant never to need):
 
 ```bash
 sudo systemd-run --unit=scrapeyard-release-upload --property=Nice=19 \
-  /usr/local/sbin/scrapeyard-release-upload scrapeyard-release-<commit>
+  /usr/local/sbin/scrapeyard-release-upload scrapeyard-release-<commit> [ARCHIVE]
 journalctl -u scrapeyard-release-upload -o cat    # "uploaded releases/...", then the SHA-256
 ```
 
-It packs at the lowest CPU and I/O priority (3 min 15 s of CPU for
-`e31e6a3`) in `/var/backups/scrapeyard` and removes the pack afterwards.
+A release already in the store (both its objects answer a `HEAD`) is left
+as it is, and the command succeeds. With `ARCHIVE`, the release workflow's
+`scrapeyard-release-<commit>.tar.zst`, those bytes are uploaded, so the
+store's checksum is the run's. Without it the retained directory is packed
+at the lowest CPU and I/O priority (3 min 15 s of CPU for `e31e6a3`) in
+`/var/backups/scrapeyard`, and the pack is removed afterwards.
+
+**Pruning retained releases** (2026-10-21). The host keeps the running
+release, the one to roll back to, and any other only for a reason. Before
+removing any, the rollback target was chosen and checked: `e31e6a3`, which
+ran before `7bccba5`, passes `verify --scanned` under `7bccba5`'s verifier,
+has the same SQL, has the day-of-week fix (`7298d04`), and is in the store;
+its upgrade to `7bccba5` and back was rehearsed on a VM. `fbc340c` is kept
+too, being in the store. `523d805`, `11872b4`, `4f73449` and `01a7efb` and
+the four application images only they used were removed (Redis and the
+probe images are shared and stayed): the host's disk went from 48 GB to
+23 GB used of 72 GB. Remove a release with `rm -rf` as root, never the one
+`current` names, then `docker image rm` only an image no retained
+`images.json` names.
 
 **Rotating the host's key** before 2027-10-21: create a second token as the
 first was made (*R2 object storage → Overview → Manage API Tokens → Create
@@ -1507,6 +1526,59 @@ had the same length and SHA-256 as production's. With no route off the VM,
 nothing could reach a retailer or a webhook. The VM, its disk, the key and
 the copy of `deploy.env` were destroyed after it. The RPO is a day (the
 timer).
+
+### Guarded deployment
+
+`security/deploy-release.sh`, installed as `/usr/local/sbin/scrapeyard-deploy`,
+promotes a release archive that the release workflow built, scanned,
+qualified and rehearsed, and refuses at the first step that does not hold:
+
+1. The host check (`scrapeyard-health.service`) passes as things are.
+2. The archive has the SHA-256 it was given, which comes from the workflow
+   run, not from the archive's own `.sha256`. It holds only its release's
+   directory. It is extracted as root (`--no-same-owner`); a release already
+   retained must have the archive's manifest. The **running** release's
+   `release_artifact.py verify --scanned` accepts it, and its manifest
+   names the archive's commit.
+3. Its SQL is the running release's, so rolling back needs no data restore.
+   A release that changes the SQL is refused; promote it by hand, as
+   [above](#retained-release-artifacts-and-rollback).
+4. `scrapeyard-backup.service` completes, its status says `uploaded`, and
+   it names the running release.
+5. `scrapeyard-release promote`.
+6. The host check passes within six runs 30 s apart, the public path
+   through Cloudflare and Access included. Otherwise, and when the
+   promotion fails, the running release is promoted again (unless it still
+   runs and the check passes) and the command fails.
+7. The new release, as the verified bytes, and the rollback release are in
+   the store (`scrapeyard-release-upload`). A failure here leaves the new
+   release running and exits 3.
+
+It holds `/run/scrapeyard/deploy.lock`, so two do not overlap. From the
+operator's machine, with `gh` signed in:
+
+```bash
+gh workflow run release-rehearsal.yml --ref main -f revision=<commit> \
+  -f previous_revision=<running commit>
+scripts/deploy_production.sh <run id> <ssh destination>
+```
+
+`scripts/deploy_production.sh` takes the archive only from a successful
+`workflow_dispatch` run of that workflow on `main`, for a commit on
+`origin/main`, and only when the download has the digest GitHub recorded for
+the artifact. It copies the archive to the host and runs `scrapeyard-deploy`
+there as the unit `scrapeyard-deploy.service`, so a dropped connection
+cannot stop it half way (`journalctl -fu scrapeyard-deploy` to follow).
+Nothing runs it on a schedule or on a merge: a deployment is still started
+by the operator, until the [open safeguards](../TECH_DEBT.md#td-21--unattended-coordinated-off-host-backup-and-restoration-are-incomplete)
+are closed.
+
+Install it beside `scrapeyard-release`:
+
+```bash
+sudo install -m 755 "$RELEASE/source/security/deploy-release.sh" /usr/local/sbin/scrapeyard-deploy
+sudo install -m 755 "$RELEASE/source/security/upload-release-r2.sh" /usr/local/sbin/scrapeyard-release-upload
+```
 
 ### Testing a restore
 

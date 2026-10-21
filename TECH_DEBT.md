@@ -6,6 +6,17 @@ it. Read [How to use this list](#how-to-use-this-list) and the
 [Eyebox contract](#eyebox-contract) before starting any entry.
 
 **Audit history:**
+- **2026-10-21, operational closeout** (pull request #51): on the
+  production host, running release `7bccba5`.
+  - Redis: `redis:7.4.11-bookworm` replaces the Alpine build; the
+    CVE-2026-84782 exception is removed, not renewed (see the 2026-10-16
+    entry). In production from the next release.
+  - TD-21: guarded deployment and release upload
+    (`security/deploy-release.sh`, `scripts/deploy_production.sh`), started
+    by the operator. Old releases pruned on the host after choosing and
+    checking the rollback target `e31e6a3`.
+  - TD-20 and TD-21, unchanged and the owner's: the healthchecks.io check's
+    settings and alert delivery, and a second copy of the recovery key.
 - **2026-10-21, release `7bccba5`** (`main` after pull request #48): the
   first release with certifi 2026.10.19, promoted on the production host
   over `e31e6a3` at 15:27 UTC.
@@ -252,7 +263,11 @@ it. Read [How to use this list](#how-to-use-this-list) and the
     2026-11-30, after which the scan fails again until it is fixed or
     renewed. The Alpine image was kept over Debian's, which scans clean,
     because the live tests and the backup's dump load ran on it; no rebuild
-    of it had been published by the end of the pass.
+    of it had been published by the end of the pass. Closed 2026-10-21: the
+    Alpine build was still not rebuilt, so Redis moved to
+    `redis:7.4.11-bookworm` (rebuilt that day, no HIGH or CRITICAL finding)
+    and the exception was removed. Its data, the live tests and the dump
+    load were checked on it (CHANGELOG).
 - **2026-10-15** (no release): readying the production host for Eyebox's
   beta soak.
   - Cloudflare's tunnel health notification now covers the production
@@ -1361,7 +1376,13 @@ is TD-85.
   Cloudflare's history shows tunnel health emails sent on 2026-10-17 and
   2026-10-21. Not seen: the check's settings, its *up* state, a missed ping,
   and any of those emails arriving. That needs the owner's mailbox or a
-  read-only healthchecks.io API key.
+  read-only healthchecks.io API key. Rechecked 2026-10-21 18:00 UTC: the
+  ping URL kept on the operator's machine (an Amp secret) is the host's
+  (equal SHA-256), and the four Cloudflare email policies are enabled with
+  one recipient each, the history unchanged (two pairs of tunnel health
+  emails). No healthchecks.io API key exists on the operator's machine or
+  in Amp, and a ping URL cannot read a check's settings, so nothing more
+  could be seen without the owner.
 - Done 2026-10-21: `fwupd-refresh.timer` disabled (the host cannot reach
   `cdn.fwupd.org`, and the VM has no firmware to update); package updates
   unchanged. Reverse with `systemctl enable --now fwupd-refresh.timer`
@@ -1504,11 +1525,21 @@ private key; it decrypts with that key to the host's file byte for byte.
   7 s, runtime 12 s, restore 52 s, start to healthy 22 s); three known jobs
   and their results identical to production's by SHA-256. RPO a day.
 - Still open: the recovery depends on the operator's machine for the age
-  key and the sealed `deploy.env`; a copy of both kept elsewhere is the
-  owner's call. A host rebuilt by the provider (not a VM) is untried
+  key and the sealed `deploy.env` (`~/.config/scrapeyard/`, mode 600); a
+  copy of both kept elsewhere is the owner's call, and no destination has
+  been named. A host rebuilt by the provider (not a VM) is untried
   (TD-19).
-- Still open: putting a release in the store after each promotion is a
-  manual step.
+- Done 2026-10-21: a guarded deployment (`scrapeyard-deploy`,
+  [DEPLOYMENT.md](docs/DEPLOYMENT.md#guarded-deployment)) backs up to the
+  store before promoting, checks the host and public path after, promotes
+  the earlier release back when they fail, and puts the new release (the
+  workflow's bytes) and its rollback in the store. It is started by the
+  operator; running it unattended waits for the two open items above and
+  TD-20's alert delivery.
+- Done 2026-10-21: the host keeps `7bccba5` (running), `e31e6a3` (its
+  rollback, checked: `verify --scanned`, the same SQL, in the store) and
+  `fbc340c`; four older releases and their images were removed (disk 67% to
+  32% used).
 
 **Problem:**
 - The repository has a tested helper for quiesced backup sets, but no complete
