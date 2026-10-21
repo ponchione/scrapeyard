@@ -11,8 +11,9 @@ The `CI` workflow exposes these checks:
 - `Quality / Python 3.12` and `Quality / Python 3.14` install the lock file,
   validate it, run Ruff over its configured scope, and run the full pytest
   suite with branch coverage and the 80% coverage floor, spread over one
-  pytest-xdist worker per runner CPU (`-n auto`). The 3.12 leg also runs
-  mypy; the 3.14 leg installs Chromium for the real-browser tests.
+  pytest-xdist worker per runner CPU (`-n auto --dist worksteal`). The 3.12
+  leg also runs mypy; the 3.14 leg installs Chromium for the real-browser
+  tests.
 - `Distribution build / Python 3.14` builds both the wheel and sdist and then
   verifies that each archive contains exactly the checked-in SQL migrations.
 - `Live Redis / Python 3.14` runs only the `live_redis` tests against an
@@ -47,7 +48,7 @@ poetry check --lock
 poetry sync --no-interaction
 poetry run ruff check src tests scripts security
 poetry run mypy src
-poetry run pytest -n auto -W error
+poetry run pytest -n auto --dist worksteal -W error
 rm -rf dist
 poetry build
 poetry run python scripts/inspect_distribution.py dist
