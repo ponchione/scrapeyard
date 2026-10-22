@@ -45,7 +45,7 @@ ARG NODE_SHA256=eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
-ARG DEBIAN_SNAPSHOT=20261008T000000Z
+ARG DEBIAN_SNAPSHOT=20261022T135713Z
 
 # The python images set LANG only up to 3.12. unzip needs a UTF-8 locale for
 # Camoufox's font names, and the browsers keep the locale they ran with.
