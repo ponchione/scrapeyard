@@ -68,11 +68,13 @@ esac
 }
 
 _MADISON = {
-    "docker-ce": ("5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
-    "docker-ce-cli": ("5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
+    "docker-ce": ("5:29.9.2-1~ubuntu.24.04~noble", "5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
+    "docker-ce-cli": ("5:29.9.2-1~ubuntu.24.04~noble", "5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
     # The packaging revision is not always 1, and the newest comes first.
     "containerd.io": (
         "2.4.10-1~ubuntu.24.04~noble",
+        "2.4.2-3~ubuntu.24.04~noble",
+        "2.4.2-1~ubuntu.24.04~noble",
         "2.4.1-2~ubuntu.24.04~noble",
         "2.4.1-1~ubuntu.24.04~noble",
         "1.7.29-1~ubuntu.24.04~noble",
@@ -132,10 +134,10 @@ def test_installer_installs_the_pinned_packages_and_checks_what_runs(tmp_path: P
 
     assert result.returncode == 0, result.stderr
     install = next(line for line in log.splitlines() if line.startswith("apt-get install "))
-    assert "docker-ce=5:29.9.0-1~ubuntu.24.04~noble" in install
-    assert "docker-ce-cli=5:29.9.0-1~ubuntu.24.04~noble" in install
+    assert "docker-ce=5:29.9.2-1~ubuntu.24.04~noble" in install
+    assert "docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble" in install
     # The newest packaging of the pinned version, and not 2.4.10 by prefix.
-    assert "containerd.io=2.4.1-2~ubuntu.24.04~noble" in install
+    assert "containerd.io=2.4.2-3~ubuntu.24.04~noble" in install
     assert "docker-compose-plugin=5.6.0-1~ubuntu.24.04~noble" in install
     assert "--allow-downgrades" in install
     assert log.index("apt-get update") < log.index("apt-get install")
@@ -233,9 +235,9 @@ def test_installer_stops_when_the_repository_lacks_a_pinned_version(tmp_path: Pa
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ({"FAKE_ENGINE": "28.5.2"}, "Docker Engine is 28.5.2, not the pinned 29.9.0"),
-        ({"FAKE_CLIENT": "28.5.2"}, "the Docker client is 28.5.2, not the pinned 29.9.0"),
-        ({"FAKE_CONTAINERD": "1.7.29"}, "containerd is 1.7.29, not the pinned 2.4.1"),
+        ({"FAKE_ENGINE": "28.5.2"}, "Docker Engine is 28.5.2, not the pinned 29.9.2"),
+        ({"FAKE_CLIENT": "28.5.2"}, "the Docker client is 28.5.2, not the pinned 29.9.2"),
+        ({"FAKE_CONTAINERD": "1.7.29"}, "containerd is 1.7.29, not the pinned 2.4.2"),
         # A runc the image put ahead of the packaged one: a release can pass
         # under one runc and start no container under another.
         ({"FAKE_RUNC": "v1.3.3-0-gd842d771"}, "runc is 1.3.3, not the pinned 1.5.2"),

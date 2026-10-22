@@ -31,8 +31,8 @@ was rehearsed:
 
 | Package | Version |
 | --- | --- |
-| `docker-ce`, `docker-ce-cli` | 29.9.0 |
-| `containerd.io` | 2.4.1, which carries runc 1.5.2 |
+| `docker-ce`, `docker-ce-cli` | 29.9.2 |
+| `containerd.io` | 2.4.2, which carries runc 1.5.2 |
 | `docker-compose-plugin` | 5.6.0 |
 
 A host also keeps Docker's classic image store (`docker info` names the
@@ -161,7 +161,6 @@ Set it up in this order:
    between the edge and the application. Then:
 
    ```bash
-   sudo useradd --system --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin cloudflared
    sudo install -d -m 700 /etc/cloudflared
    sudo install -m 600 /dev/null /etc/cloudflared/tunnel-token   # then put the tunnel's token in it
    sudo install -m 644 security/systemd/cloudflared-scrapeyard.service /etc/systemd/system/
@@ -172,6 +171,17 @@ Set it up in this order:
    sudo systemctl daemon-reload
    sudo systemctl enable --now cloudflared-scrapeyard.service
    ```
+
+   The connector runs as a user systemd makes for it (`DynamicUser=yes`),
+   not a fixed account. Until 2026-10-22 it was a `cloudflared` system
+   account, which `useradd --system` gave UID 999, the UID Redis runs as in
+   its container. Tried on the first production host: a process of that UID
+   in the connector's sandbox could signal Redis (`kill -0` succeeded), and
+   AppArmor's `docker-default` kept it from Redis's files, environment and
+   descriptors. A dynamic UID shares nothing with a container, and the same
+   test is then refused. An existing `cloudflared` account owns no file and
+   can be removed (`sudo userdel cloudflared`) once the unit no longer names
+   it.
 
    The unit gives the connector no capability and no view of Docker, the
    settings file or the releases. Whatever the tunnel's routes say, it can

@@ -96,7 +96,10 @@ def test_connector_checks_the_access_token_and_reaches_only_the_application() ->
 def test_connector_runs_without_privilege_and_keeps_its_token_out_of_its_command_line() -> None:
     unit = _unit()
 
-    assert unit["User"] == ["cloudflared"]
+    # Never a fixed account: one below 1000 can share its UID with a
+    # container's user (Redis is 999), which lets either signal the other.
+    assert unit["DynamicUser"] == ["yes"]
+    assert "User" not in unit and "Group" not in unit
     assert unit["NoNewPrivileges"] == ["yes"]
     assert unit["CapabilityBoundingSet"] == [""]
     assert unit["ProtectSystem"] == ["strict"]

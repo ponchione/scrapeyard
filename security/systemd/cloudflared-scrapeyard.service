@@ -6,8 +6,13 @@ ConditionPathExists=/etc/cloudflared/tunnel-token
 
 [Service]
 Type=notify
-User=cloudflared
-Group=cloudflared
+# A user made for each run, from systemd's dynamic range, that owns no file
+# and that no container uses. A fixed system account would take the first
+# free UID below 1000, and on the first production host that was 999, the
+# UID Redis runs as in its container: the connector could then signal Redis
+# (tried 2026-10-22). The token comes in through LoadCredential, which the
+# dynamic user can read.
+DynamicUser=yes
 LoadCredential=tunnel-token:/etc/cloudflared/tunnel-token
 ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token-file %d/tunnel-token
 Restart=always
