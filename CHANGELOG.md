@@ -27,6 +27,8 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   the host.
 
 ### Dependencies
+- The image's Debian snapshot moves to `20261022T135713Z`, which brings
+  libexpat1 2.5.0-1+deb12u5 for CVE-2025-59375 and CVE-2026-77214 (HIGH).
 - certifi 2026.10.19, for PYSEC-2026-4320.
 - Redis moves from `redis:7.4.11-alpine` (built 2026-09-21, OpenSSL
   3.3.7-r1 with CVE-2026-84782) to `redis:7.4.11-bookworm`
