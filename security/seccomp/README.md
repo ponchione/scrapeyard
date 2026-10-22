@@ -5,7 +5,7 @@ Docker container gets by default, plus one rule.
 
 | File | What it is |
 | --- | --- |
-| `moby-default.json` | Moby's default profile, verbatim: `github.com/moby/profiles/seccomp` v0.2.4, as Docker 29.9.0 vendors it (`vendor/github.com/moby/profiles/seccomp/default.json` at tag `docker-v29.9.0`). Never edit it. |
+| `moby-default.json` | Moby's default profile, verbatim: `github.com/moby/profiles/seccomp` v0.2.4, as Docker 29.9.0 and 29.9.2 vendor it (byte for byte the same) (`vendor/github.com/moby/profiles/seccomp/default.json` at tag `docker-v29.9.0`). Never edit it. |
 | `chromium.json` | Written by `scripts/derive_seccomp_profile.py` from the file above. Never edit it either. |
 
 ## The difference from Moby's default

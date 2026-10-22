@@ -51,6 +51,16 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   launches.
 
 ### Deployment
+- The container runtime pins move to Docker 29.9.2 and containerd.io 2.4.2,
+  which still carries runc 1.5.2; Compose stays 5.6.0. Moby's vendored
+  default seccomp profile is byte for byte the same in 29.9.0 and 29.9.2, so
+  the derived profile does not change. The host is raised only after the
+  lanes pass on these versions.
+- The tunnel connector's unit runs as a dynamic user (`DynamicUser=yes`)
+  instead of the `cloudflared` system account, whose UID 999 was Redis's
+  container UID: from the connector's sandbox Redis could be signalled
+  (`kill -0` allowed); its files, environment and descriptors were refused
+  by AppArmor. Under a dynamic user the signal is refused too.
 - Bounded maintenance (after the 2026-10-21 outage): the backup gives up its
   copy and the application's start after 120 s each
   (`SCRAPEYARD_BACKUP_COPY_TIMEOUT_SECONDS`,
