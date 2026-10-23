@@ -937,6 +937,11 @@ implementing.
 **Priority/ownership:** P2; joint deployment/configuration qualification. The
 values below were rechecked on 2026-10-09.
 
+**Current record (2026-10-23):** the agreed values and rules now live in one
+table, Eyebox `DEPLOY.md` "Scrapeyard limits" (Eyebox remediation R12). Read it
+there, not here; the tables below are the history that led to it. Change a
+host limit together with that table.
+
 **Locations:**
 - Scrapeyard: `src/scrapeyard/common/settings.py` (`run_max_*`,
   `workers_memory_limit_mb`) and `docker-compose.yml` (the `SCRAPEYARD_*`
