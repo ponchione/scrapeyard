@@ -205,17 +205,22 @@ sudo scrapeyard-health --dry-run
 
 ### On the first production host
 
-State on 2026-10-21, after 21:23 UTC. Three things can run different code,
+State on 2026-11-02, after 12:56 UTC. Three things can run different code,
 so each is named:
 
-- **Deployed release:** `7783ba3` (`main` after pull request #51), promoted
-  2026-10-21 21:23 UTC over `38d0483` by the guarded deployment and linked
-  from `/srv/scrapeyard-releases/current`
+- **Deployed release:** `54c6608` (`main` after pull request #65, the Brotli
+  CVE-2026-111497 fixes), promoted 2026-11-02 about 12:56 UTC over `7783ba3`
+  by the guarded deployment from rehearsal run 41428581804 and linked from
+  `/srv/scrapeyard-releases/current`
   ([DEPLOYMENT.md](DEPLOYMENT.md#guarded-deployment)). Application image
-  `sha256:f57f9ecf1da7…`; Redis `redis:7.4.11-bookworm` (image
-  `sha256:e965140ddfcc…`, Debian 12); the probe's image unchanged.
-  `38d0483` (Node 24.22.1 and pip 26.2.2, pull request #53) is the
-  rollback.
+  `sha256:33237091572a…` (libbrotli1 1.0.9-2+deb12u1, libssl3
+  3.0.22-1~deb12u2, Python brotli 1.2.1, Camoufox 0.5.8, playwright
+  1.62.0); Redis and the probe's image unchanged. The pre-promotion backup
+  is `scrapeyard-backup-20261102T125342Z.tar.zst.age`, in the store. `7783ba3`
+  is the rollback; both releases are in the store. The rehearsal rolled back
+  to `5b5e2d0` (the same code as `54c6608`), not to `7783ba3`, because every
+  image from before #65 now fails the vulnerability scan; `7783ba3` itself
+  was rehearsed on 2026-10-21.
 - **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup`,
   `scrapeyard-release` and `scrapeyard-health` are byte for byte
   `security/backup.sh`, `security/manage-release.sh` and
