@@ -84,6 +84,9 @@ services:
       - /home/scrapeyard/.config:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
       - /home/scrapeyard/.local:rw,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
       - /home/scrapeyard/.camoufox:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=0700
+      # Camoufox 0.5's browser keeps its user data root here and refuses a
+      # -profile without it.
+      - /home/scrapeyard/camoufox:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=0700
     volumes:
       - scrapeyard-data:/data
     healthcheck:

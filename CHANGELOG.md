@@ -32,13 +32,24 @@ Until 1.0, the API is not considered stable and MINOR bumps may include breaking
   1.64.101 (Chromium 156, revision 1248) and Camoufox 0.5.8 with browser
   156.0.1-beta.36 replace builds without the fix (Chromium 145 and 136,
   Firefox 135). `brotli` 1.2.1 and, on PyPy, `brotlicffi` 1.2.1.0 are direct
-  dependencies. The image moves to Debian snapshot `20261023T202335Z` and
+  dependencies. The image moves to Debian snapshot `20261026T040329Z`, which
+  also brings OpenSSL 3.0.22-1~deb12u2 for CVE-2026-84782 (HIGH), and
   refuses to build with `libbrotli1` older than 1.0.9-2+deb12u1. Camoufox 0.5
   keeps its browser under `browsers/official/<version>`, and the image
   prepares its model and fonts at build time so the read-only cache still
   works. Scrapling 0.2's `allow_webgl` becomes Camoufox 0.5's `block_webgl`.
   `browserforge` 1.2.4 is now a direct dependency, because Camoufox 0.5 no
-  longer installs it.
+  longer installs it. The service gets a `/home/scrapeyard/camoufox` tmpfs:
+  Camoufox 0.5's browser will not open a profile without it.
+- Camoufox 0.5's fingerprints come through `indexed-zstd` 1.7.2, whose wheel
+  grafts AlmaLinux 8's libzstd 1.4.4 (CVE-2022-4899). The image points that
+  library at Debian's libzstd1 1.5.4 and removes the wheel's stale SBOM.
+- `security/trivy-dependency-exceptions.yaml` accepts CVE-2026-84782 in
+  `redis:7.4.11-bookworm` until 2026-11-16. The tag has not been rebuilt
+  since Debian's OpenSSL fix, and Redis runs without TLS, so DTLS never
+  occurs.
+- filelock 4.2.6 (CVE-2026-112907 and eight more, fixed in 4.2.1) and
+  msgpack 1.2.4 (dev only, CVE-2026-114613).
 - The image's Debian snapshot moves to `20261022T135713Z`, which brings
   libexpat1 2.5.0-1+deb12u5 for CVE-2025-59375 and CVE-2026-77214 (HIGH).
 - certifi 2026.10.19, for PYSEC-2026-4320.

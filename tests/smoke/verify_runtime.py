@@ -103,6 +103,7 @@ def main() -> None:
         Path.home() / ".config",
         Path.home() / ".local",
         Path.home() / ".camoufox",
+        Path.home() / "camoufox",
         Path("/tmp"),
     ]
     for path in required:

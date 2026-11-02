@@ -44,7 +44,7 @@ ARG NODE_SHA256=eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
-ARG DEBIAN_SNAPSHOT=20261023T202335Z
+ARG DEBIAN_SNAPSHOT=20261026T040329Z
 
 # The python images set LANG only up to 3.12. unzip needs a UTF-8 locale for
 # Camoufox's font names, and the browsers keep the locale they ran with.
@@ -107,6 +107,15 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge 1.0.9-2+deb12u1 \
     && pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" \
     && pip install --no-cache-dir --only-binary=:all: -r requirements.txt \
+    # indexed-zstd 1.7.2 (fpgen, Camoufox's fingerprints) grafts AlmaLinux
+    # 8's libzstd 1.4.4 (CVE-2022-4899). It loads Debian's fixed libzstd1
+    # instead, and the wheel's SBOM no longer describes what is installed.
+    && site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && for lib in "${site}"/indexed_zstd.libs/libzstd-*.so.*; do \
+        ln -sf /usr/lib/x86_64-linux-gnu/libzstd.so.1 "${lib}"; \
+    done \
+    && rm "${site}"/indexed_zstd-*.dist-info/sboms/auditwheel.cdx.json \
+    && python -c 'import indexed_zstd' \
     && groupadd --gid "${SCRAPEYARD_GID}" scrapeyard \
     && useradd --uid "${SCRAPEYARD_UID}" --gid "${SCRAPEYARD_GID}" \
         --create-home --home-dir /home/scrapeyard --shell /usr/sbin/nologin scrapeyard \
