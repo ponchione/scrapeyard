@@ -291,8 +291,12 @@ def test_post_target_delay_schema_requires_sequential_execution():
 @pytest.mark.asyncio
 async def test_post_target_delay_cannot_outlive_run_budget_or_start_next_target():
     targets = [_concurrent_target(f"https://shop.example/{i}", FetcherType.basic) for i in range(2)]
-    context = replace(_job_execution_context(targets, concurrency=1),
-                      budget=RunBudget.from_settings(SimpleNamespace(run_max_duration_seconds=0.03)))
+    # A frozen budget clock: the deadline cannot pass before the first target
+    # on a slow runner, and the post-target sleep still times out in real time.
+    budget = RunBudget.from_settings(
+        SimpleNamespace(run_max_duration_seconds=0.2), clock=lambda: 0.0
+    )
+    context = replace(_job_execution_context(targets, concurrency=1), budget=budget)
     context.config.execution.post_target_delay = 15
     limiter = BrowserExecutionLimiter(1)
     with patch("scrapeyard.queue.worker.scrape_target", new_callable=AsyncMock) as scrape:
