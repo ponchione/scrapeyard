@@ -58,6 +58,22 @@ Install dependencies:
 poetry install
 ```
 
+For browser runs outside Docker, use a security-fixed Node 24.22.1 or later
+in the 24.x line. Both Python browser drivers still bundle older Node builds.
+Keep this override in the environment that starts Scrapeyard, including after
+`poetry install` or a driver reinstall:
+
+```bash
+export PLAYWRIGHT_NODEJS_PATH="$(command -v node)"
+"$PLAYWRIGHT_NODEJS_PATH" --version
+poetry run python -m playwright install --no-shell chromium
+poetry run python -m rebrowser_playwright install --no-shell chromium
+poetry run python -m camoufox fetch
+```
+
+Check the Node version before installing or starting a browser. The Docker
+image installs its own fixed Node and replaces both bundled executables.
+
 Run Redis locally or point `SCRAPEYARD_REDIS_DSN` at an existing Redis
 instance. For local runs outside Docker, override the default `/data/...` paths
 to writable directories:

@@ -274,14 +274,14 @@ while IFS='=' read -r label expected; do
   actual="$(docker image inspect --format "{{index .Config.Labels \"$label\"}}" "$IMAGE_ID")"
   [[ "$actual" == "$expected" ]] || fail "image label $label expected $expected, got $actual"
 done <<'EOF'
-org.scrapeyard.browser.playwright.version=1.58.0
-org.scrapeyard.browser.playwright.chromium-revision=1208
-org.scrapeyard.browser.rebrowser-playwright.version=1.52.0
-org.scrapeyard.browser.rebrowser-playwright.chromium-revision=1169
-org.scrapeyard.browser.camoufox-package.version=0.4.11
-org.scrapeyard.browser.camoufox.version=135.0.1
-org.scrapeyard.browser.camoufox.release=beta.24
-org.scrapeyard.browser.camoufox.sha256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e381ba2676a4888
+org.scrapeyard.browser.playwright.version=1.62.0
+org.scrapeyard.browser.playwright.chromium-revision=1234
+org.scrapeyard.browser.rebrowser-playwright.version=1.64.101
+org.scrapeyard.browser.rebrowser-playwright.chromium-revision=1248
+org.scrapeyard.browser.camoufox-package.version=0.5.8
+org.scrapeyard.browser.camoufox.version=156.0.1
+org.scrapeyard.browser.camoufox.release=beta.36
+org.scrapeyard.browser.camoufox.sha256=72637885ee67c93466ad377831c647192f8f08fb5c6fd9279de1320b49dd2b53
 org.scrapeyard.browser.ubo.version=1.72.2
 org.scrapeyard.browser.ubo.sha256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
 org.scrapeyard.browser.driver-node.version=24.22.1

@@ -103,6 +103,7 @@ def main() -> None:
         Path.home() / ".config",
         Path.home() / ".local",
         Path.home() / ".camoufox",
+        Path.home() / "camoufox",
         Path("/tmp"),
     ]
     for path in required:
@@ -130,7 +131,7 @@ def main() -> None:
     bundled_sandbox = (
         browser_root
         / f"chromium-{rebrowser_revision}"
-        / "chrome-linux"
+        / "chrome-linux64"
         / "chrome_sandbox"
     )
     assert bundled_sandbox.is_file() and os.access(bundled_sandbox, os.X_OK)
@@ -139,7 +140,7 @@ def main() -> None:
 
     camoufox_executable = Path(launch_path())
     assert camoufox_executable.is_file() and os.access(camoufox_executable, os.X_OK)
-    camoufox_version = Version.from_path()
+    camoufox_version = Version.from_path(camoufox_executable.parent)
     cache_root = Path(os.environ["XDG_CACHE_HOME"])
     assert cache_root == Path("/opt/scrapeyard-cache")
     assert not os.access(cache_root, os.W_OK), "immutable browser cache is writable"
@@ -196,7 +197,7 @@ def main() -> None:
             "sandbox_strategy": "unprivileged-user-namespace",
             "camoufox_package_version": camoufox_package_version,
             "camoufox_browser_version": camoufox_version.version,
-            "camoufox_browser_release": camoufox_version.release,
+            "camoufox_browser_release": camoufox_version.build,
             "camoufox_executable": str(camoufox_executable),
             "ubo_version": "1.72.2",
             "driver_node": launched,
