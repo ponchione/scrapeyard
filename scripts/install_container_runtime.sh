@@ -9,8 +9,8 @@ set -euo pipefail
 #
 # Raise these together with "Container runtime versions" in
 # docs/DEPLOYMENT.md, and raise the production host with them.
-DOCKER_VERSION="29.9.0"
-CONTAINERD_VERSION="2.4.1"
+DOCKER_VERSION="29.9.2"
+CONTAINERD_VERSION="2.4.2"
 COMPOSE_VERSION="5.6.0"
 # The runc inside that containerd.io package. It starts every container, and
 # the seccomp profile has to let it through.
