@@ -301,6 +301,8 @@ class BrowserSession:
             options = engine._PlaywrightEngine__context_kwargs()
         else:
             firefox_options = engine._get_camoufox_options()
+            # Scrapling 0.2 names the inverse of Camoufox 0.5's option.
+            firefox_options["block_webgl"] = not firefox_options.pop("allow_webgl")
             firefox_options["firefox_user_prefs"] = {
                 **firefox_options.get("firefox_user_prefs", {}),
                 "network.http.redirection-limit": _MAX_REDIRECTS,

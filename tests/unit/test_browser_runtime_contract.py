@@ -13,8 +13,8 @@ def test_dockerfile_installs_rebrowser_chromium_for_dynamic_stealth() -> None:
 
     assert "python -m playwright install --with-deps --no-shell chromium" in dockerfile
     assert "python -m rebrowser_playwright install --no-shell chromium" in dockerfile
-    assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1208" in dockerfile
-    assert "ARG REBROWSER_CHROMIUM_REVISION=1169" in dockerfile
+    assert "ARG PLAYWRIGHT_CHROMIUM_REVISION=1234" in dockerfile
+    assert "ARG REBROWSER_CHROMIUM_REVISION=1248" in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in dockerfile
     assert "XDG_CACHE_HOME=/opt/scrapeyard-cache" in dockerfile
     assert "HOME=/home/scrapeyard" in dockerfile
@@ -61,9 +61,8 @@ def test_browser_driver_pins_match_the_versions_the_image_asserts() -> None:
 
 
 def test_browser_drivers_run_on_the_patched_node_not_their_bundled_one() -> None:
-    # playwright 1.58.0 bundles Node 24.13.0 and rebrowser-playwright 1.52.0
-    # bundles 22.14.0; the October 21, 2026 Node security release fixed both
-    # lines in 22.23.4 and 24.22.1.
+    # Both drivers still bundle an affected Node. Keep the security-fixed
+    # runtime override even after a browser package upgrade.
     dockerfile = Path("Dockerfile").read_text()
     runtime = dockerfile[dockerfile.index("AS runtime"):]
     node = tuple(int(part) for part in re.search(r"(?m)^ARG NODE_VERSION=(\S+)$", runtime).group(1).split("."))

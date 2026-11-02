@@ -23,20 +23,19 @@ RUN poetry export --only main -f requirements.txt -o requirements.txt
 FROM ${PYTHON_IMAGE} AS runtime
 
 ARG PIP_VERSION=26.2.2
-ARG PLAYWRIGHT_VERSION=1.58.0
-ARG PLAYWRIGHT_CHROMIUM_REVISION=1208
-ARG REBROWSER_PLAYWRIGHT_VERSION=1.52.0
-ARG REBROWSER_CHROMIUM_REVISION=1169
-ARG CAMOUFOX_PACKAGE_VERSION=0.4.11
-ARG CAMOUFOX_BROWSER_VERSION=135.0.1
-ARG CAMOUFOX_BROWSER_RELEASE=beta.24
-ARG CAMOUFOX_BROWSER_SHA256=61e1ec455e021720af38a5cc5ff7566121363cb5b82b72f24e381ba2676a4888
+ARG PLAYWRIGHT_VERSION=1.62.0
+ARG PLAYWRIGHT_CHROMIUM_REVISION=1234
+ARG REBROWSER_PLAYWRIGHT_VERSION=1.64.101
+ARG REBROWSER_CHROMIUM_REVISION=1248
+ARG CAMOUFOX_PACKAGE_VERSION=0.5.8
+ARG CAMOUFOX_BROWSER_VERSION=156.0.1
+ARG CAMOUFOX_BROWSER_RELEASE=beta.36
+ARG CAMOUFOX_BROWSER_SHA256=72637885ee67c93466ad377831c647192f8f08fb5c6fd9279de1320b49dd2b53
 ARG UBO_VERSION=1.72.2
 ARG UBO_FILE_ID=4888680
 ARG UBO_SHA256=40c315b0da7871868155ecfae7a50a58dfa0920aebd865e008214986f1b7c578
-# Both Python drivers ship their own Node (playwright 1.58.0: 24.13.0,
-# rebrowser-playwright 1.52.0: 22.14.0), and no release of either carries a
-# Node with the October 21, 2026 security fixes. The image runs both on this
+# Both Python drivers ship an old Node (playwright 1.62.0: 24.18.1,
+# rebrowser-playwright 1.64.101: 24.21.0). The image runs both on this
 # Node instead. The hash is the one in the release's SHASUMS256.txt, whose
 # signature verified against releaser key
 # 5BE8A3F6C8A5C01D106C0AD820B1A390B168D356 in github.com/nodejs/release-keys.
@@ -45,7 +44,7 @@ ARG NODE_SHA256=eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 ARG SCRAPEYARD_UID=10001
 ARG SCRAPEYARD_GID=10001
 ARG TARGETARCH
-ARG DEBIAN_SNAPSHOT=20261022T135713Z
+ARG DEBIAN_SNAPSHOT=20261023T202335Z
 
 # The python images set LANG only up to 3.12. unzip needs a UTF-8 locale for
 # Camoufox's font names, and the browsers keep the locale they ran with.
@@ -105,6 +104,7 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         libdbus-glib-1-2 \
         libgtk-3-0 \
         unzip \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge 1.0.9-2+deb12u1 \
     && pip install --no-cache-dir --upgrade "pip==${PIP_VERSION}" \
     && pip install --no-cache-dir --only-binary=:all: -r requirements.txt \
     && groupadd --gid "${SCRAPEYARD_GID}" scrapeyard \
@@ -135,16 +135,21 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         --output /tmp/camoufox.zip \
         "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}/camoufox-${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}-lin.x86_64.zip" \
     && echo "${CAMOUFOX_BROWSER_SHA256}  /tmp/camoufox.zip" | sha256sum --check --strict \
-    && unzip -q /tmp/camoufox.zip -d "${XDG_CACHE_HOME}/camoufox" \
+    && camoufox_relative="browsers/official/${CAMOUFOX_BROWSER_VERSION}-${CAMOUFOX_BROWSER_RELEASE}" \
+    && mkdir -p "${XDG_CACHE_HOME}/camoufox/${camoufox_relative}" \
+    && unzip -q /tmp/camoufox.zip -d "${XDG_CACHE_HOME}/camoufox/${camoufox_relative}" \
     && curl --fail --location --retry 3 \
         --output /tmp/ublock-origin.xpi \
         "https://addons.mozilla.org/firefox/downloads/file/${UBO_FILE_ID}/ublock_origin-${UBO_VERSION}.xpi" \
     && echo "${UBO_SHA256}  /tmp/ublock-origin.xpi" | sha256sum --check --strict \
     && mkdir -p "${XDG_CACHE_HOME}/camoufox/addons/UBO" \
     && unzip -q /tmp/ublock-origin.xpi -d "${XDG_CACHE_HOME}/camoufox/addons/UBO" \
-    && printf '{"version":"%s","release":"%s"}\n' \
+    && printf '{"version":"%s","build":"%s","interface":1}\n' \
         "${CAMOUFOX_BROWSER_VERSION}" "${CAMOUFOX_BROWSER_RELEASE}" \
-        > "${XDG_CACHE_HOME}/camoufox/version.json" \
+        > "${XDG_CACHE_HOME}/camoufox/${camoufox_relative}/version.json" \
+    && printf '{"active_version":"%s"}\n' "${camoufox_relative}" \
+        > "${XDG_CACHE_HOME}/camoufox/config.json" \
+    && touch "${XDG_CACHE_HOME}/camoufox/.0.5_FLAG" \
     && rm /tmp/camoufox.zip /tmp/ublock-origin.xpi \
     && test "$(python -c 'import json, os, pathlib; p=pathlib.Path(os.environ["XDG_CACHE_HOME"])/"camoufox"/"addons"/"UBO"/"manifest.json"; print(json.loads(p.read_text())["version"])')" = "${UBO_VERSION}" \
     && test "$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" = "${PLAYWRIGHT_VERSION}" \
@@ -162,6 +167,13 @@ RUN test "${TARGETARCH:-amd64}" = "amd64" && \
         > /usr/share/scrapeyard-os-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 
+# Camoufox verifies its pinned model archive and file hashes. Prepare the
+# model and each OS identity's fontconfig before switching users: runtime
+# browsers must not download or write package data or the browser cache.
+RUN chmod u+w "${XDG_CACHE_HOME}/camoufox" && \
+    python -c 'from camoufox.utils import launch_options; [launch_options(os=os, headless=True) for os in ("linux", "windows", "macos")]' && \
+    chmod -R a-w "${XDG_CACHE_HOME}"
+
 COPY src/ src/
 COPY sql/ sql/
 COPY pyproject.toml README.md ./
@@ -176,6 +188,7 @@ RUN pip install --no-cache-dir --no-deps . && \
     chmod -R a-w /app
 
 USER 10001:10001
+RUN --network=none python -c 'from camoufox.utils import launch_options; [launch_options(os=os, headless=True) for os in ("linux", "windows", "macos")]'
 EXPOSE 8420
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
