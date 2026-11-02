@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.settings import ServiceSettings
 from scrapeyard.config.schema import ExecutionConfig, FailStrategy
 from scrapeyard.engine.rate_limiter import LocalDomainRateLimiter
@@ -211,10 +212,18 @@ execution:
         started.set()
         await asyncio.Event().wait()
 
+    # A frozen budget clock: setup on a slow runner cannot use up the deadline
+    # before a target starts; the blocked targets' waits still time out in
+    # real time.
+    from_settings = RunBudget.from_settings
+
+    def frozen_budget(settings, **kwargs):
+        return from_settings(settings, clock=lambda: 0.0, **kwargs)
+
     with patch("scrapeyard.queue.worker.scrape_target", block_target), patch(
         "scrapeyard.queue.worker.get_settings",
         return_value=_settings(tmp_path, run_max_duration_seconds=0.2),
-    ):
+    ), patch.object(RunBudget, "from_settings", frozen_budget):
         await scrape_task(
             "job-budget",
             config,

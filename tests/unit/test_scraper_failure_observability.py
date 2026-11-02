@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 from typing import Any
 
 import pytest
@@ -39,8 +39,19 @@ class _FakeNode:
 
 
 class _BlockingTextNode(_FakeNode):
+    """Blocks its caller's thread until the test releases it."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.done = threading.Event()
+        self.released_in_time = False
+
     def get_all_text(self) -> str:
-        time.sleep(0.2)
+        self.entered.set()
+        self.released_in_time = self.release.wait(timeout=5)
+        self.done.set()
         return self.text
 
 
@@ -76,30 +87,34 @@ async def test_near_limit_detection_work_obeys_deadline_without_blocking_event_l
             "text_patterns": [f"missing-pattern-{index}" for index in range(100)]
         }
     )
+    # A frozen budget clock: no deadline check passes before the work starts,
+    # and only the wait on the blocked work times out, in real time.
     budget = RunBudget(
-        max_duration_seconds=0.02,
+        max_duration_seconds=0.5,
         max_fetched_bytes=10_000_000,
         max_extracted_records=100,
         max_serialized_result_bytes=10_000_000,
         max_browser_debug_bytes=1_000_000,
+        clock=lambda: 0.0,
     )
 
-    async def _event_loop_probe() -> float:
-        started = asyncio.get_running_loop().time()
-        await asyncio.sleep(0.005)
-        return asyncio.get_running_loop().time() - started
-
-    probe = asyncio.create_task(_event_loop_probe())
-    with pytest.raises(BudgetExceeded):
-        await scrape_target(
-            target,
-            adaptive=False,
-            retry=RetryConfig(max_attempts=1),
-            adaptive_dir=str(tmp_path),
-            budget=budget,
-        )
-
-    assert await probe < 0.08
+    try:
+        with pytest.raises(BudgetExceeded):
+            await scrape_target(
+                target,
+                adaptive=False,
+                retry=RetryConfig(max_attempts=1),
+                adaptive_dir=str(tmp_path),
+                budget=budget,
+            )
+        # The deadline ended the run while the detection work was still
+        # blocked: neither the event loop nor the deadline waited for it.
+        assert not page.done.is_set()
+        assert await asyncio.to_thread(page.entered.wait, 5)
+    finally:
+        page.release.set()
+    assert await asyncio.to_thread(page.done.wait, 5)
+    assert page.released_in_time
 
 
 @pytest.mark.asyncio
