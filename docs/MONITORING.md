@@ -239,6 +239,18 @@ so each is named:
   `/etc/scrapeyard/backup-upload` is `security/backup-upload-r2.sh` and
   `/usr/local/sbin/scrapeyard-release-upload` is `security/upload-release-r2.sh`
   ([DEPLOYMENT.md](DEPLOYMENT.md#the-first-production-hosts-store)).
+- **Host runtime and tunnel (pull request #58):** since 2026-11-02 about
+  14:03 UTC, Docker 29.9.2, containerd.io 2.4.2 (runc 1.5.2) and Compose
+  5.6.0 from `scripts/install_container_runtime.sh` of `main` at `6a6cf43`,
+  held with `apt-mark hold`, then the host was rebooted and the boot service
+  started the release. `/etc/systemd/system/cloudflared-scrapeyard.service`
+  is `security/systemd/cloudflared-scrapeyard.service` of `6a6cf43`
+  (`DynamicUser=yes`); the host's own addresses are in
+  `cloudflared-scrapeyard.service.d/host-addresses.conf`, and the unit from
+  before is `/root/cloudflared-scrapeyard.service.before-dynamic`. The
+  connector runs as a dynamic UID (63360 at the time), not 999. The host
+  check after the reboot passed 10 of 10, the public path included; the
+  backup before the upgrade is `scrapeyard-backup-20261102T140111Z.tar.zst.age`.
 - **Repository `main`:** `7bccba5` and later; later commits change
   documentation only, unless the changelog says otherwise.
 
