@@ -277,7 +277,7 @@ async def wait_for_persisted_job(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     while True:
-        job = await job_store.get_job(job_id)
+        job = await job_store.get_job_metadata(job_id)
         if job.status in {JobStatus.complete, JobStatus.partial, JobStatus.failed}:
             return True
         if job.status in {JobStatus.cancelled, JobStatus.deleting}:

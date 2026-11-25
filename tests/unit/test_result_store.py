@@ -297,6 +297,8 @@ async def test_save_result_offloads_filesystem_work(store):
         await store.save_result("j-1", data, run_id="run-1")
 
     assert mock_to_thread.await_args_list == [
+        call(store._checked_result_dir, str(run_dir)),
+        call(Path.exists, run_dir),
         call(result_store_module.ensure_directory, run_dir),
         call(
             result_store_module.read_bytes_file_no_follow,
@@ -686,7 +688,8 @@ async def test_delete_results_offloads_directory_removal(store):
         mock_to_thread.side_effect = _run_to_thread
         await store.delete_results("j-1")
 
-    assert mock_to_thread.await_count == 1
+    assert mock_to_thread.await_count == 2
+    assert mock_to_thread.await_args_list[0].args[0] == store._checked_lifecycle_dirs
     assert mock_to_thread.await_args.args[0] is result_store_module.remove_directories
     assert set(mock_to_thread.await_args.args[1]) == {
         Path(first.file_path),

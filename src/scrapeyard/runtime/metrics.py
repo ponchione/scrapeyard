@@ -238,8 +238,6 @@ RECONCILIATION_PASSES = Counter(
     registry=REGISTRY,
 )
 
-_active_targets = 0
-
 for _priority in ("high", "normal", "low"):
     QUEUE_DEPTH.labels(_priority).set(0)
     QUEUE_OLDEST_AGE.labels(_priority).set(0)
@@ -312,28 +310,22 @@ def observe_target(
     status: str,
     fetcher: str,
     duration_seconds: float,
-    records: int,
 ) -> None:
     safe_status = status if status in {"success", "failed", "cancelled"} else "failed"
     safe_fetcher = fetcher if fetcher in {"basic", "dynamic", "stealthy"} else "other"
     TARGETS.labels(safe_status, safe_fetcher).inc()
     TARGET_DURATION.labels(safe_status, safe_fetcher).observe(max(0.0, duration_seconds))
-    if records > 0:
-        OUTPUT_RECORDS.inc(records)
 
 
 @contextmanager
 def active_target() -> Iterator[None]:
     """Track one target currently executing, including non-browser targets."""
 
-    global _active_targets
-    _active_targets += 1
-    ACTIVE_WORK.labels("targets").set(_active_targets)
+    ACTIVE_WORK.labels("targets").inc()
     try:
         yield
     finally:
-        _active_targets -= 1
-        ACTIVE_WORK.labels("targets").set(_active_targets)
+        ACTIVE_WORK.labels("targets").dec()
 
 
 def observe_rate_limit_wait(scope: str, seconds: float) -> None:

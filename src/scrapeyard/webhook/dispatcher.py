@@ -16,7 +16,12 @@ from typing import Any, Protocol
 
 import httpx
 
-from scrapeyard.common.async_tools import AwaitableCancelled, MonotonicDeadline, shield
+from scrapeyard.common.async_tools import (
+    AwaitableCancelled,
+    MonotonicDeadline,
+    await_cleanup,
+    shield,
+)
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
 from scrapeyard.engine.url_guard import (
@@ -672,53 +677,74 @@ class HttpWebhookDispatcher:
         """Lease a hostname-isolated pool without exceeding the cache bound."""
 
         evicted_client: httpx.AsyncClient | None = None
-        while True:
-            async with self._client_condition:
-                now = time.monotonic()
-                entry = self._clients.get(logical_hostname)
-                if entry is not None:
-                    if entry.expiry_task is not None:
-                        entry.expiry_task.cancel()
-                        entry.expiry_task = None
-                    entry.in_flight += 1
-                    entry.last_used_at = now
-                    client = entry.client
+        client: httpx.AsyncClient | None = None
+        try:
+            while True:
+                async with self._client_condition:
+                    now = time.monotonic()
+                    entry = self._clients.get(logical_hostname)
+                    if entry is not None:
+                        if entry.expiry_task is not None:
+                            entry.expiry_task.cancel()
+                            entry.expiry_task = None
+                        entry.in_flight += 1
+                        entry.last_used_at = now
+                        client = entry.client
+                        break
+
+                    if len(self._clients) >= self._client_cache_max_size:
+                        idle = [
+                            (candidate.last_used_at, hostname, candidate)
+                            for hostname, candidate in self._clients.items()
+                            if candidate.in_flight == 0
+                        ]
+                        if not idle:
+                            await self._client_condition.wait()
+                            continue
+                        _last_used, evicted_hostname, evicted = min(idle)
+                        self._clients.pop(evicted_hostname, None)
+                        if evicted.expiry_task is not None:
+                            evicted.expiry_task.cancel()
+                        evicted_client = evicted.client
+
+                    try:
+                        created_client = self._client_factory()
+                        if created_client is evicted_client:
+                            raise RuntimeError(
+                                "Webhook client_factory must return a distinct client "
+                                "for each logical hostname"
+                            )
+                        if any(
+                            created_client is existing.client
+                            for existing in self._clients.values()
+                        ):
+                            raise RuntimeError(
+                                "Webhook client_factory must return a distinct client "
+                                "for each logical hostname"
+                            )
+                    except BaseException:
+                        if evicted_client is not None:
+                            self._client_condition.notify_all()
+                        raise
+                    client = created_client
+                    self._clients[logical_hostname] = _ClientCacheEntry(
+                        client=client,
+                        last_used_at=now,
+                        in_flight=1,
+                    )
                     break
-
-                if len(self._clients) >= self._client_cache_max_size:
-                    idle = [
-                        (candidate.last_used_at, hostname, candidate)
-                        for hostname, candidate in self._clients.items()
-                        if candidate.in_flight == 0
-                    ]
-                    if not idle:
-                        await self._client_condition.wait()
-                        continue
-                    _last_used, evicted_hostname, evicted = min(idle)
-                    self._clients.pop(evicted_hostname, None)
-                    if evicted.expiry_task is not None:
-                        evicted.expiry_task.cancel()
-                    evicted_client = evicted.client
-
-                client = self._client_factory()
-                if client is evicted_client:
-                    await client.aclose()
-                    raise RuntimeError(
-                        "Webhook client_factory must return a distinct client "
-                        "for each logical hostname"
+        except BaseException:
+            if evicted_client is not None:
+                try:
+                    await await_cleanup(evicted_client.aclose())
+                except Exception:
+                    logger.exception(
+                        "Failed to close evicted webhook client hostname=%s",
+                        logical_hostname,
                     )
-                if any(client is existing.client for existing in self._clients.values()):
-                    raise RuntimeError(
-                        "Webhook client_factory must return a distinct client "
-                        "for each logical hostname"
-                    )
-                self._clients[logical_hostname] = _ClientCacheEntry(
-                    client=client,
-                    last_used_at=now,
-                    in_flight=1,
-                )
-                break
+            raise
 
+        assert client is not None
         if evicted_client is not None:
             try:
                 await shield(evicted_client.aclose())
@@ -997,7 +1023,6 @@ class HttpWebhookDispatcher:
             reason_code,
         )
         WEBHOOK_DELIVERIES.labels(result.status.value).inc()
-        mark_last_success("webhook")
 
         if result.status is WebhookDispatchStatus.delivered:
             await self._outbox_store.mark_delivered(
@@ -1005,6 +1030,7 @@ class HttpWebhookDispatcher:
                 delivered_at=completed_at,
                 expected_attempts=reserved.attempts,
             )
+            mark_last_success("webhook")
             return
 
         if result.status is WebhookDispatchStatus.permanent_failed:

@@ -14,7 +14,7 @@ from scrapeyard.engine.url_guard import (
     redact_userinfo_in_text,
     redact_userinfo_in_url,
 )
-from scrapeyard.models.job import ErrorRecord, Job, JobRun, JobSummary
+from scrapeyard.models.job import ErrorRecord, Job, JobMetadata, JobRun, JobSummary
 
 # Redacted job configs remembered by the SHA-256 of the stored config. Only
 # configs up to the size limit are kept, so the cache stays under ~2 MiB.
@@ -155,9 +155,14 @@ def serialize_job_created(job: Job) -> dict[str, Any]:
     }
 
 
-def serialize_schedule_state(job: Job) -> dict[str, Any]:
+def serialize_schedule_state(job: Job | JobMetadata) -> dict[str, Any]:
     """Serialize the persisted future-run configuration identity."""
 
+    config_hash = (
+        job.config_hash
+        if isinstance(job, JobMetadata)
+        else hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest()
+    )
     return {
         "job_id": job.job_id,
         "project": job.project,
@@ -166,7 +171,7 @@ def serialize_schedule_state(job: Job) -> dict[str, Any]:
         "schedule_cron": job.schedule_cron,
         "schedule_timezone": job.schedule_timezone,
         "schedule_enabled": job.schedule_enabled,
-        "config_hash": hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
+        "config_hash": config_hash,
         "updated_at": _isoformat(job.updated_at),
     }
 

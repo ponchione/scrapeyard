@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from scrapeyard.common.budgets import RunBudget
-from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobRun, JobSummary
+from scrapeyard.models.job import ErrorFilters, ErrorRecord, Job, JobMetadata, JobRun, JobSummary
 from scrapeyard.storage.types import (
     CancellationOutcome,
     CleanupBacklogSnapshot,
@@ -131,7 +131,11 @@ class JobStore(Protocol):
         updated_at: datetime,
     ) -> ScheduledJobMutationOutcome: ...
 
-    async def restore_scheduled_job(self, expected: Job, previous: Job) -> bool:
+    async def restore_scheduled_job(
+        self,
+        expected: Job | JobMetadata,
+        previous: Job | JobMetadata,
+    ) -> bool:
         """Compensate a failed scheduler registration if state is unchanged."""
         ...
 
@@ -140,6 +144,10 @@ class JobStore(Protocol):
         ...
 
     async def get_job(self, job_id: str) -> Job: ...
+
+    async def get_job_metadata(self, job_id: str) -> JobMetadata:
+        """Return lightweight job metadata without reading or decrypting its config."""
+        ...
 
     async def get_job_project(self, job_id: str) -> str:
         """Return a job's project without reading its config."""

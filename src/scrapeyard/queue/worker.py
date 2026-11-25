@@ -80,6 +80,7 @@ from scrapeyard.queue.target_execution import (
 from scrapeyard.queue.validation_policy import apply_validation
 from scrapeyard.runtime.metrics import (
     OUTPUT_BYTES,
+    OUTPUT_RECORDS,
     active_target,
     observe_run,
     observe_target,
@@ -814,6 +815,8 @@ async def _persist_job_results(
         record_count=len(flat_data),
         budget=context.budget,
     )
+    if isinstance(save_meta.record_count, int) and save_meta.record_count > 0:
+        OUTPUT_RECORDS.inc(save_meta.record_count)
     if isinstance(save_meta.serialized_bytes, int | float):
         OUTPUT_BYTES.inc(save_meta.serialized_bytes)
     await context.activity.checkpoint("after_result_persistence")
@@ -1172,7 +1175,6 @@ async def _process_all_targets(
                     ),
                     fetcher=target_cfg.fetcher.value,
                     duration_seconds=time.monotonic() - target_started,
-                    records=0 if target_result is None else len(target_result.data),
                 )
             if not cancelled:
                 await _flush_errors(

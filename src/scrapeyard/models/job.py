@@ -121,6 +121,22 @@ class JobSummary(BaseModel):
     schedule_consecutive_failures: int = 0
 
 
+class JobMetadata(BaseModel):
+    """Lightweight job metadata read without decrypting its stored config."""
+
+    job_id: str
+    project: str
+    name: str
+    status: JobStatus
+    current_run_id: Optional[str] = None
+    schedule_cron: Optional[str] = None
+    schedule_timezone: str = "UTC"
+    schedule_enabled: bool = True
+    schedule_failure_code: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    config_hash: str = ""
+
+
 class JobRun(BaseModel):
     """Represents a single execution of a scrape job."""
 

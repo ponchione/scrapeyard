@@ -78,7 +78,7 @@ from scrapeyard.config.loader import load_config_mapping, parse_config_project
 from scrapeyard.config.schema import ScrapeConfig
 from scrapeyard.engine.domain_guard import DomainGuard, normalize_guard_host
 from scrapeyard.engine.url_guard import redact_userinfo_in_text
-from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.models.job import Job, JobMetadata, JobStatus
 from scrapeyard.queue.pool import WorkerPool
 from scrapeyard.scheduler.cron import (
     ManualTriggerConflictError,
@@ -102,7 +102,10 @@ logger = logging.getLogger(__name__)
 _MAX_LIST_OFFSET = 2**63 - 1
 
 
-def _register_schedule_snapshot(scheduler: SchedulerService, job: Job) -> None:
+def _register_schedule_snapshot(
+    scheduler: SchedulerService,
+    job: Job | JobMetadata,
+) -> None:
     if job.schedule_cron is None:
         raise RuntimeError("Scheduled job snapshot is missing its cron expression")
     scheduler.register_job(
@@ -119,7 +122,7 @@ async def _apply_scheduler_mutation(
     *,
     job_store: JobStore,
     scheduler: SchedulerService,
-) -> Job:
+) -> Job | JobMetadata:
     if outcome.action is ScheduledJobMutationAction.missing:
         raise_json_error(404, "Scheduled job not found")
     if outcome.action is ScheduledJobMutationAction.not_scheduled:
@@ -247,9 +250,9 @@ def _resolve_admin_read_limit(limit: int | None) -> int:
     return resolved_limit
 
 
-async def _get_job_or_404(job_store: JobStore, job_id: str) -> Job:
+async def _get_job_metadata_or_404(job_store: JobStore, job_id: str) -> JobMetadata:
     try:
-        return await job_store.get_job(job_id)
+        return await job_store.get_job_metadata(job_id)
     except KeyError:
         raise_json_error(404, f"Job {job_id!r} not found")
 
@@ -468,7 +471,7 @@ async def update_job(
     """Replace a scheduled job's future-run config and schedule atomically."""
 
     authorize_request(request, AuthScope.schedule_admin)
-    existing = await _get_job_or_404(job_store, job_id)
+    existing = await _get_job_metadata_or_404(job_store, job_id)
     _require_job_project(request, existing.project, job_id)
     parsed = await _read_valid_yaml_config(request, scope=AuthScope.schedule_admin)
     config = parsed.config
@@ -504,7 +507,7 @@ async def _set_schedule_enabled(
     scheduler: SchedulerService,
 ) -> dict[str, Any]:
     authorize_request(request, AuthScope.schedule_admin)
-    job = await _get_job_or_404(job_store, job_id)
+    job = await _get_job_metadata_or_404(job_store, job_id)
     _require_job_project(request, job.project, job_id)
     outcome = await job_store.set_schedule_enabled(
         job_id,
@@ -569,7 +572,7 @@ async def trigger_job(
     """Queue an immediate manual run using the current persisted config version."""
 
     authorize_request(request, AuthScope.schedule_admin)
-    job = await _get_job_or_404(job_store, job_id)
+    job = await _get_job_metadata_or_404(job_store, job_id)
     _require_job_project(request, job.project, job_id)
     try:
         run_id, config_hash = await scheduler.trigger_job_now(job_id)
@@ -691,7 +694,7 @@ async def delete_job(
     """Reserve or resume safe deletion of a terminal/cancelled job."""
     authorize_request(request, AuthScope.delete)
     try:
-        job = await job_store.get_job(job_id)
+        job = await job_store.get_job_metadata(job_id)
     except KeyError:
         job = None
     if job is not None and not get_authenticated_caller(request).permits_project(job.project):
@@ -728,7 +731,7 @@ async def cancel_job(
         # The scope named depends on the request alone: submit is the least
         # that may cancel an exact run.
         authorize_request(request, AuthScope.submit if run_id is not None else AuthScope.delete)
-    job = await _get_job_or_404(job_store, job_id)
+    job = await _get_job_metadata_or_404(job_store, job_id)
     _require_job_project(request, job.project, job_id)
     scope = AuthScope.delete
     if (
@@ -774,7 +777,7 @@ async def get_results(
         raise_json_error(400, "Provide run_id when latest=false")
 
     try:
-        job = await job_store.get_job(job_id)
+        job = await job_store.get_job_metadata(job_id)
     except KeyError:
         job = None
     if job is not None and not caller.permits_project(job.project):

@@ -124,8 +124,31 @@ _readiness_probe_executor = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="scrapeyard-readiness",
 )
+_readiness_probe_executor_closed = False
 _result_storage_probe = SingleFlightSyncProbe(_readiness_probe_executor)
 _disk_probe = SingleFlightSyncProbe(_readiness_probe_executor)
+
+
+def _ensure_readiness_probe_executor() -> ThreadPoolExecutor:
+    global _readiness_probe_executor, _readiness_probe_executor_closed
+    global _result_storage_probe, _disk_probe
+    if _readiness_probe_executor_closed:
+        _readiness_probe_executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="scrapeyard-readiness",
+        )
+        _result_storage_probe = SingleFlightSyncProbe(_readiness_probe_executor)
+        _disk_probe = SingleFlightSyncProbe(_readiness_probe_executor)
+        _readiness_probe_executor_closed = False
+    return _readiness_probe_executor
+
+
+def _shutdown_readiness_probe_executor() -> None:
+    global _readiness_probe_executor_closed
+    if _readiness_probe_executor_closed:
+        return
+    _readiness_probe_executor.shutdown(wait=False, cancel_futures=True)
+    _readiness_probe_executor_closed = True
 
 
 async def _recover_stale_running_jobs() -> None:
@@ -467,6 +490,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             getattr(settings, "qualification_crash_point", "") or "none",
         )
     try:
+        _ensure_readiness_probe_executor()
         # Validate write capability even when every durable table is empty.
         EncryptionKeyring.from_settings(required=True)
         await init_db(settings.db_dir)
@@ -496,6 +520,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             release_instance_lock = not _runtime_shutdown_pending(app)
             raise
         finally:
+            _shutdown_readiness_probe_executor()
             if release_instance_lock:
                 instance_lock.release()
                 app.state.instance_lock = None
@@ -758,6 +783,7 @@ async def health(
         asyncio.create_task(_timed_async_probe(name, probe_sqlite(name), timeout))
         for name in sqlite_names
     ]
+    _ensure_readiness_probe_executor()
     artifact_task = asyncio.create_task(
         _timed_sync_probe(
             "result storage",
@@ -991,13 +1017,33 @@ async def _refresh_metrics() -> None:
                     }
                     set_cleanup_backlog(snapshots, observed_at=observed_at)
 
+        executor = _ensure_readiness_probe_executor()
+        loop = asyncio.get_running_loop()
         try:
-            DISK_FREE_BYTES.set(shutil.disk_usage(settings.storage_results_dir).free)
-        except OSError:
+            disk_usage = await asyncio.wait_for(
+                loop.run_in_executor(
+                    executor,
+                    shutil.disk_usage,
+                    settings.storage_results_dir,
+                ),
+                timeout=timeout,
+            )
+            DISK_FREE_BYTES.set(disk_usage.free)
+        except (OSError, TimeoutError):
             METRICS_REFRESH_FAILURES.labels("result_storage").inc()
         # The worker samples memory only when it could start work, so a full
         # worker would otherwise leave the headroom gauge stale.
-        memory_headroom_mb(settings.workers_memory_limit_mb)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    executor,
+                    memory_headroom_mb,
+                    settings.workers_memory_limit_mb,
+                ),
+                timeout=timeout,
+            )
+        except Exception:
+            METRICS_REFRESH_FAILURES.labels("memory").inc()
         for name, probe in _background_probes().items():
             BACKGROUND_TASK.labels(name).set(1 if probe.ok else 0)
         _metrics_refreshed_at = now

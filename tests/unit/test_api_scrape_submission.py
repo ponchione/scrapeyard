@@ -102,7 +102,7 @@ async def test_wait_for_queued_job_propagates_request_cancellation():
 @pytest.mark.parametrize("status", [JobStatus.cancelled, JobStatus.deleting])
 async def test_wait_for_persisted_job_stops_for_non_result_terminal_status(status):
     job_store = AsyncMock()
-    job_store.get_job.return_value = MagicMock(status=status)
+    job_store.get_job_metadata.return_value = MagicMock(status=status)
 
     completed = await wait_for_persisted_job(
         "job-1",
@@ -112,7 +112,7 @@ async def test_wait_for_persisted_job_stops_for_non_result_terminal_status(statu
     )
 
     assert completed is False
-    job_store.get_job.assert_awaited_once_with("job-1")
+    job_store.get_job_metadata.assert_awaited_once_with("job-1")
 
 
 @pytest.mark.asyncio

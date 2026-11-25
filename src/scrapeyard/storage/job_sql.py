@@ -37,6 +37,20 @@ JOB_SUMMARY_COLUMNS = (
     "schedule_consecutive_failures",
 )
 
+JOB_METADATA_COLUMNS = (
+    "job_id",
+    "project",
+    "name",
+    "status",
+    "current_run_id",
+    "schedule_cron",
+    "schedule_timezone",
+    "schedule_enabled",
+    "schedule_failure_code",
+    "updated_at",
+    "config_hash",
+)
+
 JOB_RUN_COLUMNS = (
     "run_id",
     "job_id",

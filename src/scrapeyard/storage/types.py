@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from scrapeyard.models.job import Job, JobStatus
+from scrapeyard.models.job import Job, JobMetadata, JobStatus
 
 
 class ResultArtifactReadError(RuntimeError):
@@ -57,8 +57,8 @@ class ScheduledJobMutationOutcome:
     """Previous/current snapshots used for API consistency compensation."""
 
     action: ScheduledJobMutationAction
-    previous: Job | None = None
-    current: Job | None = None
+    previous: Job | JobMetadata | None = None
+    current: Job | JobMetadata | None = None
 
 
 class RunOwnershipError(RuntimeError):

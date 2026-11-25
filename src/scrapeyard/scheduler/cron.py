@@ -317,6 +317,7 @@ class SchedulerService:
             job_id,
             trigger="manual",
             raise_enqueue_errors=True,
+            job=job,
         )
         if result is None:
             raise ManualTriggerConflictError(
@@ -331,17 +332,19 @@ class SchedulerService:
         trigger: str = "scheduled",
         raise_enqueue_errors: bool = False,
         new_run_id: str | None = None,
+        job: Job | None = None,
     ) -> tuple[str, str] | None:
         """Called by APScheduler when a cron trigger fires.
 
         Jitter is already applied by the CronTrigger — no additional delay needed.
         """
-        try:
-            job = await self._job_store.get_job(job_id)
-        except KeyError:
-            # Job was deleted — remove from scheduler.
-            self.remove_job(job_id)
-            return None
+        if job is None:
+            try:
+                job = await self._job_store.get_job(job_id)
+            except KeyError:
+                # Job was deleted — remove from scheduler.
+                self.remove_job(job_id)
+                return None
 
         if job.status in {JobStatus.cancelled, JobStatus.deleting}:
             logger.info(
