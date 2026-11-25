@@ -134,8 +134,12 @@ async def statements(tmp_path, monkeypatch) -> list[tuple[str, tuple[Any, ...]]]
     recorded: list[tuple[str, tuple[Any, ...]]] = []
 
     @asynccontextmanager
-    async def recording_get_db(db_name: str) -> AsyncIterator[_RecordingConnection]:
-        async with get_db(db_name) as db:
+    async def recording_get_db(
+        db_name: str,
+        *,
+        readonly: bool = False,
+    ) -> AsyncIterator[_RecordingConnection]:
+        async with get_db(db_name, readonly=readonly) as db:
             yield _RecordingConnection(db, recorded)
 
     monkeypatch.setattr(job_store_module, "get_db", recording_get_db)

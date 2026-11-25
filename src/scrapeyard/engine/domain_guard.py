@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -127,18 +128,43 @@ class LocalDomainGuard:
         *,
         clock: Callable[[], float] = time.time,
         day: Callable[[], str] = utc_day,
+        max_domains: int = 10000,
     ) -> None:
+        if max_domains < 1:
+            raise ValueError("max_domains must be positive")
         self._clock = clock
         self._day = day
-        self._pages: dict[tuple[str, str], int] = {}
+        self._max_domains = max_domains
+        self._pages: OrderedDict[tuple[str, str], int] = OrderedDict()
         self._cooldowns: dict[str, float] = {}
+        self._last_day: str | None = None
+
+    def _prune_stale_days(self, today: str) -> None:
+        if self._last_day == today:
+            return
+        self._last_day = today
+        for key in [key for key in self._pages if key[1] != today]:
+            self._pages.pop(key, None)
+
+    def _prune_expired_cooldowns(self, now: float) -> None:
+        for host, until in list(self._cooldowns.items()):
+            if until <= now:
+                self._cooldowns.pop(host, None)
 
     async def consume_page(self, host: str, limit: int) -> int:
-        key = (host, self._day())
+        today = self._day()
+        self._prune_stale_days(today)
+        key = (host, today)
         count = self._pages.get(key, 0)
         if limit > 0 and count >= limit:
             raise DomainDailyLimitReached(host, limit)
-        self._pages[key] = count + 1
+        if key in self._pages:
+            self._pages[key] = count + 1
+            self._pages.move_to_end(key)
+        else:
+            while len(self._pages) >= self._max_domains:
+                self._pages.popitem(last=False)
+            self._pages[key] = 1
         return count + 1
 
     async def cooldown_remaining(self, host: str) -> float:
@@ -152,11 +178,19 @@ class LocalDomainGuard:
         return remaining
 
     async def start_cooldown(self, host: str, seconds: int) -> None:
-        if seconds > 0:
-            self._cooldowns[host] = self._clock() + seconds
+        if seconds <= 0:
+            return
+        now = self._clock()
+        if host not in self._cooldowns and len(self._cooldowns) >= self._max_domains:
+            self._prune_expired_cooldowns(now)
+            while len(self._cooldowns) >= self._max_domains:
+                soonest = min(self._cooldowns, key=self._cooldowns.__getitem__)
+                self._cooldowns.pop(soonest, None)
+        self._cooldowns[host] = now + seconds
 
     async def status(self, host: str) -> DomainGuardStatus:
         day = self._day()
+        self._prune_stale_days(day)
         return DomainGuardStatus(
             host=host,
             day=day,

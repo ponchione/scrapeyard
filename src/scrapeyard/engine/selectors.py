@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from json.encoder import encode_basestring_ascii
 from typing import Any, cast
 
 from scrapeyard.config.schema import SelectorLong, SelectorType, SelectorValue
@@ -139,9 +140,7 @@ def _extract_selector_value(
     texts: list[str] = []
     for element in elements:
         text = _element_text(element)
-        checked_selector_value_size(text)
-        transformed = apply_transforms(text, transforms)
-        checked_selector_value_size(transformed)
+        transformed = apply_transforms(text, transforms) if transforms else text
         _reserve_json_structure(
             reserve_output_bytes,
             _json_string_serialized_size(transformed),
@@ -173,20 +172,9 @@ def _reserve_json_structure(
 
 
 def _json_string_serialized_size(value: str) -> int:
-    """Return json.dumps' UTF-8 size for one string without building it."""
+    """Return json.dumps' UTF-8 size for one string via C's ASCII encoder."""
 
-    size = 2  # surrounding quotes
-    for character in value:
-        codepoint = ord(character)
-        if character in {'"', "\\"} or character in "\b\t\n\f\r":
-            size += 2
-        elif codepoint < 0x20 or 0x7F <= codepoint <= 0xFFFF:
-            size += 6
-        elif codepoint > 0xFFFF:
-            size += 12
-        else:
-            size += 1
-    return size
+    return len(encode_basestring_ascii(value))
 
 
 def _collapse_selector_values(texts: list[str]) -> Any:

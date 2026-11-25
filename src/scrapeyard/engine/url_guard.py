@@ -590,16 +590,21 @@ def _redact_value_variants(value: Any, variants: tuple[str, ...]) -> tuple[Any, 
     return value, 0
 
 
-def redact_userinfo_in_text(text: str) -> str:
+_MAX_SENSITIVE_MAPPING_DEPTH = 64
+
+
+def redact_userinfo_in_text(text: str, *, _secrets_redacted: bool = False) -> str:
     """Strip userinfo and sensitive query values from URLs embedded in *text*.
 
     Used on stored YAML before it is returned to API clients so proxy
     credentials and URL-bearing tokens do not leak through ``GET /jobs/{id}``.
     """
 
-    redacted = redact_deployment_secrets(text)
+    redacted = text if _secrets_redacted else redact_deployment_secrets(text)
     return _URL_IN_TEXT_RE.sub(
-        lambda match: match.group(1) + redact_userinfo_in_url(match.group(2)), redacted
+        lambda match: match.group(1)
+        + redact_userinfo_in_url(match.group(2), _secrets_redacted=True),
+        redacted,
     )
 
 
@@ -611,14 +616,45 @@ def _is_sensitive_key(key: str) -> bool:
     )
 
 
-def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
+def redact_sensitive_mapping(
+    value: Any,
+    *,
+    secret_values: Any = None,
+    max_depth: int = _MAX_SENSITIVE_MAPPING_DEPTH,
+) -> Any:
     """Recursively redact common secret-bearing keys in JSON-like values."""
+    if max_depth < 0:
+        raise ValueError("max_depth must not be negative")
+    active = _ACTIVE_DEPLOYMENT_SECRETS.get()
+    if secret_values is None:
+        variants = _variants_longest_first(active)
+    else:
+        explicit = tuple(item for item in secret_values if isinstance(item, str) and item)
+        combined = explicit if not active or active == explicit else (*explicit, *active)
+        variants = _variants_longest_first(combined)
+    return _redact_sensitive_mapping(
+        value,
+        variants=variants,
+        depth=0,
+        max_depth=max_depth,
+    )
+
+
+def _redact_sensitive_mapping(
+    value: Any,
+    *,
+    variants: tuple[str, ...],
+    depth: int,
+    max_depth: int,
+) -> Any:
     if isinstance(value, Mapping):
+        if depth >= max_depth:
+            return _REDACTED_VALUE
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             redacted_key: Any = key
             if isinstance(key, str):
-                redacted_key = redact_deployment_secrets(key, secret_values)
+                redacted_key = _redact_variants(key, variants)[0] if variants else key
                 if redacted_key in redacted:
                     base_key = redacted_key
                     suffix = 2
@@ -631,17 +667,40 @@ def redact_sensitive_mapping(value: Any, *, secret_values: Any = None) -> Any:
             elif normalized in _SECRET_CONTAINER_KEYS and isinstance(item, Mapping):
                 redacted[redacted_key] = dict.fromkeys(item, _REDACTED_VALUE)
             else:
-                redacted[redacted_key] = redact_sensitive_mapping(
+                redacted[redacted_key] = _redact_sensitive_mapping(
                     item,
-                    secret_values=secret_values,
+                    variants=variants,
+                    depth=depth + 1,
+                    max_depth=max_depth,
                 )
         return redacted
     if isinstance(value, list):
-        return [redact_sensitive_mapping(item, secret_values=secret_values) for item in value]
+        if depth >= max_depth:
+            return _REDACTED_VALUE
+        return [
+            _redact_sensitive_mapping(
+                item,
+                variants=variants,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(redact_sensitive_mapping(item, secret_values=secret_values) for item in value)
+        if depth >= max_depth:
+            return _REDACTED_VALUE
+        return tuple(
+            _redact_sensitive_mapping(
+                item,
+                variants=variants,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+            for item in value
+        )
     if isinstance(value, str):
-        return redact_userinfo_in_text(redact_deployment_secrets(value, secret_values))
+        redacted_text = _redact_variants(value, variants)[0] if variants else value
+        return redact_userinfo_in_text(redacted_text, _secrets_redacted=True)
     return value
 
 
@@ -771,10 +830,11 @@ def _redact_malformed_url(url: str) -> str:
     return f"{before_fragment}{fragment_separator}{_redact_fragment(fragment)}"
 
 
-def redact_userinfo_in_url(url: str) -> str:
+def redact_userinfo_in_url(url: str, *, _secrets_redacted: bool = False) -> str:
     """Return a diagnostic URL with userinfo, query values, and fragment removed."""
 
-    url = redact_deployment_secrets(url)
+    if not _secrets_redacted:
+        url = redact_deployment_secrets(url)
 
     try:
         parsed = urlparse(url)

@@ -427,7 +427,7 @@ class SQLiteJobStore:
         self, caller_scope: str, key_digest: str, observed_at: datetime,
     ) -> dict[str, object] | None:
         """Look up existing acceptance without creating/enqueueing or refreshing retention."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT i.job_id, i.run_id, i.request_hash AS config_hash, j.project,
                           i.created_at, i.expires_at
@@ -471,7 +471,7 @@ class SQLiteJobStore:
     ) -> dict[str, CleanupBacklogSnapshot]:
         """Return exact job/idempotency backlog using retention predicates."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             rows = await job_retention.cleanup_backlog_rows(
                 db,
                 observed_at=observed_at,
@@ -494,7 +494,7 @@ class SQLiteJobStore:
 
         if limit < 1:
             raise ValueError("Ad-hoc job cleanup limit must be positive")
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             return await job_retention.list_adhoc_jobs_for_retention(
                 db,
                 expired_before,
@@ -515,7 +515,7 @@ class SQLiteJobStore:
 
         if max_runs_per_job < 1 or limit < 1:
             raise ValueError("Scheduled run retention bounds must be positive")
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             return await job_retention.list_scheduled_runs_for_retention(
                 db,
                 expired_before,
@@ -781,7 +781,7 @@ class SQLiteJobStore:
             return cursor.rowcount == 1
 
     async def get_job(self, job_id: str) -> Job:
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 f"SELECT {select_columns(JOB_COLUMNS)} FROM jobs WHERE job_id=?",
                 (job_id,),
@@ -793,7 +793,7 @@ class SQLiteJobStore:
 
     async def get_job_metadata(self, job_id: str) -> JobMetadata:
         """Return lightweight job metadata without reading or decrypting its config."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             metadata = await self._get_job_metadata_in_db(db, job_id)
         if metadata is None:
             raise KeyError(f"Job not found: {job_id!r}")
@@ -801,7 +801,7 @@ class SQLiteJobStore:
 
     async def get_job_project(self, job_id: str) -> str:
         """Return a job's project without reading or decrypting its config."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute("SELECT project FROM jobs WHERE job_id = ?", (job_id,))
             row = await cursor.fetchone()
         if row is None:
@@ -810,7 +810,7 @@ class SQLiteJobStore:
 
     async def get_job_with_stats(self, job_id: str) -> tuple[Job, int, datetime | None]:
         """Return a job with its lifetime run count and last start in one read."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 f"SELECT {select_columns(JOB_COLUMNS)}, "
                 "lifetime_run_count AS run_count, last_run_at "
@@ -842,7 +842,7 @@ class SQLiteJobStore:
     async def run_is_active(self, job_id: str, run_id: str) -> bool:
         """Check exact parent/run ownership at a cooperative lifecycle boundary."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT 1
                    FROM jobs
@@ -865,7 +865,7 @@ class SQLiteJobStore:
     ) -> bool:
         """Protect exact queued/running result ownership during reconciliation."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT 1
                    FROM jobs
@@ -914,7 +914,7 @@ class SQLiteJobStore:
 
     async def get_job_runs(self, job_id: str, limit: int = 10) -> list[JobRun]:
         """Return the last N runs for a job, newest first."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 f"SELECT {select_columns(JOB_RUN_COLUMNS)} FROM job_runs WHERE job_id = ? "
                 "ORDER BY started_at DESC LIMIT ?",
@@ -925,7 +925,7 @@ class SQLiteJobStore:
 
     async def get_job_run(self, job_id: str, run_id: str) -> JobRun | None:
         """Return one run only when it belongs to the expected parent job."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 f"SELECT {select_columns(JOB_RUN_COLUMNS)} FROM job_runs "
                 "WHERE job_id = ? AND run_id = ?",
@@ -938,7 +938,7 @@ class SQLiteJobStore:
 
     async def get_job_run_state(self, job_id: str, run_id: str) -> dict[str, object] | None:
         """Read one accepted identity atomically, including unstarted cancellation."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT j.job_id, j.project, j.name,
                           COALESCE(r.run_id, q.run_id) AS run_id,
@@ -1012,7 +1012,7 @@ class SQLiteJobStore:
         job_id: str,
     ) -> tuple[int, datetime | None]:
         """Return lifetime run count and last start without scanning history."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 "SELECT lifetime_run_count AS run_count, last_run_at "
                 "FROM jobs WHERE job_id = ?",
@@ -1033,14 +1033,14 @@ class SQLiteJobStore:
     ) -> list[tuple[JobSummary, int, datetime | None]]:
         """List jobs with lifetime run summaries, newest activity first."""
         sql, params = build_list_jobs_with_stats_query(project, limit, offset)
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(sql, params)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_job_summary_with_stats(row) for row in rows]
 
     async def summary_by_project(self) -> list[tuple[str, str, int]]:
         """Return grouped job counts by project and status."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(PROJECT_SUMMARY_QUERY)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_project_summary(row) for row in rows]
@@ -1048,7 +1048,7 @@ class SQLiteJobStore:
     async def get_queued_run_config(self, job_id: str, run_id: str) -> str:
         """Load the encrypted immutable config for one accepted delivery."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT queued_run_snapshots.config_yaml,
                           queued_run_snapshots.config_hash
@@ -1280,7 +1280,7 @@ class SQLiteJobStore:
     async def list_scheduled_trigger_failures(self) -> list[tuple[str, str]]:
         """Return unresolved failures for enabled, locally runnable schedules."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT job_id, schedule_failure_code
                    FROM jobs
@@ -1502,7 +1502,7 @@ class SQLiteJobStore:
     ) -> list[TerminalWebhookCandidate]:
         """Return terminal runs and their current logical outbox state."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             rows = await job_terminal_reconciliation.terminal_webhook_candidate_rows(db, limit)
         return job_terminal_reconciliation.terminal_webhook_candidates(rows)
 
@@ -1679,7 +1679,7 @@ class SQLiteJobStore:
         submission, scheduling, or an earlier recovery reservation. Rows with
         no owned run or no queued timestamp are deliberately excluded.
         """
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             rows = await job_recovery.stale_queued_rows(
                 db,
                 stale_before,
@@ -1760,7 +1760,7 @@ class SQLiteJobStore:
 
     async def list_scheduled_jobs(self) -> list[tuple[str, str, str, bool]]:
         """Return ID, cron, timezone, and enabled state for scheduled jobs."""
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(SCHEDULED_JOBS_QUERY)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [row_to_schedule_state(row) for row in rows]

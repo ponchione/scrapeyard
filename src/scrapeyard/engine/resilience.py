@@ -257,9 +257,22 @@ class CircuitBreaker:
         self._cooldown = cooldown_seconds
         self._max_domains = max_domains
         self._inactive_ttl = inactive_ttl_seconds
+        self._prune_interval = min(60.0, inactive_ttl_seconds)
+        self._last_prune_at: float | None = None
         self._clock = clock
         self._circuits: dict[str, _DomainCircuit] = {}
         self._lock = threading.RLock()
+
+    def _get_live_circuit(self, domain: str, now: float) -> _DomainCircuit | None:
+        circuit = self._circuits.get(domain)
+        if (
+            circuit is not None
+            and circuit.state is CircuitState.closed
+            and now - circuit.last_accessed_at >= self._inactive_ttl
+        ):
+            self._circuits.pop(domain, None)
+            return None
+        return circuit
 
     def check(self, domain: str) -> CircuitProbe | None:
         """Admit closed work or atomically grant the sole half-open probe."""
@@ -267,7 +280,7 @@ class CircuitBreaker:
         with self._lock:
             now = self._clock()
             self._prune_inactive_closed(now)
-            circuit = self._circuits.get(domain)
+            circuit = self._get_live_circuit(domain, now)
             if circuit is None or circuit.state is CircuitState.closed:
                 if circuit is not None:
                     circuit.last_accessed_at = now
@@ -287,7 +300,7 @@ class CircuitBreaker:
         with self._lock:
             now = self._clock()
             self._prune_inactive_closed(now)
-            circuit = self._circuits.get(domain)
+            circuit = self._get_live_circuit(domain, now)
             if circuit is None:
                 return
             if circuit.state is CircuitState.closed:
@@ -307,9 +320,9 @@ class CircuitBreaker:
         with self._lock:
             now = self._clock()
             self._prune_inactive_closed(now)
-            circuit = self._circuits.get(domain)
+            circuit = self._get_live_circuit(domain, now)
             if circuit is None:
-                self._make_room_for_closed_state()
+                self._make_room_for_closed_state(now)
                 if len(self._circuits) >= self._max_domains:
                     # Open and half-open entries are deliberately protected. If
                     # the cache is saturated with them, do not weaken those
@@ -339,7 +352,7 @@ class CircuitBreaker:
         with self._lock:
             now = self._clock()
             self._prune_inactive_closed(now)
-            circuit = self._circuits.get(domain)
+            circuit = self._get_live_circuit(domain, now)
             if circuit is None or not self._probe_matches(circuit, domain, probe):
                 return
             circuit.state = CircuitState.open
@@ -351,13 +364,21 @@ class CircuitBreaker:
         """Return one domain's current state for diagnostics and tests."""
 
         with self._lock:
-            self._prune_inactive_closed(self._clock())
-            circuit = self._circuits.get(domain)
+            now = self._clock()
+            self._prune_inactive_closed(now)
+            circuit = self._get_live_circuit(domain, now)
             return CircuitState.closed if circuit is None else circuit.state
 
-    def _prune_inactive_closed(self, now: float) -> None:
-        """Expire abandoned sub-threshold histories without touching open probes."""
+    def _prune_inactive_closed(self, now: float, *, force: bool = False) -> None:
+        """Periodically expire abandoned sub-threshold histories without touching open probes."""
 
+        if self._last_prune_at is None:
+            self._last_prune_at = now
+            if not force:
+                return
+        elif not force and now - self._last_prune_at < self._prune_interval:
+            return
+        self._last_prune_at = now
         expired = [
             domain
             for domain, circuit in self._circuits.items()
@@ -367,9 +388,12 @@ class CircuitBreaker:
         for domain in expired:
             self._circuits.pop(domain, None)
 
-    def _make_room_for_closed_state(self) -> None:
-        """Evict the least-recently-used sub-threshold entry at capacity."""
+    def _make_room_for_closed_state(self, now: float) -> None:
+        """Evict expired or least-recently-used sub-threshold entries at capacity."""
 
+        if len(self._circuits) < self._max_domains:
+            return
+        self._prune_inactive_closed(now, force=True)
         if len(self._circuits) < self._max_domains:
             return
         candidates = (

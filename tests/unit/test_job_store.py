@@ -101,7 +101,7 @@ async def test_project_stats_query_uses_summary_without_scanning_runs(store):
         cursor = await db.execute(f"EXPLAIN QUERY PLAN {sql}", params)
         plan = " ".join(str(row[3]) for row in await cursor.fetchall())
 
-    assert "idx_jobs_project" in plan
+    assert "sqlite_autoindex_jobs_2" in plan
     assert "job_runs" not in sql
 
 

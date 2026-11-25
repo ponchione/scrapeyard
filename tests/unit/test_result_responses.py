@@ -16,8 +16,8 @@ from starlette.requests import ClientDisconnect
 import scrapeyard.api.result_responses as response_module
 from scrapeyard.api.response_models import APICompatibility
 from scrapeyard.api.result_responses import (
+    EncodedResultResponse,
     ResultRequestSlot,
-    ResultResponse,
     ResultResponseSizeExceeded,
     ResultResponseThreadPool,
     _render_result_response,
@@ -293,7 +293,7 @@ async def test_result_response_sends_the_same_bytes_and_headers_in_chunks(monkey
     body = memoryview(bytearray(b'{"results":["caf\xc3\xa9"]}'))
     try:
         async with pool.request_capacity() as slot:
-            response = ResultResponse(body, slot)
+            response = EncodedResultResponse(body, slot)
         assert _free_request_slots(pool) == 0
 
         messages = await _send_response(response)
@@ -325,7 +325,7 @@ async def test_result_response_holds_its_request_slot_until_the_body_is_sent():
 
     try:
         async with pool.request_capacity() as slot:
-            response = ResultResponse(memoryview(bytearray(b"{}")), slot)
+            response = EncodedResultResponse(memoryview(bytearray(b"{}")), slot)
         task = asyncio.create_task(_send_response(response, on_body=stall))
         await sending.wait()
         assert _free_request_slots(pool) == 0
@@ -343,7 +343,7 @@ async def test_stalled_or_unsent_result_response_releases_its_slot_after_the_hol
     pool = ResultResponseThreadPool(1)
     try:
         async with pool.request_capacity() as slot:
-            ResultResponse(memoryview(bytearray(b"{}")), slot)
+            EncodedResultResponse(memoryview(bytearray(b"{}")), slot)
         await asyncio.wait_for(pool._request_slots.acquire(), timeout=1)
         pool._request_slots.release()
 
@@ -351,7 +351,7 @@ async def test_stalled_or_unsent_result_response_releases_its_slot_after_the_hol
             await asyncio.Event().wait()
 
         async with pool.request_capacity() as slot:
-            response = ResultResponse(memoryview(bytearray(b"{}")), slot)
+            response = EncodedResultResponse(memoryview(bytearray(b"{}")), slot)
         task = asyncio.create_task(_send_response(response, on_body=stall_forever))
         await asyncio.wait_for(pool._request_slots.acquire(), timeout=1)
         pool._request_slots.release()
@@ -378,7 +378,7 @@ async def test_stalled_result_download_is_closed_and_releases_its_body(monkeypat
     slot_released = asyncio.Event()
 
     async def app(scope, receive, send) -> None:
-        response = ResultResponse(memoryview(bodies.pop()), ResultRequestSlot(slot_released.set))
+        response = EncodedResultResponse(memoryview(bodies.pop()), ResultRequestSlot(slot_released.set))
         await response(scope, receive, send)
 
     server = uvicorn.Server(
@@ -432,7 +432,7 @@ async def test_request_capacity_releases_a_handed_off_slot_when_the_request_fail
     try:
         with pytest.raises(RuntimeError):
             async with pool.request_capacity() as slot:
-                ResultResponse(memoryview(bytearray(b"{}")), slot)
+                EncodedResultResponse(memoryview(bytearray(b"{}")), slot)
                 raise RuntimeError("handler failed after rendering")
         assert _free_request_slots(pool) == 1
     finally:

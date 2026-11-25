@@ -1620,7 +1620,7 @@ def _redact_output_artifact(
             )
         redacted_output["result_redaction"] = redaction_metadata
     if budget is not None:
-        budget.enforce_serialized_result_bytes(compact_json_size(redacted_output))
+        budget.check_deadline()
     return redacted_output
 
 

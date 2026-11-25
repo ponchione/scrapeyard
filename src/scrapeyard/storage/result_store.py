@@ -276,7 +276,7 @@ class LocalResultStore:
     @staticmethod
     async def _load_reconciliation_cursors(
     ) -> tuple[int, tuple[str, str, str] | None]:
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT metadata_cursor, filesystem_project,
                           filesystem_job_name, filesystem_run_id
@@ -376,7 +376,7 @@ class LocalResultStore:
         query: str,
         params: Sequence[object],
     ) -> int:
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(query, params)
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
 
@@ -578,7 +578,7 @@ class LocalResultStore:
     ) -> ResultPayload:
         sql, params = build_result_lookup_query(job_id, run_id)
 
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(sql, params)
             row = await cursor.fetchone()
 
@@ -622,7 +622,7 @@ class LocalResultStore:
         """Return explicit or deterministically newest metadata without its artifact."""
 
         sql, params = build_result_lookup_query(job_id, run_id)
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(sql, params)
             row = await cursor.fetchone()
         if row is None:
@@ -656,14 +656,14 @@ class LocalResultStore:
             safe_join(self._results_dir, project, job_name, run_id)
             for run_id in owned_run_ids
         ]
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(JOB_RESULTS_DELETE_QUERY, (job_id,))
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
         await self._delete_files_then_ids(rows, expected_paths)
 
     async def delete_result(self, job_id: str, run_id: str) -> bool:
         """Delete one run artifact, including an unindexed browser-debug directory."""
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT id, file_path
                    FROM results_meta
@@ -1083,7 +1083,7 @@ class LocalResultStore:
         )
 
     async def _metadata_references(self, candidate: _RemovalCandidate) -> bool:
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT file_path FROM results_meta
                    WHERE project = ? AND run_id = ?""",
@@ -1334,7 +1334,7 @@ class LocalResultStore:
         if metadata_limit:
             metadata_exhausted = False
             if not deadline_reached():
-                async with get_db("results_meta.db") as db:
+                async with get_db("results_meta.db", readonly=True) as db:
                     cursor = await db.execute(
                         """SELECT id, job_id, run_id, file_path
                            FROM results_meta
@@ -1460,7 +1460,7 @@ class LocalResultStore:
     ) -> dict[str, CleanupBacklogSnapshot]:
         """Return exact result-retention backlog using cleanup predicates."""
 
-        async with get_db("results_meta.db") as db:
+        async with get_db("results_meta.db", readonly=True) as db:
             expired_cursor = await db.execute(
                 """SELECT COUNT(*) AS eligible_count,
                           MIN(created_at) AS oldest_eligible_at

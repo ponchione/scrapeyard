@@ -656,6 +656,7 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
     await init_db(str(tmp_path / "db"))
     outbox = SQLiteWebhookOutboxStore()
     LAST_SUCCESS.labels("webhook").set(0.0)
+    enqueued_at = datetime.now(timezone.utc)
 
     for delivery_id in ("d-retry", "d-perm", "d-ok"):
         await outbox.enqueue_delivery(
@@ -668,9 +669,9 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
                 headers={},
                 timeout_seconds=5,
                 payload={"delivery_id": delivery_id},
-                next_attempt_at=NOW,
+                next_attempt_at=enqueued_at,
             ),
-            now=NOW,
+            now=enqueued_at,
         )
 
     dispatcher = HttpWebhookDispatcher(outbox_store=outbox)
