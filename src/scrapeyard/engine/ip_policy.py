@@ -10,7 +10,6 @@ exceptions are not useful scrape destinations (notably ``192.0.0.0/24``).
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Iterable
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -70,11 +69,6 @@ DENIED_ADDRESS_NETWORKS: tuple[IPNetwork, ...] = _networks(
     "ff00::/8",
 )
 
-_IPV4_DENIED_NETWORKS = tuple(
-    network
-    for network in DENIED_ADDRESS_NETWORKS
-    if isinstance(network, ipaddress.IPv4Network)
-)
 _IPV4_EMBEDDING_PREFIXES = (
     ipaddress.IPv6Network("64:ff9b::/96"),
     ipaddress.IPv6Network("64:ff9b:1::/48"),
@@ -107,39 +101,3 @@ def ip_is_blocked(address: IPAddress) -> bool:
     if isinstance(address, ipaddress.IPv6Address):
         return any(ip_is_blocked(embedded) for embedded in embedded_ipv4_addresses(address))
     return False
-
-
-def _embedded_ipv4_firewall_networks(
-    prefix: ipaddress.IPv6Network,
-    networks: Iterable[ipaddress.IPv4Network],
-) -> tuple[ipaddress.IPv6Network, ...]:
-    """Map IPv4 CIDRs into an IPv6 /96 prefix for ip6tables matching."""
-
-    return tuple(
-        ipaddress.IPv6Network(
-            (int(prefix.network_address) | int(network.network_address), 96 + network.prefixlen)
-        )
-        for network in networks
-    )
-
-
-def firewall_policy_entries() -> tuple[tuple[str, str, str], ...]:
-    """Render ordered ``(family, action, CIDR)`` host-firewall entries."""
-
-    entries = [
-        ("6" if network.version == 6 else "4", "allow", str(network))
-        for network in PUBLIC_ADDRESS_EXCEPTIONS
-    ]
-    entries.extend(
-        ("6" if network.version == 6 else "4", "deny", str(network))
-        for network in DENIED_ADDRESS_NETWORKS
-    )
-    for prefix in (
-        ipaddress.IPv6Network("::ffff:0:0/96"),
-        ipaddress.IPv6Network("64:ff9b::/96"),
-    ):
-        entries.extend(
-            ("6", "deny", str(network))
-            for network in _embedded_ipv4_firewall_networks(prefix, _IPV4_DENIED_NETWORKS)
-        )
-    return tuple(entries)

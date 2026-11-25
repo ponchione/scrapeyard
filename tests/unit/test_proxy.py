@@ -10,13 +10,12 @@ from scrapling.engines.toolbelt.navigation import construct_proxy_dict
 
 from scrapeyard.config.schema import ProxyConfig, TargetConfig
 from scrapeyard.engine.proxy import normalize_proxy_url, redact_proxy_url, resolve_proxy
+from tests.factories import make_target_config
 
 # --- Helpers ---
 
 def _target(**overrides: Any) -> TargetConfig:
-    base: dict[str, Any] = {"url": "https://example.com", "selectors": {"title": "h1"}}
-    base.update(overrides)
-    return TargetConfig.model_validate(base)
+    return make_target_config(**overrides)
 
 
 def _proxy(url: str) -> ProxyConfig:

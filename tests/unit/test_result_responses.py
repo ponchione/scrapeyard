@@ -20,7 +20,6 @@ from scrapeyard.api.result_responses import (
     ResultRequestSlot,
     ResultResponseSizeExceeded,
     ResultResponseThreadPool,
-    _render_result_response,
     encoded_result_response,
 )
 from scrapeyard.api.serializers import serialize_result_response
@@ -57,11 +56,20 @@ def test_result_response_preserves_stored_source_identity():
         assert payload[key] == artifact[key]
 
 
+async def _never_disconnect_request() -> Request:
+    async def request_messages() -> AsyncIterator[dict]:
+        await asyncio.Event().wait()
+        yield {"type": "http.disconnect"}
+
+    return await _request(request_messages())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "compatibility",
     [APICompatibility.v1, APICompatibility.legacy_v0],
 )
-def test_off_loop_renderer_preserves_jsonresponse_contract(compatibility):
+async def test_off_loop_renderer_preserves_jsonresponse_contract(compatibility):
     artifact = _artifact()
     payload = serialize_result_response(
         "job-1",
@@ -70,23 +78,28 @@ def test_off_loop_renderer_preserves_jsonresponse_contract(compatibility):
         artifact=artifact,
         compatibility=compatibility,
     )
+    pool = ResultResponseThreadPool(1)
+    try:
+        response = await _encode_with_capacity(
+            await _never_disconnect_request(),
+            pool=pool,
+            job_id="job-1",
+            run_id="run-1",
+            status="complete",
+            artifact=artifact,
+            compatibility=compatibility,
+            max_bytes=1_000_000,
+        )
+        assert isinstance(response, EncodedResultResponse)
+        assert bytes(response.body) == JSONResponse(payload).body
+        assert isinstance(response.body.obj, bytearray)
+    finally:
+        pool.shutdown()
 
-    rendered = _render_result_response(
-        "job-1",
-        "run-1",
-        "complete",
-        artifact,
-        compatibility,
-        1_000_000,
-        stop_requested=lambda: False,
-    )
 
-    assert bytes(rendered) == JSONResponse(payload).body
-    assert isinstance(rendered.obj, bytearray)
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize("grouped", [True, False])
-def test_near_limit_grouped_and_merged_render_use_one_mutable_buffer(grouped):
+async def test_near_limit_grouped_and_merged_render_use_one_mutable_buffer(grouped):
     artifact = _artifact(grouped=grouped)
     large_value = "x" * 250_000
     if grouped:
@@ -94,31 +107,42 @@ def test_near_limit_grouped_and_merged_render_use_one_mutable_buffer(grouped):
     else:
         artifact["results"][0]["value"] = large_value
 
-    rendered = _render_result_response(
-        "job-1",
-        "run-1",
-        "complete",
-        artifact,
-        APICompatibility.v1,
-        300_000,
-        stop_requested=lambda: False,
-    )
-
-    assert 250_000 < len(rendered) < 300_000
-    assert isinstance(rendered.obj, bytearray)
-
-
-def test_response_renderer_stops_before_extending_past_limit():
-    with pytest.raises(ResultResponseSizeExceeded):
-        _render_result_response(
-            "job-1",
-            "run-1",
-            "complete",
-            _artifact(),
-            APICompatibility.v1,
-            32,
-            stop_requested=lambda: False,
+    pool = ResultResponseThreadPool(1)
+    try:
+        response = await _encode_with_capacity(
+            await _never_disconnect_request(),
+            pool=pool,
+            job_id="job-1",
+            run_id="run-1",
+            status="complete",
+            artifact=artifact,
+            compatibility=APICompatibility.v1,
+            max_bytes=300_000,
         )
+        assert isinstance(response, EncodedResultResponse)
+        assert 250_000 < len(response.body) < 300_000
+        assert isinstance(response.body.obj, bytearray)
+    finally:
+        pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_response_renderer_stops_before_extending_past_limit():
+    pool = ResultResponseThreadPool(1)
+    try:
+        with pytest.raises(ResultResponseSizeExceeded):
+            await _encode_with_capacity(
+                await _never_disconnect_request(),
+                pool=pool,
+                job_id="job-1",
+                run_id="run-1",
+                status="complete",
+                artifact=_artifact(),
+                compatibility=APICompatibility.v1,
+                max_bytes=32,
+            )
+    finally:
+        pool.shutdown()
 
 
 @pytest.mark.asyncio

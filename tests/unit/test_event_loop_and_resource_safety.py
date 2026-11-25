@@ -65,6 +65,7 @@ from scrapeyard.webhook.dispatcher import (
     WebhookDispatchResult,
     WebhookDispatchStatus,
 )
+from tests.factories import fetch_webhook_delivery, seed_webhook_delivery
 from tests.unit.worker_helpers import make_job, make_settings_mock, make_target
 
 NOW = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
@@ -395,7 +396,7 @@ async def test_migrate_persisted_secrets_skips_aesgcm_decrypt_for_active_key_row
         hashlib.sha256(cfg.encode("utf-8")).hexdigest(),
         NOW,
     )
-    await outbox.enqueue_delivery(
+    await seed_webhook_delivery(
         WebhookDeliveryCreate(
             delivery_id="del-1",
             job_id="job-active",
@@ -659,7 +660,7 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
     enqueued_at = datetime.now(timezone.utc)
 
     for delivery_id in ("d-retry", "d-perm", "d-ok"):
-        await outbox.enqueue_delivery(
+        await seed_webhook_delivery(
             WebhookDeliveryCreate(
                 delivery_id=delivery_id,
                 job_id="job-1",
@@ -684,7 +685,7 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
             WebhookDispatchReason.retryable_http_response,
         )
     )
-    delivery = await outbox.get_delivery("d-retry")
+    delivery = await fetch_webhook_delivery("d-retry")
     assert delivery is not None
     await dispatcher._process_delivery(delivery)
     assert LAST_SUCCESS.labels("webhook")._value.get() == 0.0
@@ -697,7 +698,7 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
             WebhookDispatchReason.permanent_http_response,
         )
     )
-    delivery = await outbox.get_delivery("d-perm")
+    delivery = await fetch_webhook_delivery("d-perm")
     assert delivery is not None
     await dispatcher._process_delivery(delivery)
     assert LAST_SUCCESS.labels("webhook")._value.get() == 0.0
@@ -705,7 +706,7 @@ async def test_webhook_mark_last_success_only_advances_on_delivered(tmp_path):
     dispatcher.send_once = AsyncMock(
         return_value=WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
     )
-    delivery = await outbox.get_delivery("d-ok")
+    delivery = await fetch_webhook_delivery("d-ok")
     assert delivery is not None
     await dispatcher._process_delivery(delivery)
     assert LAST_SUCCESS.labels("webhook")._value.get() > 0.0

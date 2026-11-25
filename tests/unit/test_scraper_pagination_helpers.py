@@ -14,7 +14,7 @@ from scrapeyard.config.schema import FetcherType, RetryConfig, ScrapeConfig, Tar
 from scrapeyard.engine.pagination import paginate_target, pagination_url_key
 from scrapeyard.engine.scraper import FetchOutcome, TargetResult
 from scrapeyard.engine.url_guard import URLResolutionError
-from scrapeyard.queue.worker import _determine_final_status, _format_output
+from tests.unit.worker_helpers import run_scrape_task
 
 
 class _Element:
@@ -367,8 +367,8 @@ async def test_pagination_result_matches_shared_consumer_contract(scenario, monk
         ],
     )
     result = await scraper.scrape_target(config.target, False, config.retry)
-    status = _determine_final_status(config, [result], result.data)
-    artifact = _format_output(config, [result], "contract-run", status, result.errors)
+    outcome = await run_scrape_task(config, [result], job_id="contract-run")
+    artifact = outcome.saved_artifact
 
     assert {key: artifact[key] for key in fixture} == fixture
     fetch_page.assert_awaited_once()

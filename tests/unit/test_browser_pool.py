@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from scrapling import PlayWrightFetcher
 
-from scrapeyard.config.schema import ExecutionConfig, TargetConfig
+from scrapeyard.config.schema import ExecutionConfig, FetcherType, TargetConfig
 from scrapeyard.engine import browser_pool
 from scrapeyard.engine.browser_pool import (
     BrowserPool,
@@ -16,15 +16,16 @@ from scrapeyard.engine.browser_pool import (
     current_browser_pool,
 )
 from scrapeyard.engine.browser_session import BrowserSession
+from tests.factories import make_target_config
 
 
 def _target(url: str = "https://www.example.test/c/1", **browser: Any) -> TargetConfig:
-    return TargetConfig.model_validate({
-        "url": url,
-        "fetcher": "dynamic",
-        "browser": browser or None,
-        "selectors": {"name": ".name"},
-    })
+    return make_target_config(
+        url,
+        fetcher=FetcherType.dynamic,
+        browser=browser or None,
+        selectors={"name": ".name"},
+    )
 
 
 @pytest.fixture()

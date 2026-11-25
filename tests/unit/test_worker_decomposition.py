@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scrapeyard.common.budgets import BudgetExceeded, RunBudget
+from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.json_encoding import compact_json_size
 from scrapeyard.config.schema import (
     ExecutionConfig,
@@ -24,77 +22,38 @@ from scrapeyard.engine.scraper import TargetResult, TargetStatus
 from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.browser_limiter import BrowserExecutionLimiter
 from scrapeyard.queue.target_execution import resolve_target_runtime_context
-from scrapeyard.queue.worker import (
-    JobExecutionContext,
-    _collect_result_payload,
-    _format_output,
-    _materialize_output_artifact,
-    _persist_job_results,
-    _process_all_targets,
+from scrapeyard.queue.worker import scrape_task
+from scrapeyard.runtime.metrics import TARGETS
+from tests.factories import make_budget
+from tests.unit.worker_helpers import (
+    make_config_mock,
+    make_job,
+    make_settings_mock,
+    run_scrape_task,
 )
-from scrapeyard.storage.types import SaveResultMeta
 
 
 def _concurrent_target(url: str, fetcher: FetcherType) -> MagicMock:
     return MagicMock(url=url, fetcher=fetcher, proxy=None)
 
 
-def _job_execution_context(
+def _config_for_targets(
     targets: list[MagicMock],
     *,
     concurrency: int | None = None,
-    run_artifacts_dir: str | None = None,
-) -> JobExecutionContext:
-    config = MagicMock()
-    config.project = "test"
-    config.resolved_targets.return_value = targets
-    config.execution.concurrency = concurrency or len(targets)
-    config.execution.delay_between = 0
-    config.execution.post_target_delay = 0
-    config.execution.domain_rate_limit = 0
-    config.adaptive = False
-    config.schedule = None
-    config.proxy = None
-    config.retry = MagicMock()
-    config.validation.required_fields = []
-    config.validation.min_results = 0
-    config.validation.on_empty = OnEmptyAction.warn
-    return JobExecutionContext(
-        config=config,
-        config_hash="a" * 64,
-        job=MagicMock(),
-        settings=MagicMock(proxy_url=""),
-        started_at=datetime.now(timezone.utc),
-        adaptive_dir="/tmp/adaptive",
-        run_artifacts_dir=run_artifacts_dir,
-        budget=RunBudget(
-            max_duration_seconds=60,
-            max_fetched_bytes=1_000_000,
-            max_extracted_records=10_000,
-            max_serialized_result_bytes=1_000_000,
-            max_browser_debug_bytes=1_000_000,
-        ),
-        run_id="run-test",
-        activity=MagicMock(checkpoint=AsyncMock()),
+    group_by: GroupBy | str = GroupBy.target,
+    fail_strategy: FailStrategy = FailStrategy.partial,
+    reuse_browser: bool = False,
+) -> MagicMock:
+    cfg = make_config_mock(
+        targets=targets,
+        fail_strategy=fail_strategy,
+        group_by=group_by,
+        on_empty=OnEmptyAction.warn,
     )
-
-
-async def _run_targets(
-    context: JobExecutionContext,
-    limiter: BrowserExecutionLimiter,
-    *,
-    job_id: str,
-) -> list[TargetResult]:
-    circuit_breaker = MagicMock()
-    return await _process_all_targets(
-        context=context,
-        job_id=job_id,
-        run_id=f"run-{job_id}",
-        circuit_breaker=circuit_breaker,
-        rate_limiter=AsyncMock(),
-        browser_limiter=limiter,
-        error_store=AsyncMock(),
-    )
+    cfg.execution.concurrency = concurrency or len(targets)
+    cfg.execution.reuse_browser = reuse_browser
+    return cfg
 
 
 @pytest.mark.asyncio
@@ -104,15 +63,17 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
         _concurrent_target(f"https://browser-{index}.example", FetcherType.dynamic)
         for index in range(4)
     ]
-    context = _job_execution_context(targets)
+    cfg = _config_for_targets(targets)
     release = asyncio.Event()
     first_pair_started = asyncio.Event()
     active_fetches = 0
     max_active_fetches = 0
     total_started = 0
+    called = 0
 
     async def _scrape(target, *_args, **_kwargs) -> TargetResult:
-        nonlocal active_fetches, max_active_fetches, total_started
+        nonlocal active_fetches, max_active_fetches, total_started, called
+        called += 1
         active_fetches += 1
         total_started += 1
         max_active_fetches = max(max_active_fetches, active_fetches)
@@ -124,17 +85,18 @@ async def test_browser_limiter_caps_multiple_targets_in_one_job():
         finally:
             active_fetches -= 1
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape) as scrape:
-        task = asyncio.create_task(_run_targets(context, limiter, job_id="one-job"))
-        await asyncio.wait_for(first_pair_started.wait(), timeout=1)
+    task = asyncio.create_task(
+        run_scrape_task(cfg, _scrape, job_id="one-job", browser_limiter=limiter)
+    )
+    await asyncio.wait_for(first_pair_started.wait(), timeout=1)
 
-        assert limiter.active == 2
-        assert scrape.call_count == 2
+    assert limiter.active == 2
+    assert called == 2
 
-        release.set()
-        results = await asyncio.wait_for(task, timeout=1)
+    release.set()
+    outcome = await asyncio.wait_for(task, timeout=1)
 
-    assert len(results) == 4
+    assert len(outcome.saved_artifact["targets"]) == 4
     assert max_active_fetches == 2
     assert limiter.active == 0
 
@@ -146,19 +108,17 @@ async def test_reuse_browser_lends_the_run_one_pool_and_closes_it_after_the_targ
         _concurrent_target(f"https://www.example.test/c/{index}", FetcherType.dynamic)
         for index in range(3)
     ]
-    context = _job_execution_context(targets, concurrency=1)
-    context.config.execution.reuse_browser = reuse
+    cfg = _config_for_targets(targets, concurrency=1, reuse_browser=reuse)
     pools = []
 
     async def _scrape(target, *_args, **_kwargs) -> TargetResult:
         pools.append(current_browser_pool())
         return TargetResult(url=target.url, status=TargetStatus.success)
 
-    with (
-        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
-        patch.object(BrowserPool, "aclose", autospec=True) as aclose,
-    ):
-        await _run_targets(context, BrowserExecutionLimiter(1), job_id="reuse")
+    with patch.object(BrowserPool, "aclose", autospec=True) as aclose:
+        await run_scrape_task(
+            cfg, _scrape, job_id="reuse", browser_limiter=BrowserExecutionLimiter(1)
+        )
 
     assert len(pools) == 3 and len({id(pool) for pool in pools}) == 1
     assert (pools[0] is not None) is reuse
@@ -170,22 +130,18 @@ async def test_reuse_browser_lends_the_run_one_pool_and_closes_it_after_the_targ
 async def test_same_domain_targets_keep_distinct_screenshot_artifacts(tmp_path):
     limiter = BrowserExecutionLimiter(2)
     targets = [
-        _concurrent_target(
-            f"https://shop.example/products/{index}",
-            FetcherType.dynamic,
-        )
+        _concurrent_target(f"https://shop.example/products/{index}", FetcherType.dynamic)
         for index in range(2)
     ]
-    context = _job_execution_context(
-        targets,
-        run_artifacts_dir=str(tmp_path / "artifacts"),
-    )
+    cfg = _config_for_targets(targets)
+    captured_paths: list[Path] = []
 
     async def _scrape(target, *_args, **kwargs) -> TargetResult:
         artifacts_dir = Path(kwargs["artifacts_dir"])
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         screenshot = artifacts_dir / "dynamic-main.png"
         screenshot.write_bytes(target.url.encode())
+        captured_paths.append(screenshot)
         return TargetResult(
             url=target.url,
             status=TargetStatus.success,
@@ -193,19 +149,27 @@ async def test_same_domain_targets_keep_distinct_screenshot_artifacts(tmp_path):
             debug={"screenshot_path": str(screenshot)},
         )
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
-        results = await _run_targets(context, limiter, job_id="same-domain")
+    settings = make_settings_mock(
+        browser_debug_enabled=True,
+        storage_results_dir=str(tmp_path / "results"),
+    )
+    await run_scrape_task(
+        cfg,
+        _scrape,
+        job_id="same-domain",
+        settings=settings,
+        browser_limiter=limiter,
+    )
 
-    screenshots = [Path(result.debug["screenshot_path"]) for result in results]
-    assert len(set(screenshots)) == 2
-    assert {path.parent.name for path in screenshots} == {"attempt-1"}
-    assert {path.parent.parent.name for path in screenshots} == {
+    assert len(set(captured_paths)) == 2
+    assert {path.parent.name for path in captured_paths} == {"attempt-1"}
+    assert {path.parent.parent.name for path in captured_paths} == {
         "target-0001",
         "target-0002",
     }
-    assert [path.read_bytes().decode() for path in screenshots] == [
+    assert sorted(path.read_bytes().decode() for path in captured_paths) == sorted(
         target.url for target in targets
-    ]
+    )
 
 
 @pytest.mark.asyncio
@@ -215,8 +179,8 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
         _concurrent_target(f"https://target-{index}.example", FetcherType.basic)
         for index in range(4)
     ]
-    context = _job_execution_context(targets, concurrency=2)
-    context.config.execution.delay_between = 0.02
+    cfg = _config_for_targets(targets, concurrency=2)
+    cfg.execution.delay_between = 0.02
     clock = 100.0
     started: list[float] = []
     first_wave_started = 0
@@ -227,7 +191,9 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
         clock += delay_seconds
         await asyncio.sleep(0)
 
-    context.budget.sleep = AsyncMock(side_effect=_paced_sleep)
+    budget = make_budget(max_duration_seconds=60)
+    budget.clock = lambda: clock
+    budget.sleep = AsyncMock(side_effect=_paced_sleep)
 
     async def _scrape(target, *_args, **_kwargs) -> TargetResult:
         nonlocal first_wave_started
@@ -240,19 +206,20 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
             await release_first_wave.wait()
         return TargetResult(url=target.url, status=TargetStatus.success)
 
-    worker_time = MagicMock()
-    worker_time.monotonic.side_effect = lambda: clock
+    fake_time = SimpleNamespace(monotonic=lambda: clock)
     with (
-        patch("scrapeyard.queue.worker.time", worker_time),
-        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
+        patch.object(RunBudget, "from_settings", return_value=budget),
+        patch("scrapeyard.queue.worker.time", fake_time),
     ):
-        results = await _run_targets(context, limiter, job_id="paced")
+        outcome = await run_scrape_task(
+            cfg, _scrape, job_id="paced", browser_limiter=limiter
+        )
 
-    assert len(results) == 4
+    assert len(outcome.saved_artifact["targets"]) == 4
     assert [
         later - earlier for earlier, later in zip(started, started[1:], strict=False)
     ] == pytest.approx([0.02, 0.02, 0.02])
-    assert [call.args[0] for call in context.budget.sleep.await_args_list] == pytest.approx(
+    assert [call.args[0] for call in budget.sleep.await_args_list] == pytest.approx(
         [0.02, 0.02, 0.02]
     )
 
@@ -260,9 +227,9 @@ async def test_delay_between_paces_actual_target_starts_after_semaphore_waits():
 @pytest.mark.asyncio
 async def test_post_target_delay_keeps_sequential_permit_until_completion_gap():
     targets = [_concurrent_target(f"https://shop.example/{i}", FetcherType.basic) for i in range(3)]
-    context = _job_execution_context(targets, concurrency=1)
-    context.config.execution.post_target_delay = 15
-    events = []
+    cfg = _config_for_targets(targets, concurrency=1)
+    cfg.execution.post_target_delay = 15
+    events: list[object] = []
 
     async def scrape(target, *_args, **_kwargs):
         events.append(target.url)
@@ -274,16 +241,31 @@ async def test_post_target_delay_keeps_sequential_permit_until_completion_gap():
         events.append(seconds)
         await asyncio.sleep(0)
 
-    context.budget.sleep = AsyncMock(side_effect=sleep)
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=scrape):
-        results = await _run_targets(context, BrowserExecutionLimiter(1), job_id="post-delay")
-    assert len(results) == 3
-    assert events == [targets[0].url, "finished", 15, targets[1].url, "finished", 15, targets[2].url, "finished"]
+    budget = make_budget(max_duration_seconds=60)
+    budget.sleep = AsyncMock(side_effect=sleep)
+    with patch.object(RunBudget, "from_settings", return_value=budget):
+        outcome = await run_scrape_task(
+            cfg, scrape, job_id="post-delay", browser_limiter=BrowserExecutionLimiter(1)
+        )
+    assert len(outcome.saved_artifact["targets"]) == 3
+    assert events == [
+        targets[0].url,
+        "finished",
+        15,
+        targets[1].url,
+        "finished",
+        15,
+        targets[2].url,
+        "finished",
+    ]
 
 
 def test_post_target_delay_schema_requires_sequential_execution():
     assert ExecutionConfig(concurrency=1, post_target_delay=15).post_target_delay == 15
-    for invalid in ({"concurrency": 2, "post_target_delay": 15}, {"concurrency": 1, "post_target_delay": -1}):
+    for invalid in (
+        {"concurrency": 2, "post_target_delay": 15},
+        {"concurrency": 1, "post_target_delay": -1},
+    ):
         with pytest.raises(ValueError):
             ExecutionConfig(**invalid)
 
@@ -294,24 +276,34 @@ async def test_post_target_delay_cannot_outlive_run_budget_or_start_next_target(
     # A frozen budget clock: the deadline cannot pass before the first target
     # on a slow runner, and the post-target sleep still times out in real time.
     budget = RunBudget.from_settings(
-        SimpleNamespace(run_max_duration_seconds=0.2), clock=lambda: 0.0
+        SimpleNamespace(run_max_duration_seconds=0.03), clock=lambda: 0.0
     )
-    context = replace(_job_execution_context(targets, concurrency=1), budget=budget)
-    context.config.execution.post_target_delay = 15
+    cfg = _config_for_targets(targets, concurrency=1)
+    cfg.execution.post_target_delay = 15
     limiter = BrowserExecutionLimiter(1)
-    with patch("scrapeyard.queue.worker.scrape_target", new_callable=AsyncMock) as scrape:
-        scrape.return_value = TargetResult(url=targets[0].url, status=TargetStatus.success)
-        with pytest.raises(BudgetExceeded):
-            await _run_targets(context, limiter, job_id="post-delay-budget")
-    assert scrape.await_count == 1
+    calls = 0
+
+    async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        nonlocal calls
+        calls += 1
+        return TargetResult(url=target.url, status=TargetStatus.success)
+
+    with patch.object(RunBudget, "from_settings", return_value=budget):
+        outcome = await run_scrape_task(
+            cfg, _scrape, job_id="post-delay-budget", browser_limiter=limiter
+        )
+
+    assert calls == 1
     assert limiter.active == 0
+    assert outcome.final_status is JobStatus.failed
+    assert outcome.saved_artifact["budget_error"]["limit_name"] == "run_duration_seconds"
 
 
 @pytest.mark.asyncio
 async def test_browser_limiter_is_shared_across_multiple_jobs():
     limiter = BrowserExecutionLimiter(2)
-    contexts = [
-        _job_execution_context(
+    configs = [
+        _config_for_targets(
             [
                 _concurrent_target(
                     f"https://job-{job_index}-target-{target_index}.example",
@@ -341,11 +333,37 @@ async def test_browser_limiter_is_shared_across_multiple_jobs():
         finally:
             active_fetches -= 1
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
-        tasks = [
-            asyncio.create_task(_run_targets(context, limiter, job_id=f"job-{index}"))
-            for index, context in enumerate(contexts)
-        ]
+    async def _run_job(index: int):
+        job = make_job(job_id=f"job-{index}", current_run_id=f"run-{index}")
+        job_store = AsyncMock()
+        job_store.get_job.return_value = job
+        job_store.claim_run.return_value = True
+        job_store.run_is_active.return_value = True
+        result_store = AsyncMock()
+        result_store.save_result.return_value = SimpleNamespace(
+            run_id=f"run-{index}", file_path="/tmp/r.json", record_count=0, serialized_bytes=64
+        )
+        error_store = AsyncMock()
+        error_store.count_errors_for_run.return_value = 0
+        await scrape_task(
+            job.job_id,
+            f"project: test\nname: job-{index}\n",
+            run_id=f"run-{index}",
+            job_store=job_store,
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=MagicMock(check=MagicMock(return_value=None)),
+            rate_limiter=AsyncMock(),
+            browser_limiter=limiter,
+        )
+        return result_store.save_result.await_args.args[1]["targets"]
+
+    with (
+        patch("scrapeyard.queue.worker.load_config", side_effect=configs),
+        patch("scrapeyard.queue.worker.get_settings", return_value=make_settings_mock()),
+        patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape),
+    ):
+        tasks = [asyncio.create_task(_run_job(index)) for index in range(2)]
         await asyncio.wait_for(first_pair_started.wait(), timeout=1)
         assert limiter.active == 2
 
@@ -362,7 +380,7 @@ async def test_basic_target_runs_while_browser_permit_is_exhausted():
     limiter = BrowserExecutionLimiter(1)
     dynamic = _concurrent_target("https://browser.example", FetcherType.dynamic)
     basic = _concurrent_target("https://basic.example", FetcherType.basic)
-    context = _job_execution_context([dynamic, basic])
+    cfg = _config_for_targets([dynamic, basic])
     browser_started = asyncio.Event()
     release_browser = asyncio.Event()
     basic_completed = asyncio.Event()
@@ -375,14 +393,15 @@ async def test_basic_target_runs_while_browser_permit_is_exhausted():
             basic_completed.set()
         return TargetResult(url=target.url, status=TargetStatus.success)
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
-        task = asyncio.create_task(_run_targets(context, limiter, job_id="mixed"))
-        await asyncio.wait_for(browser_started.wait(), timeout=1)
-        await asyncio.wait_for(basic_completed.wait(), timeout=1)
-        assert limiter.active == 1
+    task = asyncio.create_task(
+        run_scrape_task(cfg, _scrape, job_id="mixed", browser_limiter=limiter)
+    )
+    await asyncio.wait_for(browser_started.wait(), timeout=1)
+    await asyncio.wait_for(basic_completed.wait(), timeout=1)
+    assert limiter.active == 1
 
-        release_browser.set()
-        await asyncio.wait_for(task, timeout=1)
+    release_browser.set()
+    await asyncio.wait_for(task, timeout=1)
 
     assert limiter.active == 0
 
@@ -391,16 +410,15 @@ async def test_basic_target_runs_while_browser_permit_is_exhausted():
 async def test_browser_permit_recovers_after_target_exception():
     limiter = BrowserExecutionLimiter(1)
     target = _concurrent_target("https://failing.example", FetcherType.dynamic)
-    context = _job_execution_context([target])
+    cfg = _config_for_targets([target])
 
     async def _raise(*_args, **_kwargs) -> TargetResult:
         raise RuntimeError("browser crashed")
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_raise):
-        results = await _run_targets(context, limiter, job_id="failure")
+    outcome = await run_scrape_task(cfg, _raise, job_id="failure", browser_limiter=limiter)
 
-    assert results[0].status is TargetStatus.failed
-    assert results[0].error_detail == "RuntimeError: browser crashed"
+    assert outcome.saved_artifact["targets"][0]["status"] == "failed"
+    assert outcome.saved_artifact["targets"][0]["error_detail"] == "RuntimeError: browser crashed"
     assert limiter.active == 0
 
 
@@ -408,26 +426,28 @@ async def test_browser_permit_recovers_after_target_exception():
 async def test_target_metric_classifies_pre_result_exception_as_failed():
     limiter = BrowserExecutionLimiter(1)
     target = _concurrent_target("https://failing.example", FetcherType.basic)
-    context = _job_execution_context([target])
+    cfg = _config_for_targets([target])
+    circuit_breaker = MagicMock()
+    circuit_breaker.check.side_effect = RuntimeError("failed before result")
+    before = TARGETS.labels("failed", "basic")._value.get()
 
-    with (
-        patch(
-            "scrapeyard.queue.worker._fetch_and_validate_target",
-            side_effect=RuntimeError("failed before result"),
-        ),
-        patch("scrapeyard.queue.worker.observe_target") as observe,
-        pytest.raises(RuntimeError, match="failed before result"),
-    ):
-        await _run_targets(context, limiter, job_id="failure-metric")
+    outcome = await run_scrape_task(
+        cfg,
+        [],
+        job_id="failure-metric",
+        circuit_breaker=circuit_breaker,
+        browser_limiter=limiter,
+    )
 
-    assert observe.call_args.kwargs["status"] == "failed"
+    assert TARGETS.labels("failed", "basic")._value.get() == before + 1
+    outcome.job_store.fail_owned_run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_browser_permit_recovers_after_target_cancellation():
     limiter = BrowserExecutionLimiter(1)
     target = _concurrent_target("https://cancelled.example", FetcherType.stealthy)
-    context = _job_execution_context([target])
+    cfg = _config_for_targets([target])
     browser_started = asyncio.Event()
 
     async def _block(*_args, **_kwargs) -> TargetResult:
@@ -435,19 +455,21 @@ async def test_browser_permit_recovers_after_target_cancellation():
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_block):
-        task = asyncio.create_task(_run_targets(context, limiter, job_id="cancelled"))
-        await asyncio.wait_for(browser_started.wait(), timeout=1)
-        assert limiter.active == 1
+    task = asyncio.create_task(
+        run_scrape_task(cfg, _block, job_id="cancelled", browser_limiter=limiter)
+    )
+    await asyncio.wait_for(browser_started.wait(), timeout=1)
+    assert limiter.active == 1
 
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert limiter.active == 0
 
 
-def test_collect_result_payload_flattens_data_and_errors_in_order():
+@pytest.mark.asyncio
+async def test_collect_result_payload_flattens_data_and_errors_in_order():
     results = [
         TargetResult(
             url="https://a.example",
@@ -462,11 +484,15 @@ def test_collect_result_payload_flattens_data_and_errors_in_order():
             errors=["err-b1", "err-b2"],
         ),
     ]
+    cfg = _config_for_targets(
+        [_concurrent_target(r.url, FetcherType.basic) for r in results],
+        concurrency=1,
+    )
 
-    flat_data, all_errors = _collect_result_payload(results)
+    outcome = await run_scrape_task(cfg, results)
 
-    assert flat_data == [{"sku": "a1"}, {"sku": "a2"}]
-    assert all_errors == ["warn-a", "err-b1", "err-b2"]
+    assert outcome.saved_artifact["errors"] == ["warn-a", "err-b1", "err-b2"]
+    assert outcome.job_store.finalize_owned_run.await_args.args[3] == 2
 
 
 def test_resolve_target_runtime_context_uses_explicit_adaptive_override_and_proxy():
@@ -550,9 +576,8 @@ def test_resolve_target_runtime_context_enables_adaptive_for_scheduled_jobs_when
     assert context.artifacts_dir is None
 
 
-def test_format_output_merges_results_with_source_domains_and_target_metadata():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = GroupBy.merge
+@pytest.mark.asyncio
+async def test_format_output_merges_results_with_source_domains_and_target_metadata():
     results = [
         TargetResult(
             url="https://a.example/products",
@@ -569,14 +594,14 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
             pages_scraped=1,
         ),
     ]
-
-    payload = _format_output(
-        config,
-        results,
-        "job-1",
-        JobStatus.partial,
-        ["boom"],
+    config = _config_for_targets(
+        [_concurrent_target(r.url, FetcherType.basic) for r in results],
+        concurrency=1,
+        group_by=GroupBy.merge,
     )
+
+    outcome = await run_scrape_task(config, results, job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["status"] == "partial"
     assert payload["targets"] == [
@@ -609,8 +634,9 @@ def test_format_output_merges_results_with_source_domains_and_target_metadata():
     assert results[0].data == [{"sku": "a1"}]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("group_by", [GroupBy.target, GroupBy.merge])
-def test_materialized_output_accounts_every_persisted_component(group_by):
+async def test_materialized_output_accounts_every_persisted_component(group_by):
     config = ScrapeConfig.model_validate(
         {
             "project": "test",
@@ -634,7 +660,7 @@ def test_materialized_output_accounts_every_persisted_component(group_by):
         data=[record],
         pages_scraped=1,
     )
-    budget = RunBudget(
+    budget = make_budget(
         max_duration_seconds=60,
         max_fetched_bytes=1_000_000,
         max_extracted_records=100,
@@ -643,26 +669,22 @@ def test_materialized_output_accounts_every_persisted_component(group_by):
     )
     budget.reserve_estimated_result_bytes(compact_json_size(record) + 1)
 
-    payload = _materialize_output_artifact(
-        config,
-        [result],
-        "job-1",
-        JobStatus.complete,
-        [],
-        publish_results=True,
-        budget=budget,
-    )
+    with patch.object(RunBudget, "from_settings", return_value=budget):
+        outcome = await run_scrape_task(config, [result], job_id="job-1")
+    payload = outcome.saved_artifact
+    payload_materialized = {
+        k: v for k, v in payload.items() if k not in {"run_budget", "run_id", "config_hash"}
+    }
 
-    assert budget.estimated_result_bytes >= compact_json_size(payload)
+    assert budget.estimated_result_bytes >= compact_json_size(payload_materialized)
     if group_by is GroupBy.target:
         assert payload["results"]["example.com"]["data"] is result.data
     else:
         assert payload["results"][0]["_source"] == "example.com"
 
 
-def test_format_output_rejects_reserved_source_field_in_merge_record():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = GroupBy.merge
+@pytest.mark.asyncio
+async def test_format_output_rejects_reserved_source_field_in_merge_record():
     results = [
         TargetResult(
             url="https://shop.example/products",
@@ -670,12 +692,15 @@ def test_format_output_rejects_reserved_source_field_in_merge_record():
             data=[{"_source": "catalog-feed", "sku": "a1"}],
         )
     ]
+    config = _config_for_targets(
+        [_concurrent_target("https://shop.example/products", FetcherType.basic)],
+        group_by=GroupBy.merge,
+    )
 
-    with pytest.raises(
-        ValueError,
-        match="reserved merge field '_source'",
-    ):
-        _format_output(config, results, "job-1", JobStatus.complete, [])
+    outcome = await run_scrape_task(config, results, job_id="job-1")
+
+    outcome.result_store.save_result.assert_not_awaited()
+    outcome.job_store.fail_owned_run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -684,18 +709,13 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
     group_by: GroupBy,
 ):
     secret = "Vendor Value/91"
-    target = MagicMock(url="https://shop.example/items", fetcher=FetcherType.basic)
-    context = _job_execution_context([target])
-    context.config.output.group_by = group_by
-    context.config.execution.fail_strategy = FailStrategy.partial
-    context.config.resolved_secret_values = (secret,)
-    result_store = AsyncMock()
-    result_store.save_result.return_value = SaveResultMeta(
-        run_id="run-1",
-        file_path="/tmp/results/job-1/run-1.json",
-        record_count=1,
-        serialized_bytes=512,
+    target = _concurrent_target("https://shop.example/items", FetcherType.basic)
+    config = _config_for_targets(
+        [target],
+        group_by=group_by,
+        fail_strategy=FailStrategy.partial,
     )
+    config.resolved_secret_values = (secret,)
     extracted = {
         "key": "product-key",
         "session_name": "morning",
@@ -712,21 +732,15 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
         debug={"session_name": "diagnostic-session"},
     )
 
-    await _persist_job_results(
-        context=context,
-        job_id="job-1",
-        run_id="run-1",
-        all_results=[result],
-        result_store=result_store,
-    )
+    outcome = await run_scrape_task(config, [result], job_id="job-1", run_id="run-1")
+    artifact = outcome.saved_artifact
 
-    artifact = result_store.save_result.await_args.args[1]
     if group_by == GroupBy.merge:
         persisted_record = artifact["results"][0]
         assert persisted_record["_source"] == "shop.example"
     else:
         persisted_record = artifact["results"]["shop.example"]["data"][0]
-        assert artifact["results"]["shop.example"]["debug"]["session_name"] == ("<redacted>")
+        assert artifact["results"]["shop.example"]["debug"]["session_name"] == "<redacted>"
 
     assert persisted_record == {
         "key": "product-key",
@@ -747,9 +761,8 @@ async def test_persisted_results_preserve_public_data_and_redact_resolved_secret
     }
 
 
-def test_format_output_groups_results_by_domain_without_mutating_group_items():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = "target"
+@pytest.mark.asyncio
+async def test_format_output_groups_results_by_domain_without_mutating_group_items():
     first_item = {"sku": "a1"}
     second_item = {"sku": "b1"}
     results = [
@@ -760,14 +773,14 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
             url="https://b.example/products", status="failed", data=[second_item], errors=["boom"]
         ),
     ]
-
-    payload = _format_output(
-        config,
-        results,
-        "job-1",
-        JobStatus.partial,
-        ["boom"],
+    config = _config_for_targets(
+        [_concurrent_target(r.url, FetcherType.basic) for r in results],
+        concurrency=1,
+        group_by="target",
     )
+
+    outcome = await run_scrape_task(config, results, job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["results"] == {
         "a.example": {
@@ -795,29 +808,27 @@ def test_format_output_groups_results_by_domain_without_mutating_group_items():
     assert second_item == {"sku": "b1"}
 
 
-def test_format_output_keeps_same_domain_targets_separate():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = "target"
+@pytest.mark.asyncio
+async def test_format_output_keeps_same_domain_targets_separate():
     results = [
         TargetResult(url="https://shop.example/products/a", status="success", data=[{"sku": "a"}]),
         TargetResult(url="https://shop.example/products/b", status="success", data=[{"sku": "b"}]),
     ]
-
-    payload = _format_output(
-        config,
-        results,
-        "job-1",
-        JobStatus.complete,
-        [],
+    config = _config_for_targets(
+        [_concurrent_target(r.url, FetcherType.basic) for r in results],
+        concurrency=1,
+        group_by="target",
     )
+
+    outcome = await run_scrape_task(config, results, job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["results"]["shop.example"]["data"] == [{"sku": "a"}]
     assert payload["results"]["shop.example#2"]["data"] == [{"sku": "b"}]
 
 
-def test_format_output_uses_canonical_source_grouping():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = GroupBy.merge
+@pytest.mark.asyncio
+async def test_format_output_uses_canonical_source_grouping():
     results = [
         TargetResult(
             url="https://BÜCHER.example.:443/products",
@@ -825,21 +836,19 @@ def test_format_output_uses_canonical_source_grouping():
             data=[{"sku": "a"}],
         )
     ]
-
-    payload = _format_output(
-        config,
-        results,
-        "job-1",
-        JobStatus.complete,
-        [],
+    config = _config_for_targets(
+        [_concurrent_target("https://BÜCHER.example.:443/products", FetcherType.basic)],
+        group_by=GroupBy.merge,
     )
+
+    outcome = await run_scrape_task(config, results, job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["results"] == [{"sku": "a", "_source": "xn--bcher-kva.example"}]
 
 
-def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = GroupBy.merge
+@pytest.mark.asyncio
+async def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     result = TargetResult(
         url="https://user:pass@example.com:8443/products",
         status="failed",
@@ -855,14 +864,14 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
             "screenshot_path": "/data/artifacts/job/run/dynamic-main.png",
         },
     )
-
-    payload = _format_output(
-        config,
-        [result],
-        "job-1",
-        JobStatus.failed,
-        result.errors,
+    config = _config_for_targets(
+        [_concurrent_target(result.url, FetcherType.basic)],
+        group_by=GroupBy.merge,
+        fail_strategy=FailStrategy.continue_,
     )
+
+    outcome = await run_scrape_task(config, [result], job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["targets"][0]["url"] == "https://example.com:8443/products"
     assert payload["targets"][0]["error_detail"] == "redirected to https://example.com/private"
@@ -874,9 +883,8 @@ def test_format_output_redacts_url_userinfo_from_metadata_and_debug():
     assert payload["results"] == [{"sku": "a1", "_source": "example.com:8443"}]
 
 
-def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debug():
-    config = MagicMock(project="test", name="job")
-    config.output.group_by = GroupBy.merge
+@pytest.mark.asyncio
+async def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debug():
     result = TargetResult(
         url="https://example.com/products?api_key=secret&page=2",
         status="failed",
@@ -890,14 +898,13 @@ def test_format_output_redacts_sensitive_url_query_values_from_metadata_and_debu
             ],
         },
     )
-
-    payload = _format_output(
-        config,
-        [result],
-        "job-1",
-        JobStatus.failed,
-        result.errors,
+    config = _config_for_targets(
+        [_concurrent_target(result.url, FetcherType.basic)],
+        group_by=GroupBy.merge,
     )
+
+    outcome = await run_scrape_task(config, [result], job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["targets"][0]["url"] == (
         "https://example.com/products?api_key=<redacted>&page=<redacted>"
@@ -921,6 +928,7 @@ def _merge_config(urls: list[str], secrets: tuple[str, ...], group_by: GroupBy) 
         {
             "project": "test",
             "name": "job",
+            "execution": {"concurrency": 1},
             "output": {"group_by": group_by.value},
             "targets": [{"url": url, "selectors": {"sku": ".sku"}} for url in urls],
         }
@@ -929,80 +937,54 @@ def _merge_config(urls: list[str], secrets: tuple[str, ...], group_by: GroupBy) 
     return config
 
 
-def _roomy_budget() -> RunBudget:
-    return RunBudget(
-        max_duration_seconds=60,
-        max_fetched_bytes=1_000_000,
-        max_extracted_records=1_000,
-        max_serialized_result_bytes=1_000_000,
-        max_browser_debug_bytes=1_000,
-    )
-
-
-def test_merged_record_sources_are_redacted_once_per_distinct_source(monkeypatch):
-    from scrapeyard.queue import worker
-
+@pytest.mark.asyncio
+async def test_merged_record_sources_are_redacted_once_per_distinct_source():
     urls = ["https://shop.example/a", "https://plain.example/b", "https://shop.example/c"]
-    redacted_sources: list[str] = []
-    real_redact = worker.redact_deployment_secrets_with_count
 
-    def _counting_redact(text, secret_values):
-        redacted_sources.append(text)
-        return real_redact(text, secret_values)
-
-    monkeypatch.setattr(worker, "redact_deployment_secrets_with_count", _counting_redact)
-
-    def _materialize(secret: str) -> tuple[dict, int]:
+    async def _run_with_secret(secret: str) -> tuple[dict, int]:
         results = [
-            TargetResult(url=url, status="success", data=[{"sku": f"{index}-{n}"} for n in range(20)])
+            TargetResult(
+                url=url,
+                status="success",
+                data=[{"sku": f"{index}-{n}"} for n in range(20)],
+            )
             for index, url in enumerate(urls)
         ]
-        budget = _roomy_budget()
-        payload = _materialize_output_artifact(
-            _merge_config(urls, (secret,), GroupBy.merge),
-            results,
-            "job-1",
-            JobStatus.complete,
-            [],
-            publish_results=True,
-            budget=budget,
-        )
-        return payload, budget.estimated_result_bytes
+        budget = make_budget(max_extracted_records=1_000, max_browser_debug_bytes=1_000)
+        with patch.object(RunBudget, "from_settings", return_value=budget):
+            outcome = await run_scrape_task(
+                _merge_config(urls, (secret,), GroupBy.merge),
+                results,
+                job_id="job-1",
+            )
+        return outcome.saved_artifact, budget.estimated_result_bytes
 
-    _unmatched, unmatched_estimate = _materialize("absent")
-    redacted_sources.clear()
-    payload, estimate = _materialize("shop")
+    _unmatched, unmatched_estimate = await _run_with_secret("absent")
+    payload, estimate = await _run_with_secret("shop")
 
-    assert redacted_sources == ["shop.example", "plain.example"]
     assert [item["_source"] for item in payload["results"]] == (
         ["<redacted>.example"] * 20 + ["plain.example"] * 20 + ["<redacted>.example"] * 20
     )
     assert payload["result_redaction"] == {"deployment_secret_matches": 40}
-    # Each of the 40 redacted sources reserves its growth, as before.
     growth = len("<redacted>.example") - len("shop.example")
-    assert estimate - unmatched_estimate == 40 * growth + compact_json_size(
+    # 40 merged record _source fields plus the 2 target summary URLs grew by *growth*.
+    assert estimate - unmatched_estimate == 42 * growth + compact_json_size(
         {"result_redaction": payload["result_redaction"]}
     )
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("group_by", [GroupBy.merge, GroupBy.target])
-def test_records_are_not_copied_for_redaction_without_secrets(monkeypatch, group_by):
-    from scrapeyard.queue import worker
-
+async def test_records_are_not_copied_for_redaction_without_secrets(group_by):
     config = _merge_config(["https://shop.example/a"], (), group_by)
     record = {"sku": "a1", "tags": ["x"]}
     result = TargetResult(url="https://shop.example/a", status="success", data=[record])
-    budget = _roomy_budget()
+    budget = make_budget(max_extracted_records=1_000, max_browser_debug_bytes=1_000)
     budget.reserve_estimated_result_bytes(compact_json_size(record) + 1)
-    monkeypatch.setattr(
-        worker,
-        "redact_deployment_secrets_in_value_with_count",
-        MagicMock(side_effect=AssertionError("records redacted without secrets")),
-    )
 
-    payload = _materialize_output_artifact(
-        config, [result], "job-1", JobStatus.complete, [], publish_results=True, budget=budget,
-    )
+    with patch.object(RunBudget, "from_settings", return_value=budget):
+        outcome = await run_scrape_task(config, [result], job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert result.data[0] is record
     if group_by is GroupBy.target:
@@ -1017,16 +999,46 @@ async def test_each_target_checks_run_ownership_once_before_its_fetch():
     targets = [
         _concurrent_target(f"https://t{index}.example", FetcherType.basic) for index in range(3)
     ]
-    context = _job_execution_context(targets, concurrency=1)
+    cfg = _config_for_targets(targets, concurrency=1)
+    checkpoints: list[str] = []
 
     async def _scrape(target, *_args, **_kwargs) -> TargetResult:
+        checkpoints.append(f"scrape:{target.url}")
         return TargetResult(url=target.url, status=TargetStatus.success)
 
-    with patch("scrapeyard.queue.worker.scrape_target", side_effect=_scrape):
-        await _run_targets(context, BrowserExecutionLimiter(1), job_id="checks")
+    job_store = AsyncMock()
+    job_store.get_job.return_value = make_job(job_id="checks", current_run_id="run-1")
+    job_store.claim_run.return_value = True
 
-    checkpoints = [call.args[0] for call in context.activity.checkpoint.await_args_list]
-    assert checkpoints == ["before_target_fetch", "after_target_fetch"] * 3
+    async def _check_active(_job_id: str, _run_id: str) -> bool:
+        checkpoints.append("ownership_check")
+        return True
+
+    job_store.run_is_active.side_effect = _check_active
+    await run_scrape_task(
+        cfg,
+        _scrape,
+        job_id="checks",
+        run_id="run-1",
+        job_store=job_store,
+        browser_limiter=BrowserExecutionLimiter(1),
+    )
+
+    assert checkpoints == [
+        "ownership_check",
+        "ownership_check",
+        "scrape:https://t0.example",
+        "ownership_check",
+        "ownership_check",
+        "scrape:https://t1.example",
+        "ownership_check",
+        "ownership_check",
+        "scrape:https://t2.example",
+        "ownership_check",
+        "ownership_check",
+        "ownership_check",
+        "ownership_check",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1039,11 +1051,20 @@ async def test_skipped_delivery_does_not_parse_its_config(monkeypatch, status, c
     from scrapeyard.queue import worker
 
     job_store = AsyncMock()
-    job_store.get_job.return_value = MagicMock(status=status, current_run_id=current_run_id)
+    job_store.get_job.return_value = make_job(status=status, current_run_id=current_run_id)
     load_config = MagicMock(side_effect=AssertionError("config parsed"))
     monkeypatch.setattr(worker, "load_config", load_config)
 
-    context = await worker._load_job_execution_context("job-1", "unparsed: yaml", "run-1", job_store)
+    await scrape_task(
+        "job-1",
+        "unparsed: yaml",
+        run_id="run-1",
+        job_store=job_store,
+        result_store=AsyncMock(),
+        error_store=AsyncMock(),
+        circuit_breaker=MagicMock(),
+        rate_limiter=AsyncMock(),
+    )
 
-    assert context is None
     load_config.assert_not_called()
+    job_store.claim_run.assert_not_awaited()

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
@@ -26,24 +29,145 @@ from scrapeyard.queue.reconciliation import (
     QueuedReconciliationError,
     QueuedReconciliationSummary,
 )
+from scrapeyard.runtime.health import ProbeResult
 from scrapeyard.runtime.instance_guard import SingleInstanceError
 from scrapeyard.storage.types import RunRecovery
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
 
 
+def _lifespan_settings(tmp_path: Path, **overrides: Any) -> SimpleNamespace:
+    defaults: dict[str, Any] = {
+        "log_dir": str(tmp_path / "logs"),
+        "log_level": "INFO",
+        "db_dir": str(tmp_path / "db"),
+        "redis_dsn": "redis://redis:6379/0",
+        "queue_name": "scrapeyard-test",
+        "storage_results_dir": str(tmp_path / "results"),
+        "adaptive_dir": str(tmp_path / "adaptive"),
+        "browser_debug_enabled": False,
+        "workers_shutdown_grace_seconds": 7,
+        "workers_queued_claim_timeout_seconds": 300,
+        "workers_queued_reconciliation_interval_seconds": 60,
+        "workers_queued_reconciliation_batch_size": 100,
+        "workers_running_heartbeat_timeout_seconds": 600,
+        "workers_running_reconciliation_interval_seconds": 60,
+        "workers_running_reconciliation_batch_size": 100,
+        "storage_cleanup_interval_seconds": 21600,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _patch_lifespan_basics(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+    *,
+    startup: Any = None,
+    shutdown: Any = None,
+) -> SimpleNamespace:
+    hooks = SimpleNamespace(
+        setup_logging=MagicMock(),
+        init_db=AsyncMock(),
+        migrate_persisted_secrets=AsyncMock(),
+        ensure_dirs=MagicMock(),
+        recover_stale=AsyncMock(),
+        startup=startup or AsyncMock(),
+        shutdown=shutdown or AsyncMock(),
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "setup_logging", hooks.setup_logging)
+    monkeypatch.setattr(main_module, "init_db", hooks.init_db)
+    monkeypatch.setattr(main_module, "migrate_persisted_secrets", hooks.migrate_persisted_secrets)
+    monkeypatch.setattr(main_module, "_ensure_runtime_directories", hooks.ensure_dirs)
+    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", hooks.recover_stale)
+    monkeypatch.setattr(main_module, "_startup_runtime_services", hooks.startup)
+    monkeypatch.setattr(main_module, "_shutdown_runtime_services", hooks.shutdown)
+    return hooks
+
+
+def _patch_shutdown_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
+    *,
+    worker_pool: Any = None,
+    close_webhook: Any = None,
+    close_database: Any = None,
+) -> tuple[Any, Any]:
+    app.state.worker_pool = worker_pool or SimpleNamespace(stop=AsyncMock())
+    webhook_fn = close_webhook if close_webhook is not None else AsyncMock()
+    db_fn = close_database if close_database is not None else AsyncMock()
+    monkeypatch.setattr(main_module, "close_webhook_dispatcher", webhook_fn)
+    monkeypatch.setattr(main_module, "close_db", db_fn)
+    return webhook_fn, db_fn
+
+
+def _patch_health_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pool: SimpleNamespace,
+    settings: SimpleNamespace | None = None,
+    redis_probe: Any = None,
+    sqlite_probe: Any = None,
+    storage_probe: Any = None,
+    disk_probe: Any = None,
+    background_probes: Any = None,
+) -> None:
+    async def _ok_async(*_args: Any, **_kwargs: Any) -> ProbeResult:
+        return ProbeResult(True)
+
+    def _ok_sync(*_args: Any, **_kwargs: Any) -> ProbeResult:
+        return ProbeResult(True)
+
+    if settings is not None:
+        monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    monkeypatch.setattr(main_module, "probe_redis", redis_probe or _ok_async)
+    monkeypatch.setattr(main_module, "probe_sqlite", sqlite_probe or _ok_async)
+    monkeypatch.setattr(main_module, "probe_result_storage", storage_probe or _ok_sync)
+    monkeypatch.setattr(main_module, "probe_disk", disk_probe or _ok_sync)
+    monkeypatch.setattr(
+        main_module,
+        "_background_probes",
+        background_probes
+        or (
+            lambda: {
+                name: ProbeResult(True)
+                for name in ("worker", "scheduler", "cleanup", "webhook")
+            }
+        ),
+    )
+
+
+def _health_pool(
+    *,
+    active_tasks: int = 0,
+    active_browsers: int = 0,
+    queue_depths: Any = None,
+) -> SimpleNamespace:
+    async def _empty_depths() -> dict[str, int]:
+        return {"high": 0, "normal": 0, "low": 0}
+
+    return SimpleNamespace(
+        max_concurrent=2,
+        active_tasks=active_tasks,
+        max_browsers=1,
+        active_browsers=active_browsers,
+        queue_depths=queue_depths or _empty_depths,
+    )
+
+
 @pytest.mark.asyncio
 async def test_health_cache_project_summary_classifies_statuses():
-    fake_store = MagicMock(
-        summary_by_project=AsyncMock(
-            return_value=[
+    class _SummaryStore:
+        async def summary_by_project(self):
+            return [
                 ("healthy-project", "complete", 2),
                 ("degraded-project", "running", 1),
                 ("degraded-project", "partial", 1),
                 ("failing-project", "failed", 1),
             ]
-        )
-    )
-    cache = main_module.HealthCache(lambda: fake_store, cache_ttl_seconds=60)
+
+    cache = main_module.HealthCache(_SummaryStore, cache_ttl_seconds=60)
 
     summary = await cache.project_summary()
 
@@ -55,14 +179,21 @@ async def test_health_cache_project_summary_classifies_statuses():
 
 @pytest.mark.asyncio
 async def test_health_cache_uses_cached_summary_until_ttl_expires():
-    fake_store = MagicMock(summary_by_project=AsyncMock(return_value=[("proj", "complete", 1)]))
-    cache = main_module.HealthCache(lambda: fake_store, cache_ttl_seconds=60)
+    calls = 0
+
+    class _CountingStore:
+        async def summary_by_project(self):
+            nonlocal calls
+            calls += 1
+            return [("proj", "complete", 1)]
+
+    cache = main_module.HealthCache(_CountingStore, cache_ttl_seconds=60)
 
     first = await cache.project_summary()
     second = await cache.project_summary()
 
     assert first == second
-    fake_store.summary_by_project.assert_awaited_once()
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -80,24 +211,7 @@ async def test_health_cache_surfaces_store_unavailability():
 @pytest.mark.asyncio
 async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp_path, request):
     app = FastAPI()
-    settings = SimpleNamespace(
-        log_dir="/tmp/logs",
-        log_level="DEBUG",
-        db_dir=str(tmp_path / "db"),
-        redis_dsn="redis://redis:6379/0",
-        queue_name="scrapeyard-test",
-        storage_results_dir=str(tmp_path / "results"),
-        adaptive_dir=str(tmp_path / "adaptive"),
-        browser_debug_enabled=False,
-        workers_shutdown_grace_seconds=7,
-        workers_queued_claim_timeout_seconds=300,
-        workers_queued_reconciliation_interval_seconds=60,
-        workers_queued_reconciliation_batch_size=100,
-        workers_running_heartbeat_timeout_seconds=600,
-        workers_running_reconciliation_interval_seconds=60,
-        workers_running_reconciliation_batch_size=100,
-        storage_cleanup_interval_seconds=21600,
-    )
+    settings = _lifespan_settings(tmp_path, log_dir="/tmp/logs", log_level="DEBUG")
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     job_store = SimpleNamespace(
         recover_stale_running_jobs=AsyncMock(
@@ -214,7 +328,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
         signal.raise_signal(signal.SIGTERM)
         pool.stop_taking_runs.assert_called_once_with()
         assert server_stops == [signal.SIGTERM]
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
 
     assert signal.getsignal(signal.SIGTERM) == server_handle_exit
     main_module.setup_logging.assert_called_once_with("/tmp/logs", "DEBUG")
@@ -247,7 +361,7 @@ async def test_lifespan_initializes_and_shuts_down_dependencies(monkeypatch, tmp
     worker_timeout = pool.stop.await_args.kwargs["timeout"]
     webhook_timeout = main_module.close_webhook_dispatcher.await_args.kwargs["timeout"]
     # The grace counts from the signal, so the wait before shutdown came off it.
-    assert 0 <= webhook_timeout <= worker_timeout <= 7 - 0.3
+    assert 0 <= webhook_timeout <= worker_timeout <= 7 - 0.05
     main_module.close_db.assert_awaited_once()
     heap.thaw.assert_called_once_with()
     assert app.state.instance_lock is None
@@ -365,11 +479,7 @@ async def test_shutdown_retains_shared_services_for_unresolved_worker(monkeypatc
         stop=AsyncMock(side_effect=asyncio.TimeoutError),
         shutdown_pending=True,
     )
-    app.state.worker_pool = worker
-    close_webhook = AsyncMock()
-    close_database = AsyncMock()
-    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
-    monkeypatch.setattr(main_module, "close_db", close_database)
+    close_webhook, close_database = _patch_shutdown_hooks(monkeypatch, app, worker_pool=worker)
 
     with pytest.raises(RuntimeError, match="shared services retained"):
         await main_module._shutdown_runtime_services(
@@ -412,11 +522,7 @@ async def test_shutdown_retains_shared_services_for_cancellation_resistant_backg
     task = asyncio.create_task(resistant_task())
     await started.wait()
     setattr(app.state, task_attribute, task)
-    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
-    close_webhook = AsyncMock()
-    close_database = AsyncMock()
-    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
-    monkeypatch.setattr(main_module, "close_db", close_database)
+    close_webhook, close_database = _patch_shutdown_hooks(monkeypatch, app)
 
     try:
         with pytest.raises(RuntimeError, match=phase):
@@ -492,11 +598,7 @@ async def test_shutdown_closes_the_stores_and_waits_for_lingering_thread_work(mo
 @pytest.mark.parametrize("phase", sorted(_THREAD_POOLS))
 async def test_shutdown_closes_the_stores_when_thread_work_outlives_the_grace(monkeypatch, phase):
     app = FastAPI()
-    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
-    close_webhook = AsyncMock()
-    close_database = AsyncMock()
-    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
-    monkeypatch.setattr(main_module, "close_db", close_database)
+    close_webhook, close_database = _patch_shutdown_hooks(monkeypatch, app)
     release = threading.Event()
     await _lingering_thread_work(phase, release)
 
@@ -518,14 +620,14 @@ async def test_shutdown_still_retains_shared_services_for_an_unresolved_worker_w
     monkeypatch,
 ):
     app = FastAPI()
-    app.state.worker_pool = SimpleNamespace(
-        stop=AsyncMock(side_effect=asyncio.TimeoutError),
-        shutdown_pending=True,
+    close_webhook, close_database = _patch_shutdown_hooks(
+        monkeypatch,
+        app,
+        worker_pool=SimpleNamespace(
+            stop=AsyncMock(side_effect=asyncio.TimeoutError),
+            shutdown_pending=True,
+        ),
     )
-    close_webhook = AsyncMock()
-    close_database = AsyncMock()
-    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
-    monkeypatch.setattr(main_module, "close_db", close_database)
     release = threading.Event()
     await _lingering_thread_work("run_threads", release)
 
@@ -542,12 +644,12 @@ async def test_shutdown_still_retains_shared_services_for_an_unresolved_worker_w
 @pytest.mark.asyncio
 async def test_shutdown_retains_database_for_unresolved_webhook_task(monkeypatch):
     app = FastAPI()
-    app.state.worker_pool = SimpleNamespace(stop=AsyncMock())
     app.state.webhook_dispatcher = SimpleNamespace(shutdown_pending=True)
-    close_webhook = AsyncMock(side_effect=TimeoutError("webhook workers"))
-    close_database = AsyncMock()
-    monkeypatch.setattr(main_module, "close_webhook_dispatcher", close_webhook)
-    monkeypatch.setattr(main_module, "close_db", close_database)
+    _, close_database = _patch_shutdown_hooks(
+        monkeypatch,
+        app,
+        close_webhook=AsyncMock(side_effect=TimeoutError("webhook workers")),
+    )
 
     with pytest.raises(RuntimeError, match="shared services retained"):
         await main_module._shutdown_runtime_services(
@@ -680,16 +782,7 @@ async def test_shutdown_deadline_bounds_cancellation_resistant_database(monkeypa
 @pytest.mark.asyncio
 async def test_lifespan_rejects_second_instance_before_database_start(monkeypatch, tmp_path):
     app = FastAPI()
-    settings = SimpleNamespace(
-        log_dir=str(tmp_path / "logs"),
-        log_level="INFO",
-        db_dir=str(tmp_path / "db"),
-        redis_dsn="redis://redis:6379/0",
-        queue_name="shared-queue",
-        storage_results_dir=str(tmp_path / "results"),
-        adaptive_dir=str(tmp_path / "adaptive"),
-        workers_shutdown_grace_seconds=7,
-    )
+    settings = _lifespan_settings(tmp_path, queue_name="shared-queue")
     held_lock = main_module.SingleInstanceLock(
         main_module.instance_lock_path(settings.db_dir),
         main_module.instance_identity(
@@ -699,12 +792,7 @@ async def test_lifespan_rejects_second_instance_before_database_start(monkeypatc
         ),
     )
     held_lock.acquire()
-    init_db = AsyncMock()
-    shutdown = AsyncMock()
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
-    monkeypatch.setattr(main_module, "init_db", init_db)
-    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+    hooks = _patch_lifespan_basics(monkeypatch, settings)
 
     try:
         with pytest.raises(SingleInstanceError, match="Another Scrapeyard"):
@@ -713,8 +801,8 @@ async def test_lifespan_rejects_second_instance_before_database_start(monkeypatc
     finally:
         held_lock.release()
 
-    init_db.assert_not_awaited()
-    shutdown.assert_not_awaited()
+    hooks.init_db.assert_not_awaited()
+    hooks.shutdown.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -723,11 +811,8 @@ async def test_lifespan_retains_instance_guard_for_unresolved_worker(
     tmp_path,
 ):
     app = FastAPI()
-    settings = SimpleNamespace(
-        log_dir=str(tmp_path / "logs"),
-        log_level="INFO",
-        db_dir=str(tmp_path / "db"),
-        redis_dsn="redis://redis:6379/0",
+    settings = _lifespan_settings(
+        tmp_path,
         queue_name="retained-worker",
         workers_shutdown_grace_seconds=0,
     )
@@ -736,17 +821,11 @@ async def test_lifespan_retains_instance_guard_for_unresolved_worker(
     async def startup(target_app: FastAPI) -> None:
         target_app.state.worker_pool = worker
 
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
-    monkeypatch.setattr(main_module, "init_db", AsyncMock())
-    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
-    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
-    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
-    monkeypatch.setattr(main_module, "_startup_runtime_services", startup)
-    monkeypatch.setattr(
-        main_module,
-        "_shutdown_runtime_services",
-        AsyncMock(side_effect=RuntimeError("worker still live")),
+    _patch_lifespan_basics(
+        monkeypatch,
+        settings,
+        startup=startup,
+        shutdown=AsyncMock(side_effect=RuntimeError("worker still live")),
     )
 
     with pytest.raises(RuntimeError, match="worker still live"):
@@ -777,11 +856,8 @@ async def test_lifespan_retains_instance_guard_for_any_unresolved_owned_task(
     tmp_path,
 ):
     app = FastAPI()
-    settings = SimpleNamespace(
-        log_dir=str(tmp_path / "logs"),
-        log_level="INFO",
-        db_dir=str(tmp_path / "db"),
-        redis_dsn="redis://redis:6379/0",
+    settings = _lifespan_settings(
+        tmp_path,
         queue_name="retained-background-task",
         workers_shutdown_grace_seconds=0,
     )
@@ -790,14 +866,7 @@ async def test_lifespan_retains_instance_guard_for_any_unresolved_owned_task(
         target_app.state.shutdown_pending = True
         raise RuntimeError("background task still live")
 
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
-    monkeypatch.setattr(main_module, "init_db", AsyncMock())
-    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
-    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
-    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
-    monkeypatch.setattr(main_module, "_startup_runtime_services", AsyncMock())
-    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+    _patch_lifespan_basics(monkeypatch, settings, shutdown=shutdown)
 
     with pytest.raises(RuntimeError, match="background task still live"):
         async with main_module.lifespan(app):
@@ -989,70 +1058,25 @@ async def test_redis_inspection_failure_prevents_scheduler_start(monkeypatch):
 @pytest.mark.asyncio
 async def test_lifespan_shutdown_runs_when_serving_raises(monkeypatch, tmp_path):
     app = FastAPI()
-    settings = SimpleNamespace(
-        log_dir="/tmp/logs",
-        log_level="DEBUG",
-        db_dir=str(tmp_path / "db"),
-        redis_dsn="redis://redis:6379/0",
-        queue_name="scrapeyard-test",
-        storage_results_dir="/tmp/results",
-        adaptive_dir="/tmp/adaptive",
-        workers_shutdown_grace_seconds=7,
-    )
-    shutdown = AsyncMock()
-
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "setup_logging", MagicMock())
-    monkeypatch.setattr(main_module, "init_db", AsyncMock())
-    monkeypatch.setattr(main_module, "migrate_persisted_secrets", AsyncMock())
-    monkeypatch.setattr(main_module, "_ensure_runtime_directories", MagicMock())
-    monkeypatch.setattr(main_module, "_recover_stale_running_jobs", AsyncMock())
-    monkeypatch.setattr(main_module, "_startup_runtime_services", AsyncMock())
-    monkeypatch.setattr(main_module, "_shutdown_runtime_services", shutdown)
+    settings = _lifespan_settings(tmp_path, log_dir="/tmp/logs", log_level="DEBUG")
+    hooks = _patch_lifespan_basics(monkeypatch, settings)
 
     with pytest.raises(RuntimeError, match="boom"):
         async with main_module.lifespan(app):
             raise RuntimeError("boom")
 
-    shutdown.assert_awaited_once_with(app, shutdown_grace_seconds=7)
+    hooks.shutdown.assert_awaited_once_with(app, shutdown_grace_seconds=7)
 
 
 @pytest.mark.asyncio
 async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
-    import json
-
-    from scrapeyard.runtime.health import ProbeResult
-
-    pool = SimpleNamespace(
-        max_concurrent=2,
-        active_tasks=2,
-        max_browsers=1,
-        active_browsers=1,
-        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
-    )
-    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    _patch_health_probes(monkeypatch, pool=_health_pool(active_tasks=2, active_browsers=1))
     monkeypatch.setattr(
         main_module._health,
         "project_summary",
         AsyncMock(return_value={"proj": {"status": "healthy"}}),
     )
     monkeypatch.setattr(main_module._health, "start_time", 1.0)
-
-    async def _ok_async(*_a, **_kw):
-        return ProbeResult(True)
-
-    def _ok_sync(*_a, **_kw):
-        return ProbeResult(True)
-
-    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
-    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
-    monkeypatch.setattr(main_module, "probe_disk", _ok_sync)
-    monkeypatch.setattr(main_module, "probe_result_storage", _ok_sync)
-    monkeypatch.setattr(
-        main_module,
-        "_background_probes",
-        lambda: {name: ProbeResult(True) for name in ("worker", "scheduler", "cleanup", "webhook")},
-    )
     import scrapeyard.runtime.health as runtime_health
 
     monkeypatch.setattr(runtime_health.time, "monotonic", lambda: 13.3)
@@ -1068,46 +1092,21 @@ async def test_health_returns_degraded_when_pool_is_saturated(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_filters_project_summary_for_scoped_monitor(monkeypatch):
-    import json
-
-    from scrapeyard.runtime.health import ProbeResult
-
     settings = SimpleNamespace(
         health_include_projects=True,
         health_probe_timeout_seconds=0.5,
         storage_results_dir="/tmp/results",
         health_disk_free_min_mb=1,
     )
-    pool = SimpleNamespace(
-        max_concurrent=2,
-        active_tasks=0,
-        max_browsers=1,
-        active_browsers=0,
-        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
-    )
     summaries = {
         "alpha": {"job_count": 1, "status": "healthy", "status_counts": {}},
         "beta": {"job_count": 2, "status": "failing", "status_counts": {}},
     }
-
-    async def _ok_async(*_args, **_kwargs):
-        return ProbeResult(True)
-
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    _patch_health_probes(monkeypatch, pool=_health_pool(), settings=settings)
     monkeypatch.setattr(
         main_module._health,
         "project_summary",
         AsyncMock(return_value=summaries),
-    )
-    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
-    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
-    monkeypatch.setattr(main_module, "probe_result_storage", lambda *_args: ProbeResult(True))
-    monkeypatch.setattr(main_module, "probe_disk", lambda *_args: ProbeResult(True))
-    monkeypatch.setattr(
-        main_module,
-        "_background_probes",
-        lambda: {name: ProbeResult(True) for name in ("worker", "scheduler", "cleanup", "webhook")},
     )
 
     response = await main_module.health(allowed_projects=frozenset({"alpha"}))
@@ -1118,22 +1117,11 @@ async def test_health_filters_project_summary_for_scoped_monitor(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_project_summary_timeout_is_bounded_and_unhealthy(monkeypatch):
-    import json
-
-    from scrapeyard.runtime.health import ProbeResult
-
     settings = SimpleNamespace(
         health_include_projects=True,
         health_probe_timeout_seconds=0.01,
         storage_results_dir="/tmp/results",
         health_disk_free_min_mb=1,
-    )
-    pool = SimpleNamespace(
-        max_concurrent=2,
-        active_tasks=0,
-        max_browsers=1,
-        active_browsers=0,
-        queue_depths=AsyncMock(return_value={"high": 0, "normal": 0, "low": 0}),
     )
 
     async def never_completes():
@@ -1143,26 +1131,13 @@ async def test_health_project_summary_timeout_is_bounded_and_unhealthy(monkeypat
         lambda: SimpleNamespace(summary_by_project=never_completes),
     )
     health_cache._projects_cache = {"stale": {}}
-
-    async def _ok_async(*_args, **_kwargs):
-        return ProbeResult(True)
-
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
+    _patch_health_probes(
+        monkeypatch,
+        pool=_health_pool(),
+        settings=settings,
+        background_probes=lambda: {"worker": ProbeResult(True)},
+    )
     monkeypatch.setattr(main_module, "_health", health_cache)
-    monkeypatch.setattr(main_module, "probe_redis", _ok_async)
-    monkeypatch.setattr(main_module, "probe_sqlite", _ok_async)
-    monkeypatch.setattr(
-        main_module,
-        "probe_result_storage",
-        lambda *_args: ProbeResult(True),
-    )
-    monkeypatch.setattr(main_module, "probe_disk", lambda *_args: ProbeResult(True))
-    monkeypatch.setattr(
-        main_module,
-        "_background_probes",
-        lambda: {"worker": ProbeResult(True)},
-    )
 
     response = await asyncio.wait_for(main_module.health(), timeout=0.5)
 
@@ -1177,10 +1152,6 @@ async def test_health_project_summary_timeout_is_bounded_and_unhealthy(monkeypat
 
 @pytest.mark.asyncio
 async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monkeypatch):
-    import json
-
-    from scrapeyard.runtime.health import ProbeResult
-
     timeout = 0.03
     cancelled_async_probes = 0
     started_sync_probes = 0
@@ -1204,23 +1175,15 @@ async def test_readiness_runs_independent_stalled_probes_under_one_timeout(monke
         storage_results_dir="/tmp/results",
         health_disk_free_min_mb=1,
     )
-    pool = SimpleNamespace(
-        max_concurrent=2,
-        active_tasks=0,
-        max_browsers=1,
-        active_browsers=0,
-        queue_depths=stalled_async_probe,
-    )
-    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(main_module, "get_worker_pool", lambda: pool)
-    monkeypatch.setattr(main_module, "probe_redis", stalled_async_probe)
-    monkeypatch.setattr(main_module, "probe_sqlite", stalled_async_probe)
-    monkeypatch.setattr(main_module, "probe_result_storage", slow_sync_probe)
-    monkeypatch.setattr(main_module, "probe_disk", slow_sync_probe)
-    monkeypatch.setattr(
-        main_module,
-        "_background_probes",
-        lambda: {"worker": ProbeResult(True)},
+    _patch_health_probes(
+        monkeypatch,
+        pool=_health_pool(queue_depths=stalled_async_probe),
+        settings=settings,
+        redis_probe=stalled_async_probe,
+        sqlite_probe=stalled_async_probe,
+        storage_probe=slow_sync_probe,
+        disk_probe=slow_sync_probe,
+        background_probes=lambda: {"worker": ProbeResult(True)},
     )
 
     started = asyncio.get_running_loop().time()

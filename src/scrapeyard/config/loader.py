@@ -203,9 +203,14 @@ def _redact_secret_spellings(text: str, secrets: Iterable[str]) -> str:
             repr(secret)[1:-1],
             json.dumps(secret)[1:-1],
         ))
-    for spelling in sorted(spellings, key=lambda value: (-len(value), value)):
-        text = re.sub(re.escape(spelling), "<redacted>", text, flags=re.IGNORECASE)
-    return text
+    ordered = sorted(
+        (spelling for spelling in spellings if spelling),
+        key=lambda value: (-len(value), value),
+    )
+    if not ordered:
+        return text
+    pattern = re.compile("|".join(re.escape(spelling) for spelling in ordered), flags=re.IGNORECASE)
+    return pattern.sub("<redacted>", text)
 
 
 def load_config_mapping(data: dict[str, Any]) -> ScrapeConfig:

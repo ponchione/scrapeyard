@@ -13,8 +13,8 @@ from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import RunOwnershipError, TerminalIntentAction
-from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.webhook.payload import build_terminal_webhook_delivery
+from tests.factories import fetch_webhook_delivery, list_pending_webhook_deliveries
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 
@@ -108,10 +108,9 @@ async def test_preclaim_failure_creates_run_history_and_failed_webhook_intent(
         webhook_delivery=delivery,
     )
 
-    job = await store.get_job("job-1")
+    job, count, last_run_at = await store.get_job_with_stats("job-1")
     run = await store.get_job_run("job-1", "run-1")
-    persisted = await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id)
-    count, last_run_at = await store.get_job_run_stats("job-1")
+    persisted = await fetch_webhook_delivery(delivery.delivery_id)
     async with get_db("jobs.db") as db:
         queued_snapshot = await (
             await db.execute(
@@ -151,7 +150,7 @@ async def test_finalization_atomically_creates_one_required_intent(
 
     job = await store.get_job("job-1")
     run = await store.get_job_run("job-1", "run-1")
-    persisted = await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id)
+    persisted = await fetch_webhook_delivery(delivery.delivery_id)
     assert job.status is JobStatus.complete
     assert run is not None and run.status is JobStatus.complete
     assert persisted is not None
@@ -196,7 +195,7 @@ async def test_non_applicable_terminal_status_creates_no_intent(
         NOW - timedelta(seconds=1),
     )
 
-    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    assert await list_pending_webhook_deliveries() == []
     assert await store.list_terminal_webhook_candidates() == []
 
 
@@ -223,7 +222,7 @@ async def test_ownership_loss_mutates_neither_terminal_state_nor_intent(
     assert (await store.get_job("job-1")).status is JobStatus.running
     run = await store.get_job_run("job-1", "run-1")
     assert run is not None and run.status is JobStatus.running
-    assert await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id) is None
+    assert await fetch_webhook_delivery(delivery.delivery_id) is None
 
 
 async def test_webhook_insert_fault_rolls_back_run_job_and_intent(
@@ -258,7 +257,7 @@ async def test_webhook_insert_fault_rolls_back_run_job_and_intent(
     assert (await store.get_job("job-1")).status is JobStatus.running
     run = await store.get_job_run("job-1", "run-1")
     assert run is not None and run.status is JobStatus.running
-    assert await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id) is None
+    assert await fetch_webhook_delivery(delivery.delivery_id) is None
 
 
 async def test_conditional_crash_failure_persists_failed_intent_atomically(
@@ -278,7 +277,7 @@ async def test_conditional_crash_failure_persists_failed_intent_atomically(
     )
 
     run = await store.get_job_run("job-1", "run-1")
-    persisted = await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id)
+    persisted = await fetch_webhook_delivery(delivery.delivery_id)
     assert run is not None and run.status is JobStatus.failed
     assert run.record_count == 0
     assert run.error_count == 3
@@ -320,4 +319,4 @@ async def test_repair_rechecks_terminal_snapshot_before_inserting_intent(
     )
 
     assert outcome.action is TerminalIntentAction.race_noop
-    assert await SQLiteWebhookOutboxStore().get_delivery(delivery.delivery_id) is None
+    assert await fetch_webhook_delivery(delivery.delivery_id) is None

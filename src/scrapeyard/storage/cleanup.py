@@ -218,6 +218,70 @@ class HistoryRetentionPolicy:
     error_batch_size: int
 
 
+@dataclass(frozen=True, slots=True)
+class CleanupConfig:
+    """Typed retention windows, batch sizes, and cycle budgets for one cleanup pass."""
+
+    retention_days: int
+    max_results_per_job: int
+    webhook_delivered_retention_days: int | None = None
+    webhook_failed_retention_days: int | None = None
+    webhook_cleanup_batch_size: int = 100
+    result_cleanup_batch_size: int = 500
+    orphan_grace_seconds: int = 86400
+    reconciliation_dry_run: bool = True
+    idempotency_cleanup_batch_size: int = 1000
+    history_policy: HistoryRetentionPolicy | None = None
+    cycle_max_items_per_phase: int = _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE
+    cycle_max_seconds: float = _DEFAULT_CYCLE_MAX_SECONDS
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Any,
+        *,
+        include_webhook: bool,
+        include_idempotency: bool,
+        include_history: bool,
+    ) -> CleanupConfig:
+        history_policy = (
+            HistoryRetentionPolicy(
+                adhoc_job_retention_days=settings.history_adhoc_job_retention_days,
+                scheduled_run_retention_days=settings.history_scheduled_run_retention_days,
+                scheduled_run_retention_count=settings.history_scheduled_run_retention_count,
+                error_retention_days=settings.history_error_retention_days,
+                webhook_tombstone_retention_days=settings.history_webhook_tombstone_retention_days,
+                adhoc_job_batch_size=settings.history_adhoc_job_cleanup_batch_size,
+                scheduled_run_batch_size=settings.history_scheduled_run_cleanup_batch_size,
+                error_batch_size=settings.history_error_cleanup_batch_size,
+            )
+            if include_history
+            else None
+        )
+        return cls(
+            retention_days=settings.storage_retention_days,
+            max_results_per_job=settings.storage_max_results_per_job,
+            webhook_delivered_retention_days=(
+                settings.webhook_delivered_retention_days if include_webhook else None
+            ),
+            webhook_failed_retention_days=(
+                settings.webhook_failed_retention_days if include_webhook else None
+            ),
+            webhook_cleanup_batch_size=(
+                settings.webhook_dispatch_batch_size if include_webhook else 100
+            ),
+            result_cleanup_batch_size=settings.storage_cleanup_batch_size,
+            orphan_grace_seconds=settings.storage_orphan_grace_seconds,
+            reconciliation_dry_run=settings.storage_reconciliation_dry_run,
+            idempotency_cleanup_batch_size=(
+                settings.idempotency_cleanup_batch_size if include_idempotency else 1000
+            ),
+            history_policy=history_policy,
+            cycle_max_items_per_phase=settings.storage_cleanup_cycle_max_items_per_phase,
+            cycle_max_seconds=settings.storage_cleanup_cycle_max_seconds,
+        )
+
+
 def _history_failure(failed_phases: list[str], phase: str, exc: Exception) -> None:
     failed_phases.append(phase)
     CLEANUP_HISTORY_FAILURES.labels(phase).inc()
@@ -441,40 +505,19 @@ async def _cleanup_durable_history(
     return failed_phases
 
 
-async def run_cleanup(
+async def _cleanup_expired_results(
     result_store: ResultStore,
-    retention_days: int,
-    max_results_per_job: int,
-    webhook_outbox_store: WebhookOutboxStore | None = None,
-    webhook_delivered_retention_days: int | None = None,
-    webhook_failed_retention_days: int | None = None,
-    webhook_cleanup_batch_size: int = 100,
-    result_cleanup_batch_size: int = 500,
-    orphan_grace_seconds: int = 86400,
-    reconciliation_dry_run: bool = True,
-    job_store: JobStore | None = None,
-    idempotency_cleanup_batch_size: int = 1000,
-    error_store: ErrorStore | None = None,
-    history_policy: HistoryRetentionPolicy | None = None,
-    cycle_max_items_per_phase: int = _DEFAULT_CYCLE_MAX_ITEMS_PER_PHASE,
-    cycle_max_seconds: float = _DEFAULT_CYCLE_MAX_SECONDS,
-    *,
-    now: datetime | None = None,
-) -> CleanupCycleOutcome:
-    """Drain bounded retention batches and report whether catch-up remains."""
-    cycle = _CleanupCycleBudget(
-        max_items_per_phase=cycle_max_items_per_phase,
-        max_seconds=cycle_max_seconds,
-        clock=time.monotonic,
-    )
-    failed_phases: list[str] = []
+    config: CleanupConfig,
+    cycle: _CleanupCycleBudget,
+    failed_phases: list[str],
+) -> None:
     try:
         deleted = await _drain_count_phase(
             phase="expired_results",
-            batch_size=result_cleanup_batch_size,
+            batch_size=config.result_cleanup_batch_size,
             cycle=cycle,
             operation=lambda limit: result_store.delete_expired(
-                retention_days,
+                config.retention_days,
                 limit=limit,
             ),
         )
@@ -491,13 +534,20 @@ async def run_cleanup(
             CLEANUP_ITEMS.labels("expired_results").inc(deleted)
             logger.info("Cleanup removed %d expired result(s)", deleted)
 
+
+async def _cleanup_excess_results(
+    result_store: ResultStore,
+    config: CleanupConfig,
+    cycle: _CleanupCycleBudget,
+    failed_phases: list[str],
+) -> None:
     try:
         pruned = await _drain_count_phase(
             phase="excess_results",
-            batch_size=result_cleanup_batch_size,
+            batch_size=config.result_cleanup_batch_size,
             cycle=cycle,
             operation=lambda limit: result_store.prune_excess_per_job(
-                max_results_per_job,
+                config.max_results_per_job,
                 limit=limit,
             ),
         )
@@ -514,13 +564,22 @@ async def run_cleanup(
             CLEANUP_ITEMS.labels("excess_results").inc(pruned)
             logger.info("Cleanup pruned %d excess result(s) across jobs", pruned)
 
+
+async def _cleanup_artifact_reconciliation(
+    result_store: ResultStore,
+    config: CleanupConfig,
+    cycle: _CleanupCycleBudget,
+    failed_phases: list[str],
+    *,
+    now: datetime | None,
+) -> None:
     try:
         reconciliation = await _drain_artifact_reconciliation(
             result_store=result_store,
-            grace_seconds=orphan_grace_seconds,
-            dry_run=reconciliation_dry_run,
+            grace_seconds=config.orphan_grace_seconds,
+            dry_run=config.reconciliation_dry_run,
             now=now,
-            batch_size=result_cleanup_batch_size,
+            batch_size=config.result_cleanup_batch_size,
             cycle=cycle,
         )
     except asyncio.CancelledError:
@@ -532,194 +591,264 @@ async def run_cleanup(
             "recovery_action=retry_next_cleanup_pass",
             type(exc).__name__,
         )
-    else:
-        artifact_findings = {
-            "missing": reconciliation.missing_result_files,
-            "corrupt": reconciliation.corrupt_result_files,
-            "unreadable": reconciliation.unreadable_result_files,
-            "unsafe": reconciliation.unsafe_metadata_paths,
-        }
-        for kind, count in artifact_findings.items():
-            if count:
-                CLEANUP_ARTIFACT_FINDINGS.labels(kind).inc(count)
-        if reconciliation.artifact_failures:
-            logger.warning(
-                "Result artifact validation found retained-result integrity failures "
-                "missing=%s corrupt=%s unreadable=%s unsafe=%s "
-                "recovery_action=restore_artifact_or_delete_metadata_or_accept_loss",
-                artifact_findings["missing"],
-                artifact_findings["corrupt"],
-                artifact_findings["unreadable"],
-                artifact_findings["unsafe"],
-            )
-        if reconciliation.operation_failures:
-            failed_phases.append("artifact_reconciliation")
-            logger.error(
-                "Result artifact reconciliation completed with operation "
-                "failures failure_count=%s recovery_action="
-                "retry_failures_next_cleanup_pass",
-                len(reconciliation.operation_failures),
-            )
-        if reconciliation.directories_removed:
-            CLEANUP_ITEMS.labels("artifact_directories").inc(reconciliation.directories_removed)
-        if reconciliation.files_removed:
-            CLEANUP_ITEMS.labels("artifact_files").inc(reconciliation.files_removed)
-        if reconciliation.metadata_rows_inspected:
-            CLEANUP_ITEMS.labels("artifact_metadata_inspected").inc(
-                reconciliation.metadata_rows_inspected
-            )
-        if reconciliation.filesystem_entries_inspected:
-            CLEANUP_ITEMS.labels("artifact_filesystem_inspected").inc(
-                reconciliation.filesystem_entries_inspected
-            )
-        if reconciliation.removed_bytes:
-            CLEANUP_BYTES.inc(reconciliation.removed_bytes)
-        logger.info(
-            "Result artifact reconciliation complete dry_run=%s "
-            "metadata_rows_inspected=%s valid_artifacts=%s "
-            "missing_result_files=%s corrupt_result_files=%s "
-            "unreadable_result_files=%s unsafe_metadata_paths=%s "
-            "filesystem_entries_inspected=%s "
-            "filesystem_run_directories_inspected=%s malformed_entries_ignored=%s "
-            "orphan_candidates=%s "
-            "recent_candidates_skipped=%s active_run_candidates_skipped=%s "
-            "metadata_race_candidates_skipped=%s "
-            "active_run_race_candidates_skipped=%s "
-            "stale_temporary_candidates=%s directories_would_remove=%s "
-            "files_would_remove=%s directories_removed=%s files_removed=%s "
-            "removed_bytes=%s failure_count=%s artifact_error_types=%s "
-            "operation_error_types=%s metadata_scan_exhausted=%s "
-            "filesystem_scan_exhausted=%s has_more=%s "
-            "recovery_action=retry_failures_next_cleanup_pass",
-            reconciliation.dry_run,
-            reconciliation.metadata_rows_inspected,
-            reconciliation.valid_artifacts,
-            reconciliation.missing_result_files,
-            reconciliation.corrupt_result_files,
-            reconciliation.unreadable_result_files,
-            reconciliation.unsafe_metadata_paths,
-            reconciliation.filesystem_entries_inspected,
-            reconciliation.filesystem_run_directories_inspected,
-            reconciliation.malformed_entries_ignored,
-            reconciliation.orphan_candidates,
-            reconciliation.recent_candidates_skipped,
-            reconciliation.active_run_candidates_skipped,
-            reconciliation.metadata_race_candidates_skipped,
-            reconciliation.active_run_race_candidates_skipped,
-            reconciliation.stale_temporary_candidates,
-            reconciliation.directories_would_remove,
-            reconciliation.files_would_remove,
-            reconciliation.directories_removed,
-            reconciliation.files_removed,
-            reconciliation.removed_bytes,
-            reconciliation.failure_count,
-            ",".join(
-                sorted(
-                    {
-                        failure.error_type
-                        for failure in reconciliation.artifact_failures
-                        if failure.error_type is not None
-                    }
-                )
-            )
-            or "none",
-            ",".join(sorted({failure.error_type for failure in reconciliation.operation_failures}))
-            or "none",
-            reconciliation.metadata_scan_exhausted,
-            reconciliation.filesystem_scan_exhausted,
-            reconciliation.has_more,
+        return
+
+    _record_artifact_reconciliation_report(reconciliation, failed_phases)
+
+
+def _record_artifact_reconciliation_report(
+    reconciliation: ResultReconciliationReport,
+    failed_phases: list[str],
+) -> None:
+    artifact_findings = {
+        "missing": reconciliation.missing_result_files,
+        "corrupt": reconciliation.corrupt_result_files,
+        "unreadable": reconciliation.unreadable_result_files,
+        "unsafe": reconciliation.unsafe_metadata_paths,
+    }
+    for kind, count in artifact_findings.items():
+        if count:
+            CLEANUP_ARTIFACT_FINDINGS.labels(kind).inc(count)
+    if reconciliation.artifact_failures:
+        logger.warning(
+            "Result artifact validation found retained-result integrity failures "
+            "missing=%s corrupt=%s unreadable=%s unsafe=%s "
+            "recovery_action=restore_artifact_or_delete_metadata_or_accept_loss",
+            artifact_findings["missing"],
+            artifact_findings["corrupt"],
+            artifact_findings["unreadable"],
+            artifact_findings["unsafe"],
         )
+    if reconciliation.operation_failures:
+        failed_phases.append("artifact_reconciliation")
+        logger.error(
+            "Result artifact reconciliation completed with operation "
+            "failures failure_count=%s recovery_action="
+            "retry_failures_next_cleanup_pass",
+            len(reconciliation.operation_failures),
+        )
+    if reconciliation.directories_removed:
+        CLEANUP_ITEMS.labels("artifact_directories").inc(reconciliation.directories_removed)
+    if reconciliation.files_removed:
+        CLEANUP_ITEMS.labels("artifact_files").inc(reconciliation.files_removed)
+    if reconciliation.metadata_rows_inspected:
+        CLEANUP_ITEMS.labels("artifact_metadata_inspected").inc(
+            reconciliation.metadata_rows_inspected
+        )
+    if reconciliation.filesystem_entries_inspected:
+        CLEANUP_ITEMS.labels("artifact_filesystem_inspected").inc(
+            reconciliation.filesystem_entries_inspected
+        )
+    if reconciliation.removed_bytes:
+        CLEANUP_BYTES.inc(reconciliation.removed_bytes)
+    logger.info(
+        "Result artifact reconciliation complete dry_run=%s "
+        "metadata_rows_inspected=%s valid_artifacts=%s "
+        "missing_result_files=%s corrupt_result_files=%s "
+        "unreadable_result_files=%s unsafe_metadata_paths=%s "
+        "filesystem_entries_inspected=%s "
+        "filesystem_run_directories_inspected=%s malformed_entries_ignored=%s "
+        "orphan_candidates=%s "
+        "recent_candidates_skipped=%s active_run_candidates_skipped=%s "
+        "metadata_race_candidates_skipped=%s "
+        "active_run_race_candidates_skipped=%s "
+        "stale_temporary_candidates=%s directories_would_remove=%s "
+        "files_would_remove=%s directories_removed=%s files_removed=%s "
+        "removed_bytes=%s failure_count=%s artifact_error_types=%s "
+        "operation_error_types=%s metadata_scan_exhausted=%s "
+        "filesystem_scan_exhausted=%s has_more=%s "
+        "recovery_action=retry_failures_next_cleanup_pass",
+        reconciliation.dry_run,
+        reconciliation.metadata_rows_inspected,
+        reconciliation.valid_artifacts,
+        reconciliation.missing_result_files,
+        reconciliation.corrupt_result_files,
+        reconciliation.unreadable_result_files,
+        reconciliation.unsafe_metadata_paths,
+        reconciliation.filesystem_entries_inspected,
+        reconciliation.filesystem_run_directories_inspected,
+        reconciliation.malformed_entries_ignored,
+        reconciliation.orphan_candidates,
+        reconciliation.recent_candidates_skipped,
+        reconciliation.active_run_candidates_skipped,
+        reconciliation.metadata_race_candidates_skipped,
+        reconciliation.active_run_race_candidates_skipped,
+        reconciliation.stale_temporary_candidates,
+        reconciliation.directories_would_remove,
+        reconciliation.files_would_remove,
+        reconciliation.directories_removed,
+        reconciliation.files_removed,
+        reconciliation.removed_bytes,
+        reconciliation.failure_count,
+        ",".join(
+            sorted(
+                {
+                    failure.error_type
+                    for failure in reconciliation.artifact_failures
+                    if failure.error_type is not None
+                }
+            )
+        )
+        or "none",
+        ",".join(sorted({failure.error_type for failure in reconciliation.operation_failures}))
+        or "none",
+        reconciliation.metadata_scan_exhausted,
+        reconciliation.filesystem_scan_exhausted,
+        reconciliation.has_more,
+    )
+
+
+async def _cleanup_idempotency_records(
+    job_store: JobStore,
+    config: CleanupConfig,
+    observed_at: datetime,
+    cycle: _CleanupCycleBudget,
+    failed_phases: list[str],
+) -> None:
+    try:
+        idempotency_deleted = await _drain_count_phase(
+            phase="idempotency_records",
+            batch_size=config.idempotency_cleanup_batch_size,
+            cycle=cycle,
+            operation=lambda limit: job_store.delete_expired_idempotency_records(
+                observed_at,
+                limit=limit,
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        failed_phases.append("idempotency_retention")
+        logger.error(
+            "Idempotency retention cleanup failed error_type=%s "
+            "recovery_action=retry_next_cleanup_pass",
+            type(exc).__name__,
+        )
+    else:
+        if idempotency_deleted:
+            CLEANUP_ITEMS.labels("idempotency_records").inc(idempotency_deleted)
+        logger.info(
+            "Idempotency retention cleanup complete deleted_count=%s batch_limit=%s",
+            idempotency_deleted,
+            config.idempotency_cleanup_batch_size,
+        )
+
+
+async def _cleanup_webhook_retention(
+    webhook_outbox_store: WebhookOutboxStore,
+    config: CleanupConfig,
+    observed_at: datetime,
+    cycle: _CleanupCycleBudget,
+    failed_phases: list[str],
+) -> None:
+    if (
+        config.webhook_delivered_retention_days is None
+        or config.webhook_failed_retention_days is None
+    ):
+        raise ValueError("Webhook retention windows are required for outbox cleanup")
+
+    delivered_scrubbed = 0
+    failed_scrubbed = 0
+    try:
+        while webhook_limit := cycle.next_limit(
+            "webhook_secrets",
+            config.webhook_cleanup_batch_size,
+        ):
+            summary = await webhook_outbox_store.scrub_terminal_deliveries(
+                delivered_before=(
+                    observed_at - timedelta(days=config.webhook_delivered_retention_days)
+                ),
+                failed_before=(
+                    observed_at - timedelta(days=config.webhook_failed_retention_days)
+                ),
+                scrubbed_at=observed_at,
+                limit=webhook_limit,
+            )
+            scrubbed = summary.delivered_scrubbed + summary.failed_scrubbed
+            delivered_scrubbed += summary.delivered_scrubbed
+            failed_scrubbed += summary.failed_scrubbed
+            if not cycle.record(
+                "webhook_secrets",
+                scrubbed,
+                limit=webhook_limit,
+            ):
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        failed_phases.append("webhook_retention")
+        logger.error(
+            "Webhook retention cleanup failed error_type=%s "
+            "recovery_action=retry_next_cleanup_pass",
+            type(exc).__name__,
+        )
+    else:
+        logger.info(
+            "Webhook retention cleanup complete delivered_scrubbed_count=%s "
+            "failed_scrubbed_count=%s batch_limit=%s "
+            "recovery_action=retain_terminal_tombstones",
+            delivered_scrubbed,
+            failed_scrubbed,
+            config.webhook_cleanup_batch_size,
+        )
+        scrubbed = delivered_scrubbed + failed_scrubbed
+        if scrubbed:
+            CLEANUP_ITEMS.labels("webhook_secrets").inc(scrubbed)
+
+
+async def run_cleanup(
+    result_store: ResultStore,
+    config: CleanupConfig,
+    *,
+    webhook_outbox_store: WebhookOutboxStore | None = None,
+    job_store: JobStore | None = None,
+    error_store: ErrorStore | None = None,
+    now: datetime | None = None,
+) -> CleanupCycleOutcome:
+    """Drain bounded retention batches and report whether catch-up remains."""
+    cycle = _CleanupCycleBudget(
+        max_items_per_phase=config.cycle_max_items_per_phase,
+        max_seconds=config.cycle_max_seconds,
+        clock=time.monotonic,
+    )
+    failed_phases: list[str] = []
+    await _cleanup_expired_results(result_store, config, cycle, failed_phases)
+    await _cleanup_excess_results(result_store, config, cycle, failed_phases)
+    await _cleanup_artifact_reconciliation(
+        result_store,
+        config,
+        cycle,
+        failed_phases,
+        now=now,
+    )
 
     observed_at = now or utc_now()
     if job_store is not None:
-        try:
-            idempotency_deleted = await _drain_count_phase(
-                phase="idempotency_records",
-                batch_size=idempotency_cleanup_batch_size,
-                cycle=cycle,
-                operation=lambda limit: job_store.delete_expired_idempotency_records(
-                    observed_at,
-                    limit=limit,
-                ),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            failed_phases.append("idempotency_retention")
-            logger.error(
-                "Idempotency retention cleanup failed error_type=%s "
-                "recovery_action=retry_next_cleanup_pass",
-                type(exc).__name__,
-            )
-        else:
-            if idempotency_deleted:
-                CLEANUP_ITEMS.labels("idempotency_records").inc(idempotency_deleted)
-            logger.info(
-                "Idempotency retention cleanup complete deleted_count=%s batch_limit=%s",
-                idempotency_deleted,
-                idempotency_cleanup_batch_size,
-            )
+        await _cleanup_idempotency_records(
+            job_store,
+            config,
+            observed_at,
+            cycle,
+            failed_phases,
+        )
 
     if webhook_outbox_store is not None:
-        if webhook_delivered_retention_days is None or webhook_failed_retention_days is None:
-            raise ValueError("Webhook retention windows are required for outbox cleanup")
+        await _cleanup_webhook_retention(
+            webhook_outbox_store,
+            config,
+            observed_at,
+            cycle,
+            failed_phases,
+        )
 
-        delivered_scrubbed = 0
-        failed_scrubbed = 0
-        try:
-            while webhook_limit := cycle.next_limit(
-                "webhook_secrets",
-                webhook_cleanup_batch_size,
-            ):
-                summary = await webhook_outbox_store.scrub_terminal_deliveries(
-                    delivered_before=(
-                        observed_at - timedelta(days=webhook_delivered_retention_days)
-                    ),
-                    failed_before=(
-                        observed_at - timedelta(days=webhook_failed_retention_days)
-                    ),
-                    scrubbed_at=observed_at,
-                    limit=webhook_limit,
-                )
-                scrubbed = summary.delivered_scrubbed + summary.failed_scrubbed
-                delivered_scrubbed += summary.delivered_scrubbed
-                failed_scrubbed += summary.failed_scrubbed
-                if not cycle.record(
-                    "webhook_secrets",
-                    scrubbed,
-                    limit=webhook_limit,
-                ):
-                    break
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            failed_phases.append("webhook_retention")
-            logger.error(
-                "Webhook retention cleanup failed error_type=%s "
-                "recovery_action=retry_next_cleanup_pass",
-                type(exc).__name__,
-            )
-        else:
-            logger.info(
-                "Webhook retention cleanup complete delivered_scrubbed_count=%s "
-                "failed_scrubbed_count=%s batch_limit=%s "
-                "recovery_action=retain_terminal_tombstones",
-                delivered_scrubbed,
-                failed_scrubbed,
-                webhook_cleanup_batch_size,
-            )
-            scrubbed = delivered_scrubbed + failed_scrubbed
-            if scrubbed:
-                CLEANUP_ITEMS.labels("webhook_secrets").inc(scrubbed)
-
-    if (error_store is None) is not (history_policy is None):
+    if (error_store is None) is not (config.history_policy is None):
         raise ValueError("History retention requires both error_store and history_policy")
-    if job_store is not None and error_store is not None and history_policy is not None:
+    if job_store is not None and error_store is not None and config.history_policy is not None:
         failed_phases.extend(
             await _cleanup_durable_history(
                 job_store=job_store,
                 error_store=error_store,
-                policy=history_policy,
+                policy=config.history_policy,
                 observed_at=observed_at,
                 cycle=cycle,
             )
@@ -755,57 +884,18 @@ def start_cleanup_loop(
             sleep_seconds = interval_hours * 3600
             try:
                 settings = get_settings()
-                history_policy = HistoryRetentionPolicy(
-                    adhoc_job_retention_days=(settings.history_adhoc_job_retention_days),
-                    scheduled_run_retention_days=(
-                        settings.history_scheduled_run_retention_days
-                    ),
-                    scheduled_run_retention_count=(
-                        settings.history_scheduled_run_retention_count
-                    ),
-                    error_retention_days=settings.history_error_retention_days,
-                    webhook_tombstone_retention_days=(
-                        settings.history_webhook_tombstone_retention_days
-                    ),
-                    adhoc_job_batch_size=(
-                        settings.history_adhoc_job_cleanup_batch_size
-                    ),
-                    scheduled_run_batch_size=(
-                        settings.history_scheduled_run_cleanup_batch_size
-                    ),
-                    error_batch_size=settings.history_error_cleanup_batch_size,
-                ) if job_store is not None and error_store is not None else None
-                # Webhook retention applies only when the loop owns an outbox.
-                webhook_retention: dict[str, Any] = (
-                    {}
-                    if webhook_outbox_store is None
-                    else {
-                        "webhook_outbox_store": webhook_outbox_store,
-                        "webhook_delivered_retention_days": (
-                            settings.webhook_delivered_retention_days
-                        ),
-                        "webhook_failed_retention_days": settings.webhook_failed_retention_days,
-                        "webhook_cleanup_batch_size": settings.webhook_dispatch_batch_size,
-                    }
+                config = CleanupConfig.from_settings(
+                    settings,
+                    include_webhook=webhook_outbox_store is not None,
+                    include_idempotency=job_store is not None,
+                    include_history=job_store is not None and error_store is not None,
                 )
                 outcome = await run_cleanup(
                     result_store=result_store,
-                    retention_days=settings.storage_retention_days,
-                    max_results_per_job=settings.storage_max_results_per_job,
-                    result_cleanup_batch_size=settings.storage_cleanup_batch_size,
-                    orphan_grace_seconds=settings.storage_orphan_grace_seconds,
-                    reconciliation_dry_run=(settings.storage_reconciliation_dry_run),
+                    config=config,
+                    webhook_outbox_store=webhook_outbox_store,
                     job_store=job_store,
-                    idempotency_cleanup_batch_size=(settings.idempotency_cleanup_batch_size)
-                    if job_store is not None
-                    else 1000,
                     error_store=error_store,
-                    history_policy=history_policy,
-                    cycle_max_items_per_phase=(
-                        settings.storage_cleanup_cycle_max_items_per_phase
-                    ),
-                    cycle_max_seconds=settings.storage_cleanup_cycle_max_seconds,
-                    **webhook_retention,
                 )
             except asyncio.CancelledError:
                 raise

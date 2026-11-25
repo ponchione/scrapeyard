@@ -776,7 +776,8 @@ async def _timed_settle(page: Any, wait_ms: float, in_flight: set[Any]) -> float
 
 @pytest.fixture
 def _short_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(browser_session, "_CLICK_SETTLE_QUIET_MS", 100)
+    monkeypatch.setattr(browser_session, "_CLICK_SETTLE_QUIET_MS", 30)
+    monkeypatch.setattr(browser_session, "_CLICK_CHANGE_POLL_MS", 10)
 
 
 @pytest.mark.asyncio
@@ -785,7 +786,7 @@ async def test_click_settle_ends_the_wait_once_the_page_is_quiet(_short_quiet: N
 
     elapsed = await _timed_settle(page, 2_000, set())
 
-    assert elapsed < 1.0
+    assert elapsed < 0.5
     assert page.waited == []
     assert (page.disconnected, page.disposed) == (True, True)
 
@@ -795,15 +796,15 @@ async def test_click_settle_waits_while_the_document_keeps_changing(_short_quiet
     page = _SettlingPage()
 
     async def render_late_content() -> None:
-        for _ in range(10):
-            await asyncio.sleep(0.05)
+        for _ in range(5):
+            await asyncio.sleep(0.015)
             page.mutations += 1
 
     rendering = asyncio.create_task(render_late_content())
     elapsed = await _timed_settle(page, 2_000, set())
     await rendering
 
-    assert 0.6 <= elapsed < 1.9
+    assert 0.09 <= elapsed < 1.0
 
 
 @pytest.mark.asyncio
@@ -812,32 +813,33 @@ async def test_click_settle_waits_while_a_page_request_is_in_flight(_short_quiet
     in_flight: set[Any] = {"price-request"}
 
     async def finish_request() -> None:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.08)
         in_flight.clear()
 
     finishing = asyncio.create_task(finish_request())
     elapsed = await _timed_settle(page, 2_000, in_flight)
     await finishing
 
-    assert 0.6 <= elapsed < 1.9
+    assert 0.09 <= elapsed < 1.0
 
 
 @pytest.mark.asyncio
 async def test_click_settle_never_waits_longer_than_configured(_short_quiet: None):
     page = _SettlingPage()
 
-    elapsed = await _timed_settle(page, 400, {"long-poll"})
+    elapsed = await _timed_settle(page, 100, {"long-poll"})
 
-    assert 0.4 <= elapsed < 1.0
+    assert 0.09 <= elapsed < 0.5
 
 
 @pytest.mark.asyncio
-async def test_click_settle_keeps_short_waits_unchanged():
+async def test_click_settle_keeps_short_waits_unchanged(monkeypatch):
+    monkeypatch.setattr(browser_session, "_CLICK_SETTLE_QUIET_MS", 50)
     page = _SettlingPage()
 
-    await BrowserSession._settle_after_click(page, 250, set())
+    await BrowserSession._settle_after_click(page, 50, set())
 
-    assert page.waited == [250]
+    assert page.waited == [50]
     assert not page.disposed
 
 
@@ -845,10 +847,10 @@ async def test_click_settle_keeps_short_waits_unchanged():
 async def test_click_settle_waits_out_the_time_when_the_document_is_replaced(_short_quiet: None):
     page = _SettlingPage(observe_error=RuntimeError("Execution context was destroyed"))
 
-    elapsed = await _timed_settle(page, 400, set())
+    elapsed = await _timed_settle(page, 100, set())
 
-    assert len(page.waited) == 1 and 300 < page.waited[0] <= 400
-    assert elapsed >= 0.35
+    assert len(page.waited) == 1 and 50 < page.waited[0] <= 100
+    assert elapsed >= 0.08
 
 
 class _Request:
@@ -919,7 +921,10 @@ async def _click_through_late_prices(listing: _LatePriceListing) -> tuple[ClickP
             listing, context, engine, response, response, None, spec,
         )
         elapsed = time.monotonic() - started
-    await asyncio.gather(*loading)
+    for task in loading:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*loading, return_exceptions=True)
     return result, elapsed
 
 
@@ -930,21 +935,21 @@ def _price(snapshot: ClickSnapshot) -> str | None:
 
 @pytest.mark.asyncio
 async def test_click_settle_captures_a_price_that_renders_after_the_items(_short_quiet: None):
-    result, elapsed = await _click_through_late_prices(_LatePriceListing(["p1", "p2"], price_delay=0.4))
+    result, elapsed = await _click_through_late_prices(_LatePriceListing(["p1", "p2"], price_delay=0.08))
 
     assert _price(result.pages[0]) == "priced"
-    assert 0.5 <= elapsed < 2.5
+    assert 0.09 <= elapsed < 1.5
 
 
 @pytest.mark.asyncio
 async def test_click_settle_does_not_wait_for_presentation_requests(_short_quiet: None):
-    listing = _LatePriceListing(["p1", "p2"], price_delay=1.0, resource_type="image")
+    listing = _LatePriceListing(["p1", "p2"], price_delay=0.5, resource_type="image")
 
     result, elapsed = await _click_through_late_prices(listing)
 
     # The image never changes the extracted page, so the click settles early.
     assert _price(result.pages[0]) == "pending"
-    assert elapsed < 0.9
+    assert elapsed < 0.4
 
 
 # --- click activation fallback ----------------------------------------------

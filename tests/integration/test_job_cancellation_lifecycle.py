@@ -24,6 +24,11 @@ from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
     WebhookDeliveryCreate,
 )
+from tests.factories import (
+    fetch_webhook_delivery,
+    list_pending_webhook_deliveries,
+    seed_webhook_delivery,
+)
 from tests.integration.conftest import poll_until_ready
 
 
@@ -95,7 +100,7 @@ async def test_running_cancel_stops_worker_without_failed_state_or_side_effects(
     assert (await client.get(f"/results/{job_id}")).status_code == 404
     errors = await client.get(f"/errors?job_id={job_id}")
     assert errors.json() == []
-    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    assert await list_pending_webhook_deliveries() == []
 
 
 async def test_cancel_is_idempotent_and_terminal_or_unknown_conflicts(
@@ -317,7 +322,7 @@ async def test_pending_webhook_blocks_delete_until_terminal(client, monkeypatch)
         next_attempt_at=datetime.now(timezone.utc),
     )
     outbox = SQLiteWebhookOutboxStore()
-    await outbox.enqueue_delivery(delivery)
+    await seed_webhook_delivery(delivery)
 
     conflict = await client.delete(f"/jobs/{job_id}")
 
@@ -325,7 +330,7 @@ async def test_pending_webhook_blocks_delete_until_terminal(client, monkeypatch)
     assert (await get_job_store().get_job(job_id)).status is JobStatus.complete
     await outbox.mark_delivered("manual-pending", delivered_at=datetime.now(timezone.utc))
     assert (await client.delete(f"/jobs/{job_id}")).status_code == 204
-    assert await outbox.get_delivery("manual-pending") is None
+    assert await fetch_webhook_delivery("manual-pending") is None
 
 
 async def test_deleting_resumes_after_error_cleanup_fault_and_policy_conflicts(

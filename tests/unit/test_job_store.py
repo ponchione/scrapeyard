@@ -13,17 +13,17 @@ from scrapeyard.storage.job_store import (
     DuplicateJobError,
     is_duplicate_job_integrity_error,
 )
+from tests.factories import make_job_model
 
 
 def _make_job(**overrides: Any) -> Job:
-    defaults: dict[str, Any] = {
-        "job_id": "j-1",
-        "project": "acme",
-        "name": "scrape-prices",
-        "config_yaml": "target: https://example.com",
-    }
-    defaults.update(overrides)
-    return Job.model_validate(defaults)
+    return make_job_model(
+        job_id=overrides.pop("job_id", "j-1"),
+        project=overrides.pop("project", "acme"),
+        name=overrides.pop("name", "scrape-prices"),
+        config_yaml=overrides.pop("config_yaml", "target: https://example.com"),
+        **overrides,
+    )
 
 
 def test_is_duplicate_job_integrity_error_matches_sqlite_unique_constraint() -> None:

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import importlib.util
 import ipaddress
+from pathlib import Path
 
 import pytest
 
 from scrapeyard.engine.ip_policy import (
     DENIED_ADDRESS_NETWORKS,
     PUBLIC_ADDRESS_EXCEPTIONS,
-    firewall_policy_entries,
     ip_is_blocked,
 )
+
+_RENDERER_PATH = Path(__file__).resolve().parents[2] / "security" / "render-egress-policy.py"
+_SPEC = importlib.util.spec_from_file_location("render_egress_policy", _RENDERER_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_RENDERER = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_RENDERER)
+firewall_policy_entries = _RENDERER.firewall_policy_entries
 
 
 def _firewall_blocks(value: str) -> bool:

@@ -9,12 +9,11 @@ import pytest
 
 from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine.scraper import scrape_target
+from tests.factories import make_target_config
 
 
 def _target(**overrides: Any) -> TargetConfig:
-    base: dict[str, Any] = {"url": "https://example.com", "selectors": {"title": "h1"}}
-    base.update(overrides)
-    return TargetConfig.model_validate(base)
+    return make_target_config(**overrides)
 
 
 @pytest.mark.asyncio

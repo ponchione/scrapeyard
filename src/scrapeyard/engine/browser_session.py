@@ -250,6 +250,154 @@ async def _close_page(page: Any, browser: Any) -> None:
         await _close_resource(page, browser)
 
 
+class _FetchState:
+    """Per-fetch route, traffic, asset-cache, and page-teardown coordinator."""
+
+    def __init__(
+        self,
+        *,
+        context: Any,
+        budget: RunBudget | None,
+        site: str | None,
+        assets: AssetCache | None,
+    ) -> None:
+        self.context = context
+        self.browser = context.browser
+        self.budget = budget
+        self.site = site
+        self.assets = assets
+        self.traffic = budget.traffic if budget is not None else None
+        # Playwright's dispatcher survives page fetches and inherits the context
+        # of its creation. Bind each route to THIS page's budget/diagnostics.
+        self.route_context = copy_context()
+        # Requests issued per redirect chain that still holds its reservation.
+        self.chains: dict[Any, int] = {}
+        self.releasing: set[asyncio.Future[None]] = set()
+        self.route_error: BaseException | None = None
+        self.sizing: set[asyncio.Future[int]] = set()
+        self.unsized: set[Any] = set()
+        self.storing: set[asyncio.Future[None]] = set()
+        # Requests answered from the asset cache: nothing was sent or received.
+        self.served: set[Any] = set()
+        self.page: Any = None
+        self._page_close_lock = asyncio.Lock()
+        self._closed_pages: set[int] = set()
+
+    async def reserve(self, request: Any) -> None:
+        if self.budget is not None:
+            await self.budget.reserve_requests(_MAX_REDIRECTS + 1)
+            self.chains[request] = 1
+            self.budget.traffic.request(request.url, self.site, request.resource_type)
+
+    def observe_abort(self, request: Any) -> None:
+        if self.traffic is not None:
+            self.traffic.blocked(request.url, self.site, request.resource_type)
+
+    def cached_asset(self, request: Any) -> CachedAsset | None:
+        asset = self.assets.lookup(self.site, request) if self.assets is not None else None
+        if asset is not None:
+            self.served.add(request)
+            if self.traffic is not None:
+                self.traffic.cached(request.url, self.site, request.resource_type)
+        return asset
+
+    def release_chain(self, request: Any) -> None:
+        # A chain that ended cannot redirect again: return its unused
+        # capacity now, so long fetches do not hold it until they finish.
+        issued = self.chains.pop(_chain_root(request), None)
+        if self.budget is not None and issued is not None:
+            released = asyncio.ensure_future(
+                self.budget.settle_requests(_MAX_REDIRECTS + 1, issued)
+            )
+            self.releasing.add(released)
+            released.add_done_callback(self.releasing.discard)
+
+    def observe_request(self, request: Any) -> None:
+        if request.redirected_from is None:
+            return
+        root = _chain_root(request)
+        if root in self.chains:
+            self.chains[root] += 1
+            if self.traffic is not None:
+                self.traffic.request(request.url, self.site, request.resource_type)
+
+    def observe_failed(self, request: Any) -> None:
+        self.release_chain(request)
+
+    def _record_received(self, request: Any, sized: asyncio.Future[int]) -> None:
+        self.sizing.discard(sized)
+        if self.traffic is not None and not sized.cancelled() and sized.exception() is None:
+            self.traffic.received(request.url, self.site, sized.result(), request.resource_type)
+
+    def observe_response(self, response: Any) -> None:
+        if response.status not in _REDIRECT_STATUSES:
+            self.release_chain(response.request)
+        if response.request in self.served:
+            return
+        if self.assets is not None and self.assets.wants(self.site, response):
+            stored = asyncio.ensure_future(self.assets.store(self.site, response))
+            self.storing.add(stored)
+            stored.add_done_callback(self.storing.discard)
+        if self.traffic is None:
+            return
+        declared = _declared_response_bytes(response)
+        if declared is not None:
+            self.traffic.received(response.url, self.site, declared, response.request.resource_type)
+        else:
+            # Chunked bodies declare no length; ask the browser once they finish.
+            self.unsized.add(response.request)
+
+    def observe_finished(self, request: Any) -> None:
+        if request not in self.unsized:
+            return
+        self.unsized.discard(request)
+        sized = asyncio.ensure_future(_received_bytes(request))
+        self.sizing.add(sized)
+        sized.add_done_callback(lambda done: self._record_received(request, done))
+
+    async def close_page_once(self, target_page: Any) -> None:
+        page_id = id(target_page)
+        async with self._page_close_lock:
+            if page_id in self._closed_pages:
+                return
+            await _close_page(target_page, self.browser)
+            self._closed_pages.add(page_id)
+
+    def attach_listeners(self) -> None:
+        self.context.on("request", self.observe_request)
+        self.context.on("response", self.observe_response)
+        self.context.on("requestfinished", self.observe_finished)
+        self.context.on("requestfailed", self.observe_failed)
+
+    def detach_listeners(self) -> None:
+        self.context.remove_listener("request", self.observe_request)
+        self.context.remove_listener("response", self.observe_response)
+        self.context.remove_listener("requestfinished", self.observe_finished)
+        self.context.remove_listener("requestfailed", self.observe_failed)
+
+    async def settle_background_tasks(self) -> None:
+        if self.sizing or self.storing:
+            await asyncio.wait(self.sizing | self.storing, timeout=_SIZES_SETTLE_SECONDS)
+
+    async def finalize_reservations(self, *, stopped: bool) -> None:
+        unsettled: list[asyncio.Future[Any]] = [*self.sizing, *self.storing]
+        for pending in unsettled:
+            pending.cancel()
+        try:
+            if self.releasing:
+                await await_cleanup(
+                    asyncio.gather(*self.releasing, return_exceptions=True)
+                )
+        finally:
+            if self.budget is not None and stopped:
+                await await_cleanup(
+                    self.budget.settle_requests(
+                        (_MAX_REDIRECTS + 1) * len(self.chains),
+                        sum(self.chains.values()),
+                    )
+                )
+
+
 class BrowserSession:
     """Reuse a context, but create a fresh page and callbacks for every fetch."""
 
@@ -638,6 +786,187 @@ class BrowserSession:
         stop_reason = "max_pages" if await self._next_is_available(page, spec) else "exhausted"
         return ClickPaginationResult(pages=pages, stop_reason=stop_reason)
 
+    def _build_engine(
+        self,
+        call_kwargs: dict[str, Any],
+    ) -> tuple[Any, ClickPaginationSpec | None]:
+        kwargs = dict(call_kwargs)
+        custom_config = kwargs.pop("custom_config", None) or {}
+        click_spec: ClickPaginationSpec | None = kwargs.pop("click_pagination", None)
+        engine_cls = PlaywrightEngine if self.fetcher_cls is PlayWrightFetcher else CamoufoxEngine
+        engine: Any = engine_cls(
+            **kwargs,
+            adaptor_arguments={**self.fetcher_cls._generate_parser_arguments(), **custom_config},
+        )
+        return engine, click_spec
+
+    def _make_route_guard(
+        self,
+        state: _FetchState,
+        route_handler: Callable[[Any], Awaitable[None]],
+    ) -> Callable[[Any], Awaitable[None]]:
+        async def guard(route: Any) -> None:
+            self.routed_requests += 1
+            try:
+                wrapped = (
+                    _ReleasedRoute(
+                        route,
+                        state.reserve,
+                        state.observe_abort,
+                        state.cached_asset,
+                    )
+                    if state.budget is not None or state.assets is not None
+                    else route
+                )
+                await state.route_context.run(asyncio.ensure_future, route_handler(wrapped))
+            except UnsafeURLError:
+                # The existing guard has aborted and recorded this subrequest.
+                # Preserve its contract: safe content can still be inspected.
+                return
+            except BaseException as exc:
+                if state.route_error is None:
+                    state.route_error = exc
+                # Closing a page can release a browser-native request whose
+                # frame disappeared before interception. Disable networking
+                # before aborting/closing, including unload beacons and icons.
+                await state.context.set_offline(True)
+                with suppress(Exception):
+                    await route.abort()
+                if state.page is not None:
+                    await state.close_page_once(state.page)
+
+        return guard
+
+    async def _navigate_and_settle(
+        self,
+        state: _FetchState,
+        url: str,
+        engine: Any,
+    ) -> tuple[Any, Any, Any]:
+        page = await state.context.new_page()
+        state.page = page
+        page.set_default_navigation_timeout(engine.timeout)
+        page.set_default_timeout(engine.timeout)
+        final_response = None
+
+        def handle_response(response: Any) -> None:
+            nonlocal final_response
+            if (
+                response.request.resource_type == "document"
+                and response.request.is_navigation_request()
+            ):
+                final_response = response
+
+        page.on("response", handle_response)
+        if engine.extra_headers:
+            await page.set_extra_http_headers(engine.extra_headers)
+        if self.fetcher_cls is PlayWrightFetcher and engine.stealth:
+            for script in engine._PlaywrightEngine__stealth_scripts():
+                await page.add_init_script(path=script)
+
+        first_response = await page.goto(
+            url,
+            referer=generate_convincing_referer(url) if engine.google_search else None,
+        )
+        await page.wait_for_load_state("domcontentloaded")
+        if engine.network_idle:
+            await page.wait_for_load_state("networkidle")
+        if engine.page_action is not None:
+            page = await engine.page_action(page)
+            state.page = page
+        if engine.wait_selector:
+            # Preserve Scrapling's optional selector-wait behavior.
+            try:
+                await page.locator(engine.wait_selector).first.wait_for(
+                    state=engine.wait_selector_state
+                )
+                await page.wait_for_load_state("load")
+                await page.wait_for_load_state("domcontentloaded")
+                if engine.network_idle:
+                    await page.wait_for_load_state("networkidle")
+            except Exception:
+                logger.info("Optional browser selector wait did not complete")
+        await page.wait_for_timeout(engine.wait)
+        if state.route_error is not None:
+            raise state.route_error
+        final_response = final_response or first_response
+        if final_response is None:
+            raise ValueError("Failed to get a response from the page")
+        return page, first_response, final_response
+
+    async def _capture_fetch_output(
+        self,
+        state: _FetchState,
+        page: Any,
+        engine: Any,
+        first_response: Any,
+        final_response: Any,
+        click_spec: ClickPaginationSpec | None,
+    ) -> Any:
+        response = await self._snapshot_response(
+            page,
+            state.context,
+            engine,
+            first_response,
+            final_response,
+            state.budget,
+            history=await engine._async_process_response_history(first_response),
+        )
+        if click_spec is not None:
+            click_result = await self._click_through_pages(
+                page,
+                state.context,
+                engine,
+                first_response,
+                final_response,
+                state.budget,
+                click_spec,
+            )
+            if state.route_error is not None:
+                raise state.route_error
+            setattr(response, CLICK_PAGINATION_ATTRIBUTE, click_result)
+        await state.settle_background_tasks()
+        return response
+
+    async def _teardown_fetch(
+        self,
+        state: _FetchState,
+        guard: Callable[[Any], Awaitable[None]],
+        fetch_error: BaseException | None,
+    ) -> None:
+        stopped = False
+
+        async def release_page() -> None:
+            if state.browser.is_connected():
+                await state.context.set_offline(True)
+            # Popups belong to this context and must not outlive a page fetch.
+            for owned_page in list(state.context.pages):
+                await state.close_page_once(owned_page)
+            await state.context.unroute("**/*", guard)
+            state.detach_listeners()
+
+        try:
+            try:
+                await asyncio.wait_for(release_page(), timeout=_PAGE_RELEASE_SECONDS)
+            except TimeoutError as exc:
+                raise httpx.NetworkError("Browser did not release the page") from exc
+            stopped = True
+        except BaseException:
+            # A crashed page/context can reject cleanup RPCs, or never
+            # answer them, while its driver is still connected. Stop the
+            # whole session before releasing reservations, and preserve
+            # the original fetch/budget failure.
+            try:
+                await await_cleanup(self.aclose())
+            except asyncio.CancelledError:
+                stopped = True
+                raise
+            stopped = True
+            if fetch_error is None:
+                raise
+        finally:
+            await state.finalize_reservations(stopped=stopped)
+
     async def fetch(
         self,
         url: str,
@@ -647,271 +976,48 @@ class BrowserSession:
         budget: RunBudget | None = None,
         site: str | None = None,
     ) -> Any:
-        kwargs = dict(call_kwargs)
-        custom_config = kwargs.pop("custom_config", None) or {}
-        click_spec: ClickPaginationSpec | None = kwargs.pop("click_pagination", None)
-        engine_cls = PlaywrightEngine if self.fetcher_cls is PlayWrightFetcher else CamoufoxEngine
-        engine: Any = engine_cls(
-            **kwargs,
-            adaptor_arguments={**self.fetcher_cls._generate_parser_arguments(), **custom_config},
-        )
+        engine, click_spec = self._build_engine(call_kwargs)
         if self.disconnected:
             raise httpx.NetworkError("Browser session disconnected")
         if self._context is None:
             await self._open(engine)
 
-        context = self._context
-        # Playwright's dispatcher survives page fetches and inherits the context
-        # of its creation. Bind each route to THIS page's budget/diagnostics.
-        route_context = copy_context()
-        # Requests issued per redirect chain that still holds its reservation.
-        chains: dict[Any, int] = {}
-        releasing: set[asyncio.Future[None]] = set()
-        route_error: BaseException | None = None
-        traffic = budget.traffic if budget is not None else None
-        if site is None:
-            site = url_site(url)
-        sizing: set[asyncio.Future[int]] = set()
-        unsized: set[Any] = set()
-        assets = self._assets
-        storing: set[asyncio.Future[None]] = set()
-        # Requests answered from the asset cache: nothing was sent or received.
-        served: set[Any] = set()
-
-        async def reserve(request: Any) -> None:
-            if budget is not None:
-                await budget.reserve_requests(_MAX_REDIRECTS + 1)
-                chains[request] = 1
-                budget.traffic.request(request.url, site, request.resource_type)
-
-        def observe_abort(request: Any) -> None:
-            if traffic is not None:
-                traffic.blocked(request.url, site, request.resource_type)
-
-        def cached_asset(request: Any) -> CachedAsset | None:
-            asset = assets.lookup(site, request) if assets is not None else None
-            if asset is not None:
-                served.add(request)
-                if traffic is not None:
-                    traffic.cached(request.url, site, request.resource_type)
-            return asset
-
-        def release_chain(request: Any) -> None:
-            # A chain that ended cannot redirect again: return its unused
-            # capacity now, so long fetches do not hold it until they finish.
-            issued = chains.pop(_chain_root(request), None)
-            if budget is not None and issued is not None:
-                released = asyncio.ensure_future(
-                    budget.settle_requests(_MAX_REDIRECTS + 1, issued)
-                )
-                releasing.add(released)
-                released.add_done_callback(releasing.discard)
-
-        def observe_request(request: Any) -> None:
-            if request.redirected_from is None:
-                return
-            root = _chain_root(request)
-            if root in chains:
-                chains[root] += 1
-                if traffic is not None:
-                    traffic.request(request.url, site, request.resource_type)
-
-        def observe_failed(request: Any) -> None:
-            release_chain(request)
-
-        def record_received(request: Any, sized: asyncio.Future[int]) -> None:
-            sizing.discard(sized)
-            if traffic is not None and not sized.cancelled() and sized.exception() is None:
-                traffic.received(request.url, site, sized.result(), request.resource_type)
-
-        def observe_response(response: Any) -> None:
-            if response.status not in _REDIRECT_STATUSES:
-                release_chain(response.request)
-            if response.request in served:
-                return
-            if assets is not None and assets.wants(site, response):
-                stored = asyncio.ensure_future(assets.store(site, response))
-                storing.add(stored)
-                stored.add_done_callback(storing.discard)
-            if traffic is None:
-                return
-            declared = _declared_response_bytes(response)
-            if declared is not None:
-                traffic.received(response.url, site, declared, response.request.resource_type)
-            else:
-                # Chunked bodies declare no length; ask the browser once they finish.
-                unsized.add(response.request)
-
-        def observe_finished(request: Any) -> None:
-            if request not in unsized:
-                return
-            unsized.discard(request)
-            sized = asyncio.ensure_future(_received_bytes(request))
-            sizing.add(sized)
-            sized.add_done_callback(lambda done: record_received(request, done))
-
-        browser = context.browser
-        page = None
+        state = _FetchState(
+            context=self._context,
+            budget=budget,
+            site=site if site is not None else url_site(url),
+            assets=self._assets,
+        )
+        guard = self._make_route_guard(state, route_handler)
         fetch_error: BaseException | None = None
-        page_close_lock = asyncio.Lock()
-        closed_pages: set[int] = set()
-
-        async def close_page_once(target_page: Any) -> None:
-            page_id = id(target_page)
-            async with page_close_lock:
-                if page_id in closed_pages:
-                    return
-                await _close_page(target_page, browser)
-                closed_pages.add(page_id)
-
-        async def guard(route: Any) -> None:
-            nonlocal route_error
-            self.routed_requests += 1
-            try:
-                wrapped = (
-                    _ReleasedRoute(route, reserve, observe_abort, cached_asset)
-                    if budget is not None or assets is not None
-                    else route
-                )
-                await route_context.run(asyncio.ensure_future, route_handler(wrapped))
-            except UnsafeURLError:
-                # The existing guard has aborted and recorded this subrequest.
-                # Preserve its contract: safe content can still be inspected.
-                return
-            except BaseException as exc:
-                if route_error is None:
-                    route_error = exc
-                # Closing a page can release a browser-native request whose
-                # frame disappeared before interception. Disable networking
-                # before aborting/closing, including unload beacons and icons.
-                await context.set_offline(True)
-                with suppress(Exception):
-                    await route.abort()
-                if page is not None:
-                    await close_page_once(page)
-
         try:
-            context.on("request", observe_request)
-            context.on("response", observe_response)
-            context.on("requestfinished", observe_finished)
-            context.on("requestfailed", observe_failed)
-            await context.route("**/*", guard)
-            await context.set_offline(False)
-            page = await context.new_page()
-            page.set_default_navigation_timeout(engine.timeout)
-            page.set_default_timeout(engine.timeout)
-            final_response = None
-
-            def handle_response(response: Any) -> None:
-                nonlocal final_response
-                if response.request.resource_type == "document" and response.request.is_navigation_request():
-                    final_response = response
-
-            page.on("response", handle_response)
-            if engine.extra_headers:
-                await page.set_extra_http_headers(engine.extra_headers)
-            if self.fetcher_cls is PlayWrightFetcher and engine.stealth:
-                for script in engine._PlaywrightEngine__stealth_scripts():
-                    await page.add_init_script(path=script)
-
-            first_response = await page.goto(
-                url, referer=generate_convincing_referer(url) if engine.google_search else None,
+            state.attach_listeners()
+            await state.context.route("**/*", guard)
+            await state.context.set_offline(False)
+            page, first_response, final_response = await self._navigate_and_settle(
+                state,
+                url,
+                engine,
             )
-            await page.wait_for_load_state("domcontentloaded")
-            if engine.network_idle:
-                await page.wait_for_load_state("networkidle")
-            if engine.page_action is not None:
-                page = await engine.page_action(page)
-            if engine.wait_selector:
-                # Preserve Scrapling's optional selector-wait behavior.
-                try:
-                    await page.locator(engine.wait_selector).first.wait_for(state=engine.wait_selector_state)
-                    await page.wait_for_load_state("load")
-                    await page.wait_for_load_state("domcontentloaded")
-                    if engine.network_idle:
-                        await page.wait_for_load_state("networkidle")
-                except Exception:
-                    logger.info("Optional browser selector wait did not complete")
-            await page.wait_for_timeout(engine.wait)
-            if route_error is not None:
-                raise route_error
-            final_response = final_response or first_response
-            if final_response is None:
-                raise ValueError("Failed to get a response from the page")
-            response = await self._snapshot_response(
-                page, context, engine, first_response, final_response, budget,
-                history=await engine._async_process_response_history(first_response),
+            return await self._capture_fetch_output(
+                state,
+                page,
+                engine,
+                first_response,
+                final_response,
+                click_spec,
             )
-            if click_spec is not None:
-                click_result = await self._click_through_pages(
-                    page, context, engine, first_response, final_response, budget, click_spec,
-                )
-                if route_error is not None:
-                    raise route_error
-                setattr(response, CLICK_PAGINATION_ATTRIBUTE, click_result)
-            if sizing or storing:
-                await asyncio.wait(sizing | storing, timeout=_SIZES_SETTLE_SECONDS)
-            return response
         except BaseException as exc:
             fetch_error = exc
             if isinstance(exc, (BudgetExceeded, asyncio.CancelledError)):
                 raise
-            if route_error is not None:
-                raise route_error from exc
-            if not browser.is_connected():
+            if state.route_error is not None:
+                raise state.route_error from exc
+            if not state.browser.is_connected():
                 raise httpx.NetworkError("Browser session disconnected") from exc
             raise
         finally:
-            stopped = False
-
-            async def release_page() -> None:
-                if browser.is_connected():
-                    await context.set_offline(True)
-                # Popups belong to this context and must not outlive a page fetch.
-                for owned_page in list(context.pages):
-                    await close_page_once(owned_page)
-                await context.unroute("**/*", guard)
-                context.remove_listener("request", observe_request)
-                context.remove_listener("response", observe_response)
-                context.remove_listener("requestfinished", observe_finished)
-                context.remove_listener("requestfailed", observe_failed)
-
-            try:
-                try:
-                    await asyncio.wait_for(release_page(), timeout=_PAGE_RELEASE_SECONDS)
-                except TimeoutError as exc:
-                    raise httpx.NetworkError("Browser did not release the page") from exc
-                stopped = True
-            except BaseException:
-                # A crashed page/context can reject cleanup RPCs, or never
-                # answer them, while its driver is still connected. Stop the
-                # whole session before releasing reservations, and preserve
-                # the original fetch/budget failure.
-                try:
-                    await await_cleanup(self.aclose())
-                except asyncio.CancelledError:
-                    stopped = True
-                    raise
-                stopped = True
-                if fetch_error is None:
-                    raise
-            finally:
-                unsettled: list[asyncio.Future[Any]] = [*sizing, *storing]
-                for pending in unsettled:
-                    pending.cancel()
-                try:
-                    if releasing:
-                        await await_cleanup(
-                            asyncio.gather(*releasing, return_exceptions=True)
-                        )
-                finally:
-                    if budget is not None and stopped:
-                        await await_cleanup(
-                            budget.settle_requests(
-                                (_MAX_REDIRECTS + 1) * len(chains),
-                                sum(chains.values()),
-                            )
-                        )
+            await self._teardown_fetch(state, guard, fetch_error)
 
 
 def _html_response(html: str, response_kwargs: dict[str, Any]) -> Response:

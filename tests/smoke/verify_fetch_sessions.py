@@ -24,9 +24,9 @@ from scrapling import PlayWrightFetcher, StealthyFetcher
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
 from scrapeyard.engine import browser_debug
+from scrapeyard.engine.browser_pool import activate_browser_pool
 from scrapeyard.engine.browser_session import BrowserSession
-from scrapeyard.engine.resilience import RetryHandler
-from scrapeyard.engine.scraper import _fetch_target_page
+from scrapeyard.engine.scraper import scrape_target
 
 ORIGIN = "http://session.public.test:8080"
 OTHER = "http://session-other.public.test:8080"
@@ -109,21 +109,38 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
         budgets_seen.append((route.request.url, browser_debug._BROWSER_RUN_BUDGET.get()))
         await guard(route)
 
+    class _FixedSessionPool:
+        def __init__(self, owned: BrowserSession) -> None:
+            self.session = owned
+
+        async def acquire(self, _target, _proxy_url, _fetcher_cls) -> BrowserSession:
+            return self.session
+
+        async def release(self, _session: BrowserSession) -> None:
+            return None
+
+    pool = _FixedSessionPool(session)
+
     async def fetch(url, run_budget):
-        return await _fetch_target_page(
-            RetryHandler(RetryConfig(max_attempts=2, backoff_max=0)),
-            session, url, target, False, {503}, data_dir, None, None, run_budget,
-        )
+        page_target = target.model_copy(update={"url": url})
+        with activate_browser_pool(pool):  # type: ignore[arg-type]
+            return await scrape_target(
+                page_target,
+                False,
+                RetryConfig(max_attempts=2, backoff_max=0),
+                adaptive_dir=data_dir,
+                budget=run_budget,
+            )
 
     try:
         with patch.object(browser_debug, "_guarded_async_intercept_route", observed_guard):
             first_budget, second_budget = budget(), budget()
             first = await fetch(ORIGIN + "/first", first_budget)
-            assert first.page.css("h1::text").get() == "empty"
+            assert first.is_success and first.data == [{"title": "empty"}], first
             context = session._context
             browser = context.browser
             second = await fetch(ORIGIN + "/second", second_budget)
-            assert second.page.css("h1::text").get() == "present"
+            assert second.is_success and second.data == [{"title": "present"}], second
             assert session._context is context
             assert not context.pages  # No earlier page callbacks remain alive.
             if fetcher is PlayWrightFetcher:
@@ -144,7 +161,7 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             assert all(b is first_budget for url, b in budgets_seen if url.endswith("/first"))
             assert all(b is second_budget for url, b in budgets_seen if url.endswith(("/second", "/private")))
             other = await fetch(OTHER + "/other", budget())
-            assert other.page.css("h1::text").get() == "empty"
+            assert other.is_success and other.data == [{"title": "empty"}], other
             headers = {name.lower(): value for name, value in page_requests()[-1][1].items()}
             assert "x-test-secret" not in headers
             assert "cookie" not in headers
@@ -154,12 +171,13 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             # A disconnected browser consumes retry policy, then rebuilds state.
             await browser.close()
             recovered = await fetch(ORIGIN + "/recovered", budget())
-            assert recovered.page.css("h1::text").get() == "empty"
+            assert recovered.is_success and recovered.data == [{"title": "empty"}], recovered
             assert session._context is not context
             await session.aclose()
             session = BrowserSession(fetcher)
+            pool.session = session
             clean = await fetch(ORIGIN + "/clean", budget())
-            assert clean.page.css("h1::text").get() == "empty"
+            assert clean.is_success and clean.data == [{"title": "empty"}], clean
             assert "Cookie" not in page_requests()[-1][1]
 
             # Deadline and cancellation must close the existing browser before returning.

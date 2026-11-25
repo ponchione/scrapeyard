@@ -10,13 +10,14 @@ import pytest
 from scrapeyard.common.time import utc_now
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.queue.terminal_reconciliation import reconcile_terminal_webhook_intents
-from scrapeyard.storage.cleanup import run_cleanup
+from scrapeyard.storage.cleanup import CleanupConfig, run_cleanup
 from scrapeyard.storage.database import get_db
 from scrapeyard.webhook.dispatcher import (
     WebhookDispatchReason,
     WebhookDispatchResult,
     WebhookDispatchStatus,
 )
+from tests.factories import fetch_webhook_delivery
 from tests.integration.conftest import poll_until_ready
 
 
@@ -73,7 +74,6 @@ async def test_webhook_received_after_async_job(client, monkeypatch):
     # Patch the singleton dispatcher's one-attempt sender to capture payloads.
     from scrapeyard.api.dependencies import (
         get_webhook_dispatcher,
-        get_webhook_outbox_store,
     )
     dispatcher = get_webhook_dispatcher()
 
@@ -107,7 +107,7 @@ async def test_webhook_received_after_async_job(client, monkeypatch):
     assert payload["project"] == "integ"
     assert payload["run_id"] is not None
     assert payload["results_url"] is not None
-    delivery = await get_webhook_outbox_store().get_delivery(payload["delivery_id"])
+    delivery = await fetch_webhook_delivery(payload["delivery_id"])
     assert delivery is not None
     assert delivery.delivery_id == payload["delivery_id"]
     assert delivery.payload == payload
@@ -156,9 +156,7 @@ async def test_retention_cleanup_preserves_reconciliation_dedup_evidence(
         lambda result: result.json()["status"] == "complete",
     )
     await poll_until_ready(
-        lambda: get_webhook_outbox_store().get_delivery(
-            dispatched_payloads[0]["delivery_id"]
-        )
+        lambda: fetch_webhook_delivery(dispatched_payloads[0]["delivery_id"])
         if dispatched_payloads
         else asyncio.sleep(0, result=None),
         lambda delivery: delivery is not None and delivery.status.value == "delivered",
@@ -168,15 +166,17 @@ async def test_retention_cleanup_preserves_reconciliation_dedup_evidence(
 
     await run_cleanup(
         get_result_store(),
-        retention_days=30,
-        max_results_per_job=100,
+        CleanupConfig(
+            retention_days=30,
+            max_results_per_job=100,
+            webhook_delivered_retention_days=1,
+            webhook_failed_retention_days=30,
+            webhook_cleanup_batch_size=10,
+        ),
         webhook_outbox_store=get_webhook_outbox_store(),
-        webhook_delivered_retention_days=1,
-        webhook_failed_retention_days=30,
-        webhook_cleanup_batch_size=10,
         now=utc_now() + timedelta(days=2),
     )
-    tombstone = await get_webhook_outbox_store().get_delivery(delivery_id)
+    tombstone = await fetch_webhook_delivery(delivery_id)
     assert tombstone is not None and tombstone.is_scrubbed
     assert tombstone.payload == {}
     assert tombstone.headers == {}
@@ -220,7 +220,6 @@ async def test_webhook_failure_does_not_affect_job(client, monkeypatch):
     from scrapeyard.api.dependencies import (
         get_job_store,
         get_webhook_dispatcher,
-        get_webhook_outbox_store,
     )
     dispatcher = get_webhook_dispatcher()
 
@@ -251,7 +250,7 @@ async def test_webhook_failure_does_not_affect_job(client, monkeypatch):
     assert run_id is not None
     from scrapeyard.webhook.payload import deterministic_delivery_id
 
-    delivery = await get_webhook_outbox_store().get_delivery(
+    delivery = await fetch_webhook_delivery(
         deterministic_delivery_id(
             job_id=job_id,
             run_id=run_id,
@@ -283,7 +282,6 @@ async def test_webhook_attempt_exhaustion_does_not_change_terminal_run(
     from scrapeyard.api.dependencies import (
         get_job_store,
         get_webhook_dispatcher,
-        get_webhook_outbox_store,
     )
     from scrapeyard.storage.webhook_outbox import WebhookFailureReason
     from scrapeyard.webhook.payload import deterministic_delivery_id
@@ -319,7 +317,7 @@ async def test_webhook_attempt_exhaustion_does_not_change_terminal_run(
         event="job.complete",
     )
     delivery = await poll_until_ready(
-        lambda: get_webhook_outbox_store().get_delivery(delivery_id),
+        lambda: fetch_webhook_delivery(delivery_id),
         lambda row: row is not None and row.status.value == "failed",
         failure_message="Timed out waiting for webhook attempt exhaustion",
     )

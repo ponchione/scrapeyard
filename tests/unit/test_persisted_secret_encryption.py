@@ -22,6 +22,11 @@ from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
     WebhookDeliveryCreate,
 )
+from tests.factories import (
+    fetch_webhook_delivery,
+    make_delivery_create,
+    seed_webhook_delivery,
+)
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 CONFIG_SECRET = "proxy-password-sentinel"
@@ -72,11 +77,9 @@ webhook:
 
 
 def _delivery(delivery_id: str = "secret-delivery") -> WebhookDeliveryCreate:
-    return WebhookDeliveryCreate(
-        delivery_id=delivery_id,
+    return make_delivery_create(
+        delivery_id,
         job_id="secret-job",
-        run_id="run-1",
-        event="job.complete",
         url=f"https://hooks.example.com/callback?token={URL_SECRET}",
         headers={"Authorization": f"Bearer {HEADER_SECRET}"},
         timeout_seconds=5,
@@ -104,7 +107,6 @@ def test_invalid_keyring_configuration_fails_closed(monkeypatch, keys, active):
 async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
     await init_db(str(tmp_path / "db"))
     jobs = SQLiteJobStore()
-    outbox = SQLiteWebhookOutboxStore()
     job = _job().model_copy(update={"current_run_id": "run-1"})
     await jobs.save_job(job)
     assert await jobs.claim_run(
@@ -114,7 +116,7 @@ async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
         hashlib.sha256(job.config_yaml.encode()).hexdigest(),
         NOW,
     )
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
 
     async with get_db("jobs.db") as db:
         job_row = await (
@@ -137,7 +139,7 @@ async def test_new_rows_encrypt_full_config_and_retry_request_state(tmp_path):
     assert all(str(value).startswith("syenc:v1:test-v1:") for value in webhook_row)
 
     restored_job = await jobs.get_job("secret-job")
-    restored_delivery = await outbox.get_delivery("secret-delivery")
+    restored_delivery = await fetch_webhook_delivery("secret-delivery")
     assert restored_job.config_yaml == _job().config_yaml
     assert restored_delivery is not None
     assert restored_delivery.headers["Authorization"].endswith(HEADER_SECRET)
@@ -173,7 +175,7 @@ async def test_accepted_queue_snapshot_is_encrypted_and_loaded_by_run_identity(
 async def test_retry_error_is_encrypted_at_rest_and_decrypts_for_dispatch(tmp_path):
     await init_db(str(tmp_path / "db"))
     outbox = SQLiteWebhookOutboxStore()
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     retry_error = f"timeout contacting https://hooks.example/?token={URL_SECRET}"
 
     assert await outbox.mark_retryable_failure(
@@ -192,7 +194,7 @@ async def test_retry_error_is_encrypted_at_rest_and_decrypts_for_dispatch(tmp_pa
         ).fetchone()
     assert row[0].startswith("syenc:v1:test-v1:")
     assert retry_error not in row[0]
-    restored = await outbox.get_delivery("secret-delivery")
+    restored = await fetch_webhook_delivery("secret-delivery")
     assert restored is not None
     assert restored.last_error == retry_error
 
@@ -214,7 +216,7 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
         hashlib.sha256(job.config_yaml.encode()).hexdigest(),
         NOW,
     )
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     await outbox.mark_retryable_failure(
         "secret-delivery",
         attempted_at=NOW,
@@ -242,7 +244,7 @@ async def test_rotation_reencrypts_pending_state_then_old_key_can_be_removed(
 
     _set_keys(monkeypatch, {"new": _encoded(b"n")}, "new")
     assert (await jobs.get_job("secret-job")).config_yaml == _job().config_yaml
-    pending = await outbox.get_delivery("secret-delivery")
+    pending = await fetch_webhook_delivery("secret-delivery")
     assert pending is not None and pending.payload["secret"] == PAYLOAD_SECRET
     assert pending.last_error == "old-key retry error"
 
@@ -300,7 +302,7 @@ async def test_plaintext_migration_is_atomic_and_purges_sentinel_bytes(
 
     await migrate_persisted_secrets()
     assert (await SQLiteJobStore().get_job("legacy-job")).config_yaml == plaintext
-    legacy_delivery = await SQLiteWebhookOutboxStore().get_delivery(
+    legacy_delivery = await fetch_webhook_delivery(
         "legacy-delivery"
     )
     assert legacy_delivery is not None
@@ -316,12 +318,12 @@ async def test_plaintext_migration_is_atomic_and_purges_sentinel_bytes(
 async def test_encrypted_pending_webhook_survives_normal_restart(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
-    await SQLiteWebhookOutboxStore().enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     await close_db()
 
     await init_db(str(db_dir))
     await migrate_persisted_secrets()
-    restored = await SQLiteWebhookOutboxStore().get_delivery("secret-delivery")
+    restored = await fetch_webhook_delivery("secret-delivery")
     assert restored is not None
     assert restored.url.endswith(URL_SECRET)
     assert restored.headers["Authorization"].endswith(HEADER_SECRET)
@@ -331,7 +333,7 @@ async def test_second_startup_with_active_key_performs_no_row_updates(tmp_path):
     await init_db(str(tmp_path / "db"))
     await SQLiteJobStore().save_job(_job())
     outbox = SQLiteWebhookOutboxStore()
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     await outbox.mark_retryable_failure(
         "secret-delivery",
         attempted_at=NOW,
@@ -402,7 +404,7 @@ async def test_second_startup_with_active_key_performs_no_row_updates(tmp_path):
 async def test_current_envelope_with_stale_hash_repairs_only_job_row(tmp_path):
     await init_db(str(tmp_path / "db"))
     await SQLiteJobStore().save_job(_job())
-    await SQLiteWebhookOutboxStore().enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     async with get_db("jobs.db") as db:
         before_envelope = (
             await (

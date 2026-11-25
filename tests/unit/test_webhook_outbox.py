@@ -10,53 +10,32 @@ import pytest
 from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.webhook_outbox import (
     SQLiteWebhookOutboxStore,
-    WebhookDeliveryCreate,
     WebhookDeliveryStatus,
     WebhookFailureReason,
 )
+from tests.factories import (
+    fetch_webhook_delivery,
+    list_pending_webhook_deliveries,
+    make_delivery_create,
+    seed_webhook_delivery,
+)
 
-
-def _delivery(
-    delivery_id: str = "delivery-1",
-    *,
-    job_id: str = "job-1",
-    run_id: str | None = "run-1",
-    event: str = "job.complete",
-    next_attempt_at: datetime | None = None,
-) -> WebhookDeliveryCreate:
-    scheduled_at = next_attempt_at or datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    return WebhookDeliveryCreate(
-        delivery_id=delivery_id,
-        job_id=job_id,
-        run_id=run_id,
-        event=event,
-        url="https://hooks.example.com/scrapeyard",
-        headers={"X-Test": "yes"},
-        timeout_seconds=7.0,
-        payload={
-            "delivery_id": delivery_id,
-            "event": event,
-            "job_id": job_id,
-            "run_id": run_id,
-        },
-        next_attempt_at=scheduled_at,
-    )
+_delivery = make_delivery_create
 
 
 async def test_enqueue_delivery_and_list_pending(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
-    store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
 
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("due", next_attempt_at=now - timedelta(seconds=1)), now=now
     )
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("future", next_attempt_at=now + timedelta(minutes=5)), now=now
     )
 
-    pending = await store.list_pending()
+    pending = await list_pending_webhook_deliveries()
 
     assert [delivery.delivery_id for delivery in pending] == ["due", "future"]
     assert pending[0].status is WebhookDeliveryStatus.pending
@@ -75,11 +54,11 @@ async def test_mark_delivered_records_success_and_attempt_count(tmp_path):
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     delivered_at = now + timedelta(seconds=3)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
 
     await store.mark_delivered("delivery-1", delivered_at=delivered_at, attempts=2)
 
-    delivery = await store.get_delivery("delivery-1")
+    delivery = await fetch_webhook_delivery("delivery-1")
     assert delivery is not None
     assert delivery.status is WebhookDeliveryStatus.delivered
     assert delivery.attempts == 2
@@ -95,7 +74,7 @@ async def test_mark_retryable_failure_keeps_delivery_pending_with_backoff(tmp_pa
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     attempted_at = now + timedelta(seconds=1)
     next_attempt_at = now + timedelta(minutes=1)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
 
     await store.mark_retryable_failure(
         "delivery-1",
@@ -105,7 +84,7 @@ async def test_mark_retryable_failure_keeps_delivery_pending_with_backoff(tmp_pa
         attempts=1,
     )
 
-    delivery = await store.get_delivery("delivery-1")
+    delivery = await fetch_webhook_delivery("delivery-1")
     assert delivery is not None
     assert delivery.status is WebhookDeliveryStatus.pending
     assert delivery.attempts == 1
@@ -120,7 +99,7 @@ async def test_mark_failed_is_inspectable_and_not_due(tmp_path):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
 
     await store.mark_failed(
         "delivery-1",
@@ -130,12 +109,12 @@ async def test_mark_failed_is_inspectable_and_not_due(tmp_path):
         attempts=1,
     )
 
-    delivery = await store.get_delivery("delivery-1")
+    delivery = await fetch_webhook_delivery("delivery-1")
     assert delivery is not None
     assert delivery.status is WebhookDeliveryStatus.failed
     assert delivery.attempts == 1
     assert delivery.last_error == "HTTP 404"
-    assert await store.list_pending() == []
+    assert await list_pending_webhook_deliveries() == []
     await close_db()
 
 
@@ -144,16 +123,16 @@ async def test_duplicate_enqueue_does_not_reset_terminal_delivery(tmp_path):
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     delivery = _delivery()
-    await store.enqueue_delivery(delivery, now=now)
+    await seed_webhook_delivery(delivery, now=now)
     await store.mark_delivered(
         delivery.delivery_id,
         delivered_at=now + timedelta(seconds=1),
         attempts=2,
     )
 
-    await store.enqueue_delivery(delivery, now=now + timedelta(minutes=1))
+    await seed_webhook_delivery(delivery, now=now + timedelta(minutes=1))
 
-    persisted = await store.get_delivery(delivery.delivery_id)
+    persisted = await fetch_webhook_delivery(delivery.delivery_id)
     assert persisted is not None
     assert persisted.status is WebhookDeliveryStatus.delivered
     assert persisted.attempts == 2
@@ -164,14 +143,13 @@ async def test_duplicate_enqueue_does_not_reset_terminal_delivery(tmp_path):
 async def test_delivery_survives_close_and_reopen_cycle(tmp_path):
     db_dir = tmp_path / "db"
     await init_db(str(db_dir))
-    store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
 
     await close_db()
     await init_db(str(db_dir))
 
-    restored = await SQLiteWebhookOutboxStore().get_delivery("delivery-1")
+    restored = await fetch_webhook_delivery("delivery-1")
     assert restored is not None
     assert restored.delivery_id == "delivery-1"
     assert restored.payload["job_id"] == "job-1"
@@ -179,11 +157,11 @@ async def test_delivery_survives_close_and_reopen_cycle(tmp_path):
     await close_db()
 
 
-async def test_list_pending_quarantines_malformed_delivery_rows(tmp_path, caplog):
+async def test_list_due_pending_quarantines_malformed_delivery_rows(tmp_path, caplog):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery("good"), now=now)
+    await seed_webhook_delivery(_delivery("good"), now=now)
     async with get_db("jobs.db") as db:
         await db.execute(
             """INSERT INTO webhook_deliveries
@@ -207,11 +185,11 @@ async def test_list_pending_quarantines_malformed_delivery_rows(tmp_path, caplog
         )
         await db.commit()
 
-    pending = await store.list_pending()
+    pending = await store.list_due_pending(now=now, limit=10)
 
     assert [delivery.delivery_id for delivery in pending] == ["good"]
     assert "bad-json" in caplog.text
-    quarantined = await store.get_delivery("bad-json")
+    quarantined = await fetch_webhook_delivery("bad-json")
     assert quarantined is not None
     assert quarantined.status is WebhookDeliveryStatus.failed
     assert quarantined.failure_reason is WebhookFailureReason.decode_failure
@@ -219,7 +197,7 @@ async def test_list_pending_quarantines_malformed_delivery_rows(tmp_path, caplog
     await close_db()
 
 
-async def test_get_delivery_returns_none_for_malformed_delivery_row(tmp_path, caplog):
+async def test_list_due_pending_quarantines_malformed_headers_row(tmp_path, caplog):
     await init_db(str(tmp_path / "db"))
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     async with get_db("jobs.db") as db:
@@ -245,9 +223,9 @@ async def test_get_delivery_returns_none_for_malformed_delivery_row(tmp_path, ca
         )
         await db.commit()
 
-    assert await SQLiteWebhookOutboxStore().get_delivery("bad-headers") is None
+    assert await SQLiteWebhookOutboxStore().list_due_pending(now=now, limit=10) == []
     assert "bad-headers" in caplog.text
-    quarantined = await SQLiteWebhookOutboxStore().get_delivery("bad-headers")
+    quarantined = await fetch_webhook_delivery("bad-headers")
     assert quarantined is not None
     assert quarantined.failure_reason is WebhookFailureReason.decode_failure
     await close_db()
@@ -257,15 +235,15 @@ async def test_due_query_is_bounded_and_excludes_future_rows(tmp_path):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("due-2", next_attempt_at=now - timedelta(seconds=1)),
         now=now,
     )
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("due-1", next_attempt_at=now - timedelta(seconds=2)),
         now=now,
     )
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("future", next_attempt_at=now + timedelta(seconds=1)),
         now=now,
     )
@@ -284,15 +262,15 @@ async def test_malformed_rows_filling_batch_are_scrubbed_without_starving_valid_
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("bad-1", next_attempt_at=now - timedelta(seconds=3)),
         now=now,
     )
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("bad-2", next_attempt_at=now - timedelta(seconds=2)),
         now=now,
     )
-    await store.enqueue_delivery(
+    await seed_webhook_delivery(
         _delivery("good", next_attempt_at=now - timedelta(seconds=1)),
         now=now,
     )
@@ -309,7 +287,7 @@ async def test_malformed_rows_filling_batch_are_scrubbed_without_starving_valid_
     assert [delivery.delivery_id for delivery in due] == ["good"]
     assert await store.next_pending_due_at() == now - timedelta(seconds=1)
     for delivery_id in ("bad-1", "bad-2"):
-        quarantined = await store.get_delivery(delivery_id)
+        quarantined = await fetch_webhook_delivery(delivery_id)
         assert quarantined is not None
         assert quarantined.status is WebhookDeliveryStatus.failed
         assert quarantined.failure_reason is WebhookFailureReason.decode_failure
@@ -334,7 +312,7 @@ async def test_malformed_exhausted_row_is_quarantined_and_transition_is_idempote
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery("bad-exhausted"), now=now - timedelta(days=2))
+    await seed_webhook_delivery(_delivery("bad-exhausted"), now=now - timedelta(days=2))
     async with get_db("jobs.db") as db:
         await db.execute(
             "UPDATE webhook_deliveries SET headers_json = '[]', attempts = 5 "
@@ -355,7 +333,7 @@ async def test_malformed_exhausted_row_is_quarantined_and_transition_is_idempote
         failed_at=now,
         decode_error_type="ValueError",
     )
-    quarantined = await store.get_delivery("bad-exhausted")
+    quarantined = await fetch_webhook_delivery("bad-exhausted")
     assert quarantined is not None
     assert quarantined.failure_reason is WebhookFailureReason.decode_failure
 
@@ -365,7 +343,7 @@ async def test_begin_attempt_is_compare_and_set_and_survives_reopen(tmp_path):
     await init_db(str(db_dir))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
 
     reserved = await store.begin_attempt(
         "delivery-1",
@@ -379,7 +357,7 @@ async def test_begin_attempt_is_compare_and_set_and_survives_reopen(tmp_path):
     )
     await close_db()
     await init_db(str(db_dir))
-    restored = await SQLiteWebhookOutboxStore().get_delivery("delivery-1")
+    restored = await fetch_webhook_delivery("delivery-1")
 
     assert reserved is not None and reserved.attempts == 1
     assert duplicate is None
@@ -396,7 +374,7 @@ async def test_outbox_write_rolls_back_when_commit_fails(
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
     async with get_db("jobs.db") as db:
         pass
     original_commit = db.commit
@@ -422,7 +400,7 @@ async def test_outbox_write_rolls_back_when_commit_fails(
 
     assert db.in_transaction is False
     monkeypatch.setattr(db, "commit", original_commit)
-    persisted = await store.get_delivery("delivery-1")
+    persisted = await fetch_webhook_delivery("delivery-1")
     assert persisted is not None
     assert persisted.status is WebhookDeliveryStatus.pending
     assert persisted.attempts == 0
@@ -438,7 +416,7 @@ async def test_outbox_write_rolls_back_on_cancellation(
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
     async with get_db("jobs.db") as db:
         pass
     original_execute = db.execute
@@ -467,7 +445,7 @@ async def test_outbox_write_rolls_back_on_cancellation(
 
     assert db.in_transaction is False
     monkeypatch.setattr(db, "execute", original_execute)
-    persisted = await store.get_delivery("delivery-1")
+    persisted = await fetch_webhook_delivery("delivery-1")
     assert persisted is not None
     assert persisted.status is WebhookDeliveryStatus.pending
     assert persisted.attempts == 0
@@ -478,7 +456,7 @@ async def test_terminal_transitions_cannot_return_to_pending(tmp_path):
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery(), now=now)
+    await seed_webhook_delivery(_delivery(), now=now)
     assert await store.mark_delivered(
         "delivery-1",
         delivered_at=now + timedelta(seconds=1),
@@ -496,7 +474,7 @@ async def test_terminal_transitions_cannot_return_to_pending(tmp_path):
         reason=WebhookFailureReason.non_retryable_failure,
         last_error="should not replace delivered state",
     )
-    persisted = await store.get_delivery("delivery-1")
+    persisted = await fetch_webhook_delivery("delivery-1")
     assert persisted is not None
     assert persisted.status is WebhookDeliveryStatus.delivered
 
@@ -505,16 +483,16 @@ async def test_outbox_summary_counts_oldest_age_and_attempt_distribution(tmp_pat
     await init_db(str(tmp_path / "db"))
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
-    await store.enqueue_delivery(_delivery("pending-old"), now=now - timedelta(seconds=30))
-    await store.enqueue_delivery(_delivery("pending-new"), now=now - timedelta(seconds=10))
+    await seed_webhook_delivery(_delivery("pending-old"), now=now - timedelta(seconds=30))
+    await seed_webhook_delivery(_delivery("pending-new"), now=now - timedelta(seconds=10))
     await store.begin_attempt(
         "pending-new",
         expected_attempts=0,
         attempted_at=now - timedelta(seconds=5),
     )
-    await store.enqueue_delivery(_delivery("delivered"), now=now)
+    await seed_webhook_delivery(_delivery("delivered"), now=now)
     await store.mark_delivered("delivered", delivered_at=now)
-    await store.enqueue_delivery(_delivery("failed"), now=now)
+    await seed_webhook_delivery(_delivery("failed"), now=now)
     await store.mark_failed(
         "failed",
         failed_at=now,
@@ -538,7 +516,7 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
     store = SQLiteWebhookOutboxStore()
     now = datetime(2026, 4, 24, 12, 0, tzinfo=timezone.utc)
     for delivery_id in ("delivered", "failed", "pending"):
-        await store.enqueue_delivery(_delivery(delivery_id), now=now)
+        await seed_webhook_delivery(_delivery(delivery_id), now=now)
     await store.mark_delivered("delivered", delivered_at=now + timedelta(seconds=1))
     await store.mark_failed(
         "failed",
@@ -553,7 +531,7 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
         scrubbed_at=now + timedelta(seconds=2),
         limit=10,
     )
-    inspectable_failed = await store.get_delivery("failed")
+    inspectable_failed = await fetch_webhook_delivery("failed")
     assert before_retention.delivered_scrubbed == 0
     assert before_retention.failed_scrubbed == 0
     assert inspectable_failed is not None
@@ -573,9 +551,9 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
         scrubbed_at=now + timedelta(seconds=3),
         limit=10,
     )
-    delivered = await store.get_delivery("delivered")
-    failed = await store.get_delivery("failed")
-    pending = await store.get_delivery("pending")
+    delivered = await fetch_webhook_delivery("delivered")
+    failed = await fetch_webhook_delivery("failed")
+    pending = await fetch_webhook_delivery("pending")
 
     assert summary.delivered_scrubbed == 1
     assert summary.failed_scrubbed == 1
@@ -591,7 +569,7 @@ async def test_terminal_retention_scrubs_secrets_but_keeps_tombstones(tmp_path):
     assert failed.failure_reason is WebhookFailureReason.permanent_http_response
     assert pending is not None and not pending.is_scrubbed
     assert pending.url == "https://hooks.example.com/scrapeyard"
-    assert (await store.list_pending())[0].delivery_id == "pending"
+    assert (await list_pending_webhook_deliveries())[0].delivery_id == "pending"
 
     repeated = await store.scrub_terminal_deliveries(
         delivered_before=now + timedelta(days=1),

@@ -10,16 +10,15 @@ import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
-from scrapeyard.engine.basic_fetch import BasicSession
-from scrapeyard.engine.resilience import RetryHandler
-from scrapeyard.engine.scraper import _fetch_basic_with_safe_redirects, _fetch_page
+from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import ResolvedPublicURL
+from tests.factories import make_budget
 
 _ORIGIN = "http://www.example.test"
 
 
 def _budget(max_fetched_bytes: int) -> RunBudget:
-    return RunBudget(
+    return make_budget(
         max_duration_seconds=60,
         max_fetched_bytes=max_fetched_bytes,
         max_extracted_records=100,
@@ -79,19 +78,14 @@ async def test_basic_redirect_bodies_are_counted_aggregate(monkeypatch):
         return _http("200 OK", b"def")
 
     budget = _budget(5)
-    session = BasicSession()
-    try:
-        async with _local_site(monkeypatch, respond) as paths:
-            with pytest.raises(BudgetExceeded) as exc_info:
-                await _fetch_basic_with_safe_redirects(
-                    session,
-                    f"{_ORIGIN}/start",
-                    {"timeout": 5},
-                    {},
-                    budget=budget,
-                )
-    finally:
-        await session.aclose()
+    target = TargetConfig(
+        url=f"{_ORIGIN}/start",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    async with _local_site(monkeypatch, respond) as paths:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget)
 
     assert paths == ["/start", "/final"]
     assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
@@ -108,29 +102,14 @@ async def test_retry_response_bodies_are_counted_aggregate(monkeypatch):
     )
     budget = _budget(5)
     budget.sleep = AsyncMock()
-    retry = RetryHandler(
-        RetryConfig(max_attempts=2, backoff="fixed", backoff_max=1),
-        budget=budget,
-    )
-    session = BasicSession()
-    try:
-        async with _local_site(monkeypatch, lambda _path: _http("503 Busy", b"abc")) as paths:
-            with pytest.raises(BudgetExceeded) as exc_info:
-                await retry.execute(
-                    _fetch_page,
-                    session,
-                    target.url,
-                    target,
-                    target.fetcher,
-                    False,
-                    {503},
-                    "/tmp/adaptive",
-                    None,
-                    None,
-                    budget,
-                )
-    finally:
-        await session.aclose()
+    async with _local_site(monkeypatch, lambda _path: _http("503 Busy", b"abc")) as paths:
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await scrape_target(
+                target,
+                False,
+                RetryConfig(max_attempts=2, backoff="fixed", backoff_max=1),
+                budget=budget,
+            )
 
     assert paths == ["/", "/"]
     assert exc_info.value.limit_name is BudgetLimitName.fetched_bytes
@@ -152,10 +131,13 @@ async def test_request_cap_stops_redirects_before_another_transport_call(monkeyp
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
     budget = _budget(10000)
     budget.max_requests = 2
+    target = TargetConfig(
+        url="https://example.com/start",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
     with pytest.raises(BudgetExceeded) as failure:
-        await _fetch_basic_with_safe_redirects(
-            BasicSession(), "https://example.com/start", {}, {}, budget=budget,
-        )
+        await scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget)
     assert failure.value.limit_name.value == "requests"
     assert calls == ["https://example.com/start", "https://example.com/hop-1"]
     assert budget.requests == 2

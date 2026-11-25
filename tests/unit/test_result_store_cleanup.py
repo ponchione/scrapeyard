@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 
 import scrapeyard.storage.result_store as result_store_module
-from scrapeyard.storage.cleanup import CleanupCycleOutcome, run_cleanup
+from scrapeyard.storage.cleanup import CleanupConfig, CleanupCycleOutcome, run_cleanup
 from scrapeyard.storage.database import close_db, get_db, init_db
 from scrapeyard.storage.result_store import LocalResultStore
 from scrapeyard.storage.types import ResultArtifactReadError
@@ -645,13 +645,13 @@ async def test_cleanup_deadline_resumes_partial_artifact_page(
     monkeypatch.setattr(result_store_module, "time", clock)
     monkeypatch.setattr(store, method, slow_first_inspection)
 
-    first = await run_cleanup(
-        store,
+    cleanup_config = CleanupConfig(
         retention_days=30,
         max_results_per_job=100,
         result_cleanup_batch_size=3,
         cycle_max_seconds=1.0,
     )
+    first = await run_cleanup(store, cleanup_config)
 
     assert first == CleanupCycleOutcome(saturated=True, processed_items=first_processed)
     assert inspected == run_ids[:1]
@@ -663,13 +663,7 @@ async def test_cleanup_deadline_resumes_partial_artifact_page(
         assert metadata_cursor == 0
         assert filesystem_cursor == ("test-project", "test-job", run_ids[0])
 
-    second = await run_cleanup(
-        store,
-        retention_days=30,
-        max_results_per_job=100,
-        result_cleanup_batch_size=3,
-        cycle_max_seconds=1.0,
-    )
+    second = await run_cleanup(store, cleanup_config)
 
     assert second == CleanupCycleOutcome(saturated=False, processed_items=5)
     assert inspected == run_ids

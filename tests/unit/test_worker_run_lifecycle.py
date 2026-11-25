@@ -17,7 +17,7 @@ from scrapeyard.models.job import (
     Job,
 )
 from scrapeyard.queue.run_lifecycle import build_run_paths, handle_crash
-from scrapeyard.queue.worker import _run_superseded, scrape_task
+from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.database import close_db, init_db
 from scrapeyard.storage.error_store import SQLiteErrorStore
 from scrapeyard.storage.job_store import SQLiteJobStore
@@ -61,27 +61,49 @@ async def _insert_job_row(
 
 
 # ---------------------------------------------------------------------------
-# _run_superseded — pure function tests
+# Run supersession behavior via scrape_task
 # ---------------------------------------------------------------------------
 
 
 class TestRunSuperseded:
-    def test_returns_false_when_run_id_is_none(self):
-        job = make_job(current_run_id="run-1")
-        assert _run_superseded(job, None) is False
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("current_run_id", "delivery_run_id", "should_claim"),
+        [
+            ("run-1", None, True),
+            ("run-1", "run-1", True),
+            ("run-1", "run-2", False),
+            (None, "run-1", True),
+        ],
+        ids=["none_delivery_uses_current", "matching_ids", "differing_ids_superseded", "unassigned_queued"],
+    )
+    async def test_delivery_supersession_controls_claim(
+        self, current_run_id, delivery_run_id, should_claim
+    ):
+        job_store = AsyncMock()
+        job_store.get_job.return_value = make_job(current_run_id=current_run_id)
+        job_store.queue_run.return_value = True
+        job_store.claim_run.return_value = False
 
-    def test_returns_false_when_ids_match(self):
-        job = make_job(current_run_id="run-1")
-        assert _run_superseded(job, "run-1") is False
+        with (
+            patch("scrapeyard.queue.worker.load_config", return_value=make_config_mock()),
+            patch("scrapeyard.queue.worker.get_settings", return_value=make_settings_mock()),
+        ):
+            await scrape_task(
+                "job-1",
+                SIMPLE_YAML,
+                run_id=delivery_run_id,
+                job_store=job_store,
+                result_store=AsyncMock(),
+                error_store=AsyncMock(),
+                circuit_breaker=MagicMock(),
+                rate_limiter=LocalDomainRateLimiter(),
+            )
 
-    def test_returns_true_when_ids_differ(self):
-        job = make_job(current_run_id="run-1")
-        assert _run_superseded(job, "run-2") is True
-
-    def test_returns_false_when_job_has_no_current_run(self):
-        """A generated run may atomically reserve an unassigned queued job."""
-        job = make_job(current_run_id=None)
-        assert _run_superseded(job, "run-1") is False
+        if should_claim:
+            job_store.claim_run.assert_awaited_once()
+        else:
+            job_store.claim_run.assert_not_awaited()
 
 
 def test_build_run_paths_skips_artifacts_when_browser_debug_disabled(tmp_path):

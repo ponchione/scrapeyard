@@ -210,11 +210,6 @@ class JobStore(Protocol):
         """Read exact queued/running/terminal identity without a recent-history limit."""
         ...
 
-    async def get_job_run_stats(
-        self,
-        job_id: str,
-    ) -> tuple[int, datetime | None]: ...
-
     async def list_jobs_with_stats(
         self,
         project: str | None = None,
@@ -532,17 +527,6 @@ class ErrorStore(Protocol):
 
 class WebhookOutboxStore(Protocol):
     """Async interface for durable webhook delivery persistence."""
-
-    async def enqueue_delivery(
-        self,
-        delivery: WebhookDeliveryCreate,
-        *,
-        now: datetime | None = None,
-    ) -> None: ...
-
-    async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None: ...
-
-    async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]: ...
 
     async def list_due_pending(
         self,

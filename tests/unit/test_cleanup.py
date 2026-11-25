@@ -9,10 +9,10 @@ import pytest
 from scrapeyard.models.job import JobStatus
 from scrapeyard.runtime.metrics import CLEANUP_ARTIFACT_FINDINGS
 from scrapeyard.storage.cleanup import (
+    CleanupConfig,
     CleanupCycleOutcome,
     CleanupIncompleteError,
     HistoryRetentionPolicy,
-    _CleanupCycleBudget,
     run_cleanup,
 )
 from scrapeyard.storage.types import (
@@ -27,6 +27,15 @@ from scrapeyard.storage.types import (
     ResultReconciliationReport,
 )
 from scrapeyard.storage.webhook_outbox import WebhookRetentionSummary
+
+
+def _config(**overrides) -> CleanupConfig:
+    defaults = {
+        "retention_days": 30,
+        "max_results_per_job": 100,
+    }
+    defaults.update(overrides)
+    return CleanupConfig(**defaults)
 
 
 def _history_policy() -> HistoryRetentionPolicy:
@@ -65,7 +74,7 @@ async def test_run_cleanup_delegates_age_based_deletion():
         return_value=ResultReconciliationReport(dry_run=True)
     )
 
-    await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
+    await run_cleanup(result_store, _config(retention_days=30, max_results_per_job=100))
 
     result_store.delete_expired.assert_awaited_once_with(30, limit=500)
     result_store.prune_excess_per_job.assert_awaited_once_with(100, limit=500)
@@ -80,7 +89,7 @@ async def test_run_cleanup_delegates_per_job_pruning():
         return_value=ResultReconciliationReport(dry_run=True)
     )
 
-    await run_cleanup(result_store, retention_days=14, max_results_per_job=3)
+    await run_cleanup(result_store, _config(retention_days=14, max_results_per_job=3))
 
     result_store.delete_expired.assert_awaited_once_with(14, limit=500)
     result_store.prune_excess_per_job.assert_awaited_once_with(3, limit=500)
@@ -93,11 +102,7 @@ async def test_run_cleanup_drains_repeated_full_result_batches():
     result_store.prune_excess_per_job.return_value = 0
     result_store.reconcile_artifacts.return_value = ResultReconciliationReport(dry_run=True)
 
-    outcome = await run_cleanup(
-        result_store,
-        retention_days=30,
-        max_results_per_job=100,
-    )
+    outcome = await run_cleanup(result_store, _config())
 
     assert outcome == CleanupCycleOutcome(saturated=False, processed_items=1007)
     assert result_store.delete_expired.await_count == 3
@@ -112,9 +117,7 @@ async def test_run_cleanup_reports_saturation_at_per_phase_cycle_budget():
 
     outcome = await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        cycle_max_items_per_phase=1000,
+        _config(cycle_max_items_per_phase=1000),
     )
 
     assert outcome == CleanupCycleOutcome(saturated=True, processed_items=1000)
@@ -143,9 +146,7 @@ async def test_run_cleanup_drains_artifact_backlog_larger_than_one_batch():
 
     outcome = await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        result_cleanup_batch_size=2,
+        _config(result_cleanup_batch_size=2),
     )
 
     assert outcome == CleanupCycleOutcome(saturated=False, processed_items=6)
@@ -173,9 +174,7 @@ async def test_run_cleanup_drains_artifact_scans_independently():
 
     outcome = await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        result_cleanup_batch_size=2,
+        _config(result_cleanup_batch_size=2),
     )
 
     assert outcome == CleanupCycleOutcome(saturated=False, processed_items=4)
@@ -202,10 +201,7 @@ async def test_run_cleanup_artifact_item_ceiling_marks_cycle_saturated():
 
     outcome = await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        result_cleanup_batch_size=2,
-        cycle_max_items_per_phase=4,
+        _config(result_cleanup_batch_size=2, cycle_max_items_per_phase=4),
     )
 
     assert outcome == CleanupCycleOutcome(saturated=True, processed_items=8)
@@ -236,10 +232,7 @@ async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypat
 
     outcome = await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        result_cleanup_batch_size=2,
-        cycle_max_seconds=0.5,
+        _config(result_cleanup_batch_size=2, cycle_max_seconds=0.5),
     )
 
     assert outcome == CleanupCycleOutcome(saturated=True, processed_items=2 * count)
@@ -247,19 +240,40 @@ async def test_run_cleanup_artifact_time_ceiling_marks_cycle_saturated(monkeypat
     assert result_store.reconcile_artifacts.await_args.kwargs["deadline"] == 0.5
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("count", "elapsed"),
     [(0, 0.0), (1, 0.0), (-1, 0.0), (3, 0.0), (-1, 1.0), (3, 1.0)],
 )
-def test_cleanup_budget_rejects_invalid_pages(count, elapsed):
+async def test_cleanup_budget_rejects_invalid_pages(monkeypatch, count, elapsed):
+    result_store = AsyncMock()
+    result_store.delete_expired.return_value = 0
+    result_store.prune_excess_per_job.return_value = 0
     clock = [0.0]
-    cycle = _CleanupCycleBudget(
-        max_items_per_phase=10, max_seconds=1.0, clock=lambda: clock[0]
-    )
-    clock[0] = elapsed
 
-    with pytest.raises(RuntimeError, match="invalid count|more work after a short page"):
-        cycle.record("artifact_metadata", count, limit=2, has_more=True)
+    async def reconcile_page(**_kwargs):
+        clock[0] = elapsed
+        return ResultReconciliationReport(
+            dry_run=True,
+            metadata_rows_inspected=count,
+            metadata_scan_exhausted=False,
+            filesystem_scan_exhausted=True,
+        )
+
+    result_store.reconcile_artifacts.side_effect = reconcile_page
+    monkeypatch.setattr("scrapeyard.storage.cleanup.time.monotonic", lambda: clock[0])
+
+    with pytest.raises(CleanupIncompleteError) as exc_info:
+        await run_cleanup(
+            result_store,
+            _config(
+                result_cleanup_batch_size=2,
+                cycle_max_items_per_phase=10,
+                cycle_max_seconds=1.0,
+            ),
+        )
+
+    assert exc_info.value.phases == ("artifact_reconciliation",)
 
 
 @pytest.mark.asyncio
@@ -274,10 +288,8 @@ async def test_run_cleanup_removes_bounded_expired_idempotency_records():
 
     await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
+        _config(idempotency_cleanup_batch_size=25),
         job_store=job_store,
-        idempotency_cleanup_batch_size=25,
         now=now,
     )
 
@@ -299,12 +311,12 @@ async def test_run_cleanup_scrubs_bounded_terminal_webhook_rows():
 
     await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
+        _config(
+            webhook_delivered_retention_days=7,
+            webhook_failed_retention_days=30,
+            webhook_cleanup_batch_size=25,
+        ),
         webhook_outbox_store=outbox,
-        webhook_delivered_retention_days=7,
-        webhook_failed_retention_days=30,
-        webhook_cleanup_batch_size=25,
         now=now,
     )
 
@@ -345,11 +357,9 @@ async def test_adhoc_history_cleanup_drains_error_batches_without_deleting_resul
 
     await run_cleanup(
         result_store,
-        retention_days=30,
-        max_results_per_job=100,
+        _config(history_policy=_history_policy()),
         job_store=job_store,
         error_store=error_store,
-        history_policy=_history_policy(),
         now=now,
     )
     job_store.finalize_job_deletion.assert_awaited_once_with(
@@ -387,25 +397,12 @@ async def test_adhoc_history_finalization_failure_retries_persisted_reservation(
         RuntimeError("database unavailable"),
         DeletionFinalizationOutcome(DeletionFinalizationAction.deleted, "old-job"),
     ]
+    cfg = _config(history_policy=_history_policy())
 
     with pytest.raises(CleanupIncompleteError, match="adhoc_finalization"):
-        await run_cleanup(
-            result_store,
-            retention_days=30,
-            max_results_per_job=100,
-            job_store=job_store,
-            error_store=error_store,
-            history_policy=_history_policy(),
-        )
+        await run_cleanup(result_store, cfg, job_store=job_store, error_store=error_store)
 
-    await run_cleanup(
-        result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        job_store=job_store,
-        error_store=error_store,
-        history_policy=_history_policy(),
-    )
+    await run_cleanup(result_store, cfg, job_store=job_store, error_store=error_store)
     assert job_store.finalize_job_deletion.await_count == 2
 
 
@@ -421,26 +418,13 @@ async def test_scheduled_history_error_failure_prevents_prune_until_retry():
         True,
         1,
     )
+    cfg = _config(history_policy=_history_policy())
 
     with pytest.raises(CleanupIncompleteError, match="scheduled_errors"):
-        await run_cleanup(
-            result_store,
-            retention_days=30,
-            max_results_per_job=100,
-            job_store=job_store,
-            error_store=error_store,
-            history_policy=_history_policy(),
-        )
+        await run_cleanup(result_store, cfg, job_store=job_store, error_store=error_store)
     job_store.prune_scheduled_run_for_retention.assert_not_awaited()
 
-    await run_cleanup(
-        result_store,
-        retention_days=30,
-        max_results_per_job=100,
-        job_store=job_store,
-        error_store=error_store,
-        history_policy=_history_policy(),
-    )
+    await run_cleanup(result_store, cfg, job_store=job_store, error_store=error_store)
     job_store.prune_scheduled_run_for_retention.assert_awaited_once()
 
 
@@ -456,11 +440,11 @@ async def test_webhook_cleanup_failure_is_contained(caplog):
     with pytest.raises(CleanupIncompleteError, match="webhook_retention"):
         await run_cleanup(
             result_store,
-            retention_days=30,
-            max_results_per_job=100,
+            _config(
+                webhook_delivered_retention_days=7,
+                webhook_failed_retention_days=30,
+            ),
             webhook_outbox_store=outbox,
-            webhook_delivered_retention_days=7,
-            webhook_failed_retention_days=30,
         )
 
     assert "error_type=RuntimeError" in caplog.text
@@ -479,12 +463,12 @@ async def test_reconciliation_failure_is_contained_before_webhook_cleanup(caplog
     with pytest.raises(CleanupIncompleteError, match="artifact_reconciliation"):
         await run_cleanup(
             result_store,
-            retention_days=30,
-            max_results_per_job=100,
+            _config(
+                webhook_delivered_retention_days=7,
+                webhook_failed_retention_days=30,
+                reconciliation_dry_run=False,
+            ),
             webhook_outbox_store=outbox,
-            webhook_delivered_retention_days=7,
-            webhook_failed_retention_days=30,
-            reconciliation_dry_run=False,
         )
 
     assert "error_type=RuntimeError" in caplog.text
@@ -513,12 +497,12 @@ async def test_reconciliation_operation_failures_mark_cleanup_incomplete(caplog)
     with pytest.raises(CleanupIncompleteError, match="artifact_reconciliation"):
         await run_cleanup(
             result_store,
-            retention_days=30,
-            max_results_per_job=100,
+            _config(
+                webhook_delivered_retention_days=7,
+                webhook_failed_retention_days=30,
+                reconciliation_dry_run=False,
+            ),
             webhook_outbox_store=outbox,
-            webhook_delivered_retention_days=7,
-            webhook_failed_retention_days=30,
-            reconciliation_dry_run=False,
         )
 
     outbox.scrub_terminal_deliveries.assert_awaited_once()
@@ -550,7 +534,7 @@ async def test_artifact_findings_increment_bounded_metrics_and_warn(caplog):
         for kind in ResultArtifactFailureKind
     }
 
-    await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
+    await run_cleanup(result_store, _config())
 
     after = {
         kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
@@ -575,7 +559,7 @@ async def test_clean_artifact_scan_does_not_increment_finding_metrics(caplog):
         for kind in ResultArtifactFailureKind
     }
 
-    await run_cleanup(result_store, retention_days=30, max_results_per_job=100)
+    await run_cleanup(result_store, _config())
 
     assert {
         kind.value: CLEANUP_ARTIFACT_FINDINGS.labels(kind.value)._value.get()
@@ -598,11 +582,11 @@ async def test_expired_result_failure_does_not_skip_later_cleanup_phases(caplog)
     with pytest.raises(CleanupIncompleteError, match="expired_result_retention"):
         await run_cleanup(
             result_store,
-            retention_days=30,
-            max_results_per_job=100,
+            _config(
+                webhook_delivered_retention_days=7,
+                webhook_failed_retention_days=30,
+            ),
             webhook_outbox_store=outbox,
-            webhook_delivered_retention_days=7,
-            webhook_failed_retention_days=30,
             job_store=job_store,
         )
 
@@ -626,11 +610,11 @@ async def test_per_job_result_failure_does_not_skip_later_cleanup_phases(caplog)
     with pytest.raises(CleanupIncompleteError, match="per_job_result_retention"):
         await run_cleanup(
             result_store,
-            retention_days=30,
-            max_results_per_job=100,
+            _config(
+                webhook_delivered_retention_days=7,
+                webhook_failed_retention_days=30,
+            ),
             webhook_outbox_store=outbox,
-            webhook_delivered_retention_days=7,
-            webhook_failed_retention_days=30,
         )
 
     result_store.reconcile_artifacts.assert_awaited_once()
@@ -648,11 +632,7 @@ async def test_result_retention_cancellation_propagates(phase):
     getattr(result_store, phase).side_effect = asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await run_cleanup(
-            result_store,
-            retention_days=30,
-            max_results_per_job=100,
-        )
+        await run_cleanup(result_store, _config())
 
 
 @pytest.mark.asyncio
@@ -663,8 +643,4 @@ async def test_reconciliation_cancellation_propagates():
     result_store.reconcile_artifacts.side_effect = asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await run_cleanup(
-            result_store,
-            retention_days=30,
-            max_results_per_job=100,
-        )
+        await run_cleanup(result_store, _config())

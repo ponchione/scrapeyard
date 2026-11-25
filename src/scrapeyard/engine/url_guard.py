@@ -526,19 +526,7 @@ def redact_deployment_secrets_with_count(
     return _redact_variants(text, _secret_variants(secret_values))
 
 
-def redact_deployment_secrets_in_value(
-    value: Any,
-    *,
-    secret_values: Any = None,
-) -> Any:
-    """Redact only resolved deployment-secret values in JSON-like caller data."""
-    return redact_deployment_secrets_in_value_with_count(
-        value,
-        secret_values=secret_values,
-    )[0]
-
-
-def redact_deployment_secrets_in_value_with_count(
+def redact_deployment_secret_values(
     value: Any,
     *,
     secret_values: Any = None,

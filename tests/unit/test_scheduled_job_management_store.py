@@ -7,22 +7,22 @@ import pytest
 from scrapeyard.models.job import Job, JobStatus
 from scrapeyard.storage.job_store import DuplicateJobError
 from scrapeyard.storage.types import ScheduledJobMutationAction
+from tests.factories import make_job_model
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 
 
 def _job(**overrides) -> Job:
-    values = {
-        "job_id": "scheduled-1",
-        "project": "schedule",
-        "name": "daily",
-        "config_yaml": "project: schedule\nname: daily",
-        "schedule_cron": "0 9 * * *",
-        "schedule_timezone": "America/New_York",
-        "schedule_enabled": True,
-    }
-    values.update(overrides)
-    return Job(**values)
+    return make_job_model(
+        job_id=overrides.pop("job_id", "scheduled-1"),
+        project=overrides.pop("project", "schedule"),
+        name=overrides.pop("name", "daily"),
+        config_yaml=overrides.pop("config_yaml", "project: schedule\nname: daily"),
+        schedule_cron=overrides.pop("schedule_cron", "0 9 * * *"),
+        schedule_timezone=overrides.pop("schedule_timezone", "America/New_York"),
+        schedule_enabled=overrides.pop("schedule_enabled", True),
+        **overrides,
+    )
 
 
 async def test_update_replaces_future_config_and_timezone(store):

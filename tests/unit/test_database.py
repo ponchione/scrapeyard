@@ -13,10 +13,6 @@ import aiosqlite
 import pytest
 
 from scrapeyard.storage.database import (
-    Migration,
-    _apply_migration,
-    _load_migrations,
-    _resolve_sql_dir,
     close_db,
     db_transaction,
     get_db,
@@ -25,20 +21,24 @@ from scrapeyard.storage.database import (
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.secret_envelope import migrate_persisted_secrets
 
+_SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
 
-def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
+
+async def test_resolve_sql_dir_supports_installed_wheel_layout(tmp_path, monkeypatch):
     """Top-level wheel data installs next to the package, not two levels above it."""
     import scrapeyard.storage.database as mod
 
     package_dir = tmp_path / "site-packages" / "scrapeyard"
     sql_dir = tmp_path / "site-packages" / "sql"
     package_dir.mkdir(parents=True)
-    sql_dir.mkdir()
-    (sql_dir / "001_create_jobs.sql").write_text("-- migration", encoding="utf-8")
+    shutil.copytree(_SQL_DIR, sql_dir)
 
     monkeypatch.setattr(mod.importlib.resources, "files", lambda _package: package_dir)
 
-    assert mod._resolve_sql_dir() == sql_dir
+    await init_db(str(tmp_path / "db"))
+    async with get_db("jobs.db", readonly=True) as db:
+        row = await (await db.execute("SELECT COUNT(*) FROM schema_migrations")).fetchone()
+    assert row is not None and row[0] > 0
 
 
 async def test_init_db_creates_databases(tmp_path):
@@ -291,12 +291,11 @@ async def test_webhook_failure_reason_constraint_accepts_only_known_values(tmp_p
     assert "decode_failure" in schema_sql
 
 
-async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path):
-    sql_dir = _resolve_sql_dir()
-    migrations = _load_migrations(sql_dir)["jobs.db"]
-    migration = next(item for item in migrations if item.migration_id == "016")
-    async with aiosqlite.connect(tmp_path / "upgrade.db") as db:
-        await db.executescript((sql_dir / "009_create_webhook_outbox.sql").read_text())
+async def _seed_jobs_db_through(db_path: Path, last_migration_id: str) -> None:
+    """Create jobs.db with all jobs migrations through *last_migration_id* recorded."""
+    from scripts.qualification_backup import REQUIRED_MIGRATION_FILES
+
+    async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """CREATE TABLE schema_migrations (
                    migration_id TEXT PRIMARY KEY,
@@ -305,6 +304,31 @@ async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path)
                    applied_at TEXT NOT NULL
                )"""
         )
+        for filename in REQUIRED_MIGRATION_FILES["jobs.db"]:
+            migration_id = filename.split("_", 1)[0]
+            sql = (_SQL_DIR / filename).read_text(encoding="utf-8")
+            await db.executescript(sql)
+            await db.execute(
+                """INSERT INTO schema_migrations
+                       (migration_id, filename, checksum, applied_at)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    migration_id,
+                    filename,
+                    hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            if migration_id == last_migration_id:
+                break
+        await db.commit()
+
+
+async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path):
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    await _seed_jobs_db_through(db_dir / "jobs.db", "015")
+    async with aiosqlite.connect(db_dir / "jobs.db") as db:
         await db.execute(
             """INSERT INTO webhook_deliveries
                 (delivery_id, job_id, event, url, headers_json, payload_json,
@@ -316,8 +340,9 @@ async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path)
         )
         await db.commit()
 
-        await _apply_migration(db, migration)
+    await init_db(str(db_dir))
 
+    async with get_db("jobs.db") as db:
         cursor = await db.execute(
             "SELECT job_id, status FROM webhook_deliveries WHERE delivery_id = 'existing'"
         )
@@ -330,20 +355,10 @@ async def test_webhook_decode_reason_migration_preserves_existing_rows(tmp_path)
 
 
 async def test_history_summary_migration_backfills_and_tracks_lifetime_runs(tmp_path):
-    sql_dir = _resolve_sql_dir()
-    migrations = _load_migrations(sql_dir)["jobs.db"]
-    migration = next(item for item in migrations if item.migration_id == "017")
-    async with aiosqlite.connect(tmp_path / "history-upgrade.db") as db:
-        await db.executescript((sql_dir / "001_create_jobs.sql").read_text())
-        await db.executescript((sql_dir / "004_create_job_runs.sql").read_text())
-        await db.execute(
-            """CREATE TABLE schema_migrations (
-                   migration_id TEXT PRIMARY KEY,
-                   filename TEXT NOT NULL UNIQUE,
-                   checksum TEXT NOT NULL,
-                   applied_at TEXT NOT NULL
-               )"""
-        )
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    await _seed_jobs_db_through(db_dir / "jobs.db", "016")
+    async with aiosqlite.connect(db_dir / "jobs.db") as db:
         await db.execute(
             """INSERT INTO jobs
                (job_id, project, name, config_yaml, created_at)
@@ -360,8 +375,9 @@ async def test_history_summary_migration_backfills_and_tracks_lifetime_runs(tmp_
         )
         await db.commit()
 
-        await _apply_migration(db, migration)
+    await init_db(str(db_dir))
 
+    async with get_db("jobs.db") as db:
         row = await (
             await db.execute(
                 "SELECT lifetime_run_count, last_run_at FROM jobs WHERE job_id = 'job'"
@@ -423,54 +439,59 @@ async def test_init_db_rejects_ledger_gap(tmp_path):
         await init_db(str(db_dir))
 
 
-def test_load_migrations_rejects_unassigned_file(tmp_path):
-    sql_dir = tmp_path / "sql"
-    shutil.copytree(_resolve_sql_dir(), sql_dir)
-    (sql_dir / "999_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="assignment mismatch"):
-        _load_migrations(sql_dir)
-
-
-def test_load_migrations_rejects_numeric_gap(tmp_path, monkeypatch):
+async def test_load_migrations_rejects_unassigned_file(tmp_path, monkeypatch):
     import scrapeyard.storage.database as mod
 
-    sql_dir = tmp_path / "sql"
+    package_dir = tmp_path / "pkg" / "scrapeyard"
+    sql_dir = tmp_path / "pkg" / "sql"
+    package_dir.mkdir(parents=True)
+    shutil.copytree(_SQL_DIR, sql_dir)
+    (sql_dir / "999_unassigned.sql").write_text("SELECT 1;", encoding="utf-8")
+    monkeypatch.setattr(mod.importlib.resources, "files", lambda _package: package_dir)
+
+    with pytest.raises(RuntimeError, match="assignment mismatch"):
+        await init_db(str(tmp_path / "db"))
+
+
+async def test_load_migrations_rejects_numeric_gap(tmp_path, monkeypatch):
+    import scrapeyard.storage.database as mod
+
+    package_dir = tmp_path / "pkg" / "scrapeyard"
+    sql_dir = tmp_path / "pkg" / "sql"
+    package_dir.mkdir(parents=True)
     sql_dir.mkdir()
-    (sql_dir / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+    (sql_dir / "001_create_jobs.sql").write_text("SELECT 1;", encoding="utf-8")
     (sql_dir / "003_third.sql").write_text("SELECT 3;", encoding="utf-8")
+    monkeypatch.setattr(mod.importlib.resources, "files", lambda _package: package_dir)
     monkeypatch.setattr(
         mod,
         "_DB_MIGRATIONS",
-        {"jobs.db": ("001_first.sql", "003_third.sql")},
+        {"jobs.db": ("001_create_jobs.sql", "003_third.sql")},
     )
 
     with pytest.raises(RuntimeError, match="numeric gap"):
-        mod._load_migrations(sql_dir)
+        await init_db(str(tmp_path / "db"))
 
 
-async def test_failed_migration_rolls_back_schema_and_ledger(tmp_path):
-    db_path = tmp_path / "failed.db"
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            """CREATE TABLE schema_migrations (
-                   migration_id TEXT PRIMARY KEY,
-                   filename TEXT NOT NULL UNIQUE,
-                   checksum TEXT NOT NULL,
-                   applied_at TEXT NOT NULL
-               )"""
-        )
-        await db.commit()
-        migration = Migration(
-            migration_id="010",
-            filename="010_broken.sql",
-            sql="CREATE TABLE partial_change (id INTEGER); INVALID SQL;",
-            checksum="checksum",
-        )
+async def test_failed_migration_rolls_back_schema_and_ledger(tmp_path, monkeypatch):
+    import scrapeyard.storage.database as mod
 
-        with pytest.raises(aiosqlite.OperationalError):
-            await _apply_migration(db, migration)
+    package_dir = tmp_path / "pkg" / "scrapeyard"
+    sql_dir = tmp_path / "pkg" / "sql"
+    package_dir.mkdir(parents=True)
+    sql_dir.mkdir()
+    (sql_dir / "001_create_jobs.sql").write_text(
+        "CREATE TABLE partial_change (id INTEGER); INVALID SQL;",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod.importlib.resources, "files", lambda _package: package_dir)
+    monkeypatch.setattr(mod, "_DB_MIGRATIONS", {"jobs.db": ("001_create_jobs.sql",)})
 
+    db_dir = tmp_path / "db"
+    with pytest.raises(aiosqlite.OperationalError):
+        await init_db(str(db_dir))
+
+    async with aiosqlite.connect(db_dir / "jobs.db") as db:
         cursor = await db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='partial_change'"
         )

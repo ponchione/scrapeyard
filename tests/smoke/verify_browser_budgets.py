@@ -6,12 +6,14 @@ import asyncio
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from scrapling import PlayWrightFetcher, StealthyFetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
-from scrapeyard.engine.browser_debug import _capture_html_excerpt
+from scrapeyard.config.schema import FetcherType
+from scrapeyard.engine import browser_debug
 from scrapeyard.engine.browser_session import BrowserSession
 
 
@@ -108,8 +110,15 @@ async def verify(fetcher, name: str, stealth: bool, case: str) -> None:
         options["page_action"] = wait_for_cancel
     if case == "bytes":
         async def capture_excerpt(page):
-            await _capture_html_excerpt(page, excerpt, run_budget)
-            return page
+            with patch.object(browser_debug, "assert_public_url", lambda _url, **_kw: None):
+                return await browser_debug.capture_browser_state(
+                    page,
+                    browser=None,
+                    fetcher_type=FetcherType.dynamic,
+                    artifacts_dir=None,
+                    capture=excerpt,
+                    budget=run_budget,
+                )
         options["page_action"] = capture_excerpt
     try:
         try:
