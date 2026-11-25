@@ -750,6 +750,20 @@ class BrowserSession:
             sizing.add(sized)
             sized.add_done_callback(lambda done: record_received(request, done))
 
+        browser = context.browser
+        page = None
+        fetch_error: BaseException | None = None
+        page_close_lock = asyncio.Lock()
+        closed_pages: set[int] = set()
+
+        async def close_page_once(target_page: Any) -> None:
+            page_id = id(target_page)
+            async with page_close_lock:
+                if page_id in closed_pages:
+                    return
+                await _close_page(target_page, browser)
+                closed_pages.add(page_id)
+
         async def guard(route: Any) -> None:
             nonlocal route_error
             self.routed_requests += 1
@@ -765,7 +779,8 @@ class BrowserSession:
                 # Preserve its contract: safe content can still be inspected.
                 return
             except BaseException as exc:
-                route_error = exc
+                if route_error is None:
+                    route_error = exc
                 # Closing a page can release a browser-native request whose
                 # frame disappeared before interception. Disable networking
                 # before aborting/closing, including unload beacons and icons.
@@ -773,11 +788,8 @@ class BrowserSession:
                 with suppress(Exception):
                     await route.abort()
                 if page is not None:
-                    await _close_page(page, browser)
+                    await close_page_once(page)
 
-        browser = context.browser
-        page = None
-        fetch_error: BaseException | None = None
         try:
             context.on("request", observe_request)
             context.on("response", observe_response)
@@ -857,7 +869,7 @@ class BrowserSession:
                     await context.set_offline(True)
                 # Popups belong to this context and must not outlive a page fetch.
                 for owned_page in list(context.pages):
-                    await _close_page(owned_page, browser)
+                    await close_page_once(owned_page)
                 await context.unroute("**/*", guard)
                 context.remove_listener("request", observe_request)
                 context.remove_listener("response", observe_response)
@@ -875,7 +887,11 @@ class BrowserSession:
                 # answer them, while its driver is still connected. Stop the
                 # whole session before releasing reservations, and preserve
                 # the original fetch/budget failure.
-                await await_cleanup(self.aclose())
+                try:
+                    await await_cleanup(self.aclose())
+                except asyncio.CancelledError:
+                    stopped = True
+                    raise
                 stopped = True
                 if fetch_error is None:
                     raise
@@ -883,10 +899,19 @@ class BrowserSession:
                 unsettled: list[asyncio.Future[Any]] = [*sizing, *storing]
                 for pending in unsettled:
                     pending.cancel()
-                if releasing:
-                    await asyncio.gather(*releasing)
-                if budget is not None and stopped:
-                    await budget.settle_requests((_MAX_REDIRECTS + 1) * len(chains), sum(chains.values()))
+                try:
+                    if releasing:
+                        await await_cleanup(
+                            asyncio.gather(*releasing, return_exceptions=True)
+                        )
+                finally:
+                    if budget is not None and stopped:
+                        await await_cleanup(
+                            budget.settle_requests(
+                                (_MAX_REDIRECTS + 1) * len(chains),
+                                sum(chains.values()),
+                            )
+                        )
 
 
 def _html_response(html: str, response_kwargs: dict[str, Any]) -> Response:

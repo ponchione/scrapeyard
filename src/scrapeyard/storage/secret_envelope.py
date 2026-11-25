@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import aiosqlite
@@ -21,6 +22,7 @@ from scrapeyard.storage.database import db_transaction, get_db
 
 _PREFIX = "syenc:v1:"
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SecretKeyConfigurationError(RuntimeError):
@@ -29,6 +31,46 @@ class SecretKeyConfigurationError(RuntimeError):
 
 class SecretDecryptionError(RuntimeError):
     """Raised when a durable envelope cannot be authenticated/decrypted."""
+
+
+@lru_cache(maxsize=1)
+def _parse_keyring(raw: str, active_key_id: str) -> EncryptionKeyring:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SecretKeyConfigurationError(
+            "SCRAPEYARD_ENCRYPTION_KEYS must be a JSON object"
+        ) from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise SecretKeyConfigurationError(
+            "SCRAPEYARD_ENCRYPTION_KEYS must be a non-empty JSON object"
+        )
+    keys: dict[str, bytes] = {}
+    for key_id, encoded in parsed.items():
+        if not isinstance(key_id, str) or _KEY_ID_RE.fullmatch(key_id) is None:
+            raise SecretKeyConfigurationError("Encryption key IDs must be safe names")
+        if not isinstance(encoded, str):
+            raise SecretKeyConfigurationError("Encryption keys must be base64 strings")
+        try:
+            key = base64.b64decode(
+                encoded.encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (UnicodeEncodeError, binascii.Error) as exc:
+            raise SecretKeyConfigurationError(
+                f"Encryption key {key_id!r} is not valid URL-safe base64"
+            ) from exc
+        if len(key) != 32:
+            raise SecretKeyConfigurationError(
+                f"Encryption key {key_id!r} must decode to exactly 32 bytes"
+            )
+        keys[key_id] = key
+    if active_key_id not in keys:
+        raise SecretKeyConfigurationError(
+            "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID is absent from the keyring"
+        )
+    return EncryptionKeyring(keys, active_key_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,42 +90,7 @@ class EncryptionKeyring:
                 "SCRAPEYARD_ENCRYPTION_KEYS and "
                 "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID must be configured together"
             )
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise SecretKeyConfigurationError(
-                "SCRAPEYARD_ENCRYPTION_KEYS must be a JSON object"
-            ) from exc
-        if not isinstance(parsed, dict) or not parsed:
-            raise SecretKeyConfigurationError(
-                "SCRAPEYARD_ENCRYPTION_KEYS must be a non-empty JSON object"
-            )
-        keys: dict[str, bytes] = {}
-        for key_id, encoded in parsed.items():
-            if not isinstance(key_id, str) or _KEY_ID_RE.fullmatch(key_id) is None:
-                raise SecretKeyConfigurationError("Encryption key IDs must be safe names")
-            if not isinstance(encoded, str):
-                raise SecretKeyConfigurationError("Encryption keys must be base64 strings")
-            try:
-                key = base64.b64decode(
-                    encoded.encode("ascii"),
-                    altchars=b"-_",
-                    validate=True,
-                )
-            except (UnicodeEncodeError, binascii.Error) as exc:
-                raise SecretKeyConfigurationError(
-                    f"Encryption key {key_id!r} is not valid URL-safe base64"
-                ) from exc
-            if len(key) != 32:
-                raise SecretKeyConfigurationError(
-                    f"Encryption key {key_id!r} must decode to exactly 32 bytes"
-                )
-            keys[key_id] = key
-        if active_key_id not in keys:
-            raise SecretKeyConfigurationError(
-                "SCRAPEYARD_ENCRYPTION_ACTIVE_KEY_ID is absent from the keyring"
-            )
-        return cls(keys, active_key_id)
+        return _parse_keyring(raw, active_key_id)
 
     def protect(self, plaintext: str, *, purpose: str) -> str:
         nonce = os.urandom(12)
@@ -211,8 +218,14 @@ async def migrate_persisted_secrets() -> None:
                 ):
                     job_id = str(row[0])
                     stored = str(row[1])
-                    purpose = f"jobs.config_yaml:{job_id}"
+                    stored_hash = "" if row[2] is None else str(row[2])
                     key_id = envelope_key_id(stored)
+                    if (
+                        key_id == keyring.active_key_id
+                        and _SHA256_HEX_RE.fullmatch(stored_hash) is not None
+                    ):
+                        continue
+                    purpose = f"jobs.config_yaml:{job_id}"
                     plaintext = keyring.reveal(stored, purpose=purpose)
                     expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
                     legacy_migrated |= key_id is None
@@ -221,7 +234,7 @@ async def migrate_persisted_secrets() -> None:
                         if key_id == keyring.active_key_id
                         else keyring.protect(plaintext, purpose=purpose)
                     )
-                    if protected != stored or str(row[2]) != expected_hash:
+                    if protected != stored or stored_hash != expected_hash:
                         await rewrite(
                             "UPDATE jobs SET config_yaml = ?, config_hash = ? "
                             "WHERE job_id = ?",
@@ -236,15 +249,16 @@ async def migrate_persisted_secrets() -> None:
                 ):
                     run_id = str(row[0])
                     stored = str(row[1])
-                    purpose = f"job_runs.config_yaml:{run_id}"
                     key_id = envelope_key_id(stored)
+                    if key_id == keyring.active_key_id:
+                        continue
+                    purpose = f"job_runs.config_yaml:{run_id}"
                     run_plaintext = keyring.reveal(stored, purpose=purpose)
                     legacy_migrated |= key_id is None
-                    if key_id != keyring.active_key_id:
-                        await rewrite(
-                            "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
-                            (keyring.protect(run_plaintext, purpose=purpose), run_id),
-                        )
+                    await rewrite(
+                        "UPDATE job_runs SET config_yaml = ? WHERE run_id = ?",
+                        (keyring.protect(run_plaintext, purpose=purpose), run_id),
+                    )
 
                 # Legacy runs without a snapshot take their parent's config when
                 # its hash proves it is the config the run executed. A run
@@ -283,8 +297,14 @@ async def migrate_persisted_secrets() -> None:
                 ):
                     run_id = str(row[0])
                     stored = str(row[1])
-                    purpose = f"queued_run_snapshots.config_yaml:{run_id}"
+                    stored_hash = "" if row[2] is None else str(row[2])
                     key_id = envelope_key_id(stored)
+                    if (
+                        key_id == keyring.active_key_id
+                        and _SHA256_HEX_RE.fullmatch(stored_hash) is not None
+                    ):
+                        continue
+                    purpose = f"queued_run_snapshots.config_yaml:{run_id}"
                     plaintext = keyring.reveal(stored, purpose=purpose)
                     expected_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
                     legacy_migrated |= key_id is None
@@ -293,7 +313,7 @@ async def migrate_persisted_secrets() -> None:
                         if key_id == keyring.active_key_id
                         else keyring.protect(plaintext, purpose=purpose)
                     )
-                    if protected != stored or str(row[2]) != expected_hash:
+                    if protected != stored or stored_hash != expected_hash:
                         await rewrite(
                             """UPDATE queued_run_snapshots
                                SET config_yaml = ?, config_hash = ? WHERE run_id = ?""",
@@ -315,22 +335,23 @@ async def migrate_persisted_secrets() -> None:
                         ("payload_json", row[3]),
                     ):
                         stored = str(raw_value)
-                        purpose = f"webhook.{column}:{delivery_id}"
                         key_id = envelope_key_id(stored)
+                        if key_id == keyring.active_key_id:
+                            continue
+                        purpose = f"webhook.{column}:{delivery_id}"
                         plaintext = keyring.reveal(stored, purpose=purpose)
                         legacy_migrated |= key_id is None
-                        if key_id != keyring.active_key_id:
-                            updates[column] = keyring.protect(
-                                plaintext,
-                                purpose=purpose,
-                            )
+                        updates[column] = keyring.protect(
+                            plaintext,
+                            purpose=purpose,
+                        )
                     if row[4] is not None:
                         stored_error = str(row[4])
-                        purpose = f"webhook.last_error:{delivery_id}"
                         error_key_id = envelope_key_id(stored_error)
-                        plaintext_error = keyring.reveal(stored_error, purpose=purpose)
-                        legacy_migrated |= error_key_id is None
                         if error_key_id != keyring.active_key_id:
+                            purpose = f"webhook.last_error:{delivery_id}"
+                            plaintext_error = keyring.reveal(stored_error, purpose=purpose)
+                            legacy_migrated |= error_key_id is None
                             updates["last_error"] = keyring.protect(
                                 plaintext_error,
                                 purpose=purpose,

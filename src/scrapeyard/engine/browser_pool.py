@@ -59,13 +59,18 @@ class BrowserPool:
         self, target: TargetConfig, proxy_url: str | None, fetcher_cls: Any,
     ) -> BrowserSession:
         group = browser_group_key(target, proxy_url)
-        session = next((idle for idle in self._idle if self._groups[idle] == group), None)
-        if session is not None:
+        while True:
+            session = next((idle for idle in self._idle if self._groups[idle] == group), None)
+            if session is None:
+                break
             del self._idle[session]
-            if session.disconnected:
+            if not session.disconnected:
+                return session
+            try:
                 # The next fetch relaunches instead of failing its first attempt.
                 await await_cleanup(session.aclose())
-            return session
+            finally:
+                self._groups.pop(session, None)
         evicted = None
         if len(self._groups) >= self._capacity and self._idle:
             evicted = next(iter(self._idle))
@@ -85,7 +90,7 @@ class BrowserPool:
     async def release(self, session: BrowserSession) -> None:
         if session not in self._groups:
             return
-        if session.routed_requests < RECYCLE_AFTER_REQUESTS:
+        if not session.disconnected and session.routed_requests < RECYCLE_AFTER_REQUESTS:
             self._idle[session] = None
             return
         del self._groups[session]

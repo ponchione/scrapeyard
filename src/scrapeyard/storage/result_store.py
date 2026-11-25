@@ -76,6 +76,25 @@ _ATOMIC_TEMP_PATTERN = re.compile(
 _ArtifactFingerprint = tuple[str, int, int, int, int, int]
 
 
+def _cleanup_unsaved_artifact(path: Path, run_dir: Path, remove_dir: bool) -> None:
+    with suppress(FileNotFoundError):
+        path.unlink()
+    if remove_dir:
+        with suppress(OSError):
+            run_dir.rmdir()
+
+
+def _rmdir_if_empty(run_dir: Path) -> None:
+    with suppress(OSError):
+        run_dir.rmdir()
+
+
+def _remove_dir_returning_existed(run_dir: Path) -> bool:
+    existed = run_dir.is_dir() and not run_dir.is_symlink()
+    remove_directories([run_dir])
+    return existed
+
+
 @dataclass(frozen=True, slots=True)
 class _RunIdentity:
     project: str
@@ -311,6 +330,47 @@ class LocalResultStore:
         for row_id in ids:
             self._validated_artifacts.pop(int(row_id), None)
 
+    def _resolve_retention_identities(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> list[tuple[Mapping[str, Any], _RunIdentity | None, Path | None]]:
+        resolved: list[tuple[Mapping[str, Any], _RunIdentity | None, Path | None]] = []
+        root = self._root()
+        for row in rows:
+            file_path = str(row["file_path"])
+            try:
+                path = self._checked_result_dir(file_path)
+                relative = path.relative_to(root)
+                identity = _RunIdentity(*relative.parts)
+            except (OSError, TypeError, ValueError):
+                logger.warning("Skipping unsafe result directory during cleanup: %r", file_path)
+                resolved.append((row, None, None))
+            else:
+                resolved.append((row, identity, path))
+        return resolved
+
+    def _checked_lifecycle_dirs(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        additional_paths: Sequence[Path],
+    ) -> list[Path]:
+        paths = [self._checked_result_dir(str(row["file_path"])) for row in rows]
+        paths.extend(self._checked_result_dir(str(path)) for path in additional_paths)
+        return list(dict.fromkeys(paths))
+
+    def _matches_candidate_path(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        candidate_path: Path,
+    ) -> bool:
+        for row in rows:
+            try:
+                if self._checked_result_dir(str(row["file_path"])) == candidate_path:
+                    return True
+            except (OSError, ValueError):
+                continue
+        return False
+
     async def _delete_retention_batch(
         self,
         query: str,
@@ -320,15 +380,13 @@ class LocalResultStore:
             cursor = await db.execute(query, params)
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
 
+        resolved_rows = await cleanup_safe_to_thread(self._resolve_retention_identities, rows)
         inactive_rows: list[Mapping[str, Any]] = []
-        for row in rows:
-            try:
-                path = self._checked_result_dir(str(row["file_path"]))
-                relative = path.relative_to(self._root())
-                identity = _RunIdentity(*relative.parts)
-            except (OSError, TypeError, ValueError):
+        removal_paths: list[Path] = []
+        for row, identity, checked_path in resolved_rows:
+            if identity is None:
                 # Unsafe metadata is still eligible for metadata cleanup; its
-                # filesystem path is rejected separately by _checked_result_dirs.
+                # unsafe filesystem path is skipped below.
                 inactive_rows.append(row)
                 continue
             try:
@@ -349,6 +407,8 @@ class LocalResultStore:
                 )
                 continue
             inactive_rows.append(row)
+            if checked_path is not None:
+                removal_paths.append(checked_path)
 
         if not inactive_rows:
             return 0
@@ -360,7 +420,7 @@ class LocalResultStore:
         # latency cannot block unrelated metadata access.
         await cleanup_safe_to_thread(
             remove_directories,
-            self._checked_result_dirs(inactive_rows),
+            removal_paths,
         )
         return len(inactive_rows)
 
@@ -382,9 +442,11 @@ class LocalResultStore:
 
         if not rows and not additional_paths:
             return 0
-        paths = [self._checked_result_dir(str(row["file_path"])) for row in rows]
-        paths.extend(self._checked_result_dir(str(path)) for path in additional_paths)
-        paths = list(dict.fromkeys(paths))
+        paths = await cleanup_safe_to_thread(
+            self._checked_lifecycle_dirs,
+            rows,
+            additional_paths,
+        )
         await cleanup_safe_to_thread(remove_directories, paths)
         if rows:
             async with get_db("results_meta.db") as db, db_transaction(db):
@@ -414,11 +476,12 @@ class LocalResultStore:
             )
         )
 
-        run_dir = self._checked_result_dir(
-            str(safe_join(self._results_dir, project, job_name, run_id))
+        run_dir = await cleanup_safe_to_thread(
+            self._checked_result_dir,
+            str(safe_join(self._results_dir, project, job_name, run_id)),
         )
         async with self._save_guard(run_dir):
-            run_dir_existed = run_dir.exists()
+            run_dir_existed = await cleanup_safe_to_thread(Path.exists, run_dir)
             await cleanup_safe_to_thread(ensure_directory, run_dir)
             path = run_dir / "results.json"
             try:
@@ -442,13 +505,16 @@ class LocalResultStore:
             async def restore_previous() -> None:
                 """Put back the prior artifact, or remove this run's new one."""
                 if previous_payload is None:
-                    with suppress(FileNotFoundError):
-                        path.unlink()
+                    await cleanup_safe_to_thread(
+                        _cleanup_unsaved_artifact,
+                        path,
+                        run_dir,
+                        not run_dir_existed,
+                    )
                 else:
                     await cleanup_safe_to_thread(write_bytes_file, path, previous_payload)
-                if not run_dir_existed:
-                    with suppress(OSError):
-                        run_dir.rmdir()
+                    if not run_dir_existed:
+                        await cleanup_safe_to_thread(_rmdir_if_empty, run_dir)
 
             try:
                 serialized_bytes = await cleanup_safe_to_thread(
@@ -525,7 +591,8 @@ class LocalResultStore:
         status = row["status"]
         file_path = row["file_path"]
 
-        path = self._checked_result_dir(str(file_path)) / "results.json"
+        run_dir = await cleanup_safe_to_thread(self._checked_result_dir, str(file_path))
+        path = run_dir / "results.json"
         try:
             data = await asyncio.to_thread(
                 read_json_file_no_follow,
@@ -608,12 +675,11 @@ class LocalResultStore:
             return True
 
         project, job_name = await self._job_lookup(job_id)
-        run_dir = self._checked_result_dir(
-            str(safe_join(self._results_dir, project, job_name, run_id))
+        run_dir = await cleanup_safe_to_thread(
+            self._checked_result_dir,
+            str(safe_join(self._results_dir, project, job_name, run_id)),
         )
-        existed = run_dir.is_dir() and not run_dir.is_symlink()
-        await cleanup_safe_to_thread(remove_directories, [run_dir])
-        return existed
+        return await cleanup_safe_to_thread(_remove_dir_returning_existed, run_dir)
 
     @staticmethod
     def _record_artifact_failure(
@@ -1024,13 +1090,11 @@ class LocalResultStore:
                 (candidate.identity.project, candidate.identity.run_id),
             )
             rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
-        for row in rows:
-            try:
-                if self._checked_result_dir(str(row["file_path"])) == candidate.path:
-                    return True
-            except (OSError, ValueError):
-                continue
-        return False
+        return await cleanup_safe_to_thread(
+            self._matches_candidate_path,
+            rows,
+            candidate.path,
+        )
 
     def _remove_run_candidate(
         self,

@@ -74,7 +74,7 @@ def get_result_store() -> ResultStore:
     job_store = get_job_store()
 
     async def _lookup(job_id: str) -> tuple[str, str]:
-        job = await job_store.get_job(job_id)
+        job = await job_store.get_job_metadata(job_id)
         return job.project, job.name
 
     async def _active_lookup(project: str, job_name: str, run_id: str) -> bool:

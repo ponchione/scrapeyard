@@ -15,7 +15,7 @@ import aiosqlite
 from scrapeyard.common.dt import fmt_dt
 from scrapeyard.common.settings import get_settings
 from scrapeyard.common.yaml import load_yaml_mapping
-from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
+from scrapeyard.models.job import Job, JobMetadata, JobRun, JobStatus, JobSummary
 from scrapeyard.queue.memory import memory_headroom_mb
 from scrapeyard.runtime.metrics import ADMISSION_REJECTIONS
 from scrapeyard.storage import (
@@ -32,13 +32,19 @@ from scrapeyard.storage.job_queries import (
 )
 from scrapeyard.storage.job_rows import (
     row_to_job,
+    row_to_job_metadata,
     row_to_job_run,
     row_to_job_summary_with_stats,
     row_to_job_with_stats,
     row_to_project_summary,
     row_to_schedule_state,
 )
-from scrapeyard.storage.job_sql import JOB_COLUMNS, JOB_RUN_COLUMNS, select_columns
+from scrapeyard.storage.job_sql import (
+    JOB_COLUMNS,
+    JOB_METADATA_COLUMNS,
+    JOB_RUN_COLUMNS,
+    select_columns,
+)
 from scrapeyard.storage.secret_envelope import protect_text, reveal_text
 from scrapeyard.storage.types import (
     CancellationOutcome,
@@ -61,6 +67,54 @@ from scrapeyard.storage.webhook_outbox import WebhookDeliveryCreate
 _SCHEDULE_FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 # Exact-run identities remembered by verified config hash (see get_job_run_state).
 _RUN_IDENTITY_CACHE_ENTRIES = 256
+# Offload SHA-256 + AES-GCM to a worker thread when a config exceeds this size.
+_OFFLOAD_CRYPTO_THRESHOLD_CHARS = 16 * 1024
+
+
+def _prepare_config_crypto(
+    config_yaml: str,
+    *,
+    job_purpose: str,
+    snapshot_purpose: str | None = None,
+) -> tuple[str, str, str | None]:
+    config_hash = hashlib.sha256(config_yaml.encode("utf-8")).hexdigest()
+    protected_primary = protect_text(config_yaml, purpose=job_purpose)
+    protected_snapshot = (
+        None
+        if snapshot_purpose is None
+        else protect_text(config_yaml, purpose=snapshot_purpose)
+    )
+    return config_hash, protected_primary, protected_snapshot
+
+
+async def _prepare_config_crypto_async(
+    config_yaml: str,
+    *,
+    job_purpose: str,
+    snapshot_purpose: str | None = None,
+) -> tuple[str, str, str | None]:
+    if len(config_yaml) >= _OFFLOAD_CRYPTO_THRESHOLD_CHARS:
+        return await asyncio.to_thread(
+            _prepare_config_crypto,
+            config_yaml,
+            job_purpose=job_purpose,
+            snapshot_purpose=snapshot_purpose,
+        )
+    return _prepare_config_crypto(
+        config_yaml,
+        job_purpose=job_purpose,
+        snapshot_purpose=snapshot_purpose,
+    )
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _sha256_text_async(text: str) -> str:
+    if len(text) >= _OFFLOAD_CRYPTO_THRESHOLD_CHARS:
+        return await asyncio.to_thread(_sha256_text, text)
+    return _sha256_text(text)
 
 
 def _reveal_verified(value: str, *, purpose: str, expected_hash: str) -> str | None:
@@ -70,6 +124,22 @@ def _reveal_verified(value: str, *, purpose: str, expected_hash: str) -> str | N
     if hashlib.sha256(config_yaml.encode("utf-8")).hexdigest() != expected_hash:
         return None
     return config_yaml
+
+
+def _reveal_verified_identity(
+    value: str,
+    *,
+    purpose: str,
+    expected_hash: str,
+    cached_identity: tuple[object, object] | None,
+) -> tuple[object, object] | None:
+    config_yaml = _reveal_verified(value, purpose=purpose, expected_hash=expected_hash)
+    if config_yaml is None:
+        return None
+    if cached_identity is not None:
+        return cached_identity
+    config = load_yaml_mapping(config_yaml)
+    return (config.get("project"), config.get("name"))
 
 
 class DuplicateJobError(Exception):
@@ -104,6 +174,10 @@ class SQLiteJobStore:
     def __init__(self) -> None:
         # config_hash -> (project, name) as parsed from that exact config.
         self._run_identities: OrderedDict[str, tuple[object, object]] = OrderedDict()
+        # (job_id, run_id) -> (origin, config_hash, ciphertext_digest, project, name).
+        self._verified_runs: OrderedDict[
+            tuple[str, str], tuple[str, str, str, object, object]
+        ] = OrderedDict()
 
     async def _execute_write(
         self,
@@ -114,14 +188,42 @@ class SQLiteJobStore:
             return await db.execute(sql, params)
 
     @staticmethod
-    async def _insert_job(db: aiosqlite.Connection, job: Job) -> None:
+    async def _prepare_job_insert_crypto(job: Job) -> tuple[str, str, str | None]:
+        snapshot_purpose = (
+            f"queued_run_snapshots.config_yaml:{job.current_run_id}"
+            if job.status is JobStatus.queued and job.current_run_id is not None
+            else None
+        )
+        return await _prepare_config_crypto_async(
+            job.config_yaml,
+            job_purpose=f"jobs.config_yaml:{job.job_id}",
+            snapshot_purpose=snapshot_purpose,
+        )
+
+    @staticmethod
+    async def _insert_job(
+        db: aiosqlite.Connection,
+        job: Job,
+        *,
+        prepared: tuple[str, str, str | None] | None = None,
+    ) -> None:
         current_trigger = job.current_trigger
         if current_trigger is None and job.current_run_id is not None:
             current_trigger = "scheduled" if job.schedule_cron is not None else "adhoc"
-        protected_config = protect_text(
-            job.config_yaml,
-            purpose=f"jobs.config_yaml:{job.job_id}",
-        )
+        needs_snapshot = job.status is JobStatus.queued and job.current_run_id is not None
+        if prepared is None:
+            snapshot_purpose = (
+                f"queued_run_snapshots.config_yaml:{job.current_run_id}"
+                if needs_snapshot
+                else None
+            )
+            config_hash, protected_config, protected_snapshot = _prepare_config_crypto(
+                job.config_yaml,
+                job_purpose=f"jobs.config_yaml:{job.job_id}",
+                snapshot_purpose=snapshot_purpose,
+            )
+        else:
+            config_hash, protected_config, protected_snapshot = prepared
         await db.execute(
             """INSERT INTO jobs (job_id, project, name, status,
                config_yaml, config_hash, created_at, updated_at, schedule_cron,
@@ -136,7 +238,7 @@ class SQLiteJobStore:
                 job.name,
                 job.status.value,
                 protected_config,
-                hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
+                config_hash,
                 fmt_dt(job.created_at),
                 fmt_dt(job.updated_at),
                 job.schedule_cron,
@@ -155,10 +257,21 @@ class SQLiteJobStore:
                 job.schedule_consecutive_failures,
             ),
         )
-        if job.status is JobStatus.queued and job.current_run_id is not None:
+        if needs_snapshot and job.current_run_id is not None:
             await SQLiteJobStore._check_admission(db)
             trigger = current_trigger or "adhoc"
             queued_at = job.updated_at or job.created_at
+            snapshot_ciphertext = (
+                protected_snapshot
+                if protected_snapshot is not None
+                else protect_text(
+                    job.config_yaml,
+                    purpose=(
+                        "queued_run_snapshots.config_yaml:"
+                        f"{job.current_run_id}"
+                    ),
+                )
+            )
             await db.execute(
                 """INSERT INTO queued_run_snapshots
                        (run_id, job_id, trigger, config_hash, config_yaml, queued_at)
@@ -167,14 +280,8 @@ class SQLiteJobStore:
                     job.current_run_id,
                     job.job_id,
                     trigger,
-                    hashlib.sha256(job.config_yaml.encode("utf-8")).hexdigest(),
-                    protect_text(
-                        job.config_yaml,
-                        purpose=(
-                            "queued_run_snapshots.config_yaml:"
-                            f"{job.current_run_id}"
-                        ),
-                    ),
+                    config_hash,
+                    snapshot_ciphertext,
                     fmt_dt(queued_at),
                 ),
             )
@@ -211,13 +318,26 @@ class SQLiteJobStore:
         return None if row is None else row_to_job(cast(Mapping[str, object], row))
 
     @staticmethod
+    async def _get_job_metadata_in_db(
+        db: aiosqlite.Connection,
+        job_id: str,
+    ) -> JobMetadata | None:
+        cursor = await db.execute(
+            f"SELECT {select_columns(JOB_METADATA_COLUMNS)} FROM jobs WHERE job_id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        return None if row is None else row_to_job_metadata(cast(Mapping[str, object], row))
+
+    @staticmethod
     def _raise_ownership(operation: str, job_id: str, run_id: str) -> NoReturn:
         raise RunOwnershipError(operation, job_id, run_id)
 
     async def save_job(self, job: Job) -> str:
+        prepared = await self._prepare_job_insert_crypto(job)
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             try:
-                await self._insert_job(db, job)
+                await self._insert_job(db, job, prepared=prepared)
             except aiosqlite.IntegrityError as exc:
                 if is_duplicate_job_integrity_error(exc):
                     raise DuplicateJobError(job.project, job.name) from exc
@@ -238,6 +358,7 @@ class SQLiteJobStore:
 
         if job.current_run_id is None:
             raise ValueError("Idempotent ad-hoc jobs require current_run_id")
+        prepared = await self._prepare_job_insert_crypto(job)
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             # Lazy expiry makes a key reusable on its first request after the
             # retention window, independently of the periodic cleanup cadence.
@@ -274,7 +395,7 @@ class SQLiteJobStore:
                 )
 
             try:
-                await self._insert_job(db, job)
+                await self._insert_job(db, job, prepared=prepared)
             except aiosqlite.IntegrityError as exc:
                 if is_duplicate_job_integrity_error(exc):
                     raise DuplicateJobError(job.project, job.name) from exc
@@ -440,6 +561,10 @@ class SQLiteJobStore:
     ) -> ScheduledJobMutationOutcome:
         """Replace future scheduled config while excluding an accepted run."""
 
+        config_hash, protected_config, _ = await _prepare_config_crypto_async(
+            config_yaml,
+            job_purpose=f"jobs.config_yaml:{job_id}",
+        )
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
             previous = await self._get_job_in_db(db, job_id)
             if previous is None:
@@ -472,10 +597,6 @@ class SQLiteJobStore:
                     previous,
                 )
             try:
-                protected_config = protect_text(
-                    config_yaml,
-                    purpose=f"jobs.config_yaml:{job_id}",
-                )
                 await db.execute(
                     """UPDATE jobs
                        SET project = ?, name = ?, config_yaml = ?, config_hash = ?,
@@ -486,7 +607,7 @@ class SQLiteJobStore:
                         project,
                         name,
                         protected_config,
-                        hashlib.sha256(config_yaml.encode("utf-8")).hexdigest(),
+                        config_hash,
                         schedule_cron,
                         schedule_timezone,
                         int(schedule_enabled),
@@ -498,9 +619,17 @@ class SQLiteJobStore:
                 if is_duplicate_job_integrity_error(exc):
                     raise DuplicateJobError(project, name) from exc
                 raise
-            current = await self._get_job_in_db(db, job_id)
-            if current is None:  # pragma: no cover - transaction invariant
-                raise RuntimeError("Scheduled job disappeared during update")
+            current = previous.model_copy(
+                update={
+                    "project": project,
+                    "name": name,
+                    "config_yaml": config_yaml,
+                    "schedule_cron": schedule_cron,
+                    "schedule_timezone": schedule_timezone,
+                    "schedule_enabled": schedule_enabled,
+                    "updated_at": updated_at,
+                }
+            )
             return ScheduledJobMutationOutcome(
                 ScheduledJobMutationAction.updated,
                 previous,
@@ -517,7 +646,7 @@ class SQLiteJobStore:
         """Persist pause/resume state independently of current run execution."""
 
         async with get_db("jobs.db") as db, db_transaction(db, immediate=True):
-            previous = await self._get_job_in_db(db, job_id)
+            previous = await self._get_job_metadata_in_db(db, job_id)
             if previous is None:
                 return ScheduledJobMutationOutcome(ScheduledJobMutationAction.missing)
             if previous.schedule_cron is None:
@@ -552,9 +681,52 @@ class SQLiteJobStore:
                 current,
             )
 
-    async def restore_scheduled_job(self, expected: Job, previous: Job) -> bool:
+    async def restore_scheduled_job(
+        self,
+        expected: Job | JobMetadata,
+        previous: Job | JobMetadata,
+    ) -> bool:
         """Restore one exact just-written snapshot after local scheduler failure."""
 
+        expected_hash = (
+            expected.config_hash
+            if isinstance(expected, JobMetadata)
+            else hashlib.sha256(expected.config_yaml.encode("utf-8")).hexdigest()
+        )
+        if isinstance(previous, JobMetadata):
+            cursor = await self._execute_write(
+                """UPDATE jobs
+                   SET project = ?, name = ?, schedule_cron = ?,
+                       schedule_timezone = ?, schedule_enabled = ?, updated_at = ?
+                   WHERE job_id = ?
+                     AND project = ? AND name = ? AND config_hash = ?
+                     AND schedule_cron IS ? AND schedule_timezone = ?
+                     AND schedule_enabled = ? AND updated_at IS ?
+                     AND status = ? AND current_run_id IS ?""",
+                (
+                    previous.project,
+                    previous.name,
+                    previous.schedule_cron,
+                    previous.schedule_timezone,
+                    int(previous.schedule_enabled),
+                    fmt_dt(previous.updated_at),
+                    expected.job_id,
+                    expected.project,
+                    expected.name,
+                    expected_hash,
+                    expected.schedule_cron,
+                    expected.schedule_timezone,
+                    int(expected.schedule_enabled),
+                    fmt_dt(expected.updated_at),
+                    expected.status.value,
+                    expected.current_run_id,
+                ),
+            )
+            return cursor.rowcount == 1
+        previous_hash, previous_ciphertext, _ = await _prepare_config_crypto_async(
+            previous.config_yaml,
+            job_purpose=f"jobs.config_yaml:{previous.job_id}",
+        )
         cursor = await self._execute_write(
             """UPDATE jobs
                SET project = ?, name = ?, config_yaml = ?, config_hash = ?, schedule_cron = ?,
@@ -567,11 +739,8 @@ class SQLiteJobStore:
             (
                 previous.project,
                 previous.name,
-                protect_text(
-                    previous.config_yaml,
-                    purpose=f"jobs.config_yaml:{previous.job_id}",
-                ),
-                hashlib.sha256(previous.config_yaml.encode("utf-8")).hexdigest(),
+                previous_ciphertext,
+                previous_hash,
                 previous.schedule_cron,
                 previous.schedule_timezone,
                 int(previous.schedule_enabled),
@@ -579,7 +748,7 @@ class SQLiteJobStore:
                 expected.job_id,
                 expected.project,
                 expected.name,
-                hashlib.sha256(expected.config_yaml.encode("utf-8")).hexdigest(),
+                expected_hash,
                 expected.schedule_cron,
                 expected.schedule_timezone,
                 int(expected.schedule_enabled),
@@ -621,6 +790,14 @@ class SQLiteJobStore:
         if row is None:
             raise KeyError(f"Job not found: {job_id!r}")
         return row_to_job(cast(Mapping[str, object], row))
+
+    async def get_job_metadata(self, job_id: str) -> JobMetadata:
+        """Return lightweight job metadata without reading or decrypting its config."""
+        async with get_db("jobs.db") as db:
+            metadata = await self._get_job_metadata_in_db(db, job_id)
+        if metadata is None:
+            raise KeyError(f"Job not found: {job_id!r}")
+        return metadata
 
     async def get_job_project(self, job_id: str) -> str:
         """Return a job's project without reading or decrypting its config."""
@@ -785,20 +962,37 @@ class SQLiteJobStore:
             return None  # Historical missing snapshots remain unavailable evidence.
         state = dict(row)
         config_hash = cast(str, state["config_hash"])
-        config_yaml = _reveal_verified(
-            str(state.pop("config_yaml")),
-            purpose=f"{state.pop('origin')}.config_yaml:{run_id}",
-            expected_hash=config_hash,
-        )
-        if config_yaml is None:
-            raise ValueError("Exact run configuration hash mismatch")
+        origin = str(state.pop("origin"))
+        encrypted_config = str(state.pop("config_yaml"))
+        ciphertext_digest = await _sha256_text_async(encrypted_config)
+        run_key = (job_id, run_id)
+        cached_run = self._verified_runs.get(run_key)
+        if (
+            cached_run is not None
+            and cached_run[0] == origin
+            and cached_run[1] == config_hash
+            and cached_run[2] == ciphertext_digest
+        ):
+            project, name = cached_run[3], cached_run[4]
+            if project != state["project"] or not isinstance(name, str):
+                raise ValueError("Exact run configuration identity mismatch")
+            self._verified_runs.move_to_end(run_key)
+            state["name"] = name
+            return state
+        cached_identity = self._run_identities.get(config_hash)
         # Callers poll this per in-flight run, and finding the name means
-        # parsing the whole YAML (about 45 ms at 110 KB). A run's config never
-        # changes, so parse each verified config once, off the event loop.
-        identity = self._run_identities.get(config_hash)
+        # decrypting and parsing the whole YAML. A run's ciphertext never
+        # changes, so verify and parse each snapshot once off the event loop.
+        identity = await asyncio.to_thread(
+            _reveal_verified_identity,
+            encrypted_config,
+            purpose=f"{origin}.config_yaml:{run_id}",
+            expected_hash=config_hash,
+            cached_identity=cached_identity,
+        )
         if identity is None:
-            config = await asyncio.to_thread(load_yaml_mapping, config_yaml)
-            identity = (config.get("project"), config.get("name"))
+            raise ValueError("Exact run configuration hash mismatch")
+        if cached_identity is None:
             self._run_identities[config_hash] = identity
             if len(self._run_identities) > _RUN_IDENTITY_CACHE_ENTRIES:
                 self._run_identities.popitem(last=False)
@@ -807,6 +1001,9 @@ class SQLiteJobStore:
         project, name = identity
         if project != state["project"] or not isinstance(name, str):
             raise ValueError("Exact run configuration identity mismatch")
+        self._verified_runs[run_key] = (origin, config_hash, ciphertext_digest, project, name)
+        if len(self._verified_runs) > _RUN_IDENTITY_CACHE_ENTRIES:
+            self._verified_runs.popitem(last=False)
         state["name"] = name
         return state
 
@@ -1371,11 +1568,15 @@ class SQLiteJobStore:
             stale_clause = " AND (updated_at IS NULL OR updated_at <= ?)"
             params.append(fmt_dt(stale_before))
         config_clause = ""
+        expected_hash: str | None = None
+        prepared_snapshot: str | None = None
         if expected_config_yaml is not None:
-            config_clause = " AND config_hash = ?"
-            params.append(
-                hashlib.sha256(expected_config_yaml.encode("utf-8")).hexdigest()
+            expected_hash, prepared_snapshot, _ = await _prepare_config_crypto_async(
+                expected_config_yaml,
+                job_purpose=f"queued_run_snapshots.config_yaml:{new_run_id}",
             )
+            config_clause = " AND config_hash = ?"
+            params.append(expected_hash)
         # The scheduler read the schedule as enabled before it loaded the
         # config; a pause that committed since must still stop the fire. A
         # worker picking up a delivery accepted before the pause still runs it.
@@ -1397,22 +1598,30 @@ class SQLiteJobStore:
                 await db.rollback()
                 return False
             await self._check_admission(db)
-            row = await (
-                await db.execute(
-                    "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
-                    (job_id,),
+            if expected_hash is not None and prepared_snapshot is not None:
+                config_hash = expected_hash
+                snapshot_ciphertext = prepared_snapshot
+            else:
+                row = await (
+                    await db.execute(
+                        "SELECT config_yaml, config_hash FROM jobs WHERE job_id = ?",
+                        (job_id,),
+                    )
+                ).fetchone()
+                if row is None:  # pragma: no cover - transaction invariant
+                    raise RuntimeError("Queued parent disappeared inside its transaction")
+                config_hash = cast(str, row["config_hash"])
+                config_yaml = _reveal_verified(
+                    cast(str, row["config_yaml"]),
+                    purpose=f"jobs.config_yaml:{job_id}",
+                    expected_hash=config_hash,
                 )
-            ).fetchone()
-            if row is None:  # pragma: no cover - transaction invariant
-                raise RuntimeError("Queued parent disappeared inside its transaction")
-            config_hash = cast(str, row["config_hash"])
-            config_yaml = _reveal_verified(
-                cast(str, row["config_yaml"]),
-                purpose=f"jobs.config_yaml:{job_id}",
-                expected_hash=config_hash,
-            )
-            if config_yaml is None:
-                raise ValueError("Queued parent configuration hash mismatch")
+                if config_yaml is None:
+                    raise ValueError("Queued parent configuration hash mismatch")
+                snapshot_ciphertext = protect_text(
+                    config_yaml,
+                    purpose=f"queued_run_snapshots.config_yaml:{new_run_id}",
+                )
             await db.execute(
                 """INSERT INTO queued_run_snapshots
                        (run_id, job_id, trigger, config_hash, config_yaml, queued_at)
@@ -1422,10 +1631,7 @@ class SQLiteJobStore:
                     job_id,
                     new_trigger,
                     config_hash,
-                    protect_text(
-                        config_yaml,
-                        purpose=f"queued_run_snapshots.config_yaml:{new_run_id}",
-                    ),
+                    snapshot_ciphertext,
                     fmt_dt(queued_at),
                 ),
             )

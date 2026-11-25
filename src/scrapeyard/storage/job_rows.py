@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from scrapeyard.common.dt import parse_dt
-from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
+from scrapeyard.models.job import Job, JobMetadata, JobRun, JobStatus, JobSummary
 from scrapeyard.storage.secret_envelope import reveal_text
 
 RowMapping = Mapping[str, object]
@@ -72,6 +72,28 @@ def row_to_job(row: RowMapping) -> Job:
             if _optional_row_value(row, "delete_results_on_delete") is None
             else bool(_optional_row_value(row, "delete_results_on_delete"))
         ),
+    )
+
+
+def row_to_job_metadata(row: RowMapping) -> JobMetadata:
+    return JobMetadata(
+        job_id=cast(str, row["job_id"]),
+        project=cast(str, row["project"]),
+        name=cast(str, row["name"]),
+        status=JobStatus(cast(str, row["status"])),
+        current_run_id=cast(str | None, row["current_run_id"]),
+        schedule_cron=cast(str | None, row["schedule_cron"]),
+        schedule_timezone=cast(
+            str,
+            _optional_row_value(row, "schedule_timezone") or "UTC",
+        ),
+        schedule_enabled=bool(row["schedule_enabled"]),
+        schedule_failure_code=cast(
+            str | None,
+            _optional_row_value(row, "schedule_failure_code"),
+        ),
+        updated_at=parse_dt(cast(str | None, row["updated_at"])),
+        config_hash=cast(str, _optional_row_value(row, "config_hash") or ""),
     )
 
 

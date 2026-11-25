@@ -104,10 +104,12 @@ async def test_a_session_is_replaced_after_many_routed_requests(closed) -> None:
 async def test_a_disconnected_idle_session_relaunches_instead_of_failing(closed) -> None:
     pool = BrowserPool(1)
     session = await pool.acquire(_target(), None, PlayWrightFetcher)
-    session._context = SimpleNamespace(browser=SimpleNamespace(is_connected=lambda: False))
     await pool.release(session)
+    session._context = SimpleNamespace(browser=SimpleNamespace(is_connected=lambda: False))
 
-    assert await pool.acquire(_target(), None, PlayWrightFetcher) is session
+    fresh = await pool.acquire(_target(), None, PlayWrightFetcher)
+    assert fresh is not session
+    assert pool.sessions == 1
     assert closed == [session]
 
 

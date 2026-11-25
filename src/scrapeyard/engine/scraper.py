@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ from scrapeyard.queue.cancellation import (
     CancellationCheckpoint,
     cancellation_checkpoint,
 )
+from scrapeyard.storage.types import RunOwnershipError
 
 _BASIC_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_BASIC_REDIRECTS = 10
@@ -787,7 +789,6 @@ def _prepare_scrape_context(
     shared_session: BrowserSession | None = None,
 ) -> ScrapeContext:
     resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
-    Path(resolved_adaptive_dir).mkdir(parents=True, exist_ok=True)
     fetcher = _get_fetcher(target.fetcher)
     if shared_session is not None:
         fetcher = shared_session
@@ -962,58 +963,70 @@ async def scrape_target(
     """Fetch a URL, apply selectors, and handle pagination."""
     result = TargetResult(url=target.url)
     pool = current_browser_pool() if target.fetcher is not FetcherType.basic else None
-    shared_session = (
-        await pool.acquire(target, proxy_url, _get_fetcher(target.fetcher))
-        if pool is not None
-        else None
-    )
-    context = _prepare_scrape_context(
-        target,
-        retry,
-        adaptive_dir,
-        budget,
-        cancellation_guard,
-        response_observer,
-        rate_limiter,
-        domain_rate_limit,
-        shared_session,
-    )
+    shared_session: BrowserSession | None = None
+    context: ScrapeContext | None = None
 
     try:
-        first_page = await _scrape_first_page(
-            context=context,
-            target=target,
-            result=result,
-            adaptive=adaptive,
-            proxy_url=proxy_url,
-            artifacts_dir=artifacts_dir,
+        if adaptive:
+            resolved_adaptive_dir = adaptive_dir or get_settings().adaptive_dir
+            await asyncio.to_thread(
+                Path(resolved_adaptive_dir).mkdir,
+                parents=True,
+                exist_ok=True,
+            )
+        shared_session = (
+            await pool.acquire(target, proxy_url, _get_fetcher(target.fetcher))
+            if pool is not None
+            else None
         )
-        await _scrape_paginated_pages(
-            page=first_page.page,
-            target=target,
-            result=result,
-            context=context,
-            adaptive=adaptive,
-            proxy_url=proxy_url,
-            artifacts_dir=artifacts_dir,
-        )
-        await _run_page_cpu_work(
-            context,
-            _finalize_target_success,
-            result,
+        context = _prepare_scrape_context(
             target,
+            retry,
+            adaptive_dir,
+            budget,
+            cancellation_guard,
+            response_observer,
+            rate_limiter,
+            domain_rate_limit,
+            shared_session,
         )
-    except BudgetExceeded:
-        raise
-    except SelectorExecutionError as exc:
-        _handle_selector_execution_failure(result, target, exc)
-    except Exception as exc:
-        _handle_scrape_exception(result, target, exc)
+        try:
+            first_page = await _scrape_first_page(
+                context=context,
+                target=target,
+                result=result,
+                adaptive=adaptive,
+                proxy_url=proxy_url,
+                artifacts_dir=artifacts_dir,
+            )
+            await _scrape_paginated_pages(
+                page=first_page.page,
+                target=target,
+                result=result,
+                context=context,
+                adaptive=adaptive,
+                proxy_url=proxy_url,
+                artifacts_dir=artifacts_dir,
+            )
+            await _run_page_cpu_work(
+                context,
+                _finalize_target_success,
+                result,
+                target,
+            )
+        except (BudgetExceeded, RunOwnershipError):
+            raise
+        except SelectorExecutionError as exc:
+            _handle_selector_execution_failure(result, target, exc)
+        except Exception as exc:
+            _handle_scrape_exception(result, target, exc)
     finally:
         if pool is not None and shared_session is not None:
             # The run's pool keeps the browser for the next target of this group.
             await await_cleanup(pool.release(shared_session))
-        elif isinstance(context.fetcher_cls, (BasicSession, BrowserSession)):
+        elif context is not None and isinstance(
+            context.fetcher_cls, (BasicSession, BrowserSession)
+        ):
             await await_cleanup(context.fetcher_cls.aclose())
 
     return result

@@ -277,7 +277,7 @@ async def paginate_target(
         return
 
     current_url = (result.debug.get("final_url") if result.debug else None) or target.url
-    seen_urls = {pagination_url_key(current_url)}
+    seen_urls = {pagination_url_key(target.url), pagination_url_key(current_url)}
     next_selector = target.pagination.next
     assert next_selector is not None  # Enforced by PaginationConfig validation.
     # Inspect the last permitted page too: execution success alone does not
@@ -313,7 +313,8 @@ async def paginate_target(
         ):
             result.pagination_stop_reason = "unsafe_next_url"
             break
-        if pagination_url_key(next_url) in seen_urls:
+        next_key = pagination_url_key(next_url)
+        if next_key in seen_urls:
             result.pagination_stop_reason = "repeated_url"
             break
 
@@ -328,6 +329,7 @@ async def paginate_target(
         if final_key in seen_urls:
             result.pagination_stop_reason = "repeated_url"
             break
+        seen_urls.add(next_key)
         seen_urls.add(final_key)
         page = next_outcome.page
         current_url = final_url
@@ -360,8 +362,10 @@ async def _paginate_by_page_param(
     # Every page derives from the first page's final URL, so a redirect on a
     # later page cannot change the numbering base.
     base_url = (result.debug.get("final_url") if result.debug else None) or target.url
-    seen_urls = {pagination_url_key(base_url)}
-    seen_pages = {page_data_fingerprint(result.data)}
+    seen_urls = {pagination_url_key(target.url), pagination_url_key(base_url)}
+    seen_pages = {
+        await _run_cpu_work(page_data_fingerprint, result.data, budget=budget)
+    }
     for page_number in range(1, pagination.max_pages + 1):
         await cancellation_checkpoint(
             cancellation_guard,
@@ -396,7 +400,8 @@ async def _paginate_by_page_param(
         ):
             result.pagination_stop_reason = "unsafe_next_url"
             break
-        if pagination_url_key(next_url) in seen_urls:
+        next_key = pagination_url_key(next_url)
+        if next_key in seen_urls:
             result.pagination_stop_reason = "repeated_url"
             break
 
@@ -411,6 +416,7 @@ async def _paginate_by_page_param(
         if final_key in seen_urls:
             result.pagination_stop_reason = "repeated_url"
             break
+        seen_urls.add(next_key)
         seen_urls.add(final_key)
         page = next_outcome.page
         page_data = await _run_cpu_work(
@@ -423,7 +429,11 @@ async def _paginate_by_page_param(
             result.pages_scraped += 1
             result.pagination_stop_reason = "exhausted"
             break
-        fingerprint = page_data_fingerprint(page_data)
+        fingerprint = await _run_cpu_work(
+            page_data_fingerprint,
+            page_data,
+            budget=budget,
+        )
         if fingerprint in seen_pages:
             # Past the end, some listings serve an earlier page again.
             result.pagination_stop_reason = "repeated_page"
