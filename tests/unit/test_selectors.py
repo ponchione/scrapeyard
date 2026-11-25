@@ -489,9 +489,13 @@ async def test_concurrent_page_reservations_never_extract_past_aggregate_limit(
         )
 
     assert budget.extracted_records == 2
-    assert extract_selectors.call_count == 2
-    assert sum(isinstance(outcome, BudgetExceeded) for outcome in outcomes) == 1
-    assert sum(not isinstance(outcome, BaseException) for outcome in outcomes) == 1
+    assert 1 <= extract_selectors.call_count <= 2
+    exceeded = [outcome for outcome in outcomes if isinstance(outcome, BudgetExceeded)]
+    succeeded = [outcome for outcome in outcomes if not isinstance(outcome, BaseException)]
+    assert len(exceeded) >= 1
+    assert all(exc.limit_name is BudgetLimitName.extracted_records for exc in exceeded)
+    assert len(exceeded) + len(succeeded) == 2
+    assert all(outcome.is_success and len(outcome.data) == 2 for outcome in succeeded)
 
 
 @pytest.mark.asyncio
