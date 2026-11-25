@@ -10,10 +10,11 @@ import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.common.run_threads import RunThreadPool, run_thread_work
-from scrapeyard.config.schema import BrowserActionConfig, RetryConfig
+from scrapeyard.config.schema import BrowserActionConfig, RetryConfig, TargetConfig
 from scrapeyard.engine.browser_debug import run_browser_actions
 from scrapeyard.engine.resilience import RetryableError, RetryHandler
-from scrapeyard.engine.scraper import _acquire_request_rate_limit
+from scrapeyard.engine.scraper import scrape_target
+from tests.factories import make_budget
 
 
 def _budget(**overrides) -> RunBudget:
@@ -25,7 +26,7 @@ def _budget(**overrides) -> RunBudget:
         "max_browser_debug_bytes": 100,
     }
     values.update(overrides)
-    return RunBudget(**values)
+    return make_budget(**values)
 
 
 def test_record_budget_is_aggregate_at_exact_boundary():
@@ -182,7 +183,7 @@ async def test_failure_of_abandoned_run_thread_work_is_retrieved(ending: str):
         else:
             with pytest.raises(BudgetExceeded):
                 await run_thread_work(
-                    refusing_work, run_budget=_budget(max_duration_seconds=0.2), pool=pool,
+                    refusing_work, run_budget=_budget(max_duration_seconds=0.04), pool=pool,
                 )
         await asyncio.sleep(0)
         assert pool.lingering == 1
@@ -257,13 +258,15 @@ async def test_rate_limit_wait_uses_overall_deadline():
         await asyncio.Event().wait()
 
     rate_limiter.acquire.side_effect = block_rate_limit
+    target = TargetConfig(url="https://example.com", selectors={"title": "h1"})
     with pytest.raises(BudgetExceeded) as exc_info:
-        await _acquire_request_rate_limit(
-            "https://example.com",
+        await scrape_target(
+            target,
+            False,
+            RetryConfig(max_attempts=1),
             rate_limiter=rate_limiter,
-            min_interval=5,
+            domain_rate_limit=5,
             budget=budget,
-            cancellation_guard=None,
         )
     assert exc_info.value.limit_name is BudgetLimitName.run_duration_seconds
 

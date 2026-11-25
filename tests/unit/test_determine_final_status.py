@@ -1,82 +1,82 @@
-"""Tests for _determine_final_status — pure, no side effects."""
+"""Tests for final job status resolution via scrape_task."""
 
-from unittest.mock import MagicMock
+from __future__ import annotations
+
+import pytest
 
 from scrapeyard.config.schema import FailStrategy
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import JobStatus
-from scrapeyard.queue.worker import _determine_final_status
+from tests.unit.worker_helpers import make_config_mock, make_target, run_scrape_task
 
 
-def _make_config(strategy: FailStrategy) -> MagicMock:
-    cfg = MagicMock()
-    cfg.execution.fail_strategy = strategy
-    return cfg
+async def _final_status_for(
+    strategy: FailStrategy,
+    results: list[TargetResult],
+) -> tuple[JobStatus, dict]:
+    cfg = make_config_mock(
+        targets=[make_target(r.url) for r in results],
+        fail_strategy=strategy,
+    )
+    outcome = await run_scrape_task(cfg, results)
+    return outcome.final_status, outcome.saved_artifact
 
 
-def test_all_or_nothing_does_not_mutate_flat_data():
-    """G2: _determine_final_status must NOT clear flat_data as a side effect."""
+@pytest.mark.asyncio
+async def test_all_or_nothing_fails_and_withholds_partial_results_without_mutating_inputs():
+    records = [{"x": 1}]
     results = [
-        TargetResult(url="http://a.com", status="success", data=[{"x": 1}]),
+        TargetResult(url="http://a.com", status="success", data=list(records)),
         TargetResult(url="http://b.com", status="failed", errors=["err"]),
     ]
-    flat_data = [{"x": 1}]
-    status = _determine_final_status(
-        _make_config(FailStrategy.all_or_nothing), results, flat_data,
-    )
+    status, artifact = await _final_status_for(FailStrategy.all_or_nothing, results)
     assert status == JobStatus.failed
-    # flat_data must be UNCHANGED — caller is responsible for clearing.
-    assert flat_data == [{"x": 1}]
+    assert artifact["results"] == {}
+    assert results[0].data == [{"x": 1}]
 
 
-def test_all_or_nothing_complete_on_all_success():
+@pytest.mark.asyncio
+async def test_all_or_nothing_complete_on_all_success():
     results = [
         TargetResult(url="http://a.com", status="success", data=[{"x": 1}]),
     ]
-    flat_data = [{"x": 1}]
-    status = _determine_final_status(
-        _make_config(FailStrategy.all_or_nothing), results, flat_data,
-    )
+    status, _artifact = await _final_status_for(FailStrategy.all_or_nothing, results)
     assert status == JobStatus.complete
 
 
-def test_partial_returns_partial_on_mixed():
+@pytest.mark.asyncio
+async def test_partial_returns_partial_on_mixed():
     results = [
         TargetResult(url="http://a.com", status="success", data=[{"x": 1}]),
         TargetResult(url="http://b.com", status="failed", errors=["err"]),
     ]
-    status = _determine_final_status(
-        _make_config(FailStrategy.partial), results, [{"x": 1}],
-    )
+    status, _artifact = await _final_status_for(FailStrategy.partial, results)
     assert status == JobStatus.partial
 
 
-def test_partial_returns_failed_when_all_fail():
+@pytest.mark.asyncio
+async def test_partial_returns_failed_when_all_fail():
     results = [
         TargetResult(url="http://a.com", status="failed", errors=["err"]),
     ]
-    status = _determine_final_status(
-        _make_config(FailStrategy.partial), results, [],
-    )
+    status, _artifact = await _final_status_for(FailStrategy.partial, results)
     assert status == JobStatus.failed
 
 
-def test_continue_completes_if_data_exists():
+@pytest.mark.asyncio
+async def test_continue_completes_if_data_exists():
     results = [
         TargetResult(url="http://a.com", status="success", data=[{"x": 1}]),
         TargetResult(url="http://b.com", status="failed", errors=["err"]),
     ]
-    status = _determine_final_status(
-        _make_config(FailStrategy.continue_), results, [{"x": 1}],
-    )
+    status, _artifact = await _final_status_for(FailStrategy.continue_, results)
     assert status == JobStatus.complete
 
 
-def test_continue_fails_if_no_data():
+@pytest.mark.asyncio
+async def test_continue_fails_if_no_data():
     results = [
         TargetResult(url="http://a.com", status="failed", errors=["err"]),
     ]
-    status = _determine_final_status(
-        _make_config(FailStrategy.continue_), results, [],
-    )
+    status, _artifact = await _final_status_for(FailStrategy.continue_, results)
     assert status == JobStatus.failed

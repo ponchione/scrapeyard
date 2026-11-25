@@ -137,7 +137,7 @@ def _trickling_webhook_handler(prefix: bytes, unit: bytes):
             for _ in range(200):
                 writer.write(unit)
                 await writer.drain()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.015)
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -152,7 +152,7 @@ class MemoryWebhookOutboxStore:
     def __init__(self) -> None:
         self.deliveries: dict[str, WebhookDelivery] = {}
 
-    async def enqueue_delivery(
+    async def seed_delivery(
         self,
         delivery: WebhookDeliveryCreate,
         *,
@@ -183,7 +183,7 @@ class MemoryWebhookOutboxStore:
             updated_at=created_at,
         )
 
-    async def list_pending(self, *, limit: int | None = None) -> list[WebhookDelivery]:
+    def _pending_rows(self, *, limit: int | None = None) -> list[WebhookDelivery]:
         rows = [
             delivery
             for delivery in self.deliveries.values()
@@ -199,7 +199,7 @@ class MemoryWebhookOutboxStore:
         limit: int,
     ) -> list[WebhookDelivery]:
         return [
-            delivery for delivery in await self.list_pending() if delivery.next_attempt_at <= now
+            delivery for delivery in self._pending_rows() if delivery.next_attempt_at <= now
         ][:limit]
 
     async def list_exhausted_pending(
@@ -211,18 +211,18 @@ class MemoryWebhookOutboxStore:
     ) -> list[WebhookDelivery]:
         rows = [
             delivery
-            for delivery in await self.list_pending()
+            for delivery in self._pending_rows()
             if delivery.attempts >= attempts_gte or delivery.created_at <= created_at_lte
         ]
         rows.sort(key=lambda delivery: (delivery.created_at, delivery.delivery_id))
         return rows[:limit]
 
     async def next_pending_due_at(self) -> datetime | None:
-        pending = await self.list_pending()
+        pending = self._pending_rows()
         return None if not pending else pending[0].next_attempt_at
 
     async def oldest_pending_created_at(self) -> datetime | None:
-        pending = await self.list_pending()
+        pending = self._pending_rows()
         return None if not pending else min(row.created_at for row in pending)
 
     async def summarize(
@@ -231,7 +231,7 @@ class MemoryWebhookOutboxStore:
         now: datetime | None = None,
     ) -> WebhookOutboxSummary:
         observed_at = now or datetime.now(timezone.utc)
-        pending = await self.list_pending()
+        pending = self._pending_rows()
         attempts = [row.attempts for row in pending]
         oldest = await self.oldest_pending_created_at()
         return WebhookOutboxSummary(
@@ -249,9 +249,6 @@ class MemoryWebhookOutboxStore:
             pending_attempts_max=None if not attempts else max(attempts),
             pending_attempts_total=sum(attempts),
         )
-
-    async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None:
-        return self.deliveries.get(delivery_id)
 
     async def begin_attempt(
         self,
@@ -515,7 +512,7 @@ class TestSendOnce:
         )
         _route_hooks_to(monkeypatch, connect_base)
         dispatcher = HttpWebhookDispatcher()
-        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.3)
+        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.08)
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(dispatcher.send_once(config, _payload()), timeout=5)
@@ -528,7 +525,7 @@ class TestSendOnce:
         assert result.status is WebhookDispatchStatus.retryable_failed
         assert result.reason_code is not None
         assert result.reason_code.value == "transport_failure"
-        assert 0.3 <= elapsed < 2
+        assert 0.07 <= elapsed < 2
 
     @pytest.mark.asyncio
     async def test_send_once_keeps_the_status_when_the_body_trickles_past_the_deadline(
@@ -544,7 +541,7 @@ class TestSendOnce:
         )
         _route_hooks_to(monkeypatch, connect_base)
         dispatcher = HttpWebhookDispatcher()
-        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.3)
+        config = WebhookRequestConfig(url="http://hooks.example.com/hook", headers={}, timeout=0.08)
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(dispatcher.send_once(config, _payload()), timeout=5)
@@ -746,7 +743,7 @@ class TestNotifyAndShutdown:
         await dispatcher.notify()
 
         assert dispatcher._wake_event.is_set()
-        outbox.enqueue_delivery.assert_not_awaited()
+        assert outbox.mock_calls == []
 
 
 class TestDurableOutboxDispatch:
@@ -787,7 +784,7 @@ class TestDurableOutboxDispatch:
     async def test_startup_replays_pending_delivery_from_outbox(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         now = datetime.now(timezone.utc)
-        await outbox.enqueue_delivery(
+        await outbox.seed_delivery(
             WebhookDeliveryCreate(
                 delivery_id="delivery-1",
                 job_id="job-1",
@@ -906,7 +903,7 @@ class TestDurableOutboxDispatch:
     async def test_startup_marks_unsafe_persisted_delivery_failed_without_http(self) -> None:
         outbox = MemoryWebhookOutboxStore()
         now = datetime.now(timezone.utc)
-        await outbox.enqueue_delivery(
+        await outbox.seed_delivery(
             WebhookDeliveryCreate(
                 delivery_id="delivery-1",
                 job_id="job-1",
@@ -1008,7 +1005,7 @@ async def _enqueue_memory_delivery(
     next_attempt_at: datetime | None = None,
     url: str = "https://hooks.example.com/scrapeyard",
 ) -> WebhookDelivery:
-    await outbox.enqueue_delivery(
+    await outbox.seed_delivery(
         WebhookDeliveryCreate(
             delivery_id=delivery_id,
             job_id=f"job-{delivery_id}",

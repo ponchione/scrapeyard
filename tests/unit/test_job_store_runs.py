@@ -10,17 +10,17 @@ import pytest
 from scrapeyard.models.job import Job, JobRun, JobStatus, JobSummary
 from scrapeyard.storage.database import get_db
 from scrapeyard.storage.secret_envelope import SecretDecryptionError
+from tests.factories import make_job_model
 
 
 def _make_job(**overrides: Any) -> Job:
-    defaults: dict[str, Any] = {
-        "job_id": "j-1",
-        "project": "acme",
-        "name": "scrape-prices",
-        "config_yaml": "target: https://example.com",
-    }
-    defaults.update(overrides)
-    return Job.model_validate(defaults)
+    return make_job_model(
+        job_id=overrides.pop("job_id", "j-1"),
+        project=overrides.pop("project", "acme"),
+        name=overrides.pop("name", "scrape-prices"),
+        config_yaml=overrides.pop("config_yaml", "target: https://example.com"),
+        **overrides,
+    )
 
 
 async def _insert_run(
@@ -144,55 +144,23 @@ async def test_get_job_runs_returns_job_run_objects(store):
 
 
 # ---------------------------------------------------------------------------
-# get_job_run_stats
-# ---------------------------------------------------------------------------
-
-
-async def test_get_job_run_stats_no_runs(store):
-    await store.save_job(_make_job())
-    count, last = await store.get_job_run_stats("j-1")
-    assert count == 0
-    assert last is None
-
-
-async def test_get_job_run_stats_correct_count_and_last(store):
-    await store.save_job(_make_job())
-
-    await _insert_run("r-1", "j-1", "complete", "adhoc", "aaa", "2026-03-01T10:00:00")
-    await _insert_run("r-2", "j-1", "complete", "adhoc", "aaa", "2026-03-05T14:00:00")
-    await _insert_run("r-3", "j-1", "failed", "scheduled", "aaa", "2026-03-10T08:00:00")
-
-    count, last = await store.get_job_run_stats("j-1")
-    assert count == 3
-    assert last == datetime(2026, 3, 10, 8, 0, 0)
-
-
-async def test_get_job_run_stats_only_counts_target_job(store):
-    await store.save_job(_make_job(job_id="j-1", name="a"))
-    await store.save_job(_make_job(job_id="j-2", name="b"))
-
-    await _insert_run("r-1", "j-1", "complete", "adhoc", "aaa", "2026-03-01T10:00:00")
-    await _insert_run("r-2", "j-1", "complete", "adhoc", "aaa", "2026-03-02T10:00:00")
-    await _insert_run("r-3", "j-2", "complete", "adhoc", "bbb", "2026-03-03T10:00:00")
-
-    count, last = await store.get_job_run_stats("j-1")
-    assert count == 2
-    assert last == datetime(2026, 3, 2, 10, 0, 0)
-
-
-# ---------------------------------------------------------------------------
 # get_job_with_stats and get_job_project
 # ---------------------------------------------------------------------------
 
 
-async def test_get_job_with_stats_matches_separate_reads(store):
+async def test_get_job_with_stats_returns_job_count_and_last_run(store):
     await store.save_job(_make_job())
+    assert await store.get_job_with_stats("j-1") == (await store.get_job("j-1"), 0, None)
+
+    await store.save_job(_make_job(job_id="j-2", name="b"))
     await _insert_run("r-1", "j-1", "complete", "adhoc", "aaa", "2026-03-01T10:00:00")
     await _insert_run("r-2", "j-1", "failed", "adhoc", "aaa", "2026-03-04T10:00:00")
+    await _insert_run("r-3", "j-2", "complete", "adhoc", "bbb", "2026-03-05T10:00:00")
 
     assert await store.get_job_with_stats("j-1") == (
         await store.get_job("j-1"),
-        *await store.get_job_run_stats("j-1"),
+        2,
+        datetime(2026, 3, 4, 10, 0, 0),
     )
 
 

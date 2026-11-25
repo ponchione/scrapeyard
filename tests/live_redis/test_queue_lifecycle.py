@@ -16,7 +16,6 @@ from scrapeyard.api.dependencies import (
     get_job_store,
     get_scheduler,
     get_webhook_dispatcher,
-    get_webhook_outbox_store,
     get_worker_pool,
 )
 from scrapeyard.common.settings import get_settings
@@ -27,6 +26,7 @@ from scrapeyard.queue.pool import QueueDeliveryState, WorkerPollStalled, WorkerP
 from scrapeyard.queue.reconciliation import reconcile_stale_queued_jobs
 from scrapeyard.storage.database import get_db
 from scrapeyard.webhook.payload import deterministic_delivery_id
+from tests.factories import fetch_webhook_delivery
 
 
 def _async_scrape_yaml() -> str:
@@ -969,7 +969,7 @@ async def test_real_arq_worker_finalization_creates_deterministic_intent(
         run_id=job.current_run_id,
         event="job.complete",
     )
-    delivery = await get_webhook_outbox_store().get_delivery(delivery_id)
+    delivery = await fetch_webhook_delivery(delivery_id)
     assert delivery is not None
     assert delivery.payload["delivery_id"] == delivery_id
     assert delivery.run_id == job.current_run_id

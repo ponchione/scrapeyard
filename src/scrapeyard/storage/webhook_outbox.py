@@ -349,56 +349,6 @@ def _validate_limit(limit: int) -> None:
 class SQLiteWebhookOutboxStore:
     """SQLite-backed durable webhook outbox using jobs.db."""
 
-    async def enqueue_delivery(
-        self,
-        delivery: WebhookDeliveryCreate,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        """Persist a delivery if it has not already been enqueued."""
-
-        created_at = now or utc_now()
-        async with get_db("jobs.db") as db, db_transaction(db):
-            await insert_webhook_delivery(db, delivery, created_at=created_at)
-
-    async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None:
-        """Return one delivery or terminal tombstone by ID."""
-
-        async with get_db("jobs.db", readonly=True) as db:
-            cursor = await db.execute(
-                f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} "
-                "FROM webhook_deliveries WHERE delivery_id = ?",
-                (delivery_id,),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
-        if decoded.delivery is not None:
-            return decoded.delivery
-        await self.quarantine_malformed_delivery(
-            decoded.delivery_id or delivery_id,
-            failed_at=utc_now(),
-            decode_error_type=decoded.error_type or "UnknownDecodeError",
-        )
-        return None
-
-    async def list_pending(
-        self,
-        *,
-        limit: int | None = None,
-    ) -> list[WebhookDelivery]:
-        """List pending deliveries in deterministic schedule order."""
-
-        sql = (
-            f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} FROM webhook_deliveries "
-            "WHERE status = 'pending' "
-            "ORDER BY next_attempt_at ASC, created_at ASC, delivery_id ASC"
-        )
-        if limit is not None:
-            _validate_limit(limit)
-        return await self._fetch_deliveries(sql, limit=limit)
-
     async def list_due_pending(
         self,
         *,

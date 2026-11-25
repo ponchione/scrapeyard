@@ -26,7 +26,6 @@ from scrapeyard.engine.domain_guard import (
 from scrapeyard.engine.page_cache import (
     PageCache,
     PageCacheMiss,
-    PageCacheUnavailable,
     activate_page_cache,
     canonical_cache_url,
 )
@@ -36,18 +35,14 @@ from scrapeyard.engine.scrape_models import (
     ClickPaginationResult,
     ClickSnapshot,
 )
-from scrapeyard.engine.scraper import (
-    _fetch_page,
-    _record_fetched_page,
-    _replay_cached_page,
-    scrape_target,
-)
+from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import (
     ResolvedPublicURL,
     activate_deployment_secret_redaction,
     reset_deployment_secret_redaction,
 )
 from scrapeyard.models.job import ErrorType
+from tests.factories import make_html_response, make_target_config
 
 BASE = "https://shop.example.test/list"
 _REAL_PAGINATION_URL_CHECK = pagination._pagination_url_is_safe
@@ -67,22 +62,12 @@ PAGES = {
 
 
 def _response(url: str, html: str, status: int = 200) -> Response:
-    return Response(
-        url=url,
-        text=html,
-        body=html.encode(),
-        status=status,
-        reason="OK",
-        cookies={},
-        headers={"Content-Type": "text/html; charset=utf-8"},
-        request_headers={},
-        **Fetcher._generate_parser_arguments(),
-    )
+    return make_html_response(url, html, status=status)
 
 
 def _target(**pagination) -> TargetConfig:
-    return TargetConfig(
-        url=BASE,
+    return make_target_config(
+        BASE,
         fetcher=FetcherType.basic,
         item_selector=".card",
         selectors={"name": "h2::text"},
@@ -323,8 +308,6 @@ async def test_unconfigured_cache_fails_instead_of_fetching(tmp_path, monkeypatc
         result = await _scrape(_target(), tmp_path)
     assert result.error_type is ErrorType.cache_miss
     assert "SCRAPEYARD_PAGE_CACHE_DIR" in (result.error_detail or "")
-    with activate_page_cache(None, unavailable=True), pytest.raises(PageCacheUnavailable):
-        await _fetch_page(object(), BASE, _target(), FetcherType.basic, False, {500}, str(tmp_path))
 
 
 def _click_snapshot(url: str, html: str) -> ClickSnapshot:
@@ -340,9 +323,9 @@ def _click_snapshot(url: str, html: str) -> ClickSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
+async def test_click_snapshots_are_recorded_and_replayed(tmp_path, monkeypatch):
     cache = _cache(tmp_path, PageCacheMode.record)
-    first = _response(BASE, PAGES[BASE])
+    first = make_html_response(BASE, PAGES[BASE])
     setattr(
         first,
         CLICK_PAGINATION_ATTRIBUTE,
@@ -354,12 +337,6 @@ async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
             stop_reason="exhausted",
         ),
     )
-    _record_fetched_page(cache, BASE, FetcherType.dynamic, first, BASE)
-    # Snapshots are stored as serialized by the parser, like every other page.
-    assert cache.load(BASE, "dynamic", click_index=2).html == (
-        _response(BASE, PAGES[f"{BASE}?page=3"]).html_content
-    )
-
     target = TargetConfig(
         url=BASE,
         fetcher=FetcherType.dynamic,
@@ -367,30 +344,37 @@ async def test_click_snapshots_are_recorded_and_replayed(tmp_path):
         selectors={"name": "h2::text"},
         pagination={"mode": "click", "next": "a.next", "max_pages": 5},
     )
-    replay = PageCache(mode=PageCacheMode.replay, root=cache.root)
-    outcome = await _replay_cached_page(
-        replay, BASE, target, FetcherType.dynamic,
-        adaptive=False, adaptive_dir=str(tmp_path), budget=None,
+
+    async def _fake_browser_fetch(*_args, **_kwargs):
+        return first, {}
+
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", _fake_browser_fetch)
+    monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", _allow)
+    with activate_page_cache(cache):
+        recorded = await _scrape(target, tmp_path)
+    assert recorded.is_success
+    assert _names(recorded) == ["A", "B", "C", "D"]
+    # Snapshots are stored as serialized by the parser, like every other page.
+    assert cache.load(BASE, "dynamic", click_index=2).html == (
+        make_html_response(BASE, PAGES[f"{BASE}?page=3"]).html_content
     )
-    click = getattr(outcome.page, CLICK_PAGINATION_ATTRIBUTE)
-    assert click.stop_reason == "exhausted"
-    assert all(isinstance(page, ClickSnapshot) for page in click.pages)
-    names = []
-    for snapshot in click.pages:
-        with snapshot.parsed() as page:
-            names.append(page.css("h2::text"))
-    assert names == [["C"], ["D"]]
+
+    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", _no_network)
+    replay = PageCache(mode=PageCacheMode.replay, root=cache.root)
+    with activate_page_cache(replay):
+        replayed = await _scrape(target, tmp_path)
+    assert replayed.is_success
+    assert _names(replayed) == ["A", "B", "C", "D"]
+    assert replayed.pagination_stop_reason == "exhausted"
 
     for path in cache.root.rglob("*.json"):
         if '"click_index": 2' in path.read_text():
             path.unlink()
-    truncated = await _replay_cached_page(
-        replay, BASE, target, FetcherType.dynamic,
-        adaptive=False, adaptive_dir=str(tmp_path), budget=None,
-    )
-    click = getattr(truncated.page, CLICK_PAGINATION_ATTRIBUTE)
-    assert (len(click.pages), click.stop_reason) == (1, "cache_miss")
-    assert "click page 3" in click.stop_detail
+    with activate_page_cache(replay):
+        truncated = await _scrape(target, tmp_path)
+    assert truncated.is_success
+    assert _names(truncated) == ["A", "B", "C"]
+    assert truncated.pagination_stop_reason == "cache_miss"
 
 
 def test_page_cache_mode_requires_a_service_directory():

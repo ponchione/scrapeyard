@@ -155,8 +155,7 @@ async def test_job_detail_body_is_unchanged_and_redacts_once(client, queued_only
     details = [await client.get(f"/jobs/{job_id}") for _ in range(3)]
 
     store = get_job_store()
-    job = await store.get_job(job_id)
-    run_count, last_run_at = await store.get_job_run_stats(job_id)
+    job, run_count, last_run_at = await store.get_job_with_stats(job_id)
     # The body the route built before it cached redaction and folded the stats read.
     expected = JobDetailResponse.model_validate(
         serialize_job_detail(
@@ -181,8 +180,7 @@ async def test_job_list_body_is_unchanged_without_decrypting_configs(
 ):
     _body, accepted = await _submit(client, "list-summary")
     store = get_job_store()
-    job = await store.get_job(accepted["job_id"])
-    run_count, last_run_at = await store.get_job_run_stats(accepted["job_id"])
+    job, run_count, last_run_at = await store.get_job_with_stats(accepted["job_id"])
 
     def _no_decrypt(*_args: Any, **_kwargs: Any) -> str:
         raise AssertionError("GET /jobs decrypted a config")

@@ -14,6 +14,7 @@ from pathlib import Path
 from scrapeyard.runtime.metrics import MEMORY_HEADROOM
 
 _DEFAULT_PROC_ROOT = Path("/proc/self")
+_OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 
 
 def get_process_rss_mb(proc_root: Path = _DEFAULT_PROC_ROOT) -> float | None:
@@ -76,7 +77,7 @@ def _discover_cgroup_directories(proc_root: Path) -> list[tuple[Path, bool]]:
                 continue
             # mountinfo escapes spaces, tabs, newlines and backslashes as octal.
             root, mountpoint = (
-                Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), part))
+                Path(_OCTAL_ESCAPE_RE.sub(lambda m: chr(int(m[1], 8)), part))
                 for part in fields[3:5]
             )
             for _, controllers, member in memberships:

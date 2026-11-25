@@ -20,7 +20,7 @@ from scrapeyard.common.qualification import (
     qualification_checkpoint,
 )
 from scrapeyard.common.settings import ServiceSettings
-from scrapeyard.storage.database import _DB_MIGRATIONS
+from scrapeyard.storage.database import close_db, init_db
 from scripts.qualification_backup import (
     REQUIRED_MIGRATION_FILES,
     BackupError,
@@ -57,7 +57,7 @@ def _minimal_data(root: Path) -> None:
     (result_dir / "results.json").write_text('{"known":"value"}\n', encoding="utf-8")
     (adaptive_dir / "selectors.json").write_text('{"selector":"h1"}\n', encoding="utf-8")
 
-    for database, migrations in _DB_MIGRATIONS.items():
+    for database, migrations in REQUIRED_MIGRATION_FILES.items():
         with _sqlite(db_dir / database) as db:
             assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
             db.execute(
@@ -163,8 +163,19 @@ def test_qualification_checkpoints_are_complete_disabled_and_sentinel_guarded(
     assert (tmp_path / "reached-after_enqueue_before_claim").is_file()
 
 
-def test_backup_contract_tracks_every_runtime_database_migration() -> None:
-    assert REQUIRED_MIGRATION_FILES == _DB_MIGRATIONS
+@pytest.mark.asyncio
+async def test_backup_contract_tracks_every_runtime_database_migration(tmp_path: Path) -> None:
+    db_dir = tmp_path / "db"
+    await init_db(str(db_dir))
+    await close_db()
+    applied: dict[str, tuple[str, ...]] = {}
+    for db_name in ("jobs.db", "errors.db", "results_meta.db"):
+        with _sqlite(db_dir / db_name) as db:
+            rows = db.execute(
+                "SELECT filename FROM schema_migrations ORDER BY migration_id"
+            ).fetchall()
+            applied[db_name] = tuple(str(row[0]) for row in rows)
+    assert applied == REQUIRED_MIGRATION_FILES
 
 
 def test_qualification_settings_reject_silent_or_unknown_activation() -> None:

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
-from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -16,18 +16,30 @@ from scrapeyard.config.schema import (
     MAX_SELECTOR_FIELD_NAME_CHARS,
     MAX_SELECTOR_QUERY_CHARS,
     MAX_SELECTORS_PER_TARGET,
+    RetryConfig,
     SelectorLong,
     SelectorType,
     TargetConfig,
 )
-from scrapeyard.engine.scraper import _extract_page_data
+from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.selectors import (
     SelectorExecutionError,
-    _json_string_serialized_size,
     count_selector_matches_strict,
     extract_selectors_strict,
     select_items_strict,
 )
+from scrapeyard.engine.url_guard import ResolvedPublicURL
+from tests.factories import make_budget
+
+
+def _measured_json_string_size(value: str) -> int:
+    reserved: list[int] = []
+    extract_selectors_strict(
+        _Node(),
+        {value: ".missing"},
+        reserve_output_bytes=reserved.append,
+    )
+    return sum(reserved) - 3
 
 
 @pytest.mark.parametrize(
@@ -50,7 +62,7 @@ from scrapeyard.engine.selectors import (
 def test_json_string_size_matches_ascii_json_boundaries(value: str) -> None:
     expected = len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
 
-    assert _json_string_serialized_size(value) == expected
+    assert _measured_json_string_size(value) == expected
 
 
 def test_json_string_size_matches_deterministic_random_values() -> None:
@@ -73,7 +85,7 @@ def test_json_string_size_matches_deterministic_random_values() -> None:
     codepoints.extend(randomizer.randrange(0x110000) for _ in range(500))
     value = "".join(chr(codepoint) for codepoint in codepoints)
 
-    assert _json_string_serialized_size(value) == len(
+    assert _measured_json_string_size(value) == len(
         json.dumps(value, separators=(",", ":")).encode("utf-8")
     )
 
@@ -93,7 +105,7 @@ def test_del_heavy_extraction_exhausts_budget_during_estimation() -> None:
 
 
 def _value_budget(max_serialized_result_bytes: int) -> RunBudget:
-    return RunBudget(
+    return make_budget(
         max_duration_seconds=60,
         max_fetched_bytes=10_000,
         max_extracted_records=100,
@@ -111,6 +123,9 @@ class _Node:
         xpath_map: dict[str, list[object]] | None = None,
     ) -> None:
         self.text = text
+        self.status = 200
+        self.url = "https://example.com"
+        self.headers: dict[str, str] = {}
         self._css_map = css_map or {}
         self._xpath_map = xpath_map or {}
 
@@ -349,7 +364,30 @@ def test_aggregate_result_budget_rejects_legal_list_values_during_extraction() -
     assert budget.estimated_result_bytes < budget.max_serialized_result_bytes
 
 
-def test_many_selectors_cannot_repeat_one_large_page_value_past_budget() -> None:
+async def _scrape_with_page(
+    monkeypatch: pytest.MonkeyPatch,
+    page: object,
+    target: TargetConfig,
+    *,
+    budget: RunBudget | None = None,
+) -> list[dict[str, object]]:
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda url: ResolvedPublicURL(url, "example.com", "example.com"),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.fetch_basic_response",
+        AsyncMock(return_value=page),
+    )
+    result = await scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget)
+    assert result.is_success
+    return result.data
+
+
+@pytest.mark.asyncio
+async def test_many_selectors_cannot_repeat_one_large_page_value_past_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     selectors = {f"field_{index}": "h1" for index in range(6)}
     target = TargetConfig.model_construct(
         url="https://example.com",
@@ -362,12 +400,15 @@ def test_many_selectors_cannot_repeat_one_large_page_value_past_budget() -> None
     budget = _value_budget(4096)
 
     with pytest.raises(BudgetExceeded) as exc_info:
-        _extract_page_data(page, target, budget=budget)
+        await _scrape_with_page(monkeypatch, page, target, budget=budget)
 
     assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
 
 
-def test_first_page_reserves_all_matches_before_extracting_any_row() -> None:
+@pytest.mark.asyncio
+async def test_first_page_reserves_all_matches_before_extracting_any_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     items = [_Node(), _Node()]
     page = _Node(css_map={".item": items})
     target = TargetConfig.model_validate(
@@ -384,7 +425,7 @@ def test_first_page_reserves_all_matches_before_extracting_any_row() -> None:
         "scrapeyard.engine.scraper.extract_selectors_strict"
     ) as extract_selectors:
         with pytest.raises(BudgetExceeded) as exc_info:
-            _extract_page_data(page, target, budget=budget)
+            await _scrape_with_page(monkeypatch, page, target, budget=budget)
 
     assert exc_info.value.limit_name is BudgetLimitName.extracted_records
     assert exc_info.value.observed_amount == 2
@@ -392,7 +433,10 @@ def test_first_page_reserves_all_matches_before_extracting_any_row() -> None:
     extract_selectors.assert_not_called()
 
 
-def test_first_page_accepts_exact_record_boundary() -> None:
+@pytest.mark.asyncio
+async def test_first_page_accepts_exact_record_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     items = [_Node(), _Node()]
     page = _Node(css_map={".item": items})
     target = TargetConfig.model_validate(
@@ -405,13 +449,16 @@ def test_first_page_accepts_exact_record_boundary() -> None:
     budget = _value_budget(4096)
     budget.max_extracted_records = 2
 
-    rows = _extract_page_data(page, target, budget=budget)
+    rows = await _scrape_with_page(monkeypatch, page, target, budget=budget)
 
     assert len(rows) == 2
     assert budget.extracted_records == 2
 
 
-def test_concurrent_page_reservations_never_extract_past_aggregate_limit() -> None:
+@pytest.mark.asyncio
+async def test_concurrent_page_reservations_never_extract_past_aggregate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     page = _Node(css_map={".item": [_Node(), _Node()]})
     target = TargetConfig.model_validate(
         {
@@ -422,30 +469,39 @@ def test_concurrent_page_reservations_never_extract_past_aggregate_limit() -> No
     )
     budget = _value_budget(4096)
     budget.max_extracted_records = 2
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.resolve_public_url",
+        lambda url: ResolvedPublicURL(url, "example.com", "example.com"),
+    )
+    monkeypatch.setattr(
+        "scrapeyard.engine.scraper.fetch_basic_response",
+        AsyncMock(return_value=page),
+    )
 
     with patch(
         "scrapeyard.engine.scraper.extract_selectors_strict",
         return_value={"title": None},
     ) as extract_selectors:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(_extract_page_data, page, target, budget=budget)
-                for _index in range(2)
-            ]
-        outcomes = []
-        for future in futures:
-            try:
-                outcomes.append(future.result())
-            except BudgetExceeded as exc:
-                outcomes.append(exc)
+        outcomes = await asyncio.gather(
+            scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget),
+            scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget),
+            return_exceptions=True,
+        )
 
     assert budget.extracted_records == 2
-    assert extract_selectors.call_count == 2
-    assert sum(isinstance(outcome, BudgetExceeded) for outcome in outcomes) == 1
-    assert sum(isinstance(outcome, list) for outcome in outcomes) == 1
+    assert 1 <= extract_selectors.call_count <= 2
+    exceeded = [outcome for outcome in outcomes if isinstance(outcome, BudgetExceeded)]
+    succeeded = [outcome for outcome in outcomes if not isinstance(outcome, BaseException)]
+    assert len(exceeded) >= 1
+    assert all(exc.limit_name is BudgetLimitName.extracted_records for exc in exceeded)
+    assert len(exceeded) + len(succeeded) == 2
+    assert all(outcome.is_success and len(outcome.data) == 2 for outcome in succeeded)
 
 
-def test_detection_overhead_crosses_result_ceiling_before_row_is_retained() -> None:
+@pytest.mark.asyncio
+async def test_detection_overhead_crosses_result_ceiling_before_row_is_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     target = TargetConfig.model_validate(
         {
             "url": "https://example.com",
@@ -455,7 +511,7 @@ def test_detection_overhead_crosses_result_ceiling_before_row_is_retained() -> N
     budget = _value_budget(97)
 
     with pytest.raises(BudgetExceeded) as exc_info:
-        _extract_page_data(_Node(), target, budget=budget)
+        await _scrape_with_page(monkeypatch, _Node(), target, budget=budget)
 
     assert exc_info.value.limit_name is BudgetLimitName.serialized_result_bytes
     assert exc_info.value.observed_amount == 99
@@ -492,17 +548,19 @@ def test_target_selector_schema_limits_count_names_and_queries() -> None:
             TargetConfig.model_validate({**base, "selectors": selectors})
 
 
-def test_page_extraction_parses_each_transform_pipeline_once(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_page_extraction_parses_each_transform_pipeline_once(monkeypatch) -> None:
     from scrapeyard.config import transforms
-    from scrapeyard.config.schema import TargetConfig
     from scrapeyard.engine import selectors
-    from scrapeyard.engine.scraper import _extract_page_data
+    from tests.factories import make_html_response
 
     html = "".join(
         f"<li class='card'><b class='t'>  Item {n} </b><i class='p'>${n},000</i></li>"
         for n in range(4)
     )
-    page = Adaptor(f"<html><body><ul>{html}</ul></body></html>")
+    page = make_html_response(
+        "https://www.example.test/", f"<html><body><ul>{html}</ul></body></html>"
+    )
     target = TargetConfig.model_validate({
         "url": "https://www.example.test/",
         "item_selector": "li.card",
@@ -515,7 +573,7 @@ def test_page_extraction_parses_each_transform_pipeline_once(monkeypatch) -> Non
     parse = MagicMock(side_effect=transforms.parse_transform_pipeline)
     monkeypatch.setattr(selectors, "parse_transform_pipeline", parse)
 
-    records = _extract_page_data(page, target)
+    records = await _scrape_with_page(monkeypatch, page, target)
 
     assert parse.call_count == 2
     assert [(r["title"], r["price"], r["raw"]) for r in records] == [

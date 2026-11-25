@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from scrapling import Fetcher
 from scrapling.engines.toolbelt.custom import Response
 
 from scrapeyard.common.settings import ServiceSettings
@@ -17,6 +16,7 @@ from scrapeyard.engine.url_guard import ResolvedPublicURL
 from scrapeyard.models.job import ActionTaken, ErrorType, JobStatus
 from scrapeyard.queue.worker import scrape_task
 from scrapeyard.storage.types import SaveResultMeta
+from tests.factories import make_html_response
 from tests.unit.worker_helpers import make_job
 
 URL = "https://shop.example.test/item"
@@ -34,16 +34,12 @@ execution:
 
 
 def _response(status: int, html: str, url: str = URL) -> Response:
-    return Response(
-        url=url,
-        text=html,
-        body=html.encode(),
+    return make_html_response(
+        url,
+        html,
         status=status,
         reason="",
-        cookies={},
         headers={"Content-Type": "text/html"},
-        request_headers={},
-        **Fetcher._generate_parser_arguments(),
     )
 
 

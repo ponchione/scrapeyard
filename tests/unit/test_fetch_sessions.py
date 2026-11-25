@@ -398,18 +398,25 @@ class _Frame:
 
 
 async def test_page_close_tolerates_frames_that_cannot_take_request_denial() -> None:
-    from scrapeyard.engine.browser_session import _close_page
-
     healthy = _Frame("healthy")
     page = MagicMock(frames=[_Frame("navigating"), _Frame("busy"), healthy])
     page.is_closed.return_value = False
     page.close = AsyncMock()
+    page.goto = AsyncMock(side_effect=RuntimeError("stop to trigger page cleanup"))
     browser = MagicMock()
     browser.is_connected.return_value = True
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.unroute = AsyncMock()
+    context.set_offline = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
 
     loop = asyncio.get_running_loop()
     started = loop.time()
-    await _close_page(page, browser)
+    with pytest.raises(RuntimeError, match="stop to trigger page cleanup"):
+        await session.fetch("https://fixture.example/", {}, AsyncMock())
 
     assert loop.time() - started < 1.5
     assert healthy.denied
@@ -417,16 +424,38 @@ async def test_page_close_tolerates_frames_that_cannot_take_request_denial() -> 
 
 
 async def test_page_close_still_raises_when_the_page_cannot_close() -> None:
-    from scrapeyard.engine.browser_session import _close_page
-
     page = MagicMock(frames=[_Frame("navigating")])
     page.is_closed.return_value = False
     page.close = AsyncMock(side_effect=RuntimeError("Target crashed"))
+    page.url = "https://fixture.example/"
+    nav_response = MagicMock(
+        status=200,
+        status_text="OK",
+        headers={"content-type": "text/html"},
+        all_headers=AsyncMock(return_value={"content-type": "text/html"}),
+        request=MagicMock(
+            resource_type="document",
+            is_navigation_request=MagicMock(return_value=True),
+            all_headers=AsyncMock(return_value={}),
+        ),
+    )
+    page.goto = AsyncMock(return_value=nav_response)
+    page.wait_for_load_state = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+    page.content = AsyncMock(return_value="<html><h1>ok</h1></html>")
     browser = MagicMock()
     browser.is_connected.return_value = True
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.unroute = AsyncMock()
+    context.set_offline = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.cookies = AsyncMock(return_value=[])
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
 
     with pytest.raises(RuntimeError, match="Target crashed"):
-        await _close_page(page, browser)
+        await session.fetch("https://fixture.example/", {"wait": 0}, AsyncMock())
 
 
 class _Request:

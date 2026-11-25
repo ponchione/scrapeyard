@@ -16,9 +16,6 @@ from scrapeyard.queue.pool import (
     QueueDeliveryState,
     WorkerPollStalled,
     WorkerPool,
-    _DeliverySnapshot,
-    _PriorityJobHandle,
-    _PriorityWorker,
 )
 from scrapeyard.queue.priority import WeightedPriorityPolicy
 
@@ -189,19 +186,96 @@ def test_worker_background_health_detects_stopped_runner():
     assert pool.background_detail == "worker runner task failed: RuntimeError"
 
 
+async def _make_started_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    redis: Any,
+    max_jobs: int = 4,
+    memory_available: Any = None,
+) -> Any:
+    """Create the embedded priority worker via WorkerPool.start() without starting background loops."""
+    redis.zrange = AsyncMock(return_value=[])
+    pool = _make_pool(max_concurrent=max_jobs)
+
+    def _discard_task(coro, *_args, **_kwargs):
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        task = MagicMock()
+        task.done.return_value = True
+        return task
+
+    monkeypatch.setattr(
+        "scrapeyard.queue.pool.get_settings",
+        lambda: SimpleNamespace(workers_redis_connect_timeout_seconds=1.0),
+    )
+    with (
+        patch("scrapeyard.queue.pool.create_pool", new=AsyncMock(return_value=redis)),
+        patch("scrapeyard.queue.pool.asyncio.create_task", side_effect=_discard_task),
+    ):
+        await pool.start()
+    worker = pool._worker
+    assert worker is not None
+    if memory_available is not None:
+        worker.memory_available = memory_available
+    return worker
+
+
+def _stub_redis_delivery(
+    pool: WorkerPool,
+    *states: tuple[QueueDeliveryState, str | None] | QueueDeliveryState,
+) -> AsyncMock:
+    """Configure pool._redis pipeline replies so WorkerPool inspects exact delivery states."""
+    replies: list[list[Any]] = []
+    for entry in states:
+        if isinstance(entry, tuple):
+            state, queue_name = entry
+        else:
+            state, queue_name = entry, None
+        scores = [
+            (
+                9_999_999_999_999.0
+                if state is QueueDeliveryState.deferred
+                else 1.0
+            )
+            if q == queue_name
+            else None
+            for q in pool._known_queues
+        ]
+        if state is QueueDeliveryState.complete:
+            replies.append([1, 0, 0, *[None for _ in pool._known_queues]])
+        elif state is QueueDeliveryState.missing:
+            replies.append([0, 0, 0, *[None for _ in pool._known_queues]])
+        elif state is QueueDeliveryState.in_progress:
+            replies.append([0, 1, 1, *scores])
+        else:
+            replies.append([0, 0, 1, *scores])
+
+    pipeline = MagicMock()
+    pipeline.exists = MagicMock()
+    pipeline.zscore = MagicMock()
+    if len(replies) == 1:
+        pipeline.execute = AsyncMock(return_value=replies[0])
+    else:
+        pipeline.execute = AsyncMock(side_effect=replies)
+    redis = MagicMock()
+    redis.pipeline.return_value.__aenter__ = AsyncMock(return_value=pipeline)
+    redis.pipeline.return_value.__aexit__ = AsyncMock(return_value=None)
+    redis.eval = AsyncMock(return_value=1)
+    pool._redis = redis
+    return pipeline.execute
+
+
 @pytest.mark.asyncio
 async def test_priority_worker_refills_slot_without_double_counting_active_jobs(
     monkeypatch,
 ) -> None:
     redis = MagicMock()
     redis.zcount = AsyncMock(return_value=3)
-    worker = object.__new__(_PriorityWorker)
-    worker.allow_pick_jobs = True
-    worker.memory_available = lambda: True
+    worker = await _make_started_worker(
+        monkeypatch, redis=redis, max_jobs=4, memory_available=lambda: True
+    )
     worker.job_counter = 3
-    worker.max_jobs = 4
-    worker.queue_name = "test-queue"
-    worker._pool = redis
     worker._admit_one = AsyncMock(return_value=True)
     base_poll = AsyncMock()
     monkeypatch.setattr("scrapeyard.queue.pool.timestamp_ms", lambda: 123_456)
@@ -219,16 +293,15 @@ async def test_priority_worker_refills_slot_without_double_counting_active_jobs(
 
 
 @pytest.mark.asyncio
-async def test_priority_worker_shutdown_uses_warning_clean_redis_close() -> None:
+async def test_priority_worker_shutdown_uses_warning_clean_redis_close(monkeypatch) -> None:
     redis = MagicMock()
     redis.delete = AsyncMock()
     redis.aclose = AsyncMock()
     redis.close = MagicMock()
     shutdown = AsyncMock()
     task = asyncio.create_task(asyncio.sleep(0))
-    worker = object.__new__(_PriorityWorker)
+    worker = await _make_started_worker(monkeypatch, redis=redis)
     worker._handle_signals = True
-    worker._pool = redis
     worker.tasks = {"job": task}
     worker.health_check_key = "arq:health:test"
     worker.on_shutdown = shutdown
@@ -245,13 +318,12 @@ async def test_priority_worker_shutdown_uses_warning_clean_redis_close() -> None
 
 
 async def test_memory_pressure_defers_worker_starts_but_keeps_maintenance(monkeypatch):
-    worker = object.__new__(_PriorityWorker)
-    worker.allow_pick_jobs = True
+    redis = MagicMock(zmscore=AsyncMock(return_value=[None]))
+    worker = await _make_started_worker(
+        monkeypatch, redis=redis, max_jobs=4, memory_available=lambda: False
+    )
     worker.job_counter = 0
-    worker.max_jobs = 4
-    worker.memory_available = lambda: False
     worker.tasks = {}
-    worker._pool = MagicMock(zmscore=AsyncMock(return_value=[None]))
     worker._admit_one = AsyncMock()
     base_poll, base_start = AsyncMock(), AsyncMock()
     monkeypatch.setattr("arq.worker.Worker._poll_iteration", base_poll)
@@ -273,22 +345,25 @@ def _deferrals() -> float:
     return MEMORY_DEFERRALS.labels("worker")._value.get()
 
 
-def _poll_worker(*, job_counter: int, memory_available: MagicMock) -> _PriorityWorker:
-    worker = object.__new__(_PriorityWorker)
-    worker.allow_pick_jobs = True
+async def _poll_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    job_counter: int,
+    memory_available: MagicMock,
+) -> Any:
+    redis = MagicMock(zcount=AsyncMock(return_value=0), zmscore=AsyncMock(return_value=[None]))
+    worker = await _make_started_worker(
+        monkeypatch, redis=redis, max_jobs=2, memory_available=memory_available
+    )
     worker.job_counter = job_counter
-    worker.max_jobs = 2
-    worker.queue_name = "test-queue"
-    worker.memory_available = memory_available
     worker.tasks = {}
-    worker._pool = MagicMock(zcount=AsyncMock(return_value=0), zmscore=AsyncMock(return_value=[None]))
     worker._admit_one = AsyncMock(return_value=False)
     return worker
 
 
 async def test_full_worker_neither_samples_memory_nor_counts_a_deferral(monkeypatch):
     memory_available = MagicMock(return_value=False)
-    worker = _poll_worker(job_counter=2, memory_available=memory_available)
+    worker = await _poll_worker(monkeypatch, job_counter=2, memory_available=memory_available)
     monkeypatch.setattr("arq.worker.Worker._poll_iteration", AsyncMock())
     before = _deferrals()
 
@@ -300,7 +375,7 @@ async def test_full_worker_neither_samples_memory_nor_counts_a_deferral(monkeypa
 
 async def test_memory_is_sampled_and_deferral_counted_once_per_poll(monkeypatch):
     memory_available = MagicMock(return_value=False)
-    worker = _poll_worker(job_counter=0, memory_available=memory_available)
+    worker = await _poll_worker(monkeypatch, job_counter=0, memory_available=memory_available)
     base_start = AsyncMock()
 
     async def _base_poll(self):
@@ -322,7 +397,7 @@ async def test_memory_is_sampled_and_deferral_counted_once_per_poll(monkeypatch)
 
 async def test_start_jobs_skips_runs_this_worker_is_already_running(monkeypatch):
     memory_available = MagicMock(return_value=True)
-    worker = _poll_worker(job_counter=1, memory_available=memory_available)
+    worker = await _poll_worker(monkeypatch, job_counter=1, memory_available=memory_available)
     running = asyncio.get_running_loop().create_future()
     finished = asyncio.get_running_loop().create_future()
     finished.set_result(None)
@@ -343,7 +418,9 @@ async def test_start_jobs_skips_runs_this_worker_is_already_running(monkeypatch)
 async def test_successful_poll_records_the_worker_last_success(monkeypatch):
     from scrapeyard.runtime.metrics import LAST_SUCCESS
 
-    worker = _poll_worker(job_counter=2, memory_available=MagicMock(return_value=True))
+    worker = await _poll_worker(
+        monkeypatch, job_counter=2, memory_available=MagicMock(return_value=True)
+    )
     monkeypatch.setattr("arq.worker.Worker._poll_iteration", AsyncMock())
     LAST_SUCCESS.labels("worker").set(0)
 
@@ -559,11 +636,17 @@ class _PollingWorker:
 
 @pytest.mark.asyncio
 async def test_a_held_up_event_loop_is_not_a_stalled_poll_but_a_hung_runner_is(monkeypatch):
-    pool = _make_pool(poll_stall_seconds=0.2)
+    pool = _make_pool(poll_stall_seconds=0.06)
     fake_redis = MagicMock()
     fake_redis.zrange = AsyncMock(return_value=[])
     exits: list[BaseException | None] = []
-    pool.on_runner_exit = exits.append
+    exit_event = asyncio.Event()
+
+    def _on_exit(exc: BaseException | None) -> None:
+        exits.append(exc)
+        exit_event.set()
+
+    pool.on_runner_exit = _on_exit
     monkeypatch.setattr(
         "scrapeyard.queue.pool.get_settings",
         lambda: SimpleNamespace(workers_redis_connect_timeout_seconds=1.0),
@@ -575,16 +658,16 @@ async def test_a_held_up_event_loop_is_not_a_stalled_poll_but_a_hung_runner_is(m
         await pool.start()
     worker = pool._worker
     try:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.03)
         # Something holds the event loop for more than twice the bound; the
         # poll that was due finishes a few turns after it lets go.
-        time.sleep(0.5)
-        await asyncio.sleep(0.4)
+        time.sleep(0.15)
+        await asyncio.sleep(0.08)
         assert exits == []
         assert pool.background_ok is True
 
         worker.hung = True
-        await asyncio.sleep(0.5)
+        await asyncio.wait_for(exit_event.wait(), timeout=1.0)
         assert len(exits) == 1
         assert isinstance(exits[0], WorkerPollStalled)
         assert pool.background_ok is False
@@ -640,7 +723,7 @@ async def test_stop_keeps_part_of_the_grace_for_cancelled_jobs_to_finish(monkeyp
             # Stands in for scrape_task's ownership check and crash
             # finalization, which take several database round trips.
             for _ in range(5):
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.002)
             finalized.set()
             raise
 
@@ -664,13 +747,13 @@ async def test_stop_keeps_part_of_the_grace_for_cancelled_jobs_to_finish(monkeyp
     pool._runner_task = asyncio.create_task(asyncio.sleep(0))
     monkeypatch.setattr(
         "scrapeyard.queue.pool.get_settings",
-        lambda: MagicMock(workers_shutdown_grace_seconds=1),
+        lambda: MagicMock(workers_shutdown_grace_seconds=0.2),
     )
     started = loop.time()
 
     await pool.stop()
 
-    assert loop.time() - started < 1
+    assert loop.time() - started < 0.25
     assert finalized.is_set()
     assert pending.cancelled()
     assert close_calls == 1
@@ -986,10 +1069,9 @@ async def test_inspect_delivery_requires_connected_redis():
 @pytest.mark.asyncio
 async def test_priority_handle_caps_poll_sleep_at_hard_timeout():
     pool = _make_pool()
-    pool._delivery_snapshot = AsyncMock(
-        return_value=_DeliverySnapshot(QueueDeliveryState.queued, "high")
-    )
-    handle = _PriorityJobHandle(pool, "run-timeout")
+    pool._started = True
+    _stub_redis_delivery(pool, (QueueDeliveryState.queued, pool._priority_queues["high"]))
+    handle = await pool.enqueue("job-1", "config: yaml", run_id="run-timeout")
 
     started = time.monotonic()
     with pytest.raises(asyncio.TimeoutError):
@@ -1002,18 +1084,18 @@ async def test_priority_handle_caps_poll_sleep_at_hard_timeout():
 @pytest.mark.asyncio
 async def test_priority_handle_does_not_prefer_state_observed_after_deadline():
     pool = _make_pool()
-    pool._delivery_snapshot = AsyncMock(
-        side_effect=[
-            _DeliverySnapshot(QueueDeliveryState.queued, "high"),
-            _DeliverySnapshot(QueueDeliveryState.missing),
-        ]
+    pool._started = True
+    execute = _stub_redis_delivery(
+        pool,
+        (QueueDeliveryState.queued, pool._priority_queues["high"]),
+        QueueDeliveryState.missing,
     )
-    handle = _PriorityJobHandle(pool, "run-late-missing")
+    handle = await pool.enqueue("job-1", "config: yaml", run_id="run-late-missing")
 
     with pytest.raises(asyncio.TimeoutError):
         await handle.result(timeout=0.03, poll_delay=0.2)
 
-    pool._delivery_snapshot.assert_awaited_once()
+    execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1033,10 +1115,7 @@ async def test_cancel_run_reports_unavailable_without_redis():
 )
 async def test_cancel_run_accepts_already_quiescent_delivery(state, outcome):
     pool = _make_pool()
-    pool._redis = MagicMock()
-    pool._delivery_snapshot = AsyncMock(
-        return_value=_DeliverySnapshot(state)
-    )
+    _stub_redis_delivery(pool, state)
 
     result = await pool.cancel_run("run-1")
 
@@ -1047,12 +1126,10 @@ async def test_cancel_run_accepts_already_quiescent_delivery(state, outcome):
 @pytest.mark.asyncio
 async def test_cancel_run_aborts_running_delivery_and_verifies_quiescence():
     pool = _make_pool(cancellation_grace_seconds=3.5)
-    pool._redis = MagicMock()
-    pool._delivery_snapshot = AsyncMock(
-        side_effect=[
-            _DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name),
-            _DeliverySnapshot(QueueDeliveryState.complete),
-        ]
+    _stub_redis_delivery(
+        pool,
+        (QueueDeliveryState.in_progress, pool._queue_name),
+        QueueDeliveryState.complete,
     )
     arq_job = MagicMock(abort=AsyncMock(return_value=True))
 
@@ -1068,10 +1145,7 @@ async def test_cancel_run_aborts_running_delivery_and_verifies_quiescence():
 @pytest.mark.asyncio
 async def test_a_cancel_run_cancelled_while_arq_aborts_is_cancelled_not_quiescent():
     pool = _make_pool(cancellation_grace_seconds=3.5)
-    pool._redis = MagicMock()
-    pool._delivery_snapshot = AsyncMock(
-        return_value=_DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name)
-    )
+    execute = _stub_redis_delivery(pool, (QueueDeliveryState.in_progress, pool._queue_name))
     waiting = asyncio.Event()
     abort_ended = asyncio.Event()
 
@@ -1096,7 +1170,7 @@ async def test_a_cancel_run_cancelled_while_arq_aborts_is_cancelled_not_quiescen
 
     await asyncio.wait_for(abort_ended.wait(), timeout=1)
     # Only the first look; no verification ran on a cancelled request.
-    pool._delivery_snapshot.assert_awaited_once()
+    execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1113,9 +1187,7 @@ async def test_cancel_run_removes_an_unstarted_delivery_without_waiting_for_the_
 ):
     pool = _make_pool()
     queue_name = pool._queue_name if source_priority is None else pool._priority_queues[source_priority]
-    pool._redis = MagicMock()
-    pool._redis.eval = AsyncMock(return_value=1)
-    pool._delivery_snapshot = AsyncMock(return_value=_DeliverySnapshot(initial, queue_name))
+    _stub_redis_delivery(pool, (initial, queue_name))
 
     with patch("scrapeyard.queue.pool.Job") as job_cls:
         result = await pool.cancel_run("run-1")
@@ -1132,15 +1204,13 @@ async def test_cancel_run_removes_an_unstarted_delivery_without_waiting_for_the_
 @pytest.mark.asyncio
 async def test_cancel_run_aborts_a_delivery_that_started_before_it_could_be_removed():
     pool = _make_pool(cancellation_grace_seconds=2.0)
-    pool._redis = MagicMock()
-    pool._redis.eval = AsyncMock(return_value=0)
-    pool._delivery_snapshot = AsyncMock(
-        side_effect=[
-            _DeliverySnapshot(QueueDeliveryState.queued, pool._priority_queues["normal"]),
-            _DeliverySnapshot(QueueDeliveryState.in_progress, pool._queue_name),
-            _DeliverySnapshot(QueueDeliveryState.complete),
-        ]
+    _stub_redis_delivery(
+        pool,
+        (QueueDeliveryState.queued, pool._priority_queues["normal"]),
+        (QueueDeliveryState.in_progress, pool._queue_name),
+        QueueDeliveryState.complete,
     )
+    pool._redis.eval = AsyncMock(return_value=0)
     arq_job = MagicMock(abort=AsyncMock(return_value=True))
 
     with patch("scrapeyard.queue.pool.Job", return_value=arq_job):
@@ -1153,13 +1223,7 @@ async def test_cancel_run_aborts_a_delivery_that_started_before_it_could_be_remo
 @pytest.mark.asyncio
 async def test_cancel_run_reports_bounded_abort_timeout():
     pool = _make_pool(cancellation_grace_seconds=0.25)
-    pool._redis = MagicMock()
-    pool._delivery_snapshot = AsyncMock(
-        return_value=_DeliverySnapshot(
-            QueueDeliveryState.in_progress,
-            pool._queue_name,
-        )
-    )
+    _stub_redis_delivery(pool, (QueueDeliveryState.in_progress, pool._queue_name))
     arq_job = MagicMock(abort=AsyncMock(side_effect=asyncio.TimeoutError))
 
     with patch("scrapeyard.queue.pool.Job", return_value=arq_job):

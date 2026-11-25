@@ -112,15 +112,15 @@ async def test_cleanup_loop_reads_settings_each_iteration(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert [call["retention_days"] for call in calls] == [7, 14]
-    assert [call["max_results_per_job"] for call in calls] == [20, 40]
-    assert [call["result_cleanup_batch_size"] for call in calls] == [50, 75]
-    assert [call["orphan_grace_seconds"] for call in calls] == [3600, 7200]
-    assert [call["reconciliation_dry_run"] for call in calls] == [True, False]
-    assert [call["cycle_max_items_per_phase"] for call in calls] == [100, 100]
-    assert [call["cycle_max_seconds"] for call in calls] == [30, 30]
-    # Without an outbox, webhook retention is left to run_cleanup's defaults.
-    assert all("webhook_outbox_store" not in call for call in calls)
+    assert [call["config"].retention_days for call in calls] == [7, 14]
+    assert [call["config"].max_results_per_job for call in calls] == [20, 40]
+    assert [call["config"].result_cleanup_batch_size for call in calls] == [50, 75]
+    assert [call["config"].orphan_grace_seconds for call in calls] == [3600, 7200]
+    assert [call["config"].reconciliation_dry_run for call in calls] == [True, False]
+    assert [call["config"].cycle_max_items_per_phase for call in calls] == [100, 100]
+    assert [call["config"].cycle_max_seconds for call in calls] == [30, 30]
+    assert all(call["webhook_outbox_store"] is None for call in calls)
+    assert all(call["config"].webhook_delivered_retention_days is None for call in calls)
 
 
 @pytest.mark.asyncio
@@ -151,13 +151,14 @@ async def test_cleanup_loop_wires_webhook_retention_settings(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    config = calls[0]["config"]
     assert calls[0]["webhook_outbox_store"] is outbox
-    assert calls[0]["webhook_delivered_retention_days"] == 2
-    assert calls[0]["webhook_failed_retention_days"] == 14
-    assert calls[0]["webhook_cleanup_batch_size"] == 25
-    assert calls[0]["result_cleanup_batch_size"] == 50
-    assert calls[0]["orphan_grace_seconds"] == 86400
-    assert calls[0]["reconciliation_dry_run"] is True
+    assert config.webhook_delivered_retention_days == 2
+    assert config.webhook_failed_retention_days == 14
+    assert config.webhook_cleanup_batch_size == 25
+    assert config.result_cleanup_batch_size == 50
+    assert config.orphan_grace_seconds == 86400
+    assert config.reconciliation_dry_run is True
 
 
 @pytest.mark.asyncio
@@ -200,7 +201,7 @@ async def test_cleanup_loop_wires_durable_history_policy(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    policy = calls[0]["history_policy"]
+    policy = calls[0]["config"].history_policy
     assert calls[0]["job_store"] is job_store
     assert calls[0]["error_store"] is error_store
     assert policy.adhoc_job_retention_days == 31

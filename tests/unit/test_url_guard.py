@@ -17,14 +17,12 @@ import pytest
 from scrapeyard.engine.url_guard import (
     UnsafeURLError,
     URLResolutionError,
-    _variants_longest_first as variants_longest_first,
     activate_deployment_secret_redaction,
     assert_public_url,
     canonical_url_origin,
     public_dns_hostname,
+    redact_deployment_secret_values,
     redact_deployment_secrets,
-    redact_deployment_secrets_in_value,
-    redact_deployment_secrets_in_value_with_count,
     redact_sensitive_config_text,
     redact_sensitive_mapping,
     redact_userinfo_in_text,
@@ -42,7 +40,7 @@ def test_counted_secret_redaction_handles_encoded_values_and_key_collisions() ->
         "prefix-<redacted>": "Vendor%20Value%2F91 and Vendor+Value%2F91",
     }
 
-    redacted, count = redact_deployment_secrets_in_value_with_count(
+    redacted, count = redact_deployment_secret_values(
         value,
         secret_values=(secret,),
     )
@@ -651,17 +649,20 @@ def test_run_scoped_redaction_masks_raw_encoded_and_nested_tuple_secrets() -> No
             "<redacted>": ("<redacted>",),
             "x-<redacted>": "<redacted>",
         }
-        assert redact_deployment_secrets_in_value(
+        assert redact_deployment_secret_values(
             {
                 "api_token": "public-value",
                 "url": "https://example.com?q=public#public",
                 "secret": (secret, "Vendor%20Value%2F91"),
             }
-        ) == {
-            "api_token": "public-value",
-            "url": "https://example.com?q=public#public",
-            "secret": ("<redacted>", "<redacted>"),
-        }
+        ) == (
+            {
+                "api_token": "public-value",
+                "url": "https://example.com?q=public#public",
+                "secret": ("<redacted>", "<redacted>"),
+            },
+            2,
+        )
     finally:
         reset_deployment_secret_redaction(token)
 
@@ -741,7 +742,7 @@ def test_cached_secret_redaction_matches_per_string_redaction(secret_values) -> 
 
     for _ in range(300):
         value = {"record": _tricky_value(rng), "text": _tricky_text(rng)}
-        assert redact_deployment_secrets_in_value_with_count(
+        assert redact_deployment_secret_values(
             value, secret_values=secret_values
         ) == _reference_redact_value(value, secret_values)
         text = _tricky_text(rng)
@@ -750,15 +751,29 @@ def test_cached_secret_redaction_matches_per_string_redaction(secret_values) -> 
         )[0]
 
 
-def test_secret_variants_are_built_once_per_secret_set() -> None:
-    variants_longest_first.cache_clear()
-    record = {"title": "a Vendor Value/91 b", "tags": ["Vendor%20Value%2F91", "plain"]}
+def test_secret_variants_are_built_once_per_secret_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scrapeyard.engine.url_guard as url_guard_module
+
+    quote_calls = 0
+    real_quote = url_guard_module.quote
+
+    def counting_quote(value: str, *args: Any, **kwargs: Any) -> str:
+        nonlocal quote_calls
+        quote_calls += 1
+        return real_quote(value, *args, **kwargs)
+
+    monkeypatch.setattr(url_guard_module, "quote", counting_quote)
+    secret = "Cached Variant Secret/91"
+    record = {"title": f"a {secret} b", "tags": ["Cached%20Variant%20Secret%2F91", "plain"]}
 
     for _ in range(100):
-        redact_deployment_secrets_in_value_with_count(record, secret_values=["Vendor Value/91"])
+        redacted, count = redact_deployment_secret_values(
+            record, secret_values=[secret]
+        )
+        assert count == 2
+        assert redacted["title"] == "a <redacted> b"
 
-    info = variants_longest_first.cache_info()
-    assert (info.misses, info.hits) == (1, 99)
+    assert quote_calls == 1
 
 
 def test_overlapping_equal_length_secrets_redact_the_same_under_every_hash_seed() -> None:
@@ -783,7 +798,7 @@ def test_overlapping_equal_length_secrets_redact_the_same_under_every_hash_seed(
 def test_redaction_without_secrets_returns_the_value_uncopied() -> None:
     record = {"title": "visible", "tags": ["a", ("b",)], "nested": {"k": "v"}}
 
-    redacted, count = redact_deployment_secrets_in_value_with_count(record, secret_values=())
+    redacted, count = redact_deployment_secret_values(record, secret_values=())
 
     assert redacted is record
     assert count == 0

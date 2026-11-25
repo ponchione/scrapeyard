@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from scrapling import Fetcher
@@ -15,15 +16,12 @@ from scrapeyard.engine.adaptive_diagnostics import (
     log_adaptive_selector_gap,
     missing_adaptive_selectors,
 )
-from scrapeyard.engine.basic_fetch import BasicSession, _request_headers
+from scrapeyard.engine.basic_fetch import BasicSession, fetch_streaming_response
 from scrapeyard.engine.browser_debug import browser_fetch_kwargs, default_debug_blob, response_title
-from scrapeyard.engine.resilience import RetryHandler
-from scrapeyard.engine.scraper import (
-    _fetch_basic_with_safe_redirects,
-    _fetch_page,
-    _fetch_target_page,
-)
-from scrapeyard.engine.url_guard import ResolvedPublicURL, UnsafeURLError, URLResolutionError
+from scrapeyard.engine.browser_pool import activate_browser_pool
+from scrapeyard.engine.scraper import scrape_target
+from scrapeyard.engine.url_guard import ResolvedPublicURL
+from tests.factories import make_html_response
 from tests.unit.browser_fakes import ScriptedBrowserSession
 
 
@@ -45,7 +43,7 @@ async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
 
     async def _fetch_basic_response(_fetcher_cls, url, call_kwargs, **_options):
         captured_kwargs.update(call_kwargs)
-        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+        return make_html_response(url, "<h1>ok</h1>")
 
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
@@ -53,16 +51,14 @@ async def test_fetch_page_passes_explicit_timeout_to_basic_fetcher(monkeypatch):
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    await _fetch_page(
-        BasicSession(),
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.basic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
     )
 
+    assert result.is_success
     assert captured_kwargs["timeout"] == 12.5
     assert captured_kwargs["follow_redirects"] is False
 
@@ -76,7 +72,7 @@ async def test_fetch_page_records_basic_final_url_from_response(monkeypatch):
     )
 
     async def _fetch_basic_response(_fetcher_cls, url, _call_kwargs, **_options):
-        return SimpleNamespace(status=200, url=f"{url}/canonical", text="<h1>ok</h1>")
+        return make_html_response(f"{url}/canonical", "<h1>ok</h1>")
 
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
@@ -85,17 +81,16 @@ async def test_fetch_page_records_basic_final_url_from_response(monkeypatch):
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    outcome = await _fetch_page(
-        BasicSession(),
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.basic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
     )
 
-    assert outcome.debug["final_url"] == "https://example.com/canonical"
+    assert result.is_success
+    assert result.debug is not None
+    assert result.debug["final_url"] == "https://example.com/canonical"
 
 
 @pytest.mark.asyncio
@@ -116,7 +111,7 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
                 headers={"Location": "/next"},
                 text="",
             )
-        return SimpleNamespace(status=200, url=url, headers={}, text="<h1>ok</h1>")
+        return make_html_response(url, "<h1>ok</h1>")
 
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
@@ -125,19 +120,18 @@ async def test_fetch_page_follows_safe_basic_redirects(monkeypatch):
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    outcome = await _fetch_page(
-        BasicSession(),
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.basic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
     )
 
+    assert result.is_success
+    assert result.debug is not None
     assert seen_urls == ["https://example.com", "https://example.com/next"]
-    assert outcome.debug["redirects"] == ["https://example.com/next"]
-    assert outcome.debug["final_url"] == "https://example.com/next"
+    assert result.debug["redirects"] == ["https://example.com/next"]
+    assert result.debug["final_url"] == "https://example.com/next"
 
 
 @pytest.mark.asyncio
@@ -149,11 +143,7 @@ async def test_basic_redirect_hops_rate_limit_actual_destination_hosts(monkeypat
                 url="https://example.com/start",
                 headers={"Location": "https://other.example/next"},
             ),
-            SimpleNamespace(
-                status=200,
-                url="https://other.example/next",
-                headers={},
-            ),
+            make_html_response("https://other.example/next", "<h1>ok</h1>"),
         ]
     )
     limiter = AsyncMock()
@@ -162,16 +152,21 @@ async def test_basic_redirect_hops_rate_limit_actual_destination_hosts(monkeypat
         AsyncMock(side_effect=lambda *_args, **_kwargs: next(responses)),
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", _resolve_in_place)
+    target = TargetConfig(
+        url="https://example.com/start",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
 
-    await _fetch_basic_with_safe_redirects(
-        BasicSession(),
-        "https://example.com/start",
-        {},
-        {},
+    result = await scrape_target(
+        target,
+        False,
+        RetryConfig(max_attempts=1),
         rate_limiter=limiter,
         domain_rate_limit=7,
     )
 
+    assert result.is_success
     assert limiter.acquire.await_args_list == [
         call("example.com", 7),
         call("other.example", 7),
@@ -187,11 +182,7 @@ async def test_basic_redirect_validates_each_requested_url_once(monkeypatch):
                 url="https://example.com/start",
                 headers={"Location": "/next"},
             ),
-            SimpleNamespace(
-                status=200,
-                url="https://example.com/next",
-                headers={},
-            ),
+            make_html_response("https://example.com/next", "<h1>ok</h1>"),
         ]
     )
 
@@ -201,14 +192,15 @@ async def test_basic_redirect_validates_each_requested_url_once(monkeypatch):
     validate = MagicMock(side_effect=_resolve_in_place)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch_response)
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", validate)
-
-    await _fetch_basic_with_safe_redirects(
-        BasicSession(),
-        "https://example.com/start",
-        {},
-        {},
+    target = TargetConfig(
+        url="https://example.com/start",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
     )
 
+    result = await scrape_target(target, False, RetryConfig(max_attempts=1))
+
+    assert result.is_success
     assert [call.args[0] for call in validate.call_args_list] == [
         "https://example.com/start",
         "https://example.com/next",
@@ -223,12 +215,7 @@ async def test_production_basic_fetch_pins_connection_to_validated_ip(monkeypatc
         selectors={"title": "h1"},
     )
     fetch = AsyncMock(
-        return_value=SimpleNamespace(
-            status=200,
-            url="https://93.184.216.34/products",
-            headers={},
-            text="<h1>ok</h1>",
-        )
+        return_value=make_html_response("https://93.184.216.34/products", "<h1>ok</h1>")
     )
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.resolve_public_url",
@@ -240,21 +227,20 @@ async def test_production_basic_fetch_pins_connection_to_validated_ip(monkeypatc
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
 
-    outcome = await _fetch_page(
-        Fetcher,
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.basic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
     )
 
+    assert result.is_success
+    assert result.debug is not None
     assert fetch.await_args.args[1] == "https://93.184.216.34/products"
     assert fetch.await_args.args[2]["headers"]["Host"] == "example.com"
     assert fetch.await_args.args[2]["extensions"]["sni_hostname"] == "example.com"
     assert fetch.await_args.args[2]["header_url"] == target.url
-    assert outcome.debug["final_url"] == target.url
+    assert result.debug["final_url"] == target.url
 
 
 @pytest.mark.asyncio
@@ -267,60 +253,59 @@ async def test_production_basic_redirects_generate_headers_from_each_logical_url
         "https://93.184.216.34/start",
         "https://93.184.216.35/products",
     ]
-    responses = iter(
-        [
-            SimpleNamespace(
-                status=302,
-                url=resolved_urls[0],
-                headers={"Location": logical_urls[1]},
-            ),
-            SimpleNamespace(status=200, url=resolved_urls[1], headers={}),
-        ]
-    )
-    requests: list[tuple[str, str, str, str, str]] = []
+    requests: list[tuple[str, str, str, str]] = []
 
-    def resolve(url: str) -> SimpleNamespace:
+    def resolve(url: str) -> ResolvedPublicURL:
         index = logical_urls.index(url)
         host = urlparse(url).hostname
-        return SimpleNamespace(
-            connect_url=resolved_urls[index],
-            host_header=host,
-            sni_hostname=host,
-        )
+        assert host is not None
+        return ResolvedPublicURL(resolved_urls[index], host, host)
 
-    async def fetch(_fetcher_cls, url, kwargs, **_options):
-        headers = _request_headers(
-            kwargs["header_url"],
-            kwargs["headers"],
-            stealthy=True,
-        )
+    def handle_http(request: httpx.Request) -> httpx.Response:
         requests.append(
             (
-                url,
-                kwargs["header_url"],
-                headers["referer"],
-                headers["Host"],
-                kwargs["extensions"]["sni_hostname"],
+                str(request.url),
+                request.headers["referer"],
+                request.headers["host"],
+                str(request.extensions["sni_hostname"]),
             )
         )
-        return next(responses)
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={"Location": logical_urls[1]},
+                stream=httpx.ByteStream(b""),
+            )
+        return httpx.Response(200, stream=httpx.ByteStream(b"<h1>ok</h1>"))
 
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handle_http))
+
+    async def _fake_client(self, *_args, **_kwargs):
+        return mock_client
+
+    monkeypatch.setattr(BasicSession, "client", _fake_client)
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", resolve)
-    monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
+    target = TargetConfig(
+        url=logical_urls[0],
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
 
-    await _fetch_basic_with_safe_redirects(Fetcher, logical_urls[0], {}, {})
+    try:
+        result = await scrape_target(target, False, RetryConfig(max_attempts=1))
+    finally:
+        await mock_client.aclose()
 
+    assert result.is_success
     assert requests == [
         (
             resolved_urls[0],
-            logical_urls[0],
             "https://www.google.com/search?q=acme",
             "shop.acme.com",
             "shop.acme.com",
         ),
         (
             resolved_urls[1],
-            logical_urls[1],
             "https://www.google.com/search?q=widgets",
             "catalog.widgets.org",
             "catalog.widgets.org",
@@ -328,15 +313,40 @@ async def test_production_basic_redirects_generate_headers_from_each_logical_url
     ]
 
 
-def test_generated_basic_headers_preserve_explicit_referer() -> None:
-    headers = _request_headers(
-        "https://shop.example/products",
-        {"Referer": "https://caller.example/source"},
-        stealthy=True,
-    )
+@pytest.mark.asyncio
+async def test_generated_basic_headers_preserve_explicit_referer(monkeypatch) -> None:
+    captured_headers: list[tuple[bytes, bytes]] = []
 
-    assert headers["Referer"] == "https://caller.example/source"
-    assert "referer" not in headers
+    def handle_http(request: httpx.Request) -> httpx.Response:
+        captured_headers.extend(request.headers.raw)
+        return httpx.Response(200, stream=httpx.ByteStream(b"<h1>ok</h1>"))
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handle_http))
+
+    async def _fake_client(self, *_args, **_kwargs):
+        return mock_client
+
+    monkeypatch.setattr(BasicSession, "client", _fake_client)
+    try:
+        await fetch_streaming_response(
+            Fetcher,
+            "https://shop.example/products",
+            {
+                "headers": {"Referer": "https://caller.example/source"},
+                "stealthy_headers": True,
+                "timeout": 5,
+            },
+            budget=None,
+        )
+    finally:
+        await mock_client.aclose()
+
+    referer_headers = [
+        (name.decode(), value.decode())
+        for name, value in captured_headers
+        if name.lower() == b"referer"
+    ]
+    assert referer_headers == [("Referer", "https://caller.example/source")]
 
 
 @pytest.mark.asyncio
@@ -361,16 +371,15 @@ async def test_fetch_page_blocks_basic_redirects_to_non_public_destinations(monk
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    with pytest.raises(UnsafeURLError, match="non-public"):
-        await _fetch_page(
-            BasicSession(),
-            target.url,
-            target,
-            FetcherType.basic,
-            adaptive=False,
-            retryable_status={500},
-            adaptive_dir="/tmp/adaptive",
-        )
+    result = await scrape_target(
+        target,
+        False,
+        RetryConfig(max_attempts=1),
+        adaptive_dir="/tmp/adaptive",
+    )
+
+    assert result.is_failed
+    assert "non-public" in (result.error_detail or "")
 
 
 @pytest.mark.asyncio
@@ -388,23 +397,21 @@ async def test_fetch_page_requires_resolved_dns_when_proxy_can_resolve_remotely(
     async def _fetch_basic_response(_fetcher_cls, _url, _call_kwargs):
         nonlocal fetch_called
         fetch_called = True
-        return SimpleNamespace(status=200, url=target.url, text="<h1>ok</h1>")
+        return make_html_response(target.url, "<h1>ok</h1>")
 
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", _fetch_basic_response)
 
-    with pytest.raises(URLResolutionError, match="could not be resolved"):
-        await _fetch_page(
-            object(),
-            target.url,
-            target,
-            FetcherType.basic,
-            adaptive=False,
-            retryable_status={500},
-            adaptive_dir="/tmp/adaptive",
-            proxy_url="http://proxy.example:8080",
-        )
+    result = await scrape_target(
+        target,
+        False,
+        RetryConfig(max_attempts=1),
+        adaptive_dir="/tmp/adaptive",
+        proxy_url="http://proxy.example:8080",
+    )
 
+    assert result.is_failed
+    assert "could not be resolved" in (result.error_detail or "")
     assert fetch_called is False
 
 
@@ -423,17 +430,15 @@ async def test_fetch_page_requires_resolved_dns_to_pin_a_direct_basic_fetch(monk
     monkeypatch.setattr("scrapeyard.engine.url_guard.socket.getaddrinfo", _raise_gaierror)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch)
 
-    with pytest.raises(URLResolutionError, match="could not be resolved"):
-        await _fetch_page(
-            BasicSession(),
-            target.url,
-            target,
-            FetcherType.basic,
-            adaptive=False,
-            retryable_status={500},
-            adaptive_dir="/tmp/adaptive",
-        )
+    result = await scrape_target(
+        target,
+        False,
+        RetryConfig(max_attempts=1),
+        adaptive_dir="/tmp/adaptive",
+    )
 
+    assert result.is_failed
+    assert "could not be resolved" in (result.error_detail or "")
     fetch.assert_not_awaited()
 
 
@@ -445,10 +450,7 @@ async def test_browser_fetch_performs_one_navigation_without_http_preflight(monk
         selectors={"title": "h1"},
     )
     browser_fetch = AsyncMock(
-        return_value=(
-            SimpleNamespace(status=200, url=target.url, text="<h1>ok</h1>"),
-            {},
-        )
+        return_value=(make_html_response(target.url, "<h1>ok</h1>"), {})
     )
     basic_fetch = AsyncMock()
     responses_observed = 0
@@ -460,17 +462,15 @@ async def test_browser_fetch_performs_one_navigation_without_http_preflight(monk
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", browser_fetch)
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", basic_fetch)
 
-    await _fetch_page(
-        object(),
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.dynamic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
         response_observer=observe_response,
     )
 
+    assert result.is_success
     browser_fetch.assert_awaited_once()
     assert browser_fetch.await_args.args[1] == target.url
     basic_fetch.assert_not_awaited()
@@ -492,24 +492,22 @@ async def test_browser_navigation_rate_limits_immediately_before_fetch(monkeypat
 
     async def browser_fetch(*_args, **_kwargs):
         events.append("navigate")
-        return SimpleNamespace(status=200, url=target.url), {}
+        return make_html_response(target.url, "<h1>ok</h1>"), {}
 
     limiter.acquire.side_effect = acquire
     monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_browser_response", browser_fetch)
 
-    await _fetch_page(
-        object(),
-        target.url,
+    result = await scrape_target(
         target,
-        FetcherType.dynamic,
-        adaptive=False,
-        retryable_status={500},
+        False,
+        RetryConfig(max_attempts=1),
         adaptive_dir="/tmp/adaptive",
         rate_limiter=limiter,
         domain_rate_limit=4,
     )
 
+    assert result.is_success
     assert events == ["acquire", "navigate"]
     limiter.acquire.assert_awaited_once_with("example.com", 4)
 
@@ -529,25 +527,30 @@ async def test_browser_navigation_timeout_retries_the_complete_adapter_boundary(
         attempts += 1
         if attempts == 1:
             raise PlaywrightTimeoutError("page.goto timed out")
-        return SimpleNamespace(status=200, url=url, text="<h1>ok</h1>")
+        return make_html_response(url, "<h1>ok</h1>")
+
+    session = ScriptedBrowserSession(timeout_then_success_fetch)
+
+    class _SingleSessionPool:
+        async def acquire(self, *_args):
+            return session
+
+        async def release(self, _session):
+            return None
 
     monkeypatch.setattr("scrapeyard.engine.scraper._assert_fetch_url", AsyncMock())
 
-    outcome = await _fetch_target_page(
-        RetryHandler(RetryConfig(max_attempts=2, backoff_max=0)),
-        ScriptedBrowserSession(timeout_then_success_fetch),
-        target.url,
-        target,
-        adaptive=False,
-        retryable_status={500},
-        adaptive_dir="/tmp/adaptive",
-        proxy_url=None,
-        artifacts_dir=None,
-        rate_limiter=limiter,
-        domain_rate_limit=4,
-    )
+    with activate_browser_pool(_SingleSessionPool()):  # type: ignore[arg-type]
+        result = await scrape_target(
+            target,
+            False,
+            RetryConfig(max_attempts=2, backoff_max=0),
+            adaptive_dir="/tmp/adaptive",
+            rate_limiter=limiter,
+            domain_rate_limit=4,
+        )
 
-    assert outcome.page.status == 200
+    assert result.is_success
     assert attempts == 2
     assert limiter.acquire.await_args_list == [call("example.com", 4)] * 2
 

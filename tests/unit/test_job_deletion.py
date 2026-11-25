@@ -19,6 +19,11 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
     WebhookFailureReason,
 )
+from tests.factories import (
+    fetch_webhook_delivery,
+    make_delivery_create,
+    seed_webhook_delivery,
+)
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 YAML = "project: test\nname: delete\ntarget:\n  url: https://example.com\n  selectors:\n    title: h1\n"
@@ -61,11 +66,8 @@ async def _terminal_run(store: SQLiteJobStore) -> None:
 
 
 def _delivery(delivery_id: str = "delivery-1") -> WebhookDeliveryCreate:
-    return WebhookDeliveryCreate(
-        delivery_id=delivery_id,
-        job_id="job-1",
-        run_id="run-1",
-        event="job.complete",
+    return make_delivery_create(
+        delivery_id,
         url="https://hooks.example.com/job",
         headers={},
         timeout_seconds=5,
@@ -119,7 +121,7 @@ async def test_reservation_persists_policy_and_resumes_idempotently(store):
 
 async def test_pending_webhook_blocks_reservation_without_mutating_parent(store):
     await _terminal_run(store)
-    await SQLiteWebhookOutboxStore().enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
 
     outcome = await store.reserve_job_deletion(
         "job-1",
@@ -134,7 +136,7 @@ async def test_pending_webhook_blocks_reservation_without_mutating_parent(store)
 async def test_quarantined_malformed_webhook_no_longer_blocks_deletion(store):
     await _terminal_run(store)
     outbox = SQLiteWebhookOutboxStore()
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     async with get_db("jobs.db") as db:
         await db.execute(
             "UPDATE webhook_deliveries SET payload_json = '{malformed' "
@@ -159,7 +161,7 @@ async def test_final_deletion_removes_terminal_delivery_run_and_parent(
 ):
     await _terminal_run(store)
     outbox = SQLiteWebhookOutboxStore()
-    await outbox.enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
     if terminal_kind == "delivered":
         await outbox.mark_delivered("delivery-1", delivered_at=NOW)
     else:
@@ -192,7 +194,7 @@ async def test_final_deletion_removes_terminal_delivery_run_and_parent(
     assert outcome.action is DeletionFinalizationAction.deleted
     with pytest.raises(KeyError):
         await store.get_job("job-1")
-    assert await outbox.get_delivery("delivery-1") is None
+    assert await fetch_webhook_delivery("delivery-1") is None
     assert await store.get_job_run("job-1", "run-1") is None
 
 
@@ -217,7 +219,7 @@ async def test_finalization_rechecks_pending_webhook(store):
         delete_results=False,
         requested_at=NOW,
     )
-    await SQLiteWebhookOutboxStore().enqueue_delivery(_delivery(), now=NOW)
+    await seed_webhook_delivery(_delivery(), now=NOW)
 
     outcome = await store.finalize_job_deletion(
         "job-1",

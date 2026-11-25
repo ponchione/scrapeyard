@@ -3,10 +3,11 @@
 import io
 import json
 import logging
+from pathlib import Path
 
 from scrapling.engines.toolbelt.custom import Response
 
-from scrapeyard.common.logging import _JsonFormatter, setup_logging
+from scrapeyard.common.logging import setup_logging
 from scrapeyard.common.run_threads import RunThreadPool
 from scrapeyard.config.schema import TargetConfig
 from scrapeyard.engine.adaptive_diagnostics import log_adaptive_selector_gap
@@ -16,9 +17,38 @@ from scrapeyard.engine.url_guard import (
 )
 
 
-def _format_message(message: str, **kwargs) -> str:
-    """Create a log record and format it with _JsonFormatter."""
-    fmt = _JsonFormatter()
+def _installed_json_formatter(tmp_path: Path) -> logging.Formatter:
+    """Install logging via setup_logging and return its configured JSON formatter."""
+    root = logging.getLogger()
+    scrapling_logger = logging.getLogger("scrapling")
+    original_root_handlers = list(root.handlers)
+    original_scrapling_handlers = list(scrapling_logger.handlers)
+    original_propagate = scrapling_logger.propagate
+    original_initialized = getattr(root, "_scrapeyard_logging_initialized", None)
+    try:
+        root.handlers.clear()
+        if hasattr(root, "_scrapeyard_logging_initialized"):
+            delattr(root, "_scrapeyard_logging_initialized")
+        setup_logging(str(tmp_path))
+        formatter = root.handlers[0].formatter
+        assert formatter is not None
+        return formatter
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers[:] = original_root_handlers
+        scrapling_logger.handlers[:] = original_scrapling_handlers
+        scrapling_logger.propagate = original_propagate
+        if original_initialized is None:
+            if hasattr(root, "_scrapeyard_logging_initialized"):
+                delattr(root, "_scrapeyard_logging_initialized")
+        else:
+            root._scrapeyard_logging_initialized = original_initialized
+
+
+def _format_message(tmp_path: Path, message: str, **kwargs) -> str:
+    """Create a log record and format it with the formatter configured by setup_logging."""
+    fmt = _installed_json_formatter(tmp_path)
     record = logging.LogRecord(
         name="test.logger",
         level=logging.INFO,
@@ -33,8 +63,8 @@ def _format_message(message: str, **kwargs) -> str:
     return fmt.format(record)
 
 
-def test_plain_message_produces_valid_json():
-    raw = _format_message("hello world")
+def test_plain_message_produces_valid_json(tmp_path):
+    raw = _format_message(tmp_path, "hello world")
     parsed = json.loads(raw)
     assert parsed["message"] == "hello world"
     assert parsed["level"] == "INFO"
@@ -42,34 +72,34 @@ def test_plain_message_produces_valid_json():
     assert "time" in parsed
 
 
-def test_message_with_double_quotes():
-    raw = _format_message('key is "value"')
+def test_message_with_double_quotes(tmp_path):
+    raw = _format_message(tmp_path, 'key is "value"')
     parsed = json.loads(raw)
     assert parsed["message"] == 'key is "value"'
 
 
-def test_message_with_backslashes():
-    raw = _format_message("path\\to\\file")
+def test_message_with_backslashes(tmp_path):
+    raw = _format_message(tmp_path, "path\\to\\file")
     parsed = json.loads(raw)
     assert parsed["message"] == "path\\to\\file"
 
 
-def test_message_with_newlines():
-    raw = _format_message("line1\nline2\ttab")
+def test_message_with_newlines(tmp_path):
+    raw = _format_message(tmp_path, "line1\nline2\ttab")
     parsed = json.loads(raw)
     assert parsed["message"] == "line1\nline2\ttab"
 
 
-def test_message_with_unicode():
-    raw = _format_message("prix: 42€ — résultat")
+def test_message_with_unicode(tmp_path):
+    raw = _format_message(tmp_path, "prix: 42€ — résultat")
     parsed = json.loads(raw)
     assert "42€" in parsed["message"]
 
 
-def test_message_with_exc_info():
+def test_message_with_exc_info(tmp_path):
     import sys
 
-    fmt = _JsonFormatter()
+    fmt = _installed_json_formatter(tmp_path)
     try:
         raise ValueError("boom")
     except ValueError:
@@ -89,9 +119,10 @@ def test_message_with_exc_info():
     assert parsed["message"].startswith("failed\n")
 
 
-def test_formatter_redacts_run_scoped_secret_from_exception_traceback():
+def test_formatter_redacts_run_scoped_secret_from_exception_traceback(tmp_path):
     import sys
 
+    fmt = _installed_json_formatter(tmp_path)
     secret = "formatter-secret-sentinel"
     token = activate_deployment_secret_redaction((secret,))
     try:
@@ -107,14 +138,16 @@ def test_formatter_redacts_run_scoped_secret_from_exception_traceback():
                 args=(),
                 exc_info=sys.exc_info(),
             )
-        parsed = json.loads(_JsonFormatter().format(record))
+        parsed = json.loads(fmt.format(record))
         assert secret not in parsed["message"]
         assert "ValueError: <redacted>" in parsed["message"]
     finally:
         reset_deployment_secret_redaction(token)
 
 
-async def test_run_thread_pool_preserves_and_isolates_secret_redaction(monkeypatch, caplog):
+async def test_run_thread_pool_preserves_and_isolates_secret_redaction(
+    tmp_path, monkeypatch, caplog
+):
     first, second = "thread-secret-one", "thread-secret-two"
     target = TargetConfig(
         url=f"https://example.com/{first}/{second}",
@@ -126,7 +159,7 @@ async def test_run_thread_pool_preserves_and_isolates_secret_redaction(monkeypat
     )
     output = io.StringIO()
     handler = logging.StreamHandler(output)
-    handler.setFormatter(_JsonFormatter())
+    handler.setFormatter(_installed_json_formatter(tmp_path))
     logger = logging.getLogger("scrapeyard.engine.adaptive_diagnostics")
     monkeypatch.setattr(logger, "handlers", [handler])
     monkeypatch.setattr(logger, "propagate", False)

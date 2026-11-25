@@ -15,6 +15,7 @@ from scrapeyard.models.job import (
     JobStatus,
 )
 from scrapeyard.storage.cleanup import (
+    CleanupConfig,
     CleanupIncompleteError,
     HistoryRetentionPolicy,
     run_cleanup,
@@ -334,7 +335,7 @@ async def test_scheduled_pruning_is_atomic_and_preserves_lifetime_stats(stores):
     assert second.pruned and second.webhook_tombstones_deleted == 1
     assert await jobs.get_job_run("schedule", "old") is None
     assert await jobs.get_job_run("schedule", "tombstone") is None
-    assert await jobs.get_job_run_stats("schedule") == (6, NOW - timedelta(days=1))
+    assert (await jobs.get_job_with_stats("schedule"))[1:] == (6, NOW - timedelta(days=1))
     reconciliation_candidates = await jobs.list_terminal_webhook_candidates()
     assert {candidate.run_id for candidate in reconciliation_candidates}.isdisjoint(
         {"old", "tombstone"}
@@ -467,14 +468,17 @@ async def test_real_adhoc_cleanup_resumes_after_cross_database_failure(stores):
         error_batch_size=10,
     )
 
+    config = CleanupConfig(
+        retention_days=30,
+        max_results_per_job=100,
+        history_policy=policy,
+    )
     with pytest.raises(CleanupIncompleteError, match="adhoc_errors"):
         await run_cleanup(
             results,
-            retention_days=30,
-            max_results_per_job=100,
+            config,
             job_store=jobs,
             error_store=errors,
-            history_policy=policy,
             now=NOW,
         )
 
@@ -482,11 +486,9 @@ async def test_real_adhoc_cleanup_resumes_after_cross_database_failure(stores):
 
     await run_cleanup(
         results,
-        retention_days=30,
-        max_results_per_job=100,
+        config,
         job_store=jobs,
         error_store=errors,
-        history_policy=policy,
         now=NOW,
     )
 

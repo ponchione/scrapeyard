@@ -11,11 +11,10 @@ import pytest
 
 from scrapeyard.common.budgets import BudgetExceeded, RunBudget
 from scrapeyard.common.host_verdicts import PublicHostVerdicts
-from scrapeyard.config.schema import FetcherType, TargetConfig
-from scrapeyard.engine.basic_fetch import BasicSession
+from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
 from scrapeyard.engine.browser_debug import fetch_browser_response
-from scrapeyard.engine.pagination import _pagination_url_is_safe
-from scrapeyard.engine.scraper import _fetch_page
+from scrapeyard.engine.browser_pool import activate_browser_pool
+from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import (
     UnsafeURLError,
     URLResolutionError,
@@ -24,6 +23,7 @@ from scrapeyard.engine.url_guard import (
     resolve_public_url,
 )
 from scrapeyard.engine.url_verdicts import assert_public_url_in_run, resolve_public_url_in_run
+from tests.factories import make_html_response
 from tests.unit.browser_fakes import ScriptedBrowserSession
 
 PUBLIC = "93.184.216.34"
@@ -722,25 +722,43 @@ async def test_the_route_guard_resolves_each_host_of_a_page_once(
 async def test_a_browser_page_and_its_pagination_resolve_the_target_once(
     resolver: Resolver,
 ) -> None:
-    target = _browser_target()
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://shop.test/list?page=1",
+            "fetcher": FetcherType.dynamic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
     budget = _budget()
 
     async def route_fetch(url: str, _kwargs: dict[str, Any], route_handler: Any) -> Any:
         await route_handler(_Route(url, navigation=True))
         await route_handler(_Route("https://shop.test/app.js"))
-        return SimpleNamespace(status=200, url=url, text="<html><h1>ok</h1></html>")
+        next_link = '<a class="next" href="?page=2">Next</a>' if url.endswith("page=1") else ""
+        return make_html_response(url, f"<html><h1>ok</h1>{next_link}</html>")
 
     session = ScriptedBrowserSession(route_fetch)
-    for page in (1, 2):
-        url = f"{target.url}?page={page}"
-        await _fetch_page(
-            session, url, target, FetcherType.dynamic, adaptive=False, retryable_status={500},
-            adaptive_dir="/tmp/adaptive", proxy_url="https://proxy.test:8443", budget=budget,
-        )
-        assert await _pagination_url_is_safe(
-            f"{target.url}?page={page + 1}", budget=budget, cancellation_guard=None,
+
+    class _SingleSessionPool:
+        async def acquire(self, *_args: Any) -> Any:
+            return session
+
+        async def release(self, _session: Any) -> None:
+            return None
+
+    with activate_browser_pool(_SingleSessionPool()):  # type: ignore[arg-type]
+        result = await scrape_target(
+            target,
+            False,
+            RetryConfig(max_attempts=1),
+            adaptive_dir="/tmp/adaptive",
+            proxy_url="https://proxy.test:8443",
+            budget=budget,
         )
 
+    assert result.is_success
+    assert result.pages_scraped == 2
     # Without the run's verdicts this was five lookups of shop.test and one of
     # the proxy for every page.
     assert resolver.calls == ["proxy.test", "shop.test"]
@@ -749,13 +767,21 @@ async def test_a_browser_page_and_its_pagination_resolve_the_target_once(
 async def test_a_direct_basic_fetch_resolves_once_per_request_and_still_pins(
     resolver: Resolver, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    target = TargetConfig(url="https://shop.test/list", fetcher=FetcherType.basic, selectors={"title": "h1"})
+    target = TargetConfig.model_validate(
+        {
+            "url": "https://shop.test/list?page=1",
+            "fetcher": FetcherType.basic,
+            "selectors": {"title": "h1"},
+            "pagination": {"next": "a.next", "max_pages": 2},
+        }
+    )
     budget = _budget()
     connected: list[tuple[str, Any]] = []
 
     async def fetch_basic_response(_fetcher: Any, url: str, kwargs: dict[str, Any], **_options: Any) -> Any:
         connected.append((url, kwargs["headers"]["Host"]))
-        return SimpleNamespace(status=200, url=url, headers={}, text="<h1>ok</h1>")
+        next_link = '<a class="next" href="?page=2">Next</a>' if "page=1" in url else ""
+        return make_html_response(url, f"<html><h1>ok</h1>{next_link}</html>")
 
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
@@ -763,16 +789,16 @@ async def test_a_direct_basic_fetch_resolves_once_per_request_and_still_pins(
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.fetch_basic_response", fetch_basic_response)
 
-    for page in (1, 2):
-        outcome = await _fetch_page(
-            BasicSession(), f"{target.url}?page={page}", target, FetcherType.basic,
-            adaptive=False, retryable_status={500}, adaptive_dir="/tmp/adaptive", budget=budget,
-        )
-        assert outcome.debug["final_url"] == f"{target.url}?page={page}"
-        assert await _pagination_url_is_safe(
-            f"{target.url}?page={page + 1}", budget=budget, cancellation_guard=None,
-        )
+    result = await scrape_target(
+        target,
+        False,
+        RetryConfig(max_attempts=1),
+        adaptive_dir="/tmp/adaptive",
+        budget=budget,
+    )
 
+    assert result.is_success
+    assert result.pages_scraped == 2
     # Every connection is pinned to an address resolved for it; the final-URL
     # and pagination checks no longer resolve the same name again.
     assert connected == [

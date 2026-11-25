@@ -63,6 +63,7 @@ _MAX_REQUEST_FAILURES = 20
 _MAX_BLOCKED_REQUESTS = 20
 _PAGE_ACTION_EXCEPTION_KEY = "_page_action_exception"
 _WHITESPACE_RE = re.compile(r"\s+")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
 _BROWSER_BLOCK_RESOURCES: ContextVar[bool | None] = ContextVar(
@@ -539,7 +540,7 @@ def response_title(page: Any, html: Callable[[], str] | None = None) -> str | No
     if isinstance(value, str) and value.strip():
         return value.strip()
     text = response_text(page) if html is None else html()
-    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    match = _TITLE_RE.search(text)
     if match:
         return truncate_text(match.group(1), 300)
     return None

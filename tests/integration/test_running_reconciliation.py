@@ -11,7 +11,7 @@ from scrapeyard.queue.run_lifecycle import handle_crash
 from scrapeyard.queue.running_reconciliation import reconcile_stale_running_jobs
 from scrapeyard.storage.database import init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
-from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
+from tests.factories import list_pending_webhook_deliveries
 
 CONFIG_YAML = """
 project: recovery
@@ -94,7 +94,7 @@ async def test_periodic_reconciliation_repairs_failed_crash_finalization_once(
     runs = await store.get_job_runs(job_id)
     assert len(runs) == 1
     assert runs[0].status is JobStatus.failed
-    deliveries = await SQLiteWebhookOutboxStore().list_pending()
+    deliveries = await list_pending_webhook_deliveries()
     matching = [delivery for delivery in deliveries if delivery.run_id == run_id]
     assert len(matching) == 1
     notifier.notify.assert_awaited_once_with()

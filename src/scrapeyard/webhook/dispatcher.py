@@ -4,40 +4,51 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
-import time
 from collections.abc import Callable
-from contextlib import suppress
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
-from enum import Enum
-from typing import Any, Protocol, cast
+from datetime import datetime, timedelta
+from typing import Any, cast
 
 import httpx
 
-from scrapeyard.common.async_tools import (
-    AwaitableCancelled,
-    MonotonicDeadline,
-    await_cleanup,
-    shield,
-)
+from scrapeyard.common.async_tools import MonotonicDeadline
 from scrapeyard.common.time import utc_now
 from scrapeyard.config.schema import WebhookConfig
-from scrapeyard.engine.url_guard import (
-    UnsafeURLError,
-    URLResolutionError,
-    resolve_public_url,
-)
-from scrapeyard.runtime.metrics import RETRIES, WEBHOOK_DELIVERIES, mark_last_success
+from scrapeyard.engine.url_guard import resolve_public_url
 from scrapeyard.storage.protocols import WebhookOutboxStore
-from scrapeyard.storage.webhook_outbox import (
-    WebhookDelivery,
-    WebhookDeliveryHeader,
-    WebhookFailureReason,
+from scrapeyard.webhook.client_pool import WebhookClientPool, _ClientCacheEntry
+from scrapeyard.webhook.http_delivery import (
+    drain_response,
+    is_retryable_status,
+    parse_retry_after,
+    send_webhook_request,
+)
+from scrapeyard.webhook.outcome import (
+    RetryPolicy,
+    as_utc,
+    fail_if_exhausted,
+    log_delivery_event,
+    log_startup_backlog,
+    persist_attempt_outcome,
+)
+from scrapeyard.webhook.types import (
+    QueuedWebhookDelivery,
+    WebhookDispatchReason,
+    WebhookDispatchResult,
+    WebhookDispatchStatus,
+    WebhookNotifier,
+    WebhookRequestConfig,
 )
 
-QueuedWebhookDelivery = WebhookDelivery | WebhookDeliveryHeader
+__all__ = [
+    "HttpWebhookDispatcher",
+    "QueuedWebhookDelivery",
+    "WebhookClientPool",
+    "WebhookDispatchReason",
+    "WebhookDispatchResult",
+    "WebhookDispatchStatus",
+    "WebhookNotifier",
+    "WebhookRequestConfig",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -51,65 +62,6 @@ _DEFAULT_CLIENT_CACHE_MAX_SIZE = 64
 _DEFAULT_CLIENT_CACHE_IDLE_TTL_SECONDS = 300.0
 _COORDINATOR_ERROR_RETRY_SECONDS = 1.0
 _COORDINATOR_MIN_IDLE_DELAY_SECONDS = 0.05
-# Receivers' response bodies are read up to this size, undecoded, only so the
-# connection can be reused; a longer body closes the connection instead.
-_MAX_DRAINED_RESPONSE_BYTES = 64 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class WebhookRequestConfig:
-    """Minimal webhook request settings used for persisted deliveries."""
-
-    url: str
-    headers: dict[str, str]
-    timeout: float
-
-
-@dataclass(slots=True)
-class _ClientCacheEntry:
-    """One hostname-isolated client and its eviction-safety state."""
-
-    client: httpx.AsyncClient
-    last_used_at: float
-    in_flight: int = 0
-    expiry_task: asyncio.Task[None] | None = None
-
-
-class WebhookDispatchStatus(str, Enum):
-    """Outcome of one dispatcher retry cycle."""
-
-    delivered = "delivered"
-    retryable_failed = "retryable_failed"
-    permanent_failed = "permanent_failed"
-
-
-class WebhookDispatchReason(str, Enum):
-    """Sanitized reason codes for one HTTP attempt."""
-
-    retryable_http_response = "retryable_http_response"
-    transport_failure = "transport_failure"
-    permanent_http_response = WebhookFailureReason.permanent_http_response.value
-    unsafe_url = WebhookFailureReason.unsafe_url.value
-    non_retryable_failure = WebhookFailureReason.non_retryable_failure.value
-
-
-@dataclass(frozen=True, slots=True)
-class WebhookDispatchResult:
-    """Result from attempting to deliver a webhook."""
-
-    status: WebhookDispatchStatus
-    attempts: int
-    last_error: str | None = None
-    reason_code: WebhookDispatchReason | None = None
-    retry_after_seconds: float | None = None
-
-
-class WebhookNotifier(Protocol):
-    """Worker-facing interface for waking already-durable webhook intents."""
-
-    async def notify(self) -> None:
-        """Wake processing for an intent already committed in jobs.db."""
-        ...
 
 
 class HttpWebhookDispatcher:
@@ -141,19 +93,12 @@ class HttpWebhookDispatcher:
             raise ValueError("dispatch_concurrency must be positive")
         if dispatch_batch_size < dispatch_concurrency:
             raise ValueError("dispatch_batch_size must be >= dispatch_concurrency")
-        if client_cache_max_size < 1:
-            raise ValueError("client_cache_max_size must be positive")
-        if client_cache_idle_ttl_seconds <= 0:
-            raise ValueError("client_cache_idle_ttl_seconds must be positive")
 
-        self._client_factory = client_factory or (
-            lambda: httpx.AsyncClient(trust_env=False)
+        self._client_pool = WebhookClientPool(
+            client_factory=client_factory,
+            max_size=client_cache_max_size,
+            idle_ttl_seconds=client_cache_idle_ttl_seconds,
         )
-        self._clients: dict[str, _ClientCacheEntry] = {}
-        self._client_lock = asyncio.Lock()
-        self._client_condition = asyncio.Condition(self._client_lock)
-        self._client_cache_max_size = client_cache_max_size
-        self._client_cache_idle_ttl_seconds = client_cache_idle_ttl_seconds
         self._startup_lock = asyncio.Lock()
         self._accepting_tasks = True
         self._started = False
@@ -170,9 +115,25 @@ class HttpWebhookDispatcher:
         self._coordinator_task: asyncio.Task[None] | None = None
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._tasks: set[asyncio.Task[None]] = set()
-        self._client_close_task: asyncio.Task[None] | None = None
         self._scheduled_ids: set[str] = set()
         self._active_ids: set[str] = set()
+
+    @property
+    def _retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(
+            backoff_base=self._backoff_base,
+            backoff_max=self._backoff_max,
+            max_attempts=self._max_delivery_attempts,
+            max_age_seconds=self._max_delivery_age_seconds,
+        )
+
+    @property
+    def _clients(self) -> dict[str, _ClientCacheEntry]:
+        return self._client_pool.entries
+
+    @property
+    def _client_close_task(self) -> asyncio.Task[None] | None:
+        return self._client_pool.close_task
 
     @property
     def pending_tasks(self) -> int:
@@ -193,7 +154,7 @@ class HttpWebhookDispatcher:
 
     @property
     def client_cache_size(self) -> int:
-        return len(self._clients)
+        return self._client_pool.size
 
     @property
     def shutdown_pending(self) -> bool:
@@ -201,9 +162,9 @@ class HttpWebhookDispatcher:
 
         if not self._stopping:
             return False
-        close_task = self._client_close_task
-        return any(not task.done() for task in self._tasks) or (
-            close_task is not None and not close_task.done()
+        return (
+            any(not task.done() for task in self._tasks)
+            or self._client_pool.close_pending
         )
 
     @property
@@ -254,8 +215,7 @@ class HttpWebhookDispatcher:
             if self._outbox_store is None:
                 self._accepting_tasks = True
                 return
-            lingering = [task for task in self._tasks if not task.done()]
-            if lingering:
+            if any(not task.done() for task in self._tasks):
                 raise RuntimeError(
                     "Webhook dispatcher cannot start while tasks from a previous "
                     "shutdown are still running"
@@ -272,32 +232,11 @@ class HttpWebhookDispatcher:
             self._wake_event.set()
             self._started = True
 
-            try:
-                summary = await self._outbox_store.summarize()
-            except Exception as exc:
-                logger.error(
-                    "Webhook dispatcher startup summary unavailable "
-                    "error_type=%s recovery_action=coordinator_retry",
-                    type(exc).__name__,
-                )
-            else:
-                logger.info(
-                    "Webhook dispatcher startup backlog "
-                    "pending_count=%s delivered_count=%s failed_count=%s "
-                    "oldest_pending_age_seconds=%s pending_attempts_min=%s "
-                    "pending_attempts_max=%s pending_attempts_total=%s "
-                    "dispatch_concurrency=%s dispatch_batch_size=%s "
-                    "recovery_action=start_bounded_workers",
-                    summary.pending,
-                    summary.delivered,
-                    summary.failed,
-                    summary.oldest_pending_age_seconds,
-                    summary.pending_attempts_min,
-                    summary.pending_attempts_max,
-                    summary.pending_attempts_total,
-                    self._dispatch_concurrency,
-                    self._dispatch_batch_size,
-                )
+            await log_startup_backlog(
+                self._outbox_store,
+                dispatch_concurrency=self._dispatch_concurrency,
+                dispatch_batch_size=self._dispatch_batch_size,
+            )
 
             for index in range(self._dispatch_concurrency):
                 task = asyncio.create_task(
@@ -313,25 +252,11 @@ class HttpWebhookDispatcher:
             self._track_task(self._coordinator_task)
 
     def _backoff_delay(self, attempt_index: int) -> float:
-        """Return capped exponential delay for a zero-based attempt index."""
-
-        # Past 2**62 the delay is the cap anyway, and a larger power overflows a float.
-        return float(min(self._backoff_base * (2 ** min(attempt_index, 62)), self._backoff_max))
+        return self._retry_policy.backoff_delay(attempt_index)
 
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:
-        """5xx and 429 are retryable; other 4xx responses are permanent."""
-
-        return status_code >= 500 or status_code == 429
-
-    @staticmethod
-    def _safe_payload_context(payload: dict[str, Any]) -> tuple[object, ...]:
-        return (
-            payload.get("delivery_id"),
-            payload.get("job_id"),
-            payload.get("run_id"),
-            payload.get("event"),
-        )
+        return is_retryable_status(status_code)
 
     @staticmethod
     def _parse_retry_after(
@@ -339,191 +264,31 @@ class HttpWebhookDispatcher:
         *,
         now: datetime,
     ) -> tuple[float | None, str]:
-        raw_value = response.headers.get("Retry-After")
-        if raw_value is None:
-            return None, "absent"
-        if response.status_code not in {429, 503}:
-            return None, "inapplicable_status"
-
-        value = raw_value.strip()
-        # str.isdigit also accepts digits such as "²" that float() rejects.
-        if value.isascii() and value.isdigit():
-            delay = float(value)
-            if not math.isfinite(delay):
-                return None, "out_of_range"
-            return delay, "accepted_delta_seconds"
-
-        try:
-            parsed = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None, "malformed"
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            return None, "timezone_missing"
-        delay = (parsed.astimezone(timezone.utc) - now.astimezone(timezone.utc)).total_seconds()
-        if delay <= 0:
-            return None, "past_http_date"
-        return delay, "accepted_http_date"
+        return parse_retry_after(response, now=now)
 
     @staticmethod
     async def _drain_response(response: httpx.Response) -> None:
-        """Read a small body so the connection returns to the client's pool."""
+        await drain_response(response)
 
-        if response.is_stream_consumed:
-            return
-        received = 0
-        async for chunk in response.aiter_raw():
-            received += len(chunk)
-            if received > _MAX_DRAINED_RESPONSE_BYTES:
-                return
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        return as_utc(value)
 
     async def send_once(
         self,
         config: WebhookConfig | WebhookRequestConfig,
         payload: dict[str, Any],
     ) -> WebhookDispatchResult:
-        """Perform one safety-checked HTTP request without retrying.
+        """Perform one safety-checked HTTP request without retrying."""
 
-        ``config.timeout`` bounds each connect, write and read, and also the
-        whole exchange, so a receiver that trickles bytes cannot hold a worker.
-        A response whose status arrived in time keeps that outcome even if its
-        body is still arriving at the deadline.
-        """
-
-        url = str(config.url)
-        start = time.monotonic()
-        acquired_hostname: str | None = None
-        client: httpx.AsyncClient | None = None
-        try:
-            resolved = await asyncio.to_thread(resolve_public_url, url)
-            acquired_hostname = resolved.sni_hostname
-            client = await self._acquire_client(acquired_hostname)
-            headers = dict(config.headers)
-            headers["Host"] = resolved.host_header
-            request = httpx.Request(
-                "POST",
-                resolved.connect_url,
-                json=payload,
-                headers=headers,
-                extensions={
-                    "sni_hostname": resolved.sni_hostname,
-                    "timeout": httpx.Timeout(config.timeout).as_dict(),
-                },
-            )
-            sent_at = time.monotonic()
-            response = await asyncio.wait_for(
-                client.send(
-                    request,
-                    stream=True,
-                    follow_redirects=False,
-                ),
-                timeout=config.timeout,
-            )
-            try:
-                remaining = config.timeout - (time.monotonic() - sent_at)
-                if remaining > 0:
-                    with suppress(TimeoutError, httpx.HTTPError):
-                        await asyncio.wait_for(self._drain_response(response), timeout=remaining)
-                elapsed_ms = (time.monotonic() - start) * 1000
-
-                if response.is_success:
-                    logger.info(
-                        "Webhook HTTP attempt completed status_code=%s "
-                        "elapsed_ms=%.0f outcome=delivered",
-                        response.status_code,
-                        elapsed_ms,
-                    )
-                    return WebhookDispatchResult(WebhookDispatchStatus.delivered, 1)
-
-                last_error = f"HTTP {response.status_code}"
-                if not self._is_retryable_status(response.status_code):
-                    logger.warning(
-                        "Webhook HTTP attempt completed status_code=%s "
-                        "elapsed_ms=%.0f outcome=permanent_failed "
-                        "reason_code=%s",
-                        response.status_code,
-                        elapsed_ms,
-                        WebhookDispatchReason.permanent_http_response.value,
-                    )
-                    return WebhookDispatchResult(
-                        WebhookDispatchStatus.permanent_failed,
-                        1,
-                        last_error,
-                        WebhookDispatchReason.permanent_http_response,
-                    )
-
-                retry_after, retry_after_action = self._parse_retry_after(
-                    response,
-                    now=utc_now(),
-                )
-                if retry_after_action != "absent":
-                    delivery_id, job_id, run_id, event = self._safe_payload_context(payload)
-                    logger.info(
-                        "Webhook Retry-After evaluated delivery_id=%s job_id=%s "
-                        "run_id=%s event=%s status_code=%s accepted=%s "
-                        "reason_code=%s recovery_action=%s",
-                        delivery_id,
-                        job_id,
-                        run_id,
-                        event,
-                        response.status_code,
-                        retry_after is not None,
-                        WebhookDispatchReason.retryable_http_response.value,
-                        retry_after_action,
-                    )
-                logger.warning(
-                    "Webhook HTTP attempt completed status_code=%s elapsed_ms=%.0f "
-                    "outcome=retryable_failed reason_code=%s",
-                    response.status_code,
-                    elapsed_ms,
-                    WebhookDispatchReason.retryable_http_response.value,
-                )
-                return WebhookDispatchResult(
-                    WebhookDispatchStatus.retryable_failed,
-                    1,
-                    last_error,
-                    WebhookDispatchReason.retryable_http_response,
-                    retry_after,
-                )
-            finally:
-                await response.aclose()
-
-        except UnsafeURLError:
-            logger.warning(
-                "Webhook attempt blocked outcome=permanent_failed reason_code=%s",
-                WebhookDispatchReason.unsafe_url.value,
-            )
-            return WebhookDispatchResult(
-                WebhookDispatchStatus.permanent_failed,
-                1,
-                "Webhook URL is unsafe or non-public",
-                WebhookDispatchReason.unsafe_url,
-            )
-        except (
-            URLResolutionError,
-            # The total deadline.
-            TimeoutError,
-            httpx.TimeoutException,
-            httpx.ConnectError,
-            httpx.HTTPError,
-        ) as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            error_type = type(exc).__name__
-            logger.warning(
-                "Webhook HTTP attempt failed elapsed_ms=%.0f error_type=%s "
-                "outcome=retryable_failed reason_code=%s",
-                elapsed_ms,
-                error_type,
-                WebhookDispatchReason.transport_failure.value,
-            )
-            return WebhookDispatchResult(
-                WebhookDispatchStatus.retryable_failed,
-                1,
-                f"Transport failure: {error_type}",
-                WebhookDispatchReason.transport_failure,
-            )
-        finally:
-            if acquired_hostname is not None and client is not None:
-                await self._release_client(acquired_hostname, client)
+        return await send_webhook_request(
+            config,
+            payload,
+            acquire_client=self._acquire_client,
+            release_client=self._release_client,
+            resolve_url=resolve_public_url,
+            now_fn=utc_now,
+        )
 
     async def notify(self) -> None:
         """Wake bounded workers without recreating an already-durable intent."""
@@ -535,16 +300,26 @@ class HttpWebhookDispatcher:
         self._wake_event.set()
 
     async def shutdown(self, timeout: float | None = None) -> None:
-        """Stop scheduling, drain bounded work within grace, then cancel.
-
-        Live tasks that miss the deadline remain tracked and cause
-        :class:`TimeoutError`; a later startup cannot overlap them.
-        """
+        """Stop scheduling, drain bounded work within grace, then cancel."""
 
         self._accepting_tasks = False
         self._stopping = True
         self._wake_event.set()
         deadline = MonotonicDeadline(timeout)
+        unresolved_phases = await self._stop_background_tasks(deadline, timeout=timeout)
+        if not await self._client_pool.close(deadline):
+            unresolved_phases.append("http_client")
+        if unresolved_phases:
+            raise TimeoutError(
+                "Webhook shutdown deadline exceeded in phase(s): " + ", ".join(unresolved_phases)
+            )
+
+    async def _stop_background_tasks(
+        self,
+        deadline: MonotonicDeadline,
+        *,
+        timeout: float | None,
+    ) -> list[str]:
         unresolved_phases: list[str] = []
         coordinator = self._coordinator_task
         if coordinator is not None and not coordinator.done():
@@ -576,8 +351,6 @@ class HttpWebhookDispatcher:
             try:
                 await deadline.run(asyncio.gather(*self._worker_tasks, return_exceptions=True))
             except TimeoutError:
-                # A cancelled gather and its child tasks can require one more
-                # non-blocking loop turn to publish their terminal state.
                 await asyncio.sleep(0)
                 if any(not task.done() for task in self._worker_tasks):
                     unresolved_phases.append("workers")
@@ -614,15 +387,13 @@ class HttpWebhookDispatcher:
             self._coordinator_task = None
         if live_tasks:
             if "coordinator" not in unresolved_phases and (
-                self._coordinator_task is not None
-                and not self._coordinator_task.done()
+                self._coordinator_task is not None and not self._coordinator_task.done()
             ):
                 unresolved_phases.append("coordinator")
             if "workers" not in unresolved_phases and self._worker_tasks:
                 unresolved_phases.append("workers")
             raise TimeoutError(
-                "Webhook shutdown deadline exceeded in phase(s): "
-                + ", ".join(unresolved_phases)
+                "Webhook shutdown deadline exceeded in phase(s): " + ", ".join(unresolved_phases)
             )
 
         self._started = False
@@ -630,180 +401,17 @@ class HttpWebhookDispatcher:
         self._scheduled_ids.clear()
         self._active_ids.clear()
         self._queue = None
-
-        async def _close_clients() -> None:
-            async with self._client_condition:
-                entries = list(self._clients.values())
-                self._clients.clear()
-                self._client_condition.notify_all()
-            for entry in entries:
-                if entry.expiry_task is not None:
-                    entry.expiry_task.cancel()
-            clients = list({id(entry.client): entry.client for entry in entries}.values())
-            first_failure: Exception | None = None
-            for client in clients:
-                while True:
-                    try:
-                        await client.aclose()
-                        break
-                    except asyncio.CancelledError:
-                        # Closing is idempotent.  Keep this owned task visible
-                        # until the client acknowledges closure, even after the
-                        # outer hard deadline requests cancellation.
-                        continue
-                    except Exception as exc:
-                        if first_failure is None:
-                            first_failure = exc
-                        break
-            if first_failure is not None:
-                raise first_failure
-
-        if self._client_close_task is None:
-            self._client_close_task = asyncio.create_task(
-                _close_clients(),
-                name="scrapeyard-webhook-client-close",
-            )
-
-        try:
-            await deadline.run(self._client_close_task)
-        except AwaitableCancelled:
-            pass
-        except TimeoutError:
-            unresolved_phases.append("http_client")
-        finally:
-            if self._client_close_task.done():
-                self._client_close_task = None
-
-        if unresolved_phases:
-            raise TimeoutError(
-                "Webhook shutdown deadline exceeded in phase(s): " + ", ".join(unresolved_phases)
-            )
+        return unresolved_phases
 
     async def _acquire_client(self, logical_hostname: str) -> httpx.AsyncClient:
-        """Lease a hostname-isolated pool without exceeding the cache bound."""
-
-        evicted_client: httpx.AsyncClient | None = None
-        client: httpx.AsyncClient | None = None
-        try:
-            while True:
-                async with self._client_condition:
-                    now = time.monotonic()
-                    entry = self._clients.get(logical_hostname)
-                    if entry is not None:
-                        if entry.expiry_task is not None:
-                            entry.expiry_task.cancel()
-                            entry.expiry_task = None
-                        entry.in_flight += 1
-                        entry.last_used_at = now
-                        client = entry.client
-                        break
-
-                    if len(self._clients) >= self._client_cache_max_size:
-                        idle = [
-                            (candidate.last_used_at, hostname, candidate)
-                            for hostname, candidate in self._clients.items()
-                            if candidate.in_flight == 0
-                        ]
-                        if not idle:
-                            await self._client_condition.wait()
-                            continue
-                        _last_used, evicted_hostname, evicted = min(idle)
-                        self._clients.pop(evicted_hostname, None)
-                        if evicted.expiry_task is not None:
-                            evicted.expiry_task.cancel()
-                        evicted_client = evicted.client
-
-                    try:
-                        created_client = self._client_factory()
-                        if created_client is evicted_client:
-                            raise RuntimeError(
-                                "Webhook client_factory must return a distinct client "
-                                "for each logical hostname"
-                            )
-                        if any(
-                            created_client is existing.client
-                            for existing in self._clients.values()
-                        ):
-                            raise RuntimeError(
-                                "Webhook client_factory must return a distinct client "
-                                "for each logical hostname"
-                            )
-                    except BaseException:
-                        if evicted_client is not None:
-                            self._client_condition.notify_all()
-                        raise
-                    client = created_client
-                    self._clients[logical_hostname] = _ClientCacheEntry(
-                        client=client,
-                        last_used_at=now,
-                        in_flight=1,
-                    )
-                    break
-        except BaseException:
-            if evicted_client is not None:
-                try:
-                    await await_cleanup(evicted_client.aclose())
-                except Exception:
-                    logger.exception(
-                        "Failed to close evicted webhook client hostname=%s",
-                        logical_hostname,
-                    )
-            raise
-
-        assert client is not None
-        if evicted_client is not None:
-            try:
-                await shield(evicted_client.aclose())
-            except asyncio.CancelledError:
-                await self._release_client(logical_hostname, client)
-                raise
-            except Exception:
-                logger.exception(
-                    "Failed to close evicted webhook client hostname=%s",
-                    logical_hostname,
-                )
-        return client
+        return await self._client_pool.acquire(logical_hostname)
 
     async def _release_client(
         self,
         logical_hostname: str,
         client: httpx.AsyncClient,
     ) -> None:
-        async with self._client_condition:
-            entry = self._clients.get(logical_hostname)
-            if entry is None or entry.client is not client:
-                return
-            entry.in_flight = max(0, entry.in_flight - 1)
-            entry.last_used_at = time.monotonic()
-            if entry.in_flight == 0:
-                entry.expiry_task = asyncio.create_task(
-                    self._expire_idle_client(logical_hostname, entry),
-                    name="scrapeyard-webhook-client-expiry",
-                )
-                self._client_condition.notify_all()
-
-    async def _expire_idle_client(
-        self,
-        logical_hostname: str,
-        entry: _ClientCacheEntry,
-    ) -> None:
-        try:
-            await asyncio.sleep(self._client_cache_idle_ttl_seconds)
-            async with self._client_condition:
-                current = self._clients.get(logical_hostname)
-                if current is not entry or entry.in_flight != 0:
-                    return
-                self._clients.pop(logical_hostname, None)
-                entry.expiry_task = None
-                self._client_condition.notify_all()
-            await entry.client.aclose()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception(
-                "Failed to close expired webhook client hostname=%s",
-                logical_hostname,
-            )
+        await self._client_pool.release(logical_hostname, client)
 
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
@@ -866,12 +474,17 @@ class HttpWebhookDispatcher:
             self._wake_event.clear()
             try:
                 now = utc_now()
+                policy = self._retry_policy
                 exhausted = await self._fetch_exhausted_candidates(now=now)
                 exhausted_count = 0
                 for delivery in exhausted:
                     if delivery.delivery_id in self._scheduled_ids:
                         continue
-                    exhausted_count += int(await self._fail_if_exhausted(delivery, now=now))
+                    exhausted_count += int(
+                        await fail_if_exhausted(
+                            self._outbox_store, delivery, now=now, policy=policy
+                        )
+                    )
 
                 due = await self._fetch_due_candidates(now=now)
                 queued_count = 0
@@ -917,26 +530,7 @@ class HttpWebhookDispatcher:
                     await self._wait_for_wake(_COORDINATOR_ERROR_RETRY_SECONDS)
                     continue
 
-                next_due = await self._outbox_store.next_pending_due_at()
-                oldest_pending = await self._outbox_store.oldest_pending_created_at()
-                age_deadline = (
-                    None
-                    if oldest_pending is None
-                    else self._as_utc(oldest_pending)
-                    + timedelta(seconds=self._max_delivery_age_seconds)
-                )
-                wake_at = min(
-                    (value for value in (next_due, age_deadline) if value is not None),
-                    default=None,
-                )
-                timeout = (
-                    None
-                    if wake_at is None
-                    else max(0.0, (self._as_utc(wake_at) - utc_now()).total_seconds())
-                )
-                if timeout is not None:
-                    timeout = max(timeout, _COORDINATOR_MIN_IDLE_DELAY_SECONDS)
-                await self._wait_for_wake(timeout)
+                await self._wait_until_next_outbox_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -946,6 +540,28 @@ class HttpWebhookDispatcher:
                     type(exc).__name__,
                 )
                 await self._wait_for_wake(_COORDINATOR_ERROR_RETRY_SECONDS)
+
+    async def _wait_until_next_outbox_event(self) -> None:
+        assert self._outbox_store is not None
+        next_due = await self._outbox_store.next_pending_due_at()
+        oldest_pending = await self._outbox_store.oldest_pending_created_at()
+        age_deadline = (
+            None
+            if oldest_pending is None
+            else as_utc(oldest_pending) + timedelta(seconds=self._max_delivery_age_seconds)
+        )
+        wake_at = min(
+            (value for value in (next_due, age_deadline) if value is not None),
+            default=None,
+        )
+        timeout = (
+            None
+            if wake_at is None
+            else max(0.0, (as_utc(wake_at) - utc_now()).total_seconds())
+        )
+        if timeout is not None:
+            timeout = max(timeout, _COORDINATOR_MIN_IDLE_DELAY_SECONDS)
+        await self._wait_for_wake(timeout)
 
     async def _worker_loop(self, worker_index: int) -> None:
         queue = self._queue
@@ -957,39 +573,29 @@ class HttpWebhookDispatcher:
             try:
                 await self._process_delivery(delivery)
             except asyncio.CancelledError:
-                logger.info(
-                    "Webhook attempt cancelled delivery_id=%s job_id=%s "
-                    "run_id=%s event=%s attempt_count=%s max_attempts=%s "
-                    "delivery_age_seconds=%.3f max_age_seconds=%s "
-                    "reason_code=shutdown_cancelled "
-                    "recovery_action=leave_pending_for_restart worker_index=%s",
-                    delivery.delivery_id,
-                    delivery.job_id,
-                    delivery.run_id,
-                    delivery.event,
-                    delivery.attempts,
-                    self._max_delivery_attempts,
-                    self._delivery_age_seconds(delivery, utc_now()),
-                    self._max_delivery_age_seconds,
-                    worker_index,
+                log_delivery_event(
+                    logger.info,
+                    "Webhook attempt cancelled",
+                    delivery,
+                    now=utc_now(),
+                    policy=self._retry_policy,
+                    reason_code="shutdown_cancelled",
+                    recovery_action="leave_pending_for_restart",
+                    extra_fmt="worker_index=%s",
+                    extra_args=(worker_index,),
                 )
                 raise
             except Exception as exc:
-                logger.error(
-                    "Webhook worker/store failure delivery_id=%s job_id=%s "
-                    "run_id=%s event=%s attempt_count=%s max_attempts=%s "
-                    "delivery_age_seconds=%.3f max_age_seconds=%s "
-                    "reason_code=worker_failure error_type=%s "
-                    "recovery_action=leave_pending_and_retry",
-                    delivery.delivery_id,
-                    delivery.job_id,
-                    delivery.run_id,
-                    delivery.event,
-                    delivery.attempts,
-                    self._max_delivery_attempts,
-                    self._delivery_age_seconds(delivery, utc_now()),
-                    self._max_delivery_age_seconds,
-                    type(exc).__name__,
+                log_delivery_event(
+                    logger.error,
+                    "Webhook worker/store failure",
+                    delivery,
+                    now=utc_now(),
+                    policy=self._retry_policy,
+                    reason_code="worker_failure",
+                    recovery_action="leave_pending_and_retry",
+                    extra_fmt="error_type=%s",
+                    extra_args=(type(exc).__name__,),
                 )
             finally:
                 self._active_ids.discard(delivery.delivery_id)
@@ -1003,7 +609,8 @@ class HttpWebhookDispatcher:
     async def _process_delivery(self, delivery: QueuedWebhookDelivery) -> None:
         assert self._outbox_store is not None
         now = utc_now()
-        if await self._fail_if_exhausted(delivery, now=now):
+        policy = self._retry_policy
+        if await fail_if_exhausted(self._outbox_store, delivery, now=now, policy=policy):
             return
 
         reserved = await self._outbox_store.begin_attempt(
@@ -1012,36 +619,25 @@ class HttpWebhookDispatcher:
             attempted_at=now,
         )
         if reserved is None:
-            logger.info(
-                "Webhook attempt reservation no-op delivery_id=%s job_id=%s "
-                "run_id=%s event=%s attempt_count=%s max_attempts=%s "
-                "delivery_age_seconds=%.3f max_age_seconds=%s "
-                "reason_code=reservation_race "
-                "recovery_action=skip_duplicate_local_attempt",
-                delivery.delivery_id,
-                delivery.job_id,
-                delivery.run_id,
-                delivery.event,
-                delivery.attempts,
-                self._max_delivery_attempts,
-                self._delivery_age_seconds(delivery, now),
-                self._max_delivery_age_seconds,
+            log_delivery_event(
+                logger.info,
+                "Webhook attempt reservation no-op",
+                delivery,
+                now=now,
+                policy=policy,
+                reason_code="reservation_race",
+                recovery_action="skip_duplicate_local_attempt",
             )
             return
 
-        logger.info(
-            "Webhook attempt started delivery_id=%s job_id=%s run_id=%s "
-            "event=%s attempt_count=%s max_attempts=%s "
-            "delivery_age_seconds=%.3f max_age_seconds=%s "
-            "reason_code=attempt_started recovery_action=http_post",
-            reserved.delivery_id,
-            reserved.job_id,
-            reserved.run_id,
-            reserved.event,
-            reserved.attempts,
-            self._max_delivery_attempts,
-            self._delivery_age_seconds(reserved, now),
-            self._max_delivery_age_seconds,
+        log_delivery_event(
+            logger.info,
+            "Webhook attempt started",
+            reserved,
+            now=now,
+            policy=policy,
+            reason_code="attempt_started",
+            recovery_action="http_post",
         )
         request_config = WebhookRequestConfig(
             url=reserved.url,
@@ -1062,179 +658,12 @@ class HttpWebhookDispatcher:
                 WebhookDispatchReason.non_retryable_failure,
             )
 
-        completed_at = utc_now()
-        reason_code = None if result.reason_code is None else result.reason_code.value
-        logger.info(
-            "Webhook attempt completed delivery_id=%s job_id=%s run_id=%s "
-            "event=%s attempt_count=%s max_attempts=%s "
-            "delivery_age_seconds=%.3f max_age_seconds=%s "
-            "outcome=%s reason_code=%s recovery_action=persist_outcome",
-            reserved.delivery_id,
-            reserved.job_id,
-            reserved.run_id,
-            reserved.event,
-            reserved.attempts,
-            self._max_delivery_attempts,
-            self._delivery_age_seconds(reserved, completed_at),
-            self._max_delivery_age_seconds,
-            result.status.value,
-            reason_code,
-        )
-        WEBHOOK_DELIVERIES.labels(result.status.value).inc()
-
-        if result.status is WebhookDispatchStatus.delivered:
-            await self._outbox_store.mark_delivered(
-                reserved.delivery_id,
-                delivered_at=completed_at,
-                expected_attempts=reserved.attempts,
-            )
-            mark_last_success("webhook")
-            return
-
-        if result.status is WebhookDispatchStatus.permanent_failed:
-            reason = self._terminal_reason(result.reason_code)
-            await self._outbox_store.mark_failed(
-                reserved.delivery_id,
-                failed_at=completed_at,
-                reason=reason,
-                last_error=result.last_error or "Non-retryable webhook failure",
-                expected_attempts=reserved.attempts,
-            )
-            self._log_dead_letter(reserved, completed_at, reason)
-            return
-
-        if reserved.attempts >= self._max_delivery_attempts:
-            await self._fail_delivery(
-                reserved,
-                failed_at=completed_at,
-                reason=WebhookFailureReason.attempt_exhausted,
-                last_error="Maximum total webhook delivery attempts reached",
-            )
-            return
-
-        deadline = self._delivery_deadline(reserved)
-        if self._as_utc(completed_at) >= deadline:
-            await self._fail_delivery(
-                reserved,
-                failed_at=completed_at,
-                reason=WebhookFailureReason.age_exhausted,
-                last_error="Maximum webhook delivery age reached after retryable failure",
-            )
-            return
-
-        delay = max(
-            self._backoff_delay(max(reserved.attempts - 1, 0)),
-            result.retry_after_seconds or 0.0,
-        )
-        remaining_seconds = (deadline - self._as_utc(completed_at)).total_seconds()
-        if delay >= remaining_seconds:
-            await self._fail_delivery(
-                reserved,
-                failed_at=completed_at,
-                reason=WebhookFailureReason.age_exhausted,
-                last_error="Next retry cannot occur before maximum delivery age",
-            )
-            return
-        retry_at = completed_at + timedelta(seconds=delay)
-
-        await self._outbox_store.mark_retryable_failure(
-            reserved.delivery_id,
-            attempted_at=completed_at,
-            next_attempt_at=retry_at,
-            last_error=result.last_error or "Retryable webhook delivery failure",
-            expected_attempts=reserved.attempts,
-        )
-        RETRIES.labels("webhook", "scheduled").inc()
-        logger.info(
-            "Webhook retry scheduled delivery_id=%s job_id=%s run_id=%s "
-            "event=%s attempt_count=%s max_attempts=%s "
-            "delivery_age_seconds=%.3f max_age_seconds=%s "
-            "reason_code=%s retry_delay_seconds=%.3f "
-            "recovery_action=wait_for_due_time",
-            reserved.delivery_id,
-            reserved.job_id,
-            reserved.run_id,
-            reserved.event,
-            reserved.attempts,
-            self._max_delivery_attempts,
-            self._delivery_age_seconds(reserved, completed_at),
-            self._max_delivery_age_seconds,
-            reason_code,
-            delay,
-        )
-
-    async def _fail_if_exhausted(
-        self,
-        delivery: QueuedWebhookDelivery,
-        *,
-        now: datetime,
-    ) -> bool:
-        reason: WebhookFailureReason | None = None
-        error = "Webhook delivery exhausted"
-        if delivery.attempts >= self._max_delivery_attempts:
-            reason = WebhookFailureReason.attempt_exhausted
-            error = "Maximum total webhook delivery attempts reached"
-        elif self._as_utc(now) >= self._delivery_deadline(delivery):
-            reason = WebhookFailureReason.age_exhausted
-            error = "Maximum webhook delivery age reached"
-        if reason is None:
-            return False
-        await self._fail_delivery(
-            delivery,
-            failed_at=now,
-            reason=reason,
-            last_error=error,
-        )
-        return True
-
-    async def _fail_delivery(
-        self,
-        delivery: QueuedWebhookDelivery,
-        *,
-        failed_at: datetime,
-        reason: WebhookFailureReason,
-        last_error: str,
-    ) -> None:
-        assert self._outbox_store is not None
-        transitioned = await self._outbox_store.mark_failed(
-            delivery.delivery_id,
-            failed_at=failed_at,
-            reason=reason,
-            last_error=last_error,
-            expected_attempts=delivery.attempts,
-        )
-        if transitioned:
-            self._log_dead_letter(delivery, failed_at, reason)
-
-    def _log_dead_letter(
-        self,
-        delivery: QueuedWebhookDelivery,
-        failed_at: datetime,
-        reason: WebhookFailureReason,
-    ) -> None:
-        level = logger.warning
-        message = "Webhook permanent failure/dead-letter"
-        if reason is WebhookFailureReason.attempt_exhausted:
-            level = logger.error
-            message = "Webhook attempt exhaustion"
-        elif reason is WebhookFailureReason.age_exhausted:
-            level = logger.error
-            message = "Webhook age exhaustion"
-        level(
-            "%s delivery_id=%s job_id=%s run_id=%s event=%s "
-            "attempt_count=%s max_attempts=%s delivery_age_seconds=%.3f "
-            "max_age_seconds=%s reason_code=%s "
-            "recovery_action=retain_dead_letter",
-            message,
-            delivery.delivery_id,
-            delivery.job_id,
-            delivery.run_id,
-            delivery.event,
-            delivery.attempts,
-            self._max_delivery_attempts,
-            self._delivery_age_seconds(delivery, failed_at),
-            self._max_delivery_age_seconds,
-            reason.value,
+        await persist_attempt_outcome(
+            self._outbox_store,
+            reserved,
+            result,
+            policy=policy,
+            now_fn=utc_now,
         )
 
     async def _wait_for_wake(self, timeout: float | None) -> None:
@@ -1245,29 +674,3 @@ class HttpWebhookDispatcher:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
         except TimeoutError:
             return
-
-    def _delivery_deadline(self, delivery: QueuedWebhookDelivery) -> datetime:
-        return self._as_utc(delivery.created_at) + timedelta(seconds=self._max_delivery_age_seconds)
-
-    def _delivery_age_seconds(
-        self,
-        delivery: QueuedWebhookDelivery,
-        now: datetime,
-    ) -> float:
-        return max(0.0, (self._as_utc(now) - self._as_utc(delivery.created_at)).total_seconds())
-
-    @staticmethod
-    def _as_utc(value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
-    @staticmethod
-    def _terminal_reason(
-        reason: WebhookDispatchReason | None,
-    ) -> WebhookFailureReason:
-        if reason is WebhookDispatchReason.permanent_http_response:
-            return WebhookFailureReason.permanent_http_response
-        if reason is WebhookDispatchReason.unsafe_url:
-            return WebhookFailureReason.unsafe_url
-        return WebhookFailureReason.non_retryable_failure

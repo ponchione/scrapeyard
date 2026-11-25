@@ -1,6 +1,7 @@
+import pytest
+
 from scrapeyard.engine.scrape_models import TargetResult, TargetStatus
-from scrapeyard.models.job import JobStatus
-from scrapeyard.queue.worker import _format_output
+from tests.unit.worker_helpers import make_config_mock, make_target, run_scrape_task
 
 
 def test_target_result_coerces_string_status_to_enum():
@@ -19,27 +20,20 @@ def test_target_result_rejects_unknown_status_string():
         raise AssertionError("Expected ValueError for unknown target status")
 
 
-def test_format_output_serializes_target_status_enum_values():
+@pytest.mark.asyncio
+async def test_format_output_serializes_target_status_enum_values():
     result = TargetResult(
         url="https://example.com",
         status=TargetStatus.success,
         data=[{"title": "Example"}],
     )
-
-    class _Cfg:
-        project = "test"
-        name = "job"
-
-        class output:
-            group_by = "target"
-
-    payload = _format_output(
-        _Cfg(),
-        [result],
-        "job-1",
-        final_status=JobStatus.complete,
-        all_errors=[],
+    cfg = make_config_mock(
+        targets=[make_target("https://example.com")],
+        group_by="target",
     )
+
+    outcome = await run_scrape_task(cfg, [result], job_id="job-1")
+    payload = outcome.saved_artifact
 
     assert payload["targets"][0]["status"] == "success"
     assert payload["results"]["example.com"]["status"] == "success"

@@ -16,7 +16,7 @@ from scrapeyard.api.dependencies import (
 from scrapeyard.common.settings import get_settings
 from scrapeyard.engine.scraper import TargetResult
 from scrapeyard.models.job import ErrorType
-from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
+from tests.factories import list_pending_webhook_deliveries
 from tests.integration.conftest import poll_until_ready
 
 SENTINEL = "deployment-secret-sentinel-91a7"
@@ -109,7 +109,7 @@ async def test_secret_sentinel_absent_from_all_diagnostic_boundaries(
     assert SENTINEL not in errors.text
     assert SENTINEL.encode() not in (Path(get_settings().db_dir) / "errors.db").read_bytes()
 
-    deliveries = await SQLiteWebhookOutboxStore().list_pending()
+    deliveries = await list_pending_webhook_deliveries()
     matching_payloads = [
         delivery.payload for delivery in deliveries if delivery.job_id == job_id
     ]

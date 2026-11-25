@@ -22,6 +22,7 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookFailureReason,
 )
 from scrapeyard.webhook.payload import deterministic_delivery_id
+from tests.factories import fetch_webhook_delivery, list_pending_webhook_deliveries
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 
@@ -155,7 +156,7 @@ async def test_startup_repairs_missing_intent_and_is_idempotent(
         run_id="run-1",
         event="job.complete",
     )
-    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
+    delivery = await fetch_webhook_delivery(delivery_id)
     assert first.repaired == 1
     assert second.inspected == 0
     assert delivery is not None
@@ -202,13 +203,13 @@ async def test_reconciliation_leaves_existing_delivery_state_unchanged(
             last_error="HTTP 400",
             attempts=3,
         )
-    before = await outbox.get_delivery(delivery_id)
+    before = await fetch_webhook_delivery(delivery_id)
 
     summary = await reconcile_terminal_webhook_intents(
         job_store=store,
         result_store=results,
     )
-    after = await outbox.get_delivery(delivery_id)
+    after = await fetch_webhook_delivery(delivery_id)
 
     assert summary.inspected == 0
     assert before is not None and after is not None
@@ -233,7 +234,7 @@ async def test_missing_result_metadata_uses_jobs_db_snapshot(
         run_id="run-1",
         event="job.complete",
     )
-    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
+    delivery = await fetch_webhook_delivery(delivery_id)
     assert summary.metadata_missing == 1
     assert summary.repaired == 1
     assert delivery is not None
@@ -272,7 +273,7 @@ async def test_reconciliation_creates_no_intent_when_not_applicable(
     )
 
     assert summary.not_required == 1
-    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    assert await list_pending_webhook_deliveries() == []
 
 
 async def test_reconciliation_converges_running_parent_to_terminal_run(
@@ -314,7 +315,7 @@ async def test_stale_running_recovery_eventually_repairs_failed_intent(
         event="job.failed",
     )
     assert summary.repaired == 1
-    assert await SQLiteWebhookOutboxStore().get_delivery(delivery_id) is not None
+    assert await fetch_webhook_delivery(delivery_id) is not None
 
 
 async def test_stale_scheduled_run_uses_snapshot_after_future_config_update(
@@ -376,7 +377,7 @@ async def test_stale_scheduled_run_uses_snapshot_after_future_config_update(
         run_id="run-1",
         event="job.failed",
     )
-    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
+    delivery = await fetch_webhook_delivery(delivery_id)
     assert updated.action is ScheduledJobMutationAction.updated
     assert first.repaired == 1
     assert second.inspected == 0
@@ -402,7 +403,7 @@ async def test_parent_config_change_does_not_replace_run_snapshot(
     )
 
     assert summary.repaired == 1
-    pending = await SQLiteWebhookOutboxStore().list_pending()
+    pending = await list_pending_webhook_deliveries()
     assert len(pending) == 1
     assert pending[0].url == "https://hooks.example.com/recovery"
 
@@ -440,7 +441,7 @@ async def test_bad_candidate_does_not_block_later_candidate_in_same_pass(
         run_id="run-b",
         event="job.complete",
     )
-    assert await SQLiteWebhookOutboxStore().get_delivery(repaired_id) is not None
+    assert await fetch_webhook_delivery(repaired_id) is not None
 
 
 async def test_bad_candidate_is_rotated_behind_later_bounded_batch(
@@ -484,7 +485,7 @@ async def test_bad_candidate_is_rotated_behind_later_bounded_batch(
         run_id="run-b",
         event="job.complete",
     )
-    assert await SQLiteWebhookOutboxStore().get_delivery(repaired_id) is not None
+    assert await fetch_webhook_delivery(repaired_id) is not None
 
 
 async def test_unloadable_config_without_webhook_reconciles_as_not_required(
@@ -505,7 +506,7 @@ async def test_unloadable_config_without_webhook_reconciles_as_not_required(
 
     assert summary.inspected == 1
     assert summary.not_required == 1
-    assert await SQLiteWebhookOutboxStore().list_pending() == []
+    assert await list_pending_webhook_deliveries() == []
     later = await reconcile_terminal_webhook_intents(
         job_store=store,
         result_store=_result_store(),

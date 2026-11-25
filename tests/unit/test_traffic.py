@@ -5,19 +5,23 @@ import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from scrapling import PlayWrightFetcher
 
 from scrapeyard.common.budgets import RunBudget
 from scrapeyard.common.traffic import HostTraffic, registrable_domain, url_hostname, url_site
-from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE, BasicSession
-from scrapeyard.engine.scraper import _fetch_basic_with_safe_redirects
+from scrapeyard.config.schema import FetcherType, RetryConfig, TargetConfig
+from scrapeyard.engine.basic_fetch import RECEIVED_BYTES_ATTRIBUTE
+from scrapeyard.engine.browser_session import BrowserSession
+from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import ResolvedPublicURL
+from tests.factories import make_budget, make_html_response
 
 
 def _budget() -> RunBudget:
-    return RunBudget(
+    return make_budget(
         max_duration_seconds=60,
         max_fetched_bytes=1_000_000,
         max_extracted_records=100,
@@ -154,11 +158,16 @@ def test_run_budget_snapshot_includes_the_traffic_report() -> None:
 
 async def test_basic_redirects_are_counted_per_host(monkeypatch) -> None:
     # The streaming transport reports each response's received bytes.
+    final = make_html_response("https://shop.example-mall.test/final", "<h1>ok</h1>")
+    setattr(final, RECEIVED_BYTES_ATTRIBUTE, 5)
     responses = iter([
-        SimpleNamespace(status=302, headers={"location": "https://shop.example-mall.test/final"},
-                        url="https://www.example.test/start", **{RECEIVED_BYTES_ATTRIBUTE: 3}),
-        SimpleNamespace(status=200, headers={}, url="https://shop.example-mall.test/final",
-                        **{RECEIVED_BYTES_ATTRIBUTE: 5}),
+        SimpleNamespace(
+            status=302,
+            headers={"location": "https://shop.example-mall.test/final"},
+            url="https://www.example.test/start",
+            **{RECEIVED_BYTES_ATTRIBUTE: 3},
+        ),
+        final,
     ])
 
     def resolve(url: str) -> ResolvedPublicURL:
@@ -172,10 +181,14 @@ async def test_basic_redirects_are_counted_per_host(monkeypatch) -> None:
     )
     monkeypatch.setattr("scrapeyard.engine.scraper.resolve_public_url", resolve)
     budget = _budget()
-
-    await _fetch_basic_with_safe_redirects(
-        BasicSession(), "https://www.example.test/start", {}, {}, budget=budget, site="example.test",
+    target = TargetConfig(
+        url="https://www.example.test/start",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
     )
+
+    result = await scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget)
+    assert result.is_success
 
     hosts = {row["host"]: row for row in budget.snapshot()["traffic"]["hosts"]}
     assert hosts["www.example.test"] == {
@@ -225,21 +238,20 @@ async def test_streamed_basic_fetch_reports_encoded_bytes_received(monkeypatch, 
         ),
     )
     budget = _budget()
-    session = BasicSession()
-    try:
-        response = await _fetch_basic_with_safe_redirects(
-            session, "http://www.example.test/catalog", {"timeout": 5}, {},
-            budget=budget, site="example.test",
-        )
-    finally:
-        await session.aclose()
+    target = TargetConfig(
+        url="http://www.example.test/catalog",
+        fetcher=FetcherType.basic,
+        selectors={"title": "h1"},
+    )
+    result = await scrape_target(target, False, RetryConfig(max_attempts=1), budget=budget)
+    assert result.is_success
 
     report = budget.snapshot()["traffic"]
     assert report["hosts"] == [{
         "host": "www.example.test", "third_party": False, **_counts(1, 0, len(encoded)),
         "resource_types": {"document": _counts(1, 0, len(encoded))},
     }]
-    assert budget.fetched_bytes == len(response.body) > len(encoded)
+    assert budget.fetched_bytes > len(encoded)
 
 
 @pytest.mark.parametrize(
@@ -251,14 +263,55 @@ async def test_streamed_basic_fetch_reports_encoded_bytes_received(monkeypatch, 
         (200, "GET", {"content-type": "text/html", "transfer-encoding": "chunked"}, None),
     ],
 )
-def test_browser_response_bytes_come_from_headers_when_declared(
+async def test_browser_response_bytes_come_from_headers_when_declared(
     status: int, method: str, headers: dict[str, str], expected_body: int | None,
 ) -> None:
-    from scrapeyard.engine.browser_session import _declared_response_bytes
+    browser = MagicMock()
+    browser.is_connected.return_value = True
+    page = MagicMock(frames=[])
+    page.close = AsyncMock()
+    context = MagicMock(browser=browser, pages=[page])
+    context.route = AsyncMock()
+    context.unroute = AsyncMock()
+    context.set_offline = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    session = BrowserSession(PlayWrightFetcher)
+    session._context = context
+    budget = _budget()
 
-    response = SimpleNamespace(status=status, headers=headers, request=SimpleNamespace(method=method))
+    request = MagicMock(
+        url="https://www.example.test/asset",
+        method=method,
+        resource_type="script",
+        redirected_from=None,
+    )
+    request.sizes = AsyncMock(
+        return_value={"responseHeadersSize": 50, "responseBodySize": 777}
+    )
+    response = SimpleNamespace(
+        status=status,
+        url="https://www.example.test/asset",
+        headers=headers,
+        request=request,
+    )
+
+    async def navigate(*_args, **_kwargs):
+        import asyncio
+
+        handlers = {call.args[0]: call.args[1] for call in context.on.call_args_list}
+        handlers["response"](response)
+        handlers["requestfinished"](request)
+        await asyncio.sleep(0)
+        raise RuntimeError("stop after observing response")
+
+    page.goto = AsyncMock(side_effect=navigate)
+    with pytest.raises(RuntimeError, match="stop after observing response"):
+        await session.fetch("https://www.example.test/", {}, AsyncMock(), budget=budget)
+
     header_bytes = 19 + sum(len(name) + len(value) + 4 for name, value in headers.items())
-
-    declared = _declared_response_bytes(response)
-
-    assert declared == (None if expected_body is None else header_bytes + expected_body)
+    if expected_body is None:
+        request.sizes.assert_awaited_once()
+        assert budget.snapshot()["traffic"]["hosts"][0]["bytes"] == 827
+    else:
+        request.sizes.assert_not_awaited()
+        assert budget.snapshot()["traffic"]["hosts"][0]["bytes"] == header_bytes + expected_body

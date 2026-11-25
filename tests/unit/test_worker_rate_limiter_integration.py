@@ -1,85 +1,99 @@
-"""Tests that scrape_task uses the injected rate_limiter."""
+"""Tests that scrape_task uses the injected rate_limiter with real stores and configs."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from scrapeyard.config.schema import FetcherType
+from scrapeyard.engine.resilience import CircuitBreaker
 from scrapeyard.engine.scraper import TargetResult
+from scrapeyard.models.job import JobStatus
 from scrapeyard.queue.worker import scrape_task
-from tests.unit.worker_helpers import make_job, make_settings_mock
+from scrapeyard.storage.database import init_db
+from scrapeyard.storage.error_store import SQLiteErrorStore
+from scrapeyard.storage.job_store import SQLiteJobStore
+from scrapeyard.storage.result_store import LocalResultStore
+from tests.factories import make_job_model, make_scrape_yaml
+
+
+class RecordingRateLimiter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    async def acquire(self, domain: str, min_interval: float) -> None:
+        self.calls.append((domain, min_interval))
 
 
 @pytest.mark.asyncio
-async def test_scrape_task_passes_rate_limiter_to_request_boundary():
-    job = make_job(job_id="j-rate", name="rate-test")
-    job_store = AsyncMock()
-    job_store.get_job.return_value = job
-    job_store.claim_run.return_value = True
-    job_store.queue_run.return_value = True
-
-    rate_limiter = AsyncMock()
-    rate_limiter.acquire = AsyncMock()
-
-    success = TargetResult(
-        url="https://example.com", status="success", data=[{"title": "T"}],
+async def test_scrape_task_passes_rate_limiter_to_request_boundary(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    result_store = LocalResultStore(str(tmp_path / "results"), job_store)
+    error_store = SQLiteErrorStore()
+    config_yaml = make_scrape_yaml(
+        project="test",
+        name="rate-test",
+        url="https://example.com",
+        extra_top_level="execution:\n  domain_rate_limit: 3\n",
     )
+    job = make_job_model(
+        job_id="j-rate",
+        project="test",
+        name="rate-test",
+        config_yaml=config_yaml,
+        status=JobStatus.queued,
+    )
+    await job_store.save_job(job)
+    rate_limiter = RecordingRateLimiter()
+    observed_kwargs: dict[str, object] = {}
 
-    scrape = AsyncMock(return_value=success)
-    with patch("scrapeyard.queue.worker.load_config") as mock_load, \
-         patch("scrapeyard.queue.worker.scrape_target", new=scrape), \
-         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        cfg = MagicMock()
-        cfg.project = "test"
-        cfg.name = "rate-test"
-        cfg.resolved_targets.return_value = [
-            MagicMock(
-                url="https://example.com",
-                fetcher=MagicMock(value="basic"),
-                proxy=None,
-            ),
-        ]
-        cfg.execution.concurrency = 1
-        cfg.execution.deadline_at = None
-        cfg.execution.delay_between = 0
-        cfg.execution.domain_rate_limit = 3
-        cfg.execution.fail_strategy = MagicMock(value="partial")
-        cfg.adaptive = None
-        cfg.schedule = None
-        cfg.retry = MagicMock()
-        cfg.validation = MagicMock()
-        cfg.webhook = None
-        cfg.output.group_by = MagicMock(value="target")
-        cfg.proxy = None
-        mock_load.return_value = cfg
-        mock_settings.return_value = make_settings_mock(adaptive_dir="/tmp/adapt")
+    async def fake_scrape(*_args, **kwargs):
+        observed_kwargs.update(kwargs)
+        return TargetResult(
+            url="https://example.com", status="success", data=[{"title": "T"}],
+        )
 
+    with patch("scrapeyard.queue.worker.scrape_target", new=fake_scrape):
         await scrape_task(
             job.job_id,
-            "project: test\nname: rate-test\ntarget:\n  url: https://example.com\n  selectors:\n    t: h1",
+            config_yaml,
             job_store=job_store,
-            result_store=AsyncMock(),
-            error_store=AsyncMock(),
-            circuit_breaker=MagicMock(),
+            result_store=result_store,
+            error_store=error_store,
+            circuit_breaker=CircuitBreaker(5, 60),
             rate_limiter=rate_limiter,
         )
 
-    rate_limiter.acquire.assert_not_awaited()
-    assert scrape.await_args.kwargs["rate_limiter"] is rate_limiter
-    assert scrape.await_args.kwargs["domain_rate_limit"] == 3
+    assert rate_limiter.calls == []
+    assert observed_kwargs["rate_limiter"] is rate_limiter
+    assert observed_kwargs["domain_rate_limit"] == 3
 
 
 @pytest.mark.asyncio
-async def test_browser_permit_is_acquired_before_request_rate_limit():
-    job = make_job(job_id="j-browser-rate", name="browser-rate-test")
-    job_store = AsyncMock()
-    job_store.get_job.return_value = job
-    job_store.claim_run.return_value = True
-    rate_limiter = AsyncMock()
+async def test_browser_permit_is_acquired_before_request_rate_limit(tmp_path):
+    await init_db(str(tmp_path / "db"))
+    job_store = SQLiteJobStore()
+    result_store = LocalResultStore(str(tmp_path / "results"), job_store)
+    error_store = SQLiteErrorStore()
+    config_yaml = make_scrape_yaml(
+        project="test",
+        name="browser-rate-test",
+        url="https://example.com",
+        extra_top_level="execution:\n  domain_rate_limit: 3\n",
+        extra_target="  fetcher: dynamic\n",
+    )
+    job = make_job_model(
+        job_id="j-browser-rate",
+        project="test",
+        name="browser-rate-test",
+        config_yaml=config_yaml,
+        status=JobStatus.queued,
+    )
+    await job_store.save_job(job)
+    rate_limiter = RecordingRateLimiter()
     permit_entered = asyncio.Event()
     release_permit = asyncio.Event()
 
@@ -90,63 +104,32 @@ async def test_browser_permit_is_acquired_before_request_rate_limit():
             await release_permit.wait()
             yield
 
-    success = TargetResult(
-        url="https://example.com",
-        status="success",
-        data=[{"title": "T"}],
-    )
-
-    async def scrape(*_args, **kwargs):
+    async def fake_scrape(*_args, **kwargs):
         assert permit_entered.is_set()
         await kwargs["rate_limiter"].acquire(
             "example.com",
             kwargs["domain_rate_limit"],
         )
-        return success
+        return TargetResult(
+            url="https://example.com", status="success", data=[{"title": "T"}],
+        )
 
-    with patch("scrapeyard.queue.worker.load_config") as mock_load, \
-         patch("scrapeyard.queue.worker.scrape_target", new=scrape), \
-         patch("scrapeyard.queue.worker.get_settings") as mock_settings:
-        cfg = MagicMock()
-        cfg.project = "test"
-        cfg.name = "browser-rate-test"
-        cfg.resolved_targets.return_value = [
-            MagicMock(
-                url="https://example.com",
-                fetcher=FetcherType.dynamic,
-                proxy=None,
-            ),
-        ]
-        cfg.execution.concurrency = 1
-        cfg.execution.deadline_at = None
-        cfg.execution.delay_between = 0
-        cfg.execution.domain_rate_limit = 3
-        cfg.execution.fail_strategy = MagicMock(value="partial")
-        cfg.adaptive = None
-        cfg.schedule = None
-        cfg.retry = MagicMock()
-        cfg.validation = MagicMock()
-        cfg.webhook = None
-        cfg.output.group_by = MagicMock(value="target")
-        cfg.proxy = None
-        mock_load.return_value = cfg
-        mock_settings.return_value = make_settings_mock(adaptive_dir="/tmp/adapt")
-
+    with patch("scrapeyard.queue.worker.scrape_target", new=fake_scrape):
         task = asyncio.create_task(
             scrape_task(
                 job.job_id,
-                "project: test\nname: browser-rate-test",
+                config_yaml,
                 job_store=job_store,
-                result_store=AsyncMock(),
-                error_store=AsyncMock(),
-                circuit_breaker=MagicMock(),
+                result_store=result_store,
+                error_store=error_store,
+                circuit_breaker=CircuitBreaker(5, 60),
                 rate_limiter=rate_limiter,
                 browser_limiter=BlockingBrowserLimiter(),
             )
         )
         await asyncio.wait_for(permit_entered.wait(), timeout=1)
-        rate_limiter.acquire.assert_not_awaited()
+        assert rate_limiter.calls == []
         release_permit.set()
         await task
 
-    rate_limiter.acquire.assert_awaited_once_with("example.com", 3)
+    assert rate_limiter.calls == [("example.com", 3)]

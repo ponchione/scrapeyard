@@ -24,8 +24,8 @@ from scrapeyard.queue.terminal_reconciliation import (
 from scrapeyard.storage.database import get_db, init_db
 from scrapeyard.storage.job_store import SQLiteJobStore
 from scrapeyard.storage.types import StaleQueuedJob
-from scrapeyard.storage.webhook_outbox import SQLiteWebhookOutboxStore
 from scrapeyard.webhook.payload import deterministic_delivery_id
+from tests.factories import fetch_webhook_delivery
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
 TIMEOUT = 300
@@ -518,8 +518,8 @@ webhook:
         run_id="run-adhoc",
         event="job.failed",
     )
-    delivery = await SQLiteWebhookOutboxStore().get_delivery(delivery_id)
-    count, _last_run_at = await store.get_job_run_stats("job-adhoc")
+    delivery = await fetch_webhook_delivery(delivery_id)
+    _job, count, _last_run_at = await store.get_job_with_stats("job-adhoc")
     assert summary.failed == 1
     assert terminal.repaired == 1
     assert delivery is not None

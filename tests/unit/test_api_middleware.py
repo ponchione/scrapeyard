@@ -13,7 +13,6 @@ from scrapeyard.api.middleware import (
     HostHeaderMiddleware,
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
-    _api_key_is_valid,
 )
 from scrapeyard.common.request_hosts import parse_allowed_hosts
 
@@ -202,8 +201,34 @@ async def test_rate_limit_duplicate_api_key_headers_fall_back_to_client_ip() -> 
         assert (await client.get("/limited", headers={"X-API-Key": "key-a"})).status_code == 200
 
 
-def test_api_key_validation_treats_non_ascii_input_as_invalid() -> None:
-    assert _api_key_is_valid("kéy", {"key"}) is False
+@pytest.mark.asyncio
+async def test_api_key_validation_treats_non_ascii_input_as_invalid() -> None:
+    app = _auth_app(keys={"key"})
+    responses: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        responses.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/protected",
+        "raw_path": b"/protected",
+        "query_string": b"",
+        "headers": [(b"x-api-key", "kéy".encode("latin-1"))],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    await app(scope, receive, send)
+
+    start = next(msg for msg in responses if msg["type"] == "http.response.start")
+    assert start["status"] == 401
 
 
 @pytest.mark.asyncio

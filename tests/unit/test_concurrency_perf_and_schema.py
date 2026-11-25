@@ -20,7 +20,7 @@ import scrapeyard.api.middleware as middleware_module
 import scrapeyard.engine.detection as detection_module
 import scrapeyard.engine.selectors as selectors_module
 import scrapeyard.engine.url_guard as url_guard_module
-import scrapeyard.queue.worker as worker_module
+import scrapeyard.queue.worker_output as worker_output_module
 import scrapeyard.storage.webhook_outbox as outbox_module
 from scrapeyard.api.middleware import RateLimitMiddleware
 from scrapeyard.api.response_models import ResultResponse
@@ -53,6 +53,7 @@ from scrapeyard.storage.webhook_outbox import (
     WebhookDeliveryCreate,
 )
 from scrapeyard.webhook.dispatcher import HttpWebhookDispatcher
+from tests.factories import seed_webhook_delivery
 
 
 def _make_job(
@@ -172,7 +173,7 @@ async def test_completing_one_of_50_due_webhooks_does_not_redecrypt_other_49(
         now = datetime.now(timezone.utc)
         for index in range(50):
             delivery_id = f"del-{index:03d}"
-            await outbox.enqueue_delivery(
+            await seed_webhook_delivery(
                 WebhookDeliveryCreate(
                     delivery_id=delivery_id,
                     job_id=f"job-{index:03d}",
@@ -449,7 +450,7 @@ def test_actual_worker_payload_validates_against_result_response_strict_schema(
         max_browser_debug_bytes=1_000,
     )
 
-    worker_payload = worker_module._materialize_output_artifact(
+    worker_payload = worker_output_module.materialize_output_artifact(
         config,
         [result],
         "job-1",
@@ -562,15 +563,13 @@ async def test_worker_skips_redundant_full_graph_compact_json_size_and_store_enf
         await job_store.save_job(job)
 
         full_graph_calls = 0
-        real_size = worker_module.compact_json_size
+        real_size = worker_output_module.compact_json_size
 
         def spy_compact_json_size(data: Any) -> int:
             nonlocal full_graph_calls
             if isinstance(data, dict) and "results" in data and "targets" in data:
                 full_graph_calls += 1
             return real_size(data)
-
-        monkeypatch.setattr(worker_module, "compact_json_size", spy_compact_json_size)
 
         config = ScrapeConfig.model_validate(
             {
@@ -589,7 +588,7 @@ async def test_worker_skips_redundant_full_graph_compact_json_size_and_store_enf
             max_browser_debug_bytes=1_000,
         )
 
-        payload = worker_module._materialize_output_artifact(
+        payload = worker_output_module.materialize_output_artifact(
             config,
             [result],
             "job-1",
@@ -597,6 +596,7 @@ async def test_worker_skips_redundant_full_graph_compact_json_size_and_store_enf
             [],
             publish_results=True,
             budget=budget,
+            size_fn=spy_compact_json_size,
         )
         assert full_graph_calls == 0
 

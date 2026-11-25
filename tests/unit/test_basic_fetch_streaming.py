@@ -23,15 +23,16 @@ from scrapling import Fetcher
 
 from scrapeyard.common.budgets import BudgetExceeded, BudgetLimitName, RunBudget
 from scrapeyard.config.schema import RetryConfig, TargetConfig
-from scrapeyard.engine.basic_fetch import _response_cookie_metadata, fetch_streaming_response
+from scrapeyard.engine.basic_fetch import fetch_streaming_response
 from scrapeyard.engine.scraper import scrape_target
 from scrapeyard.engine.url_guard import ResolvedPublicURL
 from scrapeyard.models.job import ErrorType
 from scrapeyard.runtime.metrics import REGISTRY
+from tests.factories import make_budget
 
 
 def _budget(*, fetched_bytes: int = 1024, duration: float = 5) -> RunBudget:
-    return RunBudget(
+    return make_budget(
         max_duration_seconds=duration,
         max_fetched_bytes=fetched_bytes,
         max_extracted_records=100,
@@ -57,15 +58,31 @@ def _retry_metric(outcome: str) -> float:
     ) or 0.0
 
 
-def test_valueless_response_cookie_is_normalized_in_metadata() -> None:
-    response = httpx.Response(
-        200,
-        headers={"Set-Cookie": "flag"},
-        request=httpx.Request("GET", "https://example.test/"),
-    )
+@pytest.mark.asyncio
+async def test_valueless_response_cookie_is_normalized_in_metadata() -> None:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _read_request(reader)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Set-Cookie: flag\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n\r\nok"
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
 
-    assert [(cookie.name, cookie.value) for cookie in response.cookies.jar] == [("flag", None)]
-    assert _response_cookie_metadata(response.cookies) == {"flag": ""}
+    server, url = await _request_url(handler)
+    try:
+        response = await fetch_streaming_response(Fetcher, url, {"timeout": 5}, budget=None)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert response.cookies == {"flag": ""}
 
 
 @pytest.mark.parametrize("proxy_url", [None, "http://proxy.example:8080"])
@@ -507,11 +524,11 @@ async def test_busy_run_threads_do_not_time_out_a_page_that_has_arrived(monkeypa
     monkeypatch.setattr(
         "scrapeyard.api.dependencies.get_run_thread_pool", functools.cache(lambda: pool)
     )
-    busy = asyncio.ensure_future(pool.run(time.sleep, 1.5))
+    busy = asyncio.ensure_future(pool.run(time.sleep, 0.2))
     server, url = await _serve_encoded("identity", b"<html><body><h1>arrived</h1></body></html>")
     try:
         response = await fetch_streaming_response(
-            Fetcher, url, {"timeout": 0.5, "stealthy_headers": False}, budget=_budget(),
+            Fetcher, url, {"timeout": 0.06, "stealthy_headers": False}, budget=_budget(),
         )
     finally:
         server.close()
@@ -661,7 +678,7 @@ def _trickling_handler(prefix: bytes, unit: bytes, closed: asyncio.Event):
             for _ in range(200):
                 writer.write(unit)
                 await writer.drain()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.015)
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -691,7 +708,7 @@ async def test_trickled_response_times_out_at_the_total_timeout(prefix, unit) ->
                 fetch_streaming_response(
                     Fetcher,
                     url,
-                    {"timeout": 0.3, "stealthy_headers": False},
+                    {"timeout": 0.08, "stealthy_headers": False},
                     budget=_budget(fetched_bytes=1 << 20, duration=30),
                 ),
                 timeout=5,
@@ -702,7 +719,7 @@ async def test_trickled_response_times_out_at_the_total_timeout(prefix, unit) ->
         server.close()
         await server.wait_closed()
 
-    assert 0.3 <= elapsed < 2
+    assert 0.07 <= elapsed < 2
 
 
 async def test_trickled_response_times_out_without_a_run_budget() -> None:
@@ -716,7 +733,7 @@ async def test_trickled_response_times_out_without_a_run_budget() -> None:
                 fetch_streaming_response(
                     Fetcher,
                     url,
-                    {"timeout": 0.3, "stealthy_headers": False},
+                    {"timeout": 0.08, "stealthy_headers": False},
                     budget=None,
                 ),
                 timeout=5,
@@ -737,7 +754,7 @@ async def test_trickled_basic_fetch_fails_the_target_as_timeout(monkeypatch, tmp
     )
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.get_settings",
-        lambda: SimpleNamespace(basic_fetch_timeout_seconds=0.3, adaptive_dir=str(tmp_path)),
+        lambda: SimpleNamespace(basic_fetch_timeout_seconds=0.08, adaptive_dir=str(tmp_path)),
     )
     monkeypatch.setattr(
         "scrapeyard.engine.scraper.resolve_public_url",
@@ -773,8 +790,8 @@ async def test_run_deadline_still_wins_when_it_ends_before_the_request_timeout()
                 fetch_streaming_response(
                     Fetcher,
                     url,
-                    {"timeout": 0.3, "stealthy_headers": False},
-                    budget=_budget(duration=0.3),
+                    {"timeout": 0.08, "stealthy_headers": False},
+                    budget=_budget(duration=0.08),
                 ),
                 timeout=5,
             )
