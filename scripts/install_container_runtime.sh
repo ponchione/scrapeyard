@@ -11,6 +11,9 @@ set -euo pipefail
 # docs/DEPLOYMENT.md, and raise the production host with them.
 DOCKER_VERSION="29.9.2"
 CONTAINERD_VERSION="2.4.2"
+# Pin the packaging revision too: containerd.io packaging revisions bump the
+# bundled runc (2.4.2-3 carries runc 1.5.2; 2.4.2-4 moved it to 1.5.3).
+CONTAINERD_PACKAGE_REVISION="3"
 COMPOSE_VERSION="5.6.0"
 # The runc inside that containerd.io package. It starts every container, and
 # the seccomp profile has to let it through.
@@ -79,17 +82,28 @@ add_repository() {
 }
 
 # The repository's package version for an upstream version: an epoch in front
-# and a packaging revision behind, and the revision is not always 1.
+# and a packaging revision behind, and the revision is not always 1. When a
+# packaging revision is given, require that exact revision rather than taking a
+# newer one (e.g. containerd.io revisions that bump the bundled runc).
 package_version() {
-  local package="$1" upstream="$2" version
-  version="$(apt-cache madison "$package" | awk -F'|' -v want="$upstream" '
+  local package="$1" upstream="$2" revision="${3:-}" version
+  version="$(apt-cache madison "$package" | awk -F'|' -v want="$upstream" -v rev="$revision" '
     {
       gsub(/[[:space:]]/, "", $2)
       bare = $2
       sub(/^[0-9]+:/, "", bare)
-      if (index(bare, want "-") == 1) { print $2; exit }
+      if (rev != "") {
+        prefix = want "-" rev
+        if (bare == prefix || index(bare, prefix "~") == 1) { print $2; exit }
+      } else if (index(bare, want "-") == 1) {
+        print $2; exit
+      }
     }')"
-  [[ -n "$version" ]] || fail "Docker's repository does not offer $package $upstream for this release"
+  if [[ -n "$revision" ]]; then
+    [[ -n "$version" ]] || fail "Docker's repository does not offer $package ${upstream}-${revision} for this release"
+  else
+    [[ -n "$version" ]] || fail "Docker's repository does not offer $package $upstream for this release"
+  fi
   printf '%s\n' "$version"
 }
 
@@ -103,7 +117,7 @@ add_repository
 apt-get update -q -o Acquire::Retries=3
 engine_package="$(package_version docker-ce "$DOCKER_VERSION")"
 client_package="$(package_version docker-ce-cli "$DOCKER_VERSION")"
-containerd_package="$(package_version containerd.io "$CONTAINERD_VERSION")"
+containerd_package="$(package_version containerd.io "$CONTAINERD_VERSION" "$CONTAINERD_PACKAGE_REVISION")"
 compose_package="$(package_version docker-compose-plugin "$COMPOSE_VERSION")"
 # A runner carries a newer or an older Docker, and the image may hold it.
 apt-get install -y -q --no-install-recommends --allow-downgrades --allow-change-held-packages \

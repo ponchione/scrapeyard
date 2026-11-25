@@ -3,15 +3,8 @@
 # fixes. scripts/run_container_security_scan.sh applies this file to those
 # images only. Each entry says why it does not apply and expires; after that
 # date the gate fails again until the image digest is refreshed.
-vulnerabilities:
-  - id: CVE-2026-84782
-    statement: >-
-      OpenSSL information disclosure through DTLS handshake retransmission,
-      in libssl3 3.0.22-1~deb12u1 of redis:7.4.11-bookworm (sha256:44960b31…,
-      built 2026-10-21). Debian's fix, 3.0.22-1~deb12u2, reached the
-      security archive on 2026-10-26, and on 2026-11-02 the tag still
-      resolves to that build. Redis speaks TCP only and runs here without
-      TLS, so it never makes a DTLS handshake. The application image takes
-      the fix from Debian snapshot 20261026T040329Z. Replace the digest when
-      the tag is rebuilt, and remove this entry.
-    expired_at: 2026-11-16
+#
+# Empty since 2026-11-25: CVE-2026-84782 and CVE-2026-109518 were closed by
+# moving Redis to redis:7.4.12-bookworm and the egress probe to
+# python:3.12.16-slim-bookworm.
+vulnerabilities: []
