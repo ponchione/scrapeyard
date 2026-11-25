@@ -71,8 +71,12 @@ _MADISON = {
     "docker-ce": ("5:29.9.2-1~ubuntu.24.04~noble", "5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
     "docker-ce-cli": ("5:29.9.2-1~ubuntu.24.04~noble", "5:29.9.0-1~ubuntu.24.04~noble", "5:28.5.2-1~ubuntu.24.04~noble"),
     # The packaging revision is not always 1, and the newest comes first.
+    # Newer revisions of 2.4.2 (e.g. -4 with runc 1.5.3) or prefix-colliding
+    # revisions (-30) must not override the pinned -3 revision.
     "containerd.io": (
         "2.4.10-1~ubuntu.24.04~noble",
+        "2.4.2-30~ubuntu.24.04~noble",
+        "2.4.2-4~ubuntu.24.04~noble",
         "2.4.2-3~ubuntu.24.04~noble",
         "2.4.2-1~ubuntu.24.04~noble",
         "2.4.1-2~ubuntu.24.04~noble",
@@ -136,7 +140,7 @@ def test_installer_installs_the_pinned_packages_and_checks_what_runs(tmp_path: P
     install = next(line for line in log.splitlines() if line.startswith("apt-get install "))
     assert "docker-ce=5:29.9.2-1~ubuntu.24.04~noble" in install
     assert "docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble" in install
-    # The newest packaging of the pinned version, and not 2.4.10 by prefix.
+    # The pinned packaging revision of containerd.io, not 2.4.10, 2.4.2-30, or 2.4.2-4.
     assert "containerd.io=2.4.2-3~ubuntu.24.04~noble" in install
     assert "docker-compose-plugin=5.6.0-1~ubuntu.24.04~noble" in install
     assert "--allow-downgrades" in install
@@ -229,6 +233,25 @@ def test_installer_stops_when_the_repository_lacks_a_pinned_version(tmp_path: Pa
 
     assert result.returncode == 1
     assert "does not offer docker-compose-plugin 5.6.0" in result.stderr
+    assert "apt-get install" not in log
+
+
+def test_installer_stops_when_the_repository_lacks_the_pinned_containerd_revision(
+    tmp_path: Path,
+) -> None:
+    offered = {
+        **_MADISON,
+        "containerd.io": (
+            "2.4.2-30~ubuntu.24.04~noble",
+            "2.4.2-4~ubuntu.24.04~noble",
+            "2.4.2-1~ubuntu.24.04~noble",
+        ),
+    }
+
+    result, log, _ = _run(tmp_path, offered=offered)
+
+    assert result.returncode == 1
+    assert "does not offer containerd.io 2.4.2-3" in result.stderr
     assert "apt-get install" not in log
 
 
