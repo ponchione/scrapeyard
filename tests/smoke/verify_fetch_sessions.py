@@ -132,15 +132,19 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
                 budget=run_budget,
             )
 
+    def single_title(result):
+        assert result.is_success and len(result.data) == 1, result
+        return result.data[0]["title"]
+
     try:
         with patch.object(browser_debug, "_guarded_async_intercept_route", observed_guard):
             first_budget, second_budget = budget(), budget()
             first = await fetch(ORIGIN + "/first", first_budget)
-            assert first.is_success and first.data == [{"title": "empty"}], first
+            assert single_title(first) == "empty", first
             context = session._context
             browser = context.browser
             second = await fetch(ORIGIN + "/second", second_budget)
-            assert second.is_success and second.data == [{"title": "present"}], second
+            assert single_title(second) == "present", second
             assert session._context is context
             assert not context.pages  # No earlier page callbacks remain alive.
             if fetcher is PlayWrightFetcher:
@@ -160,8 +164,16 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             ]
             assert all(b is first_budget for url, b in budgets_seen if url.endswith("/first"))
             assert all(b is second_budget for url, b in budgets_seen if url.endswith(("/second", "/private")))
-            other = await fetch(OTHER + "/other", budget())
-            assert other.is_success and other.data == [{"title": "empty"}], other
+            other_response, _ = await browser_debug.fetch_browser_response(
+                session,
+                OTHER + "/other",
+                target,
+                target.fetcher,
+                browser_debug.browser_fetch_kwargs(target, target.fetcher, proxy_url=None),
+                None,
+                budget=budget(),
+            )
+            assert other_response.css("h1::text").get() == "empty"
             headers = {name.lower(): value for name, value in page_requests()[-1][1].items()}
             assert "x-test-secret" not in headers
             assert "cookie" not in headers
@@ -171,13 +183,13 @@ async def verify(fetcher, fetcher_type, data_dir, *, stealth=False):
             # A disconnected browser consumes retry policy, then rebuilds state.
             await browser.close()
             recovered = await fetch(ORIGIN + "/recovered", budget())
-            assert recovered.is_success and recovered.data == [{"title": "empty"}], recovered
+            assert single_title(recovered) == "empty", recovered
             assert session._context is not context
             await session.aclose()
             session = BrowserSession(fetcher)
             pool.session = session
             clean = await fetch(ORIGIN + "/clean", budget())
-            assert clean.is_success and clean.data == [{"title": "empty"}], clean
+            assert single_title(clean) == "empty", clean
             assert "Cookie" not in page_requests()[-1][1]
 
             # Deadline and cancellation must close the existing browser before returning.
