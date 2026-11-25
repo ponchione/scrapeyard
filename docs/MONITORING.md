@@ -205,22 +205,33 @@ sudo scrapeyard-health --dry-run
 
 ### On the first production host
 
-State on 2026-11-02, after 12:56 UTC. Three things can run different code,
+State on 2026-11-25, after 20:03 UTC. Three things can run different code,
 so each is named:
 
-- **Deployed release:** `54c6608` (`main` after pull request #65, the Brotli
-  CVE-2026-111497 fixes), promoted 2026-11-02 about 12:56 UTC over `7783ba3`
-  by the guarded deployment from rehearsal run 41428581804 and linked from
-  `/srv/scrapeyard-releases/current`
-  ([DEPLOYMENT.md](DEPLOYMENT.md#guarded-deployment)). Application image
-  `sha256:33237091572a…` (libbrotli1 1.0.9-2+deb12u1, libssl3
-  3.0.22-1~deb12u2, Python brotli 1.2.1, Camoufox 0.5.8, playwright
-  1.62.0); Redis and the probe's image unchanged. The pre-promotion backup
-  is `scrapeyard-backup-20261102T125342Z.tar.zst.age`, in the store. `7783ba3`
-  is the rollback; both releases are in the store. The rehearsal rolled back
-  to `5b5e2d0` (the same code as `54c6608`), not to `7783ba3`, because every
-  image from before #65 now fails the vulnerability scan; `7783ba3` itself
-  was rehearsed on 2026-10-21.
+- **Deployed release:** `3c076c0` (`main` after pull requests #71 and #72,
+  WO-S2 and WO-S3), promoted 2026-11-25 20:03 UTC over `69678f0` (WO-S1 and
+  the pull request #70 image refresh, promoted earlier the same day at 12:43
+  UTC) by hand via `scrapeyard-release promote` from rehearsal run
+  45682058526 and linked from `/srv/scrapeyard-releases/current`
+  ([DEPLOYMENT.md](DEPLOYMENT.md#retained-release-artifacts-and-rollback)).
+  Application image `sha256:05f34e57a784…` (`python:3.14.8-slim-bookworm`,
+  archive SHA-256 `cf9ff24c1fc0…`); Redis `redis:7.4.12-bookworm`
+  (`sha256:7631cf0694bd…`) and egress probe `python:3.12.16-slim-bookworm`
+  (`sha256:f4a31709c79e…`) unchanged from `69678f0`. Promoted by hand because
+  pull request #71 added forward-only migration
+  `sql/026_drop_redundant_jobs_project_index.sql`, which `scrapeyard-deploy`
+  refuses (`69678f0` rejects unknown migration `026`, so returning to
+  `69678f0` requires restoring the coordinated pre-promotion backup). The
+  rehearsal rolled back to `57f5439` (`3c076c0~1`, which shares migration
+  `026`), not `69678f0`. The pre-promotion backup is
+  `scrapeyard-backup-20261125T200040Z.tar.zst.age` (59.2 MB, SHA-256
+  `8df97fadfd3d…`, application down 42.5 s), uploaded to the store. After
+  promotion, migration `026` was recorded in `jobs.db.schema_migrations` with
+  `idx_jobs_project` dropped, the host check passed 10 of 10 including the
+  public path and healthchecks.io (`HTTP 200`), authenticated `/health/ready`
+  returned `200`, Redis held its 14 keys, and three witnessed completed jobs
+  and their results read back byte for byte with `200`. Both `3c076c0` and
+  `69678f0` are in the R2 store.
 - **Installed host scripts:** `/usr/local/sbin/scrapeyard-backup`,
   `scrapeyard-release` and `scrapeyard-health` are byte for byte
   `security/backup.sh`, `security/manage-release.sh` and
