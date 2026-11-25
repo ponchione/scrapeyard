@@ -62,7 +62,7 @@ class ResultRequestSlot:
             self._release()
 
 
-class ResultResponse(Response):
+class EncodedResultResponse(Response):
     """Rendered result JSON that keeps its request slot until it has been sent.
 
     The bytes and headers, including ``Content-Length``, are those of a plain
@@ -145,7 +145,7 @@ class ResultResponseThreadPool(OwnedThreadPool):
     async def request_capacity(self) -> AsyncIterator[ResultRequestSlot]:
         """Bound result artifact loading, rendering and sending as one unit.
 
-        A ``ResultResponse`` built with the slot takes it over and releases it
+        An ``EncodedResultResponse`` built with the slot takes it over and releases it
         once its body has been sent, so a rendered body in transit still
         counts against this capacity.
         """
@@ -276,4 +276,4 @@ async def encoded_result_response(
         disconnect_task.cancel()
         with suppress(asyncio.CancelledError):
             await disconnect_task
-    return ResultResponse(body, slot)
+    return EncodedResultResponse(body, slot)

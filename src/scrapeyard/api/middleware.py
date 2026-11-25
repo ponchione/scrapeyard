@@ -125,6 +125,10 @@ class RateLimitMiddleware:
         self.request_limit = requests
         self.window_seconds = window_seconds
         self.api_keys = set(api_keys or ())
+        self._api_key_buckets: tuple[tuple[str, str], ...] = tuple(
+            (key, f"api:{hashlib.sha256(key.encode('utf-8')).hexdigest()}")
+            for key in self.api_keys
+        )
         self.exempt_paths = set(exempt_paths)
         self.clock = clock or time.monotonic
         self.max_keys = max_keys
@@ -161,9 +165,15 @@ class RateLimitMiddleware:
             provided = None
         if provided is not None:
             api_key = provided.decode("latin-1")
-            if _api_key_is_valid(api_key, self.api_keys):
-                digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
-                return f"api:{digest}"
+            matched_bucket: str | None = None
+            for configured_key, bucket_key in self._api_key_buckets:
+                try:
+                    if secrets.compare_digest(api_key, configured_key):
+                        matched_bucket = bucket_key
+                except TypeError:
+                    continue
+            if matched_bucket is not None:
+                return matched_bucket
 
         client = scope.get("client")
         host = client[0] if client else "unknown"
@@ -176,13 +186,11 @@ class RateLimitMiddleware:
             requests = self._requests_by_key.get(key)
             if requests is None:
                 if len(self._requests_by_key) >= self.max_keys:
-                    observe_rate_limit_state("api", "saturated")
-                    earliest_expiry = min(
-                        bucket[-1] + self.window_seconds
-                        for bucket in self._requests_by_key.values()
-                        if bucket
-                    )
-                    return max(0.0, earliest_expiry - now)
+                    earliest_expiry = self._prune_expired_keys(cutoff, now, force=True)
+                    if len(self._requests_by_key) >= self.max_keys:
+                        observe_rate_limit_state("api", "saturated")
+                        assert earliest_expiry is not None
+                        return max(0.0, earliest_expiry - now)
                 requests = deque()
                 self._requests_by_key[key] = requests
             while requests and requests[0] <= cutoff:
@@ -194,14 +202,26 @@ class RateLimitMiddleware:
             requests.append(now)
             return None
 
-    def _prune_expired_keys(self, cutoff: float, now: float) -> None:
-        if now < self._last_prune_at + self.window_seconds:
-            return
+    def _prune_expired_keys(
+        self,
+        cutoff: float,
+        now: float,
+        *,
+        force: bool = False,
+    ) -> float | None:
+        if not force and now < self._last_prune_at + self.window_seconds:
+            return None
         self._last_prune_at = now
+        earliest_expiry: float | None = None
         for key, requests in list(self._requests_by_key.items()):
             if not requests or requests[-1] <= cutoff:
                 self._requests_by_key.pop(key, None)
                 observe_rate_limit_state("api", "expired")
+            else:
+                expiry = requests[-1] + self.window_seconds
+                if earliest_expiry is None or expiry < earliest_expiry:
+                    earliest_expiry = expiry
+        return earliest_expiry
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})

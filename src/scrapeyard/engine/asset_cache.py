@@ -147,13 +147,15 @@ class AssetCache:
         }
         size = (
             _ENTRY_OVERHEAD_BYTES
-            + len(key[1])
+            + sys.getsizeof(key[1])
             + len(body)
             + sum(
                 _HEADER_SLOT_BYTES + sys.getsizeof(name) + sys.getsizeof(value)
                 for name, value in kept_headers.items()
             )
         )
+        if size > self._max_bytes:
+            return
         self._remove(key)
         self._entries[key] = CachedAsset(
             status=response.status,

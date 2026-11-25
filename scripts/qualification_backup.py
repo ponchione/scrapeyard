@@ -61,6 +61,7 @@ REQUIRED_MIGRATION_FILES = {
         "021_add_admission_index.sql",
         "022_add_retention_lookup_indexes.sql",
         "025_add_running_unowned_index.sql",
+        "026_drop_redundant_jobs_project_index.sql",
     ),
     "errors.db": (
         "002_create_errors.sql",
@@ -200,7 +201,6 @@ REQUIRED_COLUMNS = {
 }
 REQUIRED_INDEXES = {
     "jobs.db": {
-        "idx_jobs_project",
         "idx_jobs_scheduled",
         "idx_jobs_running_unowned",
         "idx_job_runs_job_started",

@@ -128,7 +128,7 @@ async def test_admission_index_upgrade_preserves_accepted_runs(tmp_path):
         await db.execute("DROP INDEX idx_jobs_scheduled")
         await db.execute("DROP INDEX idx_jobs_running_unowned")
         await db.execute(
-            "DELETE FROM schema_migrations WHERE migration_id IN ('021', '022', '025')"
+            "DELETE FROM schema_migrations WHERE migration_id IN ('021', '022', '025', '026')"
         )
     await close_db()
     await init_db(db_dir)
@@ -149,10 +149,10 @@ async def test_index_migrations_upgrade_existing_databases(tmp_path):
     await SQLiteJobStore().save_job(Job(
         job_id="job", project="test", name="job", config_yaml="{}", current_run_id="run",
     ))
-    # Return each database to its state before migrations 022 to 025.
+    # Return each database to its state before migrations 022 to 026.
     downgrades = {
         "jobs.db": (
-            ("022", "025"),
+            ("022", "025", "026"),
             """INSERT INTO scrape_idempotency
                    (caller_scope, key_digest, request_hash, job_id, run_id,
                     response_mode, created_at, expires_at)
@@ -160,6 +160,7 @@ async def test_index_migrations_upgrade_existing_databases(tmp_path):
                DROP INDEX idx_scrape_idempotency_job;
                DROP INDEX idx_jobs_scheduled;
                DROP INDEX idx_jobs_running_unowned;
+               CREATE INDEX idx_jobs_project ON jobs (project);
                CREATE INDEX idx_job_runs_job_id ON job_runs (job_id);
                CREATE INDEX idx_job_runs_started_at ON job_runs (started_at);""",
         ),
@@ -195,7 +196,7 @@ async def test_index_migrations_upgrade_existing_databases(tmp_path):
                 "idx_jobs_running_unowned",
                 "idx_job_runs_job_started",
             },
-            {"idx_job_runs_job_id", "idx_job_runs_started_at"},
+            {"idx_jobs_project", "idx_job_runs_job_id", "idx_job_runs_started_at"},
         ),
         "errors.db": (
             {"idx_errors_job_timestamp", "idx_errors_project_timestamp"},
@@ -249,6 +250,7 @@ async def test_init_db_records_ordered_migration_history_once(tmp_path):
             "021",
             "022",
             "025",
+            "026",
         ]
     assert [row[0] for row in histories["errors.db"]] == ["002", "007", "023"]
     assert [row[0] for row in histories["results_meta.db"]] == [

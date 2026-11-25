@@ -49,11 +49,19 @@ def enrich_item_detection(
     budget: RunBudget | None = None,
 ) -> None:
     """Add pricing_visibility, display_price_text, and stock_status to *item_data* in-place."""
+    item_text: str | None = None
+    normalized_item_text: str | None = None
+    if map_config is not None and not _is_numeric_price(item_data.get("price")):
+        _check_budget(budget)
+        item_text = _get_element_text(element)
+        normalized_item_text = item_text.lower()
     vis, display_text = detect_pricing_visibility(
         item_data,
         element,
         map_config,
         budget=budget,
+        item_text=item_text,
+        normalized_item_text=normalized_item_text,
     )
     item_data["pricing_visibility"] = vis
     item_data["display_price_text"] = display_text
@@ -66,6 +74,7 @@ def enrich_item_detection(
         element,
         stock_config,
         budget=budget,
+        normalized_item_text=normalized_item_text,
     )
 
 
@@ -75,6 +84,8 @@ def detect_pricing_visibility(
     config: MapDetectionConfig | None,
     *,
     budget: RunBudget | None = None,
+    item_text: str | None = None,
+    normalized_item_text: str | None = None,
 ) -> tuple[PricingVisibility, str | None]:
     """Classify a listing's pricing visibility.
 
@@ -99,12 +110,16 @@ def detect_pricing_visibility(
     if config is None:
         return (PricingVisibility.unknown, None)
 
-    _check_budget(budget)
-    item_text = _get_element_text(element)
+    if item_text is None:
+        _check_budget(budget)
+        item_text = _get_element_text(element)
+    if normalized_item_text is None:
+        normalized_item_text = item_text.lower()
     text_visibility, display_text = _match_map_text_patterns(
         item_text,
         config.text_patterns,
         budget=budget,
+        normalized_item_text=normalized_item_text,
     )
     if text_visibility is not None:
         return (text_visibility, display_text)
@@ -151,6 +166,7 @@ def detect_stock_status(
     config: StockDetectionConfig | None,
     *,
     budget: RunBudget | None = None,
+    normalized_item_text: str | None = None,
 ) -> StockStatus:
     """Classify a listing's stock status.
 
@@ -187,9 +203,9 @@ def detect_stock_status(
             ):
                 return status
 
-    _check_budget(budget)
-    item_text = _get_element_text(element)
-    item_text_normalized = item_text.lower()
+    if normalized_item_text is None:
+        _check_budget(budget)
+        normalized_item_text = _get_element_text(element).lower()
 
     for status in _STOCK_PRIORITY:
         _check_budget(budget)
@@ -197,7 +213,7 @@ def detect_stock_status(
         if patterns is None:
             continue
         if _stock_patterns_match(
-            item_text_normalized,
+            normalized_item_text,
             element,
             patterns,
             budget=budget,
@@ -266,8 +282,10 @@ def _match_map_text_patterns(
     patterns: list[str],
     *,
     budget: RunBudget | None,
+    normalized_item_text: str | None = None,
 ) -> tuple[PricingVisibility | None, str | None]:
-    normalized_item_text = item_text.lower()
+    if normalized_item_text is None:
+        normalized_item_text = item_text.lower()
     first_map_match: tuple[PricingVisibility, str | None] | None = None
     for pattern in patterns:
         _check_budget(budget)

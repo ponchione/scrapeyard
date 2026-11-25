@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 
@@ -31,7 +31,13 @@ from scrapeyard.engine.url_guard import (
 )
 from scrapeyard.runtime.metrics import RETRIES, WEBHOOK_DELIVERIES, mark_last_success
 from scrapeyard.storage.protocols import WebhookOutboxStore
-from scrapeyard.storage.webhook_outbox import WebhookDelivery, WebhookFailureReason
+from scrapeyard.storage.webhook_outbox import (
+    WebhookDelivery,
+    WebhookDeliveryHeader,
+    WebhookFailureReason,
+)
+
+QueuedWebhookDelivery = WebhookDelivery | WebhookDeliveryHeader
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +165,7 @@ class HttpWebhookDispatcher:
         self._max_delivery_age_seconds = max_delivery_age_seconds
         self._dispatch_concurrency = dispatch_concurrency
         self._dispatch_batch_size = dispatch_batch_size
-        self._queue: asyncio.Queue[WebhookDelivery] | None = None
+        self._queue: asyncio.Queue[QueuedWebhookDelivery] | None = None
         self._wake_event = asyncio.Event()
         self._coordinator_task: asyncio.Task[None] | None = None
         self._worker_tasks: list[asyncio.Task[None]] = []
@@ -803,27 +809,71 @@ class HttpWebhookDispatcher:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def _fetch_exhausted_candidates(
+        self,
+        *,
+        now: datetime,
+    ) -> list[QueuedWebhookDelivery]:
+        assert self._outbox_store is not None
+        created_at_lte = now - timedelta(seconds=self._max_delivery_age_seconds)
+        header_fetcher = getattr(self._outbox_store, "list_exhausted_pending_headers", None)
+        if header_fetcher is not None:
+            return cast(
+                list[QueuedWebhookDelivery],
+                await header_fetcher(
+                    attempts_gte=self._max_delivery_attempts,
+                    created_at_lte=created_at_lte,
+                    limit=self._dispatch_batch_size,
+                    exclude_ids=self._scheduled_ids,
+                ),
+            )
+        return cast(
+            list[QueuedWebhookDelivery],
+            await self._outbox_store.list_exhausted_pending(
+                attempts_gte=self._max_delivery_attempts,
+                created_at_lte=created_at_lte,
+                limit=self._dispatch_batch_size,
+            ),
+        )
+
+    async def _fetch_due_candidates(
+        self,
+        *,
+        now: datetime,
+    ) -> list[QueuedWebhookDelivery]:
+        assert self._outbox_store is not None
+        header_fetcher = getattr(self._outbox_store, "list_due_pending_headers", None)
+        if header_fetcher is not None:
+            return cast(
+                list[QueuedWebhookDelivery],
+                await header_fetcher(
+                    now=now,
+                    limit=self._dispatch_batch_size,
+                    exclude_ids=self._scheduled_ids,
+                ),
+            )
+        return cast(
+            list[QueuedWebhookDelivery],
+            await self._outbox_store.list_due_pending(
+                now=now,
+                limit=self._dispatch_batch_size,
+            ),
+        )
+
     async def _coordinator_loop(self) -> None:
         assert self._outbox_store is not None
         while not self._stopping:
             self._wake_event.clear()
             try:
                 now = utc_now()
-                exhausted = await self._outbox_store.list_exhausted_pending(
-                    attempts_gte=self._max_delivery_attempts,
-                    created_at_lte=now - timedelta(seconds=self._max_delivery_age_seconds),
-                    limit=self._dispatch_batch_size,
-                )
+                exhausted = await self._fetch_exhausted_candidates(now=now)
                 exhausted_count = 0
                 for delivery in exhausted:
                     if delivery.delivery_id in self._scheduled_ids:
                         continue
                     exhausted_count += int(await self._fail_if_exhausted(delivery, now=now))
 
-                due = await self._outbox_store.list_due_pending(
-                    now=now,
-                    limit=self._dispatch_batch_size,
-                )
+                due = await self._fetch_due_candidates(now=now)
                 queued_count = 0
                 queue = self._queue
                 if queue is None:
@@ -856,8 +906,15 @@ class HttpWebhookDispatcher:
                 if queue.full() or (due and queued_count == 0):
                     await self._wait_for_wake(_COORDINATOR_ERROR_RETRY_SECONDS)
                     continue
-                if queued_count or exhausted_count:
+                if (
+                    queued_count
+                    and len(due) >= self._dispatch_batch_size
+                    and queue.qsize() <= self._dispatch_concurrency
+                ) or exhausted_count:
                     await asyncio.sleep(0)
+                    continue
+                if self._scheduled_ids and queue.qsize() > self._dispatch_concurrency:
+                    await self._wait_for_wake(_COORDINATOR_ERROR_RETRY_SECONDS)
                     continue
 
                 next_due = await self._outbox_store.next_pending_due_at()
@@ -938,11 +995,12 @@ class HttpWebhookDispatcher:
                 self._active_ids.discard(delivery.delivery_id)
                 self._scheduled_ids.discard(delivery.delivery_id)
                 queue.task_done()
-                self._wake_event.set()
+                if queue.qsize() <= self._dispatch_concurrency:
+                    self._wake_event.set()
             if self._stopping and queue.empty():
                 return
 
-    async def _process_delivery(self, delivery: WebhookDelivery) -> None:
+    async def _process_delivery(self, delivery: QueuedWebhookDelivery) -> None:
         assert self._outbox_store is not None
         now = utc_now()
         if await self._fail_if_exhausted(delivery, now=now):
@@ -1107,7 +1165,7 @@ class HttpWebhookDispatcher:
 
     async def _fail_if_exhausted(
         self,
-        delivery: WebhookDelivery,
+        delivery: QueuedWebhookDelivery,
         *,
         now: datetime,
     ) -> bool:
@@ -1131,7 +1189,7 @@ class HttpWebhookDispatcher:
 
     async def _fail_delivery(
         self,
-        delivery: WebhookDelivery,
+        delivery: QueuedWebhookDelivery,
         *,
         failed_at: datetime,
         reason: WebhookFailureReason,
@@ -1150,7 +1208,7 @@ class HttpWebhookDispatcher:
 
     def _log_dead_letter(
         self,
-        delivery: WebhookDelivery,
+        delivery: QueuedWebhookDelivery,
         failed_at: datetime,
         reason: WebhookFailureReason,
     ) -> None:
@@ -1188,12 +1246,12 @@ class HttpWebhookDispatcher:
         except TimeoutError:
             return
 
-    def _delivery_deadline(self, delivery: WebhookDelivery) -> datetime:
+    def _delivery_deadline(self, delivery: QueuedWebhookDelivery) -> datetime:
         return self._as_utc(delivery.created_at) + timedelta(seconds=self._max_delivery_age_seconds)
 
     def _delivery_age_seconds(
         self,
-        delivery: WebhookDelivery,
+        delivery: QueuedWebhookDelivery,
         now: datetime,
     ) -> float:
         return max(0.0, (self._as_utc(now) - self._as_utc(delivery.created_at)).total_seconds())

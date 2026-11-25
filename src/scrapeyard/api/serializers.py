@@ -235,6 +235,11 @@ def serialize_result_response(
             "budget_error": artifact.get("budget_error"),
             "run_budget": artifact.get("run_budget"),
             **({"page_cache": artifact["page_cache"]} if "page_cache" in artifact else {}),
+            **(
+                {"result_redaction": artifact["result_redaction"]}
+                if "result_redaction" in artifact
+                else {}
+            ),
             "results": artifact["results"],
         }
     return {

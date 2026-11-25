@@ -84,7 +84,7 @@ async def probe_redis(pool: RedisHealthPool) -> ProbeResult:
 
 async def probe_sqlite(db_name: str = "jobs.db") -> ProbeResult:
     try:
-        async with get_db(db_name) as db:
+        async with get_db(db_name, readonly=True) as db:
             await db.execute("SELECT 1")
     except Exception as exc:  # pragma: no cover
         return ProbeResult(False, f"{db_name} probe failed: {type(exc).__name__}")

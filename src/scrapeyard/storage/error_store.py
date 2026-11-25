@@ -139,14 +139,14 @@ class SQLiteErrorStore:
         offset: int = 0,
     ) -> list[ErrorRecord]:
         sql, params = build_query_errors_query(filters, limit, offset)
-        async with get_db("errors.db") as db:
+        async with get_db("errors.db", readonly=True) as db:
             cursor = await db.execute(sql, params)
             rows = cast(list[Mapping[str, object]], await cursor.fetchall())
         return [_row_to_error(r) for r in rows]
 
     async def count_errors_for_run(self, run_id: str) -> int:
         """Return the number of error records for a given run_id."""
-        async with get_db("errors.db") as db:
+        async with get_db("errors.db", readonly=True) as db:
             cursor = await db.execute(
                 "SELECT COUNT(*) AS error_count FROM errors WHERE run_id = ?",
                 (run_id,),
@@ -235,7 +235,7 @@ class SQLiteErrorStore:
     ) -> dict[str, CleanupBacklogSnapshot]:
         """Return exact error-retention backlog using the delete predicate."""
 
-        async with get_db("errors.db") as db:
+        async with get_db("errors.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT COUNT(*) AS eligible_count,
                           MIN(timestamp) AS oldest_eligible_at

@@ -35,6 +35,7 @@ _DB_MIGRATIONS: dict[str, tuple[str, ...]] = {
         "021_add_admission_index.sql",
         "022_add_retention_lookup_indexes.sql",
         "025_add_running_unowned_index.sql",
+        "026_drop_redundant_jobs_project_index.sql",
     ),
     "errors.db": (
         "002_create_errors.sql",
@@ -59,6 +60,13 @@ _CONNECTION_PRAGMAS: tuple[str, ...] = (
     "PRAGMA synchronous = NORMAL",
     "PRAGMA foreign_keys = ON",
 )
+
+_READ_CONNECTION_PRAGMAS: tuple[str, ...] = (
+    "PRAGMA busy_timeout = 5000",
+    "PRAGMA foreign_keys = ON",
+    "PRAGMA query_only = ON",
+)
+_DEFAULT_READ_POOL_SIZE = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +403,11 @@ async def _apply_connection_pragmas(db: aiosqlite.Connection) -> None:
         await db.execute(pragma)
 
 
+async def _apply_read_connection_pragmas(db: aiosqlite.Connection) -> None:
+    for pragma in _READ_CONNECTION_PRAGMAS:
+        await db.execute(pragma)
+
+
 @asynccontextmanager
 async def db_transaction(
     db: aiosqlite.Connection,
@@ -525,35 +538,75 @@ async def _close_all(connections: list[aiosqlite.Connection]) -> None:
         raise failures[0]
 
 
-class DatabaseManager:
-    """Encapsulates database directory, cached connections, and re-entrant locks.
+class _ReadConnectionPool:
+    """Bounded pool of lazy read-only WAL connections for one SQLite database."""
 
-    Replaces the former module-level globals (_db_dir, _db_connections, etc.)
-    with instance state, making it easier to test and reason about lifecycle.
+    def __init__(self, max_size: int) -> None:
+        self.semaphore = asyncio.Semaphore(max_size)
+        self.idle: list[aiosqlite.Connection] = []
+        self.all_connections: list[aiosqlite.Connection] = []
+
+
+class DatabaseManager:
+    """Encapsulates database directory, cached connections, and concurrency control.
+
+    Writes serialize per database on one cached read-write connection while
+    read-only queries run concurrently on a small bounded pool of WAL reader
+    connections (``PRAGMA query_only = ON``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, read_pool_size: int = _DEFAULT_READ_POOL_SIZE) -> None:
+        if read_pool_size < 1:
+            raise ValueError("read_pool_size must be positive")
         self._db_dir: Path | None = None
         self._connections: dict[str, aiosqlite.Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._read_pool_size = read_pool_size
+        self._read_pools: dict[str, _ReadConnectionPool] = {}
+        self._active_borrows = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+        self._closing = False
+        self._close_lock = asyncio.Lock()
+
+    def _begin_borrow(self) -> None:
+        self._active_borrows += 1
+        self._drained.clear()
+
+    def _end_borrow(self) -> None:
+        self._active_borrows -= 1
+        if self._active_borrows == 0:
+            self._drained.set()
 
     async def _close_cached_connections(self) -> None:
         connections = list(self._connections.values())
+        for pool in self._read_pools.values():
+            connections.extend(pool.all_connections)
         self._connections.clear()
+        self._read_pools.clear()
         # Every connection owns a thread that blocks interpreter exit until it
         # closes, so finish closing all of them even if this is cancelled.
         await await_cleanup(_close_all(connections))
 
     async def close(self) -> None:
-        """Close cached SQLite connections and clear state."""
-        await self._close_cached_connections()
-        self._db_dir = None
-        self._locks.clear()
+        """Wait for active borrowers to drain, then close all SQLite connections."""
+        async with self._close_lock:
+            self._closing = True
+            try:
+                while self._active_borrows > 0:
+                    await self._drained.wait()
+                try:
+                    await self._close_cached_connections()
+                finally:
+                    self._db_dir = None
+                    self._locks.clear()
+            finally:
+                self._closing = False
 
     async def init(self, db_dir: str) -> None:
         """Create *db_dir* (if needed), open each database, and apply migrations."""
         db_path = Path(db_dir)
-        if self._connections and self._db_dir != db_path:
+        if (self._connections or self._read_pools) and self._db_dir != db_path:
             await self.close()
         db_path.mkdir(parents=True, exist_ok=True)
         self._db_dir = db_path
@@ -584,20 +637,75 @@ class DatabaseManager:
             self._connections[db_name] = connection
         return connection
 
+    async def _open_read_connection(self, db_name: str) -> aiosqlite.Connection:
+        if self._db_dir is None:
+            raise RuntimeError("Database not initialised — call init_db() first")
+        connection = await _connect(self._db_dir / db_name)
+        try:
+            connection.row_factory = aiosqlite.Row
+            await _apply_read_connection_pragmas(connection)
+        except BaseException:
+            await await_cleanup(connection.close())
+            raise
+        return connection
+
     @asynccontextmanager
-    async def get(self, db_name: str) -> AsyncIterator[aiosqlite.Connection]:
+    async def get(
+        self,
+        db_name: str,
+        *,
+        readonly: bool = False,
+    ) -> AsyncIterator[aiosqlite.Connection]:
         """Yield a cached connection to the named database.
 
-        Raises RuntimeError if init() has not been called, ValueError if
-        *db_name* is unrecognised.
+        When *readonly* is true, borrow a ``PRAGMA query_only = ON`` reader
+        connection from the bounded read pool so WAL readers do not serialize
+        behind writers.
+
+        Raises RuntimeError if init() has not been called or close() is in
+        progress, ValueError if *db_name* is unrecognised.
         """
         if self._db_dir is None:
             raise RuntimeError("Database not initialised — call init_db() first")
+        if self._closing:
+            raise RuntimeError("Database is closing")
         if db_name not in _DB_MIGRATIONS:
             raise ValueError(f"Unknown database: {db_name!r}")
 
+        if readonly:
+            pool = self._read_pools.setdefault(
+                db_name, _ReadConnectionPool(self._read_pool_size)
+            )
+            await pool.semaphore.acquire()
+            conn: aiosqlite.Connection | None = None
+            borrowed = False
+            try:
+                if self._closing or self._db_dir is None:
+                    raise RuntimeError("Database is closing")
+                self._begin_borrow()
+                borrowed = True
+                if pool.idle:
+                    conn = pool.idle.pop()
+                else:
+                    conn = await self._open_read_connection(db_name)
+                    pool.all_connections.append(conn)
+                yield conn
+            finally:
+                if conn is not None:
+                    pool.idle.append(conn)
+                if borrowed:
+                    self._end_borrow()
+                pool.semaphore.release()
+            return
+
         async with self._locks.setdefault(db_name, asyncio.Lock()):
-            yield await self._get_cached_connection(db_name)
+            if self._closing or self._db_dir is None:
+                raise RuntimeError("Database is closing")
+            self._begin_borrow()
+            try:
+                yield await self._get_cached_connection(db_name)
+            finally:
+                self._end_borrow()
 
 
 _default_manager = DatabaseManager()
@@ -620,20 +728,27 @@ async def init_db(db_dir: str) -> None:
 
 
 @asynccontextmanager
-async def get_db(db_name: str) -> AsyncIterator[aiosqlite.Connection]:
+async def get_db(
+    db_name: str,
+    *,
+    readonly: bool = False,
+) -> AsyncIterator[aiosqlite.Connection]:
     """Yield a cached :class:`aiosqlite.Connection` to the named database.
 
     Parameters
     ----------
     db_name:
         One of ``jobs.db``, ``errors.db``, or ``results_meta.db``.
+    readonly:
+        When true, borrow a read-only WAL connection that can run concurrently
+        with writers.
 
     Raises
     ------
     RuntimeError
-        If :func:`init_db` has not been called yet.
+        If :func:`init_db` has not been called yet or shutdown is closing DBs.
     ValueError
         If *db_name* is not a recognised database.
     """
-    async with _default_manager.get(db_name) as conn:
+    async with _default_manager.get(db_name, readonly=readonly) as conn:
         yield conn

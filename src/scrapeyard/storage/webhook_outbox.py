@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -53,6 +53,19 @@ class WebhookDeliveryCreate:
     timeout_seconds: float
     payload: dict[str, Any]
     next_attempt_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookDeliveryHeader:
+    """Unencrypted scheduling metadata for one pending webhook delivery."""
+
+    delivery_id: str
+    job_id: str
+    run_id: str | None
+    event: str
+    attempts: int
+    next_attempt_at: datetime
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +125,25 @@ class WebhookDecodeResult:
     delivery: WebhookDelivery | None
     delivery_id: str | None
     error_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _WebhookHeaderDecodeResult:
+    header: WebhookDeliveryHeader | None
+    delivery_id: str | None
+    error_type: str | None
+
+
+WEBHOOK_HEADER_COLUMNS = (
+    "delivery_id",
+    "job_id",
+    "run_id",
+    "event",
+    "attempts",
+    "next_attempt_at",
+    "created_at",
+)
+_MAX_SQL_EXCLUDE_IDS = 500
 
 
 WEBHOOK_DELIVERY_COLUMNS = (
@@ -261,6 +293,35 @@ def row_to_webhook_delivery(row: Mapping[str, Any]) -> WebhookDelivery:
     )
 
 
+def row_to_webhook_delivery_header(row: Mapping[str, Any]) -> WebhookDeliveryHeader:
+    """Decode unencrypted scheduling metadata without decrypting secret fields."""
+
+    return WebhookDeliveryHeader(
+        delivery_id=str(row["delivery_id"]),
+        job_id=str(row["job_id"]),
+        run_id=None if row["run_id"] is None else str(row["run_id"]),
+        event=str(row["event"]),
+        attempts=int(row["attempts"]),
+        next_attempt_at=_require_dt(
+            cast(str | None, row["next_attempt_at"]),
+            "next_attempt_at",
+        ),
+        created_at=_require_dt(cast(str | None, row["created_at"]), "created_at"),
+    )
+
+
+def _decode_webhook_header(row: Mapping[str, Any]) -> _WebhookHeaderDecodeResult:
+    try:
+        return _WebhookHeaderDecodeResult(row_to_webhook_delivery_header(row), None, None)
+    except (KeyError, TypeError, ValueError) as exc:
+        raw_delivery_id = _row_value(row, "delivery_id")
+        return _WebhookHeaderDecodeResult(
+            None,
+            None if raw_delivery_id is None else str(raw_delivery_id),
+            type(exc).__name__,
+        )
+
+
 def _decode_webhook_delivery(row: Mapping[str, Any]) -> WebhookDecodeResult:
     try:
         return WebhookDecodeResult(row_to_webhook_delivery(row), None, None)
@@ -303,25 +364,24 @@ class SQLiteWebhookOutboxStore:
     async def get_delivery(self, delivery_id: str) -> WebhookDelivery | None:
         """Return one delivery or terminal tombstone by ID."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 f"SELECT {', '.join(WEBHOOK_DELIVERY_COLUMNS)} "
                 "FROM webhook_deliveries WHERE delivery_id = ?",
                 (delivery_id,),
             )
             row = await cursor.fetchone()
-            if row is None:
-                return None
-            decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
-            if decoded.delivery is not None:
-                return decoded.delivery
-            async with db_transaction(db):
-                await self._quarantine_malformed_row(
-                    db,
-                    decoded,
-                    failed_at=utc_now(),
-                )
+        if row is None:
             return None
+        decoded = _decode_webhook_delivery(cast(Mapping[str, Any], row))
+        if decoded.delivery is not None:
+            return decoded.delivery
+        await self.quarantine_malformed_delivery(
+            decoded.delivery_id or delivery_id,
+            failed_at=utc_now(),
+            decode_error_type=decoded.error_type or "UnknownDecodeError",
+        )
+        return None
 
     async def list_pending(
         self,
@@ -376,10 +436,47 @@ class SQLiteWebhookOutboxStore:
             limit=limit,
         )
 
+    async def list_due_pending_headers(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+        exclude_ids: Collection[str] = (),
+    ) -> list[WebhookDeliveryHeader]:
+        """Return lightweight due scheduling headers without decrypting payloads."""
+
+        _validate_limit(limit)
+        return await self._fetch_headers(
+            where_clause="status = 'pending' AND next_attempt_at <= ?",
+            order_by="next_attempt_at ASC, created_at ASC, delivery_id ASC",
+            params=(fmt_dt(now),),
+            limit=limit,
+            exclude_ids=exclude_ids,
+        )
+
+    async def list_exhausted_pending_headers(
+        self,
+        *,
+        attempts_gte: int,
+        created_at_lte: datetime,
+        limit: int,
+        exclude_ids: Collection[str] = (),
+    ) -> list[WebhookDeliveryHeader]:
+        """Return lightweight exhausted scheduling headers without decrypting payloads."""
+
+        _validate_limit(limit)
+        return await self._fetch_headers(
+            where_clause="status = 'pending' AND (attempts >= ? OR created_at <= ?)",
+            order_by="created_at ASC, delivery_id ASC",
+            params=(attempts_gte, fmt_dt(created_at_lte)),
+            limit=limit,
+            exclude_ids=exclude_ids,
+        )
+
     async def next_pending_due_at(self) -> datetime | None:
         """Return the earliest pending schedule time without loading its row."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 "SELECT MIN(next_attempt_at) FROM webhook_deliveries WHERE status = 'pending'"
             )
@@ -389,7 +486,7 @@ class SQLiteWebhookOutboxStore:
     async def oldest_pending_created_at(self) -> datetime | None:
         """Return the oldest pending creation time for age-bound wakeups."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 "SELECT MIN(created_at) FROM webhook_deliveries WHERE status = 'pending'"
             )
@@ -400,7 +497,7 @@ class SQLiteWebhookOutboxStore:
         """Return status counts, oldest pending age, and pending attempt range."""
 
         observed_at = now or utc_now()
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT
                        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
@@ -672,7 +769,7 @@ class SQLiteWebhookOutboxStore:
     ) -> dict[str, CleanupBacklogSnapshot]:
         """Return exact terminal-secret backlog using the scrub predicate."""
 
-        async with get_db("jobs.db") as db:
+        async with get_db("jobs.db", readonly=True) as db:
             cursor = await db.execute(
                 """SELECT COUNT(*) AS eligible_count,
                           MIN(COALESCE(delivered_at, failed_at)) AS oldest_eligible_at
@@ -692,6 +789,74 @@ class SQLiteWebhookOutboxStore:
                 parse_dt(row["oldest_eligible_at"]),
             )
         }
+
+    async def _fetch_headers(
+        self,
+        *,
+        where_clause: str,
+        order_by: str,
+        params: Sequence[object],
+        limit: int,
+        exclude_ids: Collection[str],
+    ) -> list[WebhookDeliveryHeader]:
+        excluded_list = sorted(set(exclude_ids)) if exclude_ids else []
+        excluded_set: set[str] = set()
+        sql_where = where_clause
+        base_params: tuple[object, ...] = tuple(params)
+        if excluded_list and len(excluded_list) <= _MAX_SQL_EXCLUDE_IDS:
+            placeholders = ",".join("?" for _ in excluded_list)
+            sql_where = f"{where_clause} AND delivery_id NOT IN ({placeholders})"
+            base_params = (*base_params, *excluded_list)
+        elif excluded_list:
+            excluded_set = set(excluded_list)
+
+        sql = (
+            f"SELECT {', '.join(WEBHOOK_HEADER_COLUMNS)} "
+            f"FROM webhook_deliveries WHERE {sql_where} ORDER BY {order_by} "
+            "LIMIT ? OFFSET ?"
+        )
+        headers: list[WebhookDeliveryHeader] = []
+        inspected = 0
+        inspection_limit = limit * 2
+        offset = 0
+        while len(headers) < limit:
+            remaining_inspections = inspection_limit - inspected
+            if remaining_inspections <= 0:
+                break
+            fetch_limit = min(limit - len(headers), remaining_inspections)
+            if excluded_set:
+                fetch_limit += len(excluded_set)
+            async with get_db("jobs.db", readonly=True) as db:
+                cursor = await db.execute(sql, (*base_params, fetch_limit, offset))
+                rows = cast(list[Mapping[str, Any]], await cursor.fetchall())
+            if not rows:
+                break
+            malformed: list[_WebhookHeaderDecodeResult] = []
+            for row in rows:
+                raw_id = _row_value(row, "delivery_id")
+                if excluded_set and raw_id is not None and str(raw_id) in excluded_set:
+                    offset += 1
+                    continue
+                inspected += 1
+                decoded = _decode_webhook_header(row)
+                if decoded.header is not None:
+                    headers.append(decoded.header)
+                    offset += 1
+                    if len(headers) >= limit:
+                        break
+                else:
+                    malformed.append(decoded)
+            if not malformed:
+                break
+            failed_at = utc_now()
+            for bad in malformed:
+                if bad.delivery_id is not None:
+                    await self.quarantine_malformed_delivery(
+                        bad.delivery_id,
+                        failed_at=failed_at,
+                        decode_error_type=bad.error_type or "UnknownDecodeError",
+                    )
+        return headers
 
     async def _fetch_deliveries(
         self,
